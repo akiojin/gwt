@@ -11,13 +11,15 @@ use gwt_core::{
     index::{
         broker::{
             RefreshBroker, RefreshClaim, RefreshIntent, RefreshReason, RefreshResourceClass,
-            RefreshScope, RefreshTarget, RefreshTargetKind, REFRESH_INTENT_PROTOCOL_VERSION,
+            RefreshScope, RefreshTarget, RefreshTargetKind, DEFAULT_REFRESH_CLAIM_TIMEOUT,
+            REFRESH_INTENT_PROTOCOL_VERSION,
         },
         paths::gwt_index_root,
         runtime::{reconcile_repo, PythonRunnerSpawner, ReconcileOptions, RunnerSpawner},
     },
     index_coordinator::{
-        IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey, INDEX_HEAVY_LEASE_TTL,
+        HeavyHolderContext, IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey,
+        INDEX_HEAVY_LEASE_TTL,
     },
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
@@ -27,6 +29,8 @@ use serde::Serialize;
 use crate::index_status_projection;
 
 const DISABLE_BACKGROUND_INDEX_ENV: &str = "GWT_DISABLE_BACKGROUND_INDEX";
+const REFRESH_CHECKPOINT_RESERVE: Duration = Duration::from_secs(5);
+const REFRESH_QUANTUM_EXHAUSTED: &str = "background refresh quantum exhausted";
 
 /// SPEC-3170 FR-073/FR-074: emergency opt-out shared by every automatic
 /// project-index bootstrap entry. Explicit search, status refresh, and manual
@@ -1140,6 +1144,7 @@ pub(crate) fn run_coordinated_index_job<T>(
     scope_label: &str,
     worktree_hash: Option<&str>,
     priority: JobPriority,
+    holder_context: Option<&HeavyHolderContext>,
     build: impl FnMut() -> Result<BuildStep<T>, String>,
 ) -> Result<CoordinatedRun<T>, String> {
     let coordinator = IndexCoordinator::open_default()
@@ -1150,6 +1155,7 @@ pub(crate) fn run_coordinated_index_job<T>(
         scope_label,
         worktree_hash,
         priority,
+        holder_context,
         build,
     )
 }
@@ -1160,6 +1166,7 @@ fn run_coordinated_index_job_with_coordinator<T>(
     scope_label: &str,
     worktree_hash: Option<&str>,
     priority: JobPriority,
+    holder_context: Option<&HeavyHolderContext>,
     mut build: impl FnMut() -> Result<BuildStep<T>, String>,
 ) -> Result<CoordinatedRun<T>, String> {
     let key = match worktree_hash {
@@ -1186,9 +1193,16 @@ fn run_coordinated_index_job_with_coordinator<T>(
                     } else {
                         INDEX_HEAVY_LEASE_TTL
                     };
-                    let heavy = guard
+                    let mut heavy = guard
                         .acquire_heavy_with_ttl(heavy_timeout, lease_ttl)
                         .map_err(|err| format!("index heavy lease failed: {err}"))?;
+                    if let Some(context) = holder_context {
+                        heavy.record_runner_context(
+                            &context.project_root,
+                            &context.action,
+                            &context.qos,
+                        );
+                    }
                     let step = {
                         let _deadline = (scope_label == "issues").then(|| {
                             gwt_core::operation_deadline::ScopedOperationDeadline::enter(
@@ -1306,19 +1320,85 @@ fn run_rebuild_runner_observing_deadline(
     #[cfg(test)]
     let args = crate::cli::index::runtime::rebuild_runner_fixture_args().unwrap_or(args);
 
-    gwt_core::operation_deadline::ensure_remaining("project index rebuild runner")?;
-    gwt_core::process_console::spawn_logged_blocking(
+    let deadline = gwt_core::operation_deadline::ensure_remaining("project index rebuild runner")?;
+    let mut options = gwt_core::process_console::SpawnOptions::new(format!(
+        "project index rebuild {}",
+        action.label,
+    ))
+    .current_dir(&context.project_root)
+    .forward_output(false);
+    let run_id = deadline.filter(|_| qos == "background").map(|deadline| {
+        let remaining = deadline.saturating_duration_since(gwt_core::operation_deadline::now());
+        let soft_millis = remaining
+            .saturating_sub(REFRESH_CHECKPOINT_RESERVE)
+            .as_millis() as u64;
+        let run_id = uuid::Uuid::new_v4().to_string();
+        options.envs.push((
+            OsString::from("GWT_INDEX_REFRESH_YIELD_AT_MS"),
+            OsString::from(unix_millis_now().saturating_add(soft_millis).to_string()),
+        ));
+        options.envs.push((
+            OsString::from("GWT_INDEX_REFRESH_RUN_ID"),
+            OsString::from(&run_id),
+        ));
+        run_id
+    });
+    let result = gwt_core::process_console::spawn_logged_blocking(
         &gwt_core::process_console::ProcessConsoleHub::new(),
         gwt_core::process_console::ProcessKind::IndexRunner,
         context.python.clone(),
         &args,
-        gwt_core::process_console::SpawnOptions::new(format!(
-            "project index rebuild {}",
-            action.label
-        ))
-        .current_dir(&context.project_root)
-        .forward_output(false),
-    )
+        options,
+    );
+    if let (Err(error), Some(run_id)) = (&result, run_id) {
+        // Only our reaped child reaching its known hard deadline may release
+        // an incomplete Issues build. Other failures keep the repair stop.
+        if action.label == "issues"
+            && error
+                .get_ref()
+                .and_then(|cause| {
+                    cause.downcast_ref::<gwt_core::process_console::spawn::ProcessDeadlineExpired>()
+                })
+                .is_some_and(|deadline| deadline.interrupted_child_reaped())
+        {
+            let repair = gwt_index_root()
+                .join(context.repo_hash.as_str())
+                .join("issues/repair.json");
+            if let Err(error) = mark_expected_issue_budget_interruption(&repair, &run_id) {
+                tracing::warn!(target: "gwt::index", error = %error,
+                    "could not identify the interrupted issue build; explicit repair remains required");
+            }
+        }
+    }
+    result
+}
+
+fn mark_expected_issue_budget_interruption(path: &Path, run_id: &str) -> io::Result<bool> {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut repair: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if repair["last_error"].as_str() != Some("BUILD_INCOMPLETE")
+        || repair["refresh_run_id"].as_str() != Some(run_id)
+    {
+        return Ok(false);
+    }
+    let Some(fingerprint) = repair["fingerprint"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+    repair["expected_budget_interruption"] = serde_json::json!({
+        "fingerprint": fingerprint, "run_id": run_id,
+    });
+    let bytes = serde_json::to_vec(&repair)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    gwt_core::atomic_file::write_atomic(path, &bytes)?;
+    Ok(true)
 }
 
 enum RebuildRunnerOutput {
@@ -1364,7 +1444,9 @@ fn run_rebuild_runner_for_target(
     action: crate::cli::index::runtime::RebuildAction,
     qos: &str,
 ) -> Result<RebuildRunnerOutput, String> {
-    if action.label == "issues" || gwt_core::operation_deadline::current().is_none() {
+    if (action.label == "issues" && qos != "background")
+        || gwt_core::operation_deadline::current().is_none()
+    {
         if rebuild_action_uses_file_index_v2(action) {
             let args = protocol_aware_rebuild_runner_args(context, action, qos);
             #[cfg(test)]
@@ -1510,6 +1592,11 @@ pub fn rebuild_index_target(
         action.label,
         coordinator_worktree.as_deref(),
         priority,
+        Some(&HeavyHolderContext {
+            project_root: ctx.project_root.clone(),
+            action: action.action.to_string(),
+            qos: qos.to_string(),
+        }),
         || {
             let rebuild_started = Instant::now();
             let rebuild_label = action.label;
@@ -1539,6 +1626,17 @@ pub fn rebuild_index_target(
                 return Err(failure);
             }
             if runner_payload_yielded(output.stdout()) {
+                if serde_json::from_slice::<serde_json::Value>(output.stdout())
+                    .ok()
+                    .and_then(|payload| {
+                        payload
+                            .get("budget_exhausted")
+                            .and_then(serde_json::Value::as_bool)
+                    })
+                    == Some(true)
+                {
+                    return Err(REFRESH_QUANTUM_EXHAUSTED.to_string());
+                }
                 tracing::info!(
                     target: "gwt::index",
                     scope = rebuild_label,
@@ -1868,6 +1966,27 @@ fn issue_index_needs_rebuild_for_cache(
     if source.document_count == 0 {
         return Ok(false);
     }
+    let interrupted = std::fs::read(
+        index_root
+            .join(repo_hash.as_str())
+            .join("issues/repair.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+    if let Some(repair) = interrupted {
+        let expected = &repair["expected_budget_interruption"];
+        if repair["last_error"].as_str() == Some("BUILD_INCOMPLETE")
+            && repair["fingerprint"].as_str() == Some(source.fingerprint.as_str())
+            && expected["fingerprint"].as_str() == Some(source.fingerprint.as_str())
+            && repair["refresh_run_id"].as_str().is_some_and(|run_id| {
+                !run_id.is_empty() && expected["run_id"].as_str() == Some(run_id)
+            })
+        {
+            // Publication may precede the deadline; even current metadata
+            // must drain the known interruption and clear its repair marker.
+            return Ok(true);
+        }
+    }
     Ok(
         read_issue_index_source_fingerprint(index_root, repo_hash).as_deref()
             != Some(source.fingerprint.as_str()),
@@ -2024,16 +2143,11 @@ pub fn execute_claimed_project_index_refresh(claim: RefreshClaim) -> Result<Path
         let _ = claim.fail(message.clone());
         return Err(message);
     };
-    let spawner = PythonRunnerSpawner {
-        python_executable: project_index_python_path(),
-        runner_script: gwt_core::runtime::project_index_runner_path(),
-    };
-    execute_claimed_project_index_refresh_with(
-        claim,
-        &project.project_root,
-        &project.index_root,
-        &spawner,
-    )
+    execute_claimed_refresh(claim, |intent| {
+        gwt_core::runtime::ensure_project_index_runtime()
+            .map_err(|error| format!("project index runtime ensure failed: {error}"))?;
+        execute_claimed_refresh_inner(intent, &project.project_root, &project.index_root)
+    })
     .map(|()| project.project_root)
 }
 
@@ -2048,9 +2162,30 @@ pub fn execute_claimed_project_index_refresh_with<S: RunnerSpawner + ?Sized>(
     index_root: &Path,
     _spawner: &S,
 ) -> Result<(), String> {
+    execute_claimed_refresh(claim, |intent| {
+        execute_claimed_refresh_inner(intent, project_root, index_root)
+    })
+}
+
+fn execute_claimed_refresh(
+    claim: RefreshClaim,
+    maintenance: impl FnOnce(&RefreshIntent) -> Result<(), String>,
+) -> Result<(), String> {
     let started = Instant::now();
     let intent = claim.intent().clone();
-    match execute_claimed_refresh_inner(&intent, project_root, index_root) {
+    let result = {
+        let _deadline = (intent.priority == JobPriority::Background).then(|| {
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                gwt_core::operation_deadline::now() + DEFAULT_REFRESH_CLAIM_TIMEOUT,
+            )
+        });
+        maintenance(&intent).and_then(|()| {
+            gwt_core::operation_deadline::ensure_remaining("project index refresh completion")
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    };
+    match result {
         Ok(()) => {
             tracing::info!(
                 target: "gwt::index",
@@ -2079,6 +2214,23 @@ pub fn execute_claimed_project_index_refresh_with<S: RunnerSpawner + ?Sized>(
     }
 }
 
+fn reconcile_claimed_refresh_worktrees(
+    repo_root: &Path,
+    index_root: &Path,
+    repo_hash: &RepoHash,
+) -> Result<Vec<PathBuf>, String> {
+    // A failed inventory cannot authorize orphan deletion.
+    let active_worktrees = list_git_worktree_paths(repo_root)?;
+    reconcile_repo(&ReconcileOptions {
+        index_root: index_root.to_path_buf(),
+        repo_hash: repo_hash.clone(),
+        active_worktree_paths: active_worktrees.clone(),
+        legacy_worktree_dirs: active_worktrees.clone(),
+    })
+    .map_err(|err| err.to_string())?;
+    Ok(active_worktrees)
+}
+
 fn execute_claimed_refresh_inner(
     intent: &RefreshIntent,
     project_root: &Path,
@@ -2103,15 +2255,7 @@ fn execute_claimed_refresh_inner(
         ));
     }
 
-    let active_worktrees =
-        list_git_worktree_paths(&repo_root).unwrap_or_else(|_| vec![repo_root.clone()]);
-    reconcile_repo(&ReconcileOptions {
-        index_root: index_root.to_path_buf(),
-        repo_hash: repo_hash.clone(),
-        active_worktree_paths: active_worktrees.clone(),
-        legacy_worktree_dirs: active_worktrees.clone(),
-    })
-    .map_err(|err| err.to_string())?;
+    let active_worktrees = reconcile_claimed_refresh_worktrees(&repo_root, index_root, &repo_hash)?;
 
     let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(&repo_hash);
     match crate::issue_cache::sync_issue_cache_from_remote_if_stale_with_fingerprint(
@@ -2399,16 +2543,13 @@ fn process_cwd_worktree_root_for_repo(repo_root: &Path) -> Option<PathBuf> {
 }
 
 fn list_git_worktree_paths(project_root: &Path) -> Result<Vec<PathBuf>, String> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(project_root)
-        .output()
+    let output = run_project_index_git_probe(project_root, &["worktree", "list", "--porcelain"])
         .map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    if !output.success() {
+        return Err(output.stderr.trim().to_string());
     }
 
-    let mut worktrees = parse_git_worktree_paths(&String::from_utf8_lossy(&output.stdout));
+    let mut worktrees = parse_git_worktree_paths(&output.stdout);
 
     if worktrees.is_empty() {
         worktrees.push(canonicalize_path(project_root.to_path_buf()));
@@ -2431,6 +2572,155 @@ pub(crate) fn project_index_python_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_refresh_maintenance_has_one_finite_deadline() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broker = RefreshBroker::open(temp.path(), Duration::ZERO).expect("broker");
+        let target = RefreshTarget::base("budget-repo", [RefreshScope::Issues]);
+        broker
+            .submit(RefreshIntent {
+                protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+                target: target.clone(),
+                desired_epoch: 7,
+                desired_snapshot: "snapshot-7".to_string(),
+                priority: JobPriority::Background,
+                reason: RefreshReason::Startup,
+                resource_class: RefreshResourceClass::Embedding,
+            })
+            .expect("submit");
+        let claim = broker.claim_next().expect("claim").expect("claimable");
+        let started = Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(started);
+        execute_claimed_refresh(claim, |_| {
+            assert_eq!(
+                gwt_core::operation_deadline::current(),
+                Some(started + Duration::from_secs(60)),
+                "runtime provision and every nested runner share this deadline",
+            );
+            Ok(())
+        })
+        .expect("maintenance");
+        assert!(gwt_core::operation_deadline::current().is_none());
+        assert_eq!(
+            broker
+                .inspect()
+                .expect("snapshot")
+                .target(&target)
+                .expect("target")
+                .completed_epoch(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn background_refresh_deadline_keeps_required_work_pending() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broker = RefreshBroker::open(temp.path(), Duration::ZERO).expect("broker");
+        let target = RefreshTarget::base("budget-repo", [RefreshScope::Issues]);
+        broker
+            .submit(RefreshIntent {
+                protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+                target: target.clone(),
+                desired_epoch: 7,
+                desired_snapshot: "snapshot-7".to_string(),
+                priority: JobPriority::Background,
+                reason: RefreshReason::DirtyEvent,
+                resource_class: RefreshResourceClass::Embedding,
+            })
+            .expect("submit");
+        let claim = broker.claim_next().expect("claim").expect("claimable");
+        let started = Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(started);
+        let error = execute_claimed_refresh(claim, |_| {
+            let _expired = gwt_core::operation_deadline::ScopedOperationClock::set(
+                started + Duration::from_secs(60),
+            );
+            gwt_core::operation_deadline::ensure_remaining("refresh maintenance")
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .expect_err("quantum expires");
+        assert!(error.contains("deadline expired"));
+        let snapshot = broker.inspect().expect("snapshot");
+        let pending = snapshot.target(&target).expect("target");
+        assert_eq!(
+            pending.state(),
+            gwt_core::index::broker::RefreshTargetState::Quiet
+        );
+        assert_eq!(pending.desired_epoch(), 7);
+        assert_eq!(pending.completed_epoch(), None);
+        assert!(pending
+            .last_error()
+            .expect("error")
+            .contains("deadline expired"));
+        assert!(gwt_core::operation_deadline::current().is_none());
+    }
+
+    #[test]
+    fn background_issue_runner_backstop_marks_its_owned_interruption() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let _home = ScopedGwtHome::set(&home);
+        let repo_hash =
+            gwt_core::repo_hash::compute_repo_hash("https://github.com/example/budget.git");
+        let repair = gwt_index_root()
+            .join(repo_hash.as_str())
+            .join("issues/repair.json");
+        let ready = temp.path().join("ready");
+        let _hang = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_HANG", "1");
+        let _ready = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_MARKER", ready.as_os_str());
+        let _repair = ScopedEnvVar::set("GWT_INDEX_TEST_REPAIR_PATH", repair.as_os_str());
+        let context = crate::cli::index::runtime::IndexContext {
+            project_root: temp.path().to_path_buf(),
+            repo_hash,
+            worktree_hash: "wt-budget".to_string(),
+            python: std::env::current_exe().expect("fixture binary"),
+            runner: PathBuf::from("--ignored"),
+        };
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + gwt_core::deadline_budget::HANG_GUARD,
+        );
+        let error = gwt_core::process_console::spawn::with_spawn_ready_for_tests(
+            // The cleanup reserve is a quarter of this budget, capped at the
+            // 1s production grace. A 1s budget left only 250ms to reap the
+            // Windows process tree on a loaded runner, so the fail-closed
+            // path (no reap evidence, no marker) fired instead.
+            Duration::from_secs(4),
+            move || {
+                let started = Instant::now();
+                while !ready.exists() {
+                    assert!(started.elapsed() < gwt_core::deadline_budget::HANG_GUARD);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            },
+            || {
+                run_rebuild_runner_for_target(
+                    &context,
+                    rebuild_action_for_scope(IndexRebuildScope::Issues),
+                    "background",
+                )
+            },
+        )
+        .err()
+        .expect("child deadline");
+        assert!(error.contains("process deadline expired"), "{error}");
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(repair).expect("repair")).expect("JSON");
+        assert_eq!(
+            marker["expected_budget_interruption"]["fingerprint"],
+            "source-fingerprint"
+        );
+        assert_eq!(
+            marker["expected_budget_interruption"]["run_id"],
+            marker["refresh_run_id"]
+        );
+        assert!(marker["refresh_run_id"].is_string());
+    }
 
     static GWT_INDEX_TEST_FIXTURE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2597,6 +2887,14 @@ mod tests {
         let marker = std::env::var_os("GWT_INDEX_TEST_REBUILD_MARKER")
             .map(PathBuf::from)
             .expect("rebuild marker path");
+        if let Some(path) = std::env::var_os("GWT_INDEX_TEST_REPAIR_PATH").map(PathBuf::from) {
+            std::fs::create_dir_all(path.parent().expect("repair parent"))
+                .expect("repair directory");
+            std::fs::write(path, serde_json::to_vec(&serde_json::json!({
+                "fingerprint": "source-fingerprint", "failures": 1,
+                "last_error": "BUILD_INCOMPLETE", "refresh_run_id": std::env::var("GWT_INDEX_REFRESH_RUN_ID").ok(),
+            })).expect("repair JSON")).expect("write incomplete repair");
+        }
         std::fs::write(marker, b"started").expect("write rebuild marker");
         // Stay alive beyond the loaded-machine deadline used by the parent
         // fixture so settlement proves process-tree termination, not a normal
@@ -2620,6 +2918,14 @@ mod tests {
     #[test]
     fn project_index_git_context_does_not_fall_through_an_expired_deadline() {
         let checkout_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = gwt_core::repo_hash::compute_repo_hash("https://example.test/inventory.git");
+        let kept = temp
+            .path()
+            .join(repo.as_str())
+            .join("worktrees/linked-index/keep");
+        std::fs::create_dir_all(kept.parent().expect("parent")).expect("index directory");
+        std::fs::write(&kept, b"live index").expect("live index");
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             Instant::now() - Duration::from_millis(1),
         );
@@ -2628,6 +2934,15 @@ mod tests {
             project_index_git_context(&checkout_root).is_none(),
             "an expired git probe must not reuse an earlier raw probe result"
         );
+        let error = list_git_worktree_paths(&checkout_root)
+            .expect_err("worktree enumeration must honor the same expired deadline");
+        assert!(error.contains("deadline expired"), "{error}");
+        let result = reconcile_claimed_refresh_worktrees(temp.path(), temp.path(), &repo);
+        assert_eq!(
+            std::fs::read(kept).expect("expired inventory retains index"),
+            b"live index"
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -3962,6 +4277,36 @@ detached
                 .expect("rebuild decision"),
             "startup must rebuild issues when source cache fingerprint differs from index meta",
         );
+        let source = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
+            .expect("source fingerprint")
+            .expect("source");
+        std::fs::write(
+            issues_dir.join("meta.json"),
+            serde_json::json!({
+                "source_cache_fingerprint": source.fingerprint,
+            })
+            .to_string(),
+        )
+        .expect("current published metadata");
+        assert!(
+            !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root)
+                .expect("current source")
+        );
+        std::fs::write(
+            issues_dir.join("repair.json"),
+            serde_json::json!({
+                "last_error": "BUILD_INCOMPLETE", "fingerprint": source.fingerprint,
+                "refresh_run_id": "own-run", "expected_budget_interruption": {
+                    "fingerprint": source.fingerprint, "run_id": "own-run",
+                },
+            })
+            .to_string(),
+        )
+        .expect("budget interrupted after metadata publication");
+        assert!(
+            issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root)
+                .expect("known interruption must resume and clear the marker")
+        );
     }
 
     #[test]
@@ -4035,6 +4380,7 @@ detached
             "files",
             Some("wt001"),
             JobPriority::Background,
+            None,
             || Ok(BuildStep::Done(7)),
         )
         .expect("owner build succeeds");
@@ -4055,6 +4401,7 @@ detached
             "issues",
             None,
             JobPriority::Background,
+            None,
             || Err("boom".to_string()),
         )
         .expect_err("build failure propagates");
@@ -4071,6 +4418,7 @@ detached
             "issues",
             None,
             JobPriority::Background,
+            None,
             || {
                 let deadline =
                     gwt_core::operation_deadline::current().expect("issues build deadline");
@@ -4098,6 +4446,7 @@ detached
             "files",
             Some("wt002"),
             JobPriority::Background,
+            None,
             || {
                 calls += 1;
                 if calls == 1 {
@@ -4160,6 +4509,7 @@ detached
             "specs",
             None,
             JobPriority::Background,
+            None,
             || panic!("a coalesced caller must not run its own build"),
         )
         .expect("coalesced join succeeds");

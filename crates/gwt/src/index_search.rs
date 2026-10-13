@@ -20,6 +20,17 @@ use crate::{
 const INDEX_SEARCH_LIMIT: usize = 50;
 const SEARCH_ATTEMPT_HARD_LIMIT_MS: u64 = 30_000;
 const RUNNER_DIAGNOSTIC_MAX_BYTES: usize = 512;
+pub(crate) const SEARCH_UNAVAILABLE_START_DECISION: &str = "known_approved_owner_only";
+/// Reasons caused by contention for the host-wide heavy lease rather than by
+/// a runner that failed to start or finish (Issue #4840 AC-h).
+const SEARCH_LEASE_CONTENTION_REASONS: [&str; 3] = [
+    "search heavy lease unavailable",
+    "search admission deadline expired",
+    "search coordinator unavailable",
+];
+const SEARCH_UNAVAILABLE_LEASE_RECOVERY: &str = "Another index job holds the host-wide heavy lease (see holder and index.status); a background holder yields at its next checkpoint, so retry after the indicated delay instead of starting index.rebuild.";
+const SEARCH_UNAVAILABLE_RUNNER_RECOVERY: &str = "The index runner failed to start or finish; check index.status for runtime health and run index.repair when a scope reports repair_required, then retry after the indicated delay.";
+const SEARCH_UNAVAILABLE_COMMON_RECOVERY: &str = "For a known, approved owner, code investigation and approved implementation may proceed while retrying. Before choosing or routing an owner or creating an Issue/SPEC, recover semantic search or use the index-independent GitHub search as the duplicate preflight: gh search issues --repo <owner>/<repo> '<query>'.";
 
 /// Exit code for retryable "index not ready" search failures (Phase 70
 /// FR-388): missing / corrupt scopes that did not repair within the wait
@@ -66,6 +77,19 @@ pub struct IndexSearchFailed {
 pub(crate) struct IndexSearchUnavailable {
     pub(crate) reason: String,
     pub(crate) retry_after_ms: u64,
+    pub(crate) holder: Option<Box<crate::index_resources::IndexRunnerHolder>>,
+}
+
+impl IndexSearchUnavailable {
+    /// Caller action for this reason, plus the shared start/fallback guidance.
+    pub(crate) fn recovery(&self) -> String {
+        let specific = if SEARCH_LEASE_CONTENTION_REASONS.contains(&self.reason.as_str()) {
+            SEARCH_UNAVAILABLE_LEASE_RECOVERY
+        } else {
+            SEARCH_UNAVAILABLE_RUNNER_RECOVERY
+        };
+        format!("{specific} {SEARCH_UNAVAILABLE_COMMON_RECOVERY}")
+    }
 }
 
 /// Non-retryable stop state that only an explicit `index.repair` clears
@@ -198,11 +222,17 @@ impl std::fmt::Display for IndexSearchAttemptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Public(error) => error.fmt(f),
-            Self::Unavailable(unavailable) => write!(
-                f,
-                "search unavailable: {} (retry in {} ms)",
-                unavailable.reason, unavailable.retry_after_ms,
-            ),
+            Self::Unavailable(unavailable) => {
+                write!(
+                    f,
+                    "search unavailable: {} (retry in {} ms)",
+                    unavailable.reason, unavailable.retry_after_ms
+                )?;
+                if let Some(holder) = &unavailable.holder {
+                    write!(f, "; holder: {holder}")?;
+                }
+                write!(f, "; {}", unavailable.recovery())
+            }
             Self::RepairRequired(required) => write!(
                 f,
                 "index repair required: {}; {}",
@@ -1081,6 +1111,7 @@ fn search_unavailable_error(reason: impl Into<String>) -> IndexSearchAttemptErro
     IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
         reason: sanitize_runner_diagnostic(&reason.into()),
         retry_after_ms: SEARCH_RETRY_AFTER_MS,
+        holder: None,
     })
 }
 
@@ -1090,6 +1121,7 @@ fn search_unavailable_error(reason: impl Into<String>) -> IndexSearchAttemptErro
 /// unavailable, return the existing retryable error without starting model
 /// work alongside the current holder.
 fn acquire_search_heavy_lease(
+    project_root: &Path,
     repo_hash: &str,
     worktree_hash: Option<&str>,
 ) -> Result<gwt_core::index_coordinator::HeavyLease, IndexSearchAttemptError> {
@@ -1104,13 +1136,25 @@ fn acquire_search_heavy_lease(
     let key = TargetKey::search(repo_hash, worktree_hash);
     coordinator
         .acquire_interactive_search_heavy(&key, timeout)
+        .map(|mut heavy| {
+            heavy.record_runner_context(project_root, "search-multi", "interactive");
+            heavy
+        })
         .map_err(|error| {
             tracing::debug!(
                 target: "gwt::index",
                 %error,
                 "search heavy admission failed"
             );
-            search_unavailable_error("search heavy lease unavailable")
+            IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
+                reason: "search heavy lease unavailable".to_string(),
+                retry_after_ms: SEARCH_RETRY_AFTER_MS,
+                holder: coordinator
+                    .heavy_lease_status()
+                    .ok()
+                    .and_then(|status| crate::index_resources::index_runner_holder(&status))
+                    .map(Box::new),
+            })
         })
 }
 
@@ -1138,7 +1182,7 @@ fn run_batch_scope_search(
     // host-wide heavy lease — not an exception to it. Registering as a
     // pending interactive claimant is also what makes a running background
     // build hand the lease back at its next 16-document checkpoint.
-    let _heavy = acquire_search_heavy_lease(repo_hash, worktree_hash)?;
+    let _heavy = acquire_search_heavy_lease(project_root, repo_hash, worktree_hash)?;
     // FR-103 (T-IDX-419): the interactive semantic attempt runs through the
     // shared process lifecycle boundary — captured output without terminal
     // forwarding, one hard deadline, and full process-tree termination and
@@ -1638,6 +1682,7 @@ fn runner_payload_error(payload: &Value) -> IndexSearchAttemptError {
             IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
                 reason,
                 retry_after_ms,
+                holder: None,
             })
         }
         // Unknown, absent, malformed, and legacy structured diagnostics are
@@ -2811,6 +2856,65 @@ mod tests {
     }
 
     #[test]
+    fn search_admission_failure_reports_the_foreign_holder_and_start_guidance() {
+        use gwt_core::{
+            index_coordinator::{JobAdmission, JobPriority},
+            test_support::{env_lock, ScopedEnvVar},
+        };
+
+        let _env = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("isolated home");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let coordinator = IndexCoordinator::open_default().unwrap();
+        let JobAdmission::Owner(job) = coordinator
+            .request_job(
+                &TargetKey::repo_shared("foreign-repo", "issues"),
+                JobPriority::Background,
+                Duration::from_secs(1),
+            )
+            .unwrap()
+        else {
+            panic!("new target must be owned")
+        };
+        let mut heavy = job.acquire_heavy(Duration::from_secs(1)).unwrap();
+        let foreign_root = temp.path().join("foreign-project");
+        heavy.record_runner_context(&foreign_root, "index-issues", "background");
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + Duration::from_millis(100),
+        );
+
+        let error = match acquire_search_heavy_lease(
+            &temp.path().join("request-project"),
+            "request-repo",
+            None,
+        ) {
+            Ok(_) => panic!("foreign holder must block admission"),
+            Err(error) => error,
+        };
+        assert_eq!(error.error_code(), Some("SEARCH_UNAVAILABLE"));
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("repo_hash=foreign-repo"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("action=index-issues qos=background"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("approved implementation"),
+            "{diagnostic}"
+        );
+        let IndexSearchAttemptError::Unavailable(unavailable) = error else {
+            panic!("admission must be retryable unavailable");
+        };
+        assert_eq!(unavailable.holder.unwrap().project_root, Some(foreign_root));
+    }
+
+    #[test]
     fn public_mapping_hides_internal_unavailable_diagnostics() {
         let raw = format!(
             "\u{1b}[31msecret runner path ghp_abcdef0123456789ABCDEF\u{1b}[0m {}",
@@ -2819,6 +2923,7 @@ mod tests {
         let public_error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
             reason: raw.clone(),
             retry_after_ms: SEARCH_RETRY_AFTER_MS,
+            holder: None,
         })
         .into_public();
 

@@ -226,7 +226,7 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
   const exclusion = String(entry?.exclusion_reason || "").trim();
   const attentionReason =
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
-  const reason = exclusion || attentionReason;
+  const reason = entry?.readiness_diagnosis || exclusion || attentionReason;
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -632,12 +632,13 @@ export function createKnowledgeKanbanSurface({
   getResumeBounds,
   // SPEC #3206 FR-017: surface errors (Issue Monitor last_error, Issue window
   // load/search failures) are reported to the notification center as error
-  // rows and are NOT rendered in this surface at all — the bell + drawer are
-  // the single place errors are read (user ruling 2026-09-04; a per-surface
-  // indicator re-fragments the very thing v2 consolidated). Pure seams: the
-  // surface never learns the center's shape.
+  // rows; the bell + drawer are the single place diagnostic text is read.
+  // Issue #5284 retains only linked state badges in the Issue window. Pure
+  // seams keep the surface independent of the center's DOM shape.
   reportSurfaceError = () => {},
   resolveSurfaceError = () => {},
+  reportSurfaceNotice = () => {},
+  openSurfaceNotice = () => false,
 }) {
       const knowledgeBridgeStateMap = new Map();
       const terminalPreviewText = new Map();
@@ -660,6 +661,8 @@ export function createKnowledgeKanbanSurface({
       // under its own key, so it never competes with `last_error` for a slot.
       const ISSUE_MONITOR_BLACKOUT_KEY = "issue-monitor:agent_blackout";
       let reportedIssueMonitorBlackout = "";
+      const ISSUE_MONITOR_CAPACITY_KEY = "issue-monitor:capacity";
+      let reportedIssueMonitorCapacity = "";
 
       function syncIssueMonitorBlackoutReport() {
         const blackout =
@@ -677,6 +680,7 @@ export function createKnowledgeKanbanSurface({
 
       function syncIssueMonitorErrorReport() {
         syncIssueMonitorBlackoutReport();
+        syncIssueMonitorCapacityReport();
         const lastError = issueMonitorErrorText();
         if (lastError === reportedIssueMonitorError) return;
         reportedIssueMonitorError = lastError;
@@ -721,6 +725,8 @@ export function createKnowledgeKanbanSurface({
         queue_len: 0,
         active_count: 0,
         max_active_agents: 1,
+        max_active_agents_override: null,
+        agent_capacity: null,
         total_candidates: 0,
         autonomous_mode: false,
         auto_apply_updates: false,
@@ -729,6 +735,9 @@ export function createKnowledgeKanbanSurface({
         label_excluded_issues: [],
         quota_hold: null,
       }});
+      // Receive paths publish the window whose data changed; the synchronous
+      // view pulls its current knowledge state without rendering in receive.
+      const issueWindowViewModel = createUiStateStore({ windowId: null });
 
       function issueMonitorStateText(state) {
         switch (String(state || "")) {
@@ -824,8 +833,89 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
-      function firstLine(text) {
-        return String(text || "").split(/\r?\n/)[0].trim();
+      function issueMonitorCapacityNotice() {
+        const status = issueMonitorModel.read().status;
+        const capacity = status.agent_capacity;
+        if (!capacity) return null;
+        const override = status.max_active_agents_override;
+        const manual = Number.isInteger(override) && override > 0;
+        const manualEffective = manual && status.max_active_agents === override;
+        const excess = manual ? override - capacity.recommended_worker_limit : 0;
+        const incomplete = !capacity.measurement_complete;
+        const attention = incomplete || excess > 0;
+        const message = incomplete
+          ? manualEffective
+            ? `Capacity pending. Manual limit ${override}; no action needed.`
+            : "Capacity pending. Wait or set Max active manually."
+          : excess > 0
+            ? `${excess} over recommended. Lower Max active if slow.`
+            : `Capacity ready. ${capacity.recommended_worker_limit} workers recommended.`;
+        const shownReasons = new Set();
+        const uniqueReason = (reason) => String(reason || "").split(/[;\n]+/)
+          .map(part => part.trim()).filter(part => {
+            if (!part || shownReasons.has(part)) return false;
+            shownReasons.add(part);
+            return true;
+          }).join("; ");
+        const lines = [
+          `Recommended: ${capacity.recommended_worker_limit} monitor workers · ${capacity.recommended_implementation_count} implementation agents · ${capacity.recommended_total_count} total including PM`,
+          `Machine budget: ${capacity.machine_budget ?? "unknown"} · Machine live: ${capacity.machine_live_agents} · This project: ${capacity.own_live_agents} (PM: ${capacity.own_pm_agents}) · Other projects: ${capacity.other_live_agents}`,
+          `GUI CPU reserved: ${Number(capacity.gui_cpu_millicores) / 1000} cores`,
+          uniqueReason(capacity.reason),
+        ];
+        for (const constraint of capacity.constraints || []) {
+          const resource = constraint.resource === "disk" ? "Disk" : String(constraint.resource).toUpperCase();
+          const reason = uniqueReason(constraint.reason);
+          lines.push(`${resource}: ${constraint.capacity ?? "unknown"} agent slots${constraint.binding ? " · limiting" : ""}${reason ? ` · ${reason}` : ""}`);
+        }
+        if (attention) lines.push("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
+        return {
+          key: ISSUE_MONITOR_CAPACITY_KEY, title: "Issue Monitor capacity",
+          level: manualEffective || !attention ? "info" : "warn", message,
+          details: lines.filter(Boolean).join("\n"), attention,
+          badge: incomplete ? "Capacity pending · Details"
+            : excess > 0 ? "Over recommended · Details" : `Capacity ${capacity.recommended_worker_limit} · Details`,
+        };
+      }
+
+      function syncIssueMonitorCapacityReport() {
+        const notice = issueMonitorCapacityNotice();
+        const fingerprint = notice?.attention ? JSON.stringify(notice) : "";
+        if (fingerprint === reportedIssueMonitorCapacity) return;
+        reportedIssueMonitorCapacity = fingerprint;
+        if (fingerprint) reportSurfaceNotice(notice);
+        else resolveSurfaceError(ISSUE_MONITOR_CAPACITY_KEY);
+      }
+
+      function renderIssueMonitorCapacity(bar) {
+        const status = issueMonitorModel.read().status;
+        const override = status.max_active_agents_override;
+        const manual = Number.isInteger(override) && override > 0;
+        bar.querySelector('[data-role="monitor-capacity-mode"]').textContent = manual ? "Manual" : "Auto";
+        bar.querySelector('[data-action="monitor-capacity-auto"]').hidden = !manual;
+        bar.querySelector(".knowledge-monitor-max-active input").min = manual ? "1" : "0";
+        const badge = bar.querySelector(".knowledge-monitor-capacity-badge");
+        const notice = issueMonitorCapacityNotice();
+        badge.hidden = !notice;
+        badge.textContent = notice?.badge || "";
+        badge.dataset.tone = notice?.level === "warn" ? "warning" : "info";
+      }
+
+      function createIssueNoticeBadge(label, key, message) {
+        // Renderer-failure fallback must not call the failing injected renderer.
+        const badge = document.createElement("button");
+        badge.type = "button";
+        badge.className = "knowledge-row-badge knowledge-notification-badge";
+        badge.dataset.tone = "blocked";
+        badge.setAttribute("aria-haspopup", "dialog");
+        badge.textContent = `${label} · Details`;
+        badge.addEventListener("click", () => {
+          if (!openSurfaceNotice(key)) {
+            reportSurfaceError({ key, title: "Issue window", message });
+            openSurfaceNotice(key);
+          }
+        });
+        return badge;
       }
 
       function renderIssueMonitorControls(element) {
@@ -834,9 +924,10 @@ export function createKnowledgeKanbanSurface({
         const bar = element?.querySelector(".knowledge-monitor-bar");
         if (!bar) return;
         const maxActive = Math.max(
-          1,
-          Number.parseInt(String(issueMonitorModel.read().status.max_active_agents || 1), 10) || 1,
+          0,
+          Number.parseInt(String(issueMonitorModel.read().status.max_active_agents ?? 1), 10) || 0,
         );
+        renderIssueMonitorCapacity(bar);
         const quotaHold = normalizedIssueMonitorQuotaHold(issueMonitorModel.read().status);
         const state = effectiveIssueMonitorState(issueMonitorModel.read().status, quotaHold);
         const pill = bar.querySelector(".knowledge-monitor-pill");
@@ -847,13 +938,14 @@ export function createKnowledgeKanbanSurface({
           pill.dataset.state = state;
           // Issue #3628 (AC-5): the outage outranks a per-issue error, which
           // already occupies `last_error` in the notification center.
-          pill.title = issueMonitorModel.read().status.agent_blackout
-            ? firstLine(issueMonitorModel.read().status.agent_blackout)
-            : state === "error"
-              ? firstLine(issueMonitorModel.read().status.last_error)
-              : state === "quota_hold"
-                ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}`
-                : "";
+          const errorKey = issueMonitorModel.read().status.agent_blackout
+            ? ISSUE_MONITOR_BLACKOUT_KEY : state === "error" && issueMonitorErrorText() ? ISSUE_MONITOR_ERROR_KEY : "";
+          pill.dataset.notificationKey = errorKey;
+          pill.disabled = !errorKey;
+          pill.title = errorKey ? "Details in notifications" : state === "quota_hold"
+            ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "";
+          if (errorKey) pill.setAttribute("aria-haspopup", "dialog");
+          else pill.removeAttribute("aria-haspopup");
         }
         const active = bar.querySelector('[data-metric="active"]');
         if (active) {
@@ -1143,6 +1235,8 @@ export function createKnowledgeKanbanSurface({
         issueMonitorModel.update(model => ({ ...model, status: {
           ...model.status,
           ...(nextStatus || {}),
+          max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
+          agent_capacity: nextStatus?.agent_capacity ?? null,
           quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
           // Issue #4366 AC-6b: omitted once the hold clears, so it must not
           // survive from the previous status the way merged fields do.
@@ -1327,6 +1421,25 @@ export function createKnowledgeKanbanSurface({
             kind: "set_issue_monitor_max_active_agents",
             max_active_agents: value,
           });
+        });
+        bar.querySelector(".knowledge-monitor-capacity-badge")?.addEventListener("click", () => {
+          const notice = issueMonitorCapacityNotice();
+          if (!notice) return;
+          reportSurfaceNotice(notice);
+          openSurfaceNotice(notice.key);
+        });
+        bar.querySelector(".knowledge-monitor-pill")?.addEventListener("click", () => {
+          const key = bar.querySelector(".knowledge-monitor-pill").dataset.notificationKey;
+          if (!key) return;
+          if (!openSurfaceNotice(key)) {
+            const message = key === ISSUE_MONITOR_BLACKOUT_KEY
+              ? issueMonitorModel.read().status.agent_blackout : issueMonitorErrorText();
+            reportSurfaceError({ key, title: "Issue Monitor", message });
+            openSurfaceNotice(key);
+          }
+        });
+        bar.querySelector('[data-action="monitor-capacity-auto"]')?.addEventListener("click", () => {
+          send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: null });
         });
         bar
           .querySelector('[data-action="monitor-toggle"]')
@@ -1668,6 +1781,9 @@ export function createKnowledgeKanbanSurface({
           // FR-017: a closed window's load error is no longer actionable.
           resolveSurfaceError(issueWindowErrorKey(windowId));
           state.reportedError = "";
+        }
+        if (state?.renderError) {
+          resolveSurfaceError(`issue-window:${windowId}:render`);
         }
         if (state?.pendingSearchTimer !== null && state?.pendingSearchTimer !== undefined) {
           clearTimeout(state.pendingSearchTimer);
@@ -2297,7 +2413,8 @@ export function createKnowledgeKanbanSurface({
               Array.isArray(rows)
                 ? rows.find((entry) => entry && entry.number === number)
                 : null;
-            const row = findRow(state.entries) || findRow(state.baseEntries) || null;
+            const row = findRow(state.entries) || findRow(state.baseEntries) ||
+              (state.kind === "issue" ? issueDetailEntry(state, number) : null);
             const authoritative = state.detail && state.detail.number === number;
             if (!authoritative) {
               state.detail = row
@@ -2864,12 +2981,31 @@ export function createKnowledgeKanbanSurface({
         // request is pending and becomes the authoritative semantic result
         // set on completion. Reapplying substring filtering here would hide
         // valid semantic matches whose wording differs from the query.
-        return (Array.isArray(state.entries) ? state.entries : []).map(queueProjectedEntry);
+        const entries = new Map((Array.isArray(state.entries) ? state.entries : [])
+          .map(entry => [entry.number, entry]));
+        // The inbox is already a complete row source. A separate knowledge
+        // load supplies details, but may still be pending when Monitor data
+        // arrives at startup. Keep semantic search's result set authoritative.
+        if (!state.query.trim()) {
+          for (const live of Object.values(issueMonitorModel.read().inboxByIssue)) {
+            const issue = live.issue;
+            if (entries.has(issue.number)) continue;
+            const labels = Array.isArray(issue.labels) ? issue.labels : [];
+            entries.set(issue.number, { number: issue.number, title: issue.title,
+              state: issue.state, labels, is_spec: labels.includes("gwt-spec"),
+              monitor_state: live.state, exclusion_reason: live.exclusion_reason,
+              meta: "", linked_branch_count: 0, related_work_count: 0, related_session_count: 0 });
+          }
+        }
+        return [...entries].map(([, entry]) => queueProjectedEntry(entry));
       }
 
       function queueProjectedEntry(entry) {
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
-        if (live) entry = { ...entry, monitor_state: live.state };
+        if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state };
+        const diagnosis = live?.error_message;
+        entry = { ...entry, readiness_diagnosis: typeof diagnosis === "string" &&
+          diagnosis.startsWith("SessionStart readiness pending:") ? diagnosis : null };
         if (!Array.isArray(issueMonitorModel.read().status.terminal_queue)) return entry;
         const index = issueMonitorModel.read().status.terminal_queue.findIndex(item => item.number === entry.number);
         const queued = index < 0 ? null : issueMonitorModel.read().status.terminal_queue[index];
@@ -3476,7 +3612,7 @@ export function createKnowledgeKanbanSurface({
           );
           if (found) return found;
         }
-        return null;
+        return filteredIssueEntries(state).find(entry => entry.number === number) || null;
       }
 
       function renderIssueDetailAcceptance(detail) {
@@ -3798,6 +3934,14 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderKnowledgeDetailOnly(windowId, state) {
+        if (state.kind === "issue") {
+          issueWindowViewModel.update(() => ({ windowId, detailOnly: true }));
+          return;
+        }
+        renderKnowledgeDetailView(windowId, state);
+      }
+
+      function renderKnowledgeDetailView(windowId, state) {
         const element = windowMap.get(windowId);
         const detailPane = element?.querySelector(".knowledge-detail-pane");
         if (!detailPane) {
@@ -4319,6 +4463,9 @@ export function createKnowledgeKanbanSurface({
           if (child !== other) child.remove();
         }
         const visibleEntries = filteredIssueEntries(state);
+        if (state.error) {
+          list.insertBefore(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error), other);
+        }
         if (splitMode) {
           const pairs = visibleEntries
             .map((entry) => renderIssueSplitPair(windowId, state, entry))
@@ -4354,7 +4501,7 @@ export function createKnowledgeKanbanSurface({
           knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
         );
         if (state.kind === "issue") {
-          renderIssueKnowledgeBridge(windowId, element, state);
+          issueWindowViewModel.update(() => ({ windowId }));
           return;
         }
         const board = element.querySelector(".kanban-board");
@@ -4540,7 +4687,7 @@ export function createKnowledgeKanbanSurface({
                 </div>
                 <section class="knowledge-monitor-bar" aria-label="Issue execution monitor">
                   <div class="knowledge-monitor-status" role="group" aria-label="Monitor status">
-                  <span class="knowledge-row-badge knowledge-monitor-pill" data-tone="idle" aria-live="polite">Stopped</span>
+                  <button type="button" class="knowledge-row-badge knowledge-monitor-pill" data-tone="idle" aria-live="polite" disabled>Stopped</button>
                   <span class="knowledge-monitor-metric" data-metric="active">Active 0/1</span>
                   <span class="knowledge-monitor-metric" data-metric="queue">Queue 0</span>
                   </div><div class="knowledge-monitor-controls" role="group" aria-label="Monitor controls">
@@ -4557,11 +4704,14 @@ export function createKnowledgeKanbanSurface({
                     <span>Max active</span>
                     <input type="number" min="1" step="1" value="1" aria-label="Max active agents" />
                   </label>
+                  <span class="knowledge-monitor-metric" data-role="monitor-capacity-mode">Auto</span>
+                  <button type="button" class="wizard-button is-compact" data-action="monitor-capacity-auto" hidden>Use Auto</button>
                   <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start monitor</button>
                   <button type="button" class="wizard-button is-compact" data-action="monitor-auto-apply" title="Apply a staged gwt update automatically once no agent is running (default: follows Autonomous)">Auto-apply updates: OFF</button>
                   <button type="button" class="wizard-button is-compact primary" data-action="monitor-setup" hidden>Set up agent</button>
                   <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Agent settings">⚙ Settings</button>
                   </div>
+                  <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
                 </section>
                 <details class="knowledge-monitor-labels knowledge-monitor-candidate">
                   <summary>Allowed labels · All labels · Excluded 0</summary>
@@ -5081,6 +5231,44 @@ export function createKnowledgeKanbanSurface({
       }
 
       issueMonitorModel.subscribe(model => model.status, syncIssueMonitorErrorReport);
+      issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly }) => {
+        const element = windowMap.get(windowId);
+        const state = knowledgeBridgeStateMap.get(windowId);
+        if (!element || !state) return;
+        if ((state.error || "") !== (state.reportedLoadDiagnostic || "")) {
+          state.reportedLoadDiagnostic = state.error || "";
+          if (state.error) {
+            send({ kind: "report_knowledge_error", id: windowId, stage: "load", message: state.error });
+          }
+        }
+        try {
+          if (detailOnly) {
+            renderKnowledgeDetailView(windowId, state);
+            if (state.error) {
+              const detail = element.querySelector(".knowledge-detail-pane");
+              detail?.prepend(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error));
+            }
+          } else {
+            renderIssueKnowledgeBridge(windowId, element, state);
+          }
+          if (state.renderError) {
+            state.renderError = "";
+            resolveSurfaceError(`issue-window:${windowId}:render`);
+          }
+        } catch (error) {
+          const message = String(error?.message || error);
+          const list = element.querySelector(detailOnly ? ".knowledge-detail-pane" : ".knowledge-list");
+          if (list) {
+            list.replaceChildren(createIssueNoticeBadge("Issue rendering failed", `issue-window:${windowId}:render`, message));
+          }
+          if (state.renderError !== message) {
+            state.renderError = message;
+            send({ kind: "report_knowledge_error", id: windowId, stage: "render", message });
+            reportSurfaceError({ key: `issue-window:${windowId}:render`, title: "Issue window", message });
+          }
+          throw error;
+        }
+      });
 
       return {
         issueMonitorModel,

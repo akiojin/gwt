@@ -108,6 +108,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, board_all_view_windows);
         $visit!($runtime, $id, pending_workspace_resume_contexts);
         $visit!($runtime, $id, pending_launch_feedback_contexts);
+        $visit!($runtime, $id, runtime_hook_agent_failures_in_flight);
         $visit!($runtime, $id, pending_launch_completions);
         $visit!($runtime, $id, pending_launch_delivery_acks);
         $visit!($runtime, $id, pending_continue_work);

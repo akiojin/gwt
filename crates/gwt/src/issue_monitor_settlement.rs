@@ -16,8 +16,8 @@ use std::{
 };
 
 use gwt_github::client::{
-    FetchResult, IssueClient, OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient,
-    RepositoryIdentity, ResolutionDeadline,
+    FetchResult, IssueClient, IssueSnapshot, OwnerMutationError, OwnerMutationResult,
+    OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
 };
 use gwt_github::{IssueNumber, IssueState};
 
@@ -26,6 +26,26 @@ use crate::issue_monitor::MergedIssueSettlementAction;
 /// Marker prefix of every settlement comment. The full marker carries the PR
 /// number and merge SHA so a retried effect can prove its comment landed.
 pub const SETTLEMENT_MARKER_PREFIX: &str = "<!-- gwt-merged-issue-settlement v1";
+
+/// Remove only the queue label from a freshly confirmed Closed Issue. A retry
+/// with the label already absent performs no mutation; other labels survive.
+pub fn remove_closed_queue_label<C: IssueClient + ?Sized>(
+    client: &C,
+    snapshot: &IssueSnapshot,
+) -> OwnerMutationResult<bool> {
+    if snapshot.state != IssueState::Closed {
+        return Ok(false);
+    }
+    let Some(label) = snapshot
+        .labels
+        .iter()
+        .find(|label| label.eq_ignore_ascii_case("gwt-queued"))
+    else {
+        return Ok(false);
+    };
+    client.remove_label_mutation(snapshot.number, label)?;
+    Ok(true)
+}
 
 /// Connect timeout cap for the settlement mutation.
 const SETTLEMENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -283,6 +303,35 @@ mod tests {
 
     fn repository() -> RepositoryIdentity {
         RepositoryIdentity::new("example", "repo")
+    }
+
+    #[test]
+    fn queue_label_cleanup_is_closed_only_and_replay_safe() {
+        let client = FakeIssueClient::new();
+        seed_open_issue(&client, 42, vec![]);
+        let FetchResult::Updated(mut snapshot) = client.fetch(IssueNumber(42), None).unwrap()
+        else {
+            panic!("snapshot")
+        };
+        snapshot.labels = vec!["bug".to_string(), "GWT-QUEUED".to_string()];
+        client.seed(snapshot.clone());
+        assert!(!remove_closed_queue_label(&client, &snapshot).unwrap());
+        snapshot.state = IssueState::Closed;
+        client.seed(snapshot.clone());
+        assert!(remove_closed_queue_label(&client, &snapshot).unwrap());
+        let FetchResult::Updated(cleaned) = client.fetch(IssueNumber(42), None).unwrap() else {
+            panic!("snapshot")
+        };
+        assert_eq!(cleaned.labels, vec!["bug"]);
+        assert!(!remove_closed_queue_label(&client, &cleaned).unwrap());
+        assert_eq!(
+            client
+                .call_log()
+                .iter()
+                .filter(|call| call.starts_with("remove_label"))
+                .count(),
+            1
+        );
     }
 
     fn seed_open_issue(client: &FakeIssueClient, number: u64, comments: Vec<&str>) {

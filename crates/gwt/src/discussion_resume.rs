@@ -105,7 +105,13 @@ pub fn set_proposal_status_by_label(
                 })
             })
             .collect();
-        if candidates.len() > 1 {
+        // Issue #5075: copies of one proposal (same title and origin) left by
+        // older `discussion.update` runs are one target, not an ambiguity.
+        let distinct_targets = candidates
+            .iter()
+            .map(|(proposal, origin)| (proposal.title.as_str(), origin.as_deref()))
+            .collect::<std::collections::HashSet<_>>();
+        if distinct_targets.len() > 1 {
             let details = candidates
                 .iter()
                 .map(|(proposal, origin)| {
@@ -124,7 +130,15 @@ pub fn set_proposal_status_by_label(
                 format!("ambiguous proposal {label}; specify title and origin_session:\n{details}"),
             ));
         }
-        let Some((target, origin)) = candidates.into_iter().next() else {
+        let header_lines: Vec<usize> = candidates
+            .iter()
+            .map(|(proposal, _)| proposal.header_line_index)
+            .collect();
+        let gate_passing = candidates
+            .iter()
+            .position(|(proposal, _)| evidence_gate_blocker(proposal).is_none())
+            .unwrap_or(0);
+        let Some((target, origin)) = candidates.into_iter().nth(gate_passing) else {
             return Ok(None);
         };
         if explicit_target.is_none()
@@ -150,9 +164,11 @@ pub fn set_proposal_status_by_label(
         }
 
         let mut lines: Vec<String> = document.content.lines().map(str::to_string).collect();
-        if let Some(line) = lines.get_mut(target.header_line_index) {
-            if let Some(rewritten) = replace_trailing_status_tag(line, new_status) {
-                *line = rewritten;
+        for index in header_lines {
+            if let Some(line) = lines.get_mut(index) {
+                if let Some(rewritten) = replace_trailing_status_tag(line, new_status) {
+                    *line = rewritten;
+                }
             }
         }
         let rewritten = lines.join("\n");
@@ -218,7 +234,7 @@ fn read_status_discussion_document(worktree: &Path) -> io::Result<Option<Discuss
 /// line. Mirrors the `rsplit_once('[')` parse contract used by
 /// [`parse_proposals`] so titles that happen to contain a literal
 /// `"[active]"` substring do not fool the replacement.
-fn replace_trailing_status_tag(line: &str, new_status: &str) -> Option<String> {
+pub(crate) fn replace_trailing_status_tag(line: &str, new_status: &str) -> Option<String> {
     // Find the rightmost `[` and its matching `]` on the same line,
     // ignoring anything that appears before them (including a proposal
     // title that spuriously contains `[active]`).
@@ -562,7 +578,7 @@ fn entry_field(lines: &[&str], field: &str) -> Option<String> {
         })
 }
 
-fn discussion_entry_heading_indices(lines: &[&str]) -> Vec<usize> {
+pub(crate) fn discussion_entry_heading_indices(lines: &[&str]) -> Vec<usize> {
     lines
         .iter()
         .enumerate()
@@ -1510,6 +1526,45 @@ Status: active
         assert!(!updated.contains("### Proposal A - Hook-driven resume [active]"));
         // Other proposals remain untouched
         assert!(updated.contains("### Proposal B - Manual follow-up only [parked]"));
+    }
+
+    /// Issue #5075 (AC-2): copies of one proposal left behind by older
+    /// updates share title and origin, so an explicit target resolves them
+    /// as one proposal instead of refusing as ambiguous.
+    #[test]
+    fn set_proposal_status_resolves_duplicate_copies_of_one_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(dir.path().join("gwt-home"));
+        let block = "
+### Proposal A - Same title [active]
+- Implementation Proof: a.rs:1
+";
+        let body = format!(
+            "## 2026-10-06 — Entry
+
+Status: active
+Origin Session: s1
+{block}{block}{block}"
+        );
+        write_canonical_discussion(dir.path(), &body);
+
+        let target = ProposalTarget {
+            title: "Same title".to_string(),
+            origin_session: Some("s1".to_string()),
+        };
+        let updated =
+            set_proposal_status_by_label(dir.path(), "Proposal A", "parked", None, Some(&target))
+                .unwrap()
+                .expect("duplicate copies resolve as one target");
+        assert_eq!(updated.title, "Same title");
+        let content = read_canonical_discussion(dir.path());
+        assert!(!content.contains("[active]"), "{content}");
+        assert_eq!(
+            content
+                .matches("### Proposal A - Same title [parked]")
+                .count(),
+            3
+        );
     }
 
     #[test]

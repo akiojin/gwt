@@ -34,9 +34,8 @@ use tempfile::TempDir;
 
 const NOW: &str = "2026-08-09T05:00:00Z";
 
-fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+fn env_test_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -327,7 +326,8 @@ fn failover_fresh_strategy_survives_disk_reload_until_delivery_ack() {
     let temp = TempDir::new().expect("tempdir");
     let prefs_path = temp.path().join("issue-monitor.json");
 
-    let monitor = launched_monitor();
+    let mut monitor = launched_monitor();
+    monitor.set_max_active_agents(2);
     let attempts_before = monitor.attempt_count(42);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
 

@@ -30,11 +30,23 @@ pub struct Operation {
 /// first. Kept sorted so a diff against the dispatch source stays readable.
 pub const OPERATIONS: &[Operation] = &[
     Operation {
+        name: "actions.cancel",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.dispatch",
+        aliases: &[],
+    },
+    Operation {
         name: "actions.job_logs",
         aliases: &["actions.job-logs"],
     },
     Operation {
         name: "actions.logs",
+        aliases: &[],
+    },
+    Operation {
+        name: "actions.queued",
         aliases: &[],
     },
     Operation {
@@ -51,6 +63,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "board.show",
+        aliases: &[],
+    },
+    Operation {
+        name: "board.sync",
         aliases: &[],
     },
     Operation {
@@ -492,11 +508,31 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.report.post",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.report.list",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.pause",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.resume",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.stop",
         aliases: &["pm.deregister"],
     },
     Operation {
         name: "pr.checks",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.close",
         aliases: &[],
     },
     Operation {
@@ -580,11 +616,19 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "release.update.defer",
+        aliases: &[],
+    },
+    Operation {
         name: "search",
         aliases: &[],
     },
     Operation {
         name: "verify.adjudicate",
+        aliases: &[],
+    },
+    Operation {
+        name: "verify.cancel",
         aliases: &[],
     },
     Operation {
@@ -616,6 +660,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "verify.status",
+        aliases: &[],
+    },
+    Operation {
         name: "workflow.bypass",
         aliases: &[],
     },
@@ -642,6 +690,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "workspace.projection_prune",
         aliases: &["workspace.projection-prune"],
+    },
+    Operation {
+        name: "workspace.receipt",
+        aliases: &[],
     },
     Operation {
         name: "workspace.store_consolidate",
@@ -786,6 +838,10 @@ mod tests {
     /// it.
     #[test]
     fn catalog_covers_every_dispatched_operation() {
+        assert!(
+            names().any(|name| name == "actions.dispatch"),
+            "Issue #4249 Phase 6 operation is callable"
+        );
         let source = include_str!("json_envelope.rs");
         let mut dispatched: std::collections::BTreeSet<String> = Default::default();
         let mut inside = false;

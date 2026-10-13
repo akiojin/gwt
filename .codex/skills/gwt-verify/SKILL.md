@@ -90,7 +90,7 @@ and Agent Visual Check gates.
 For the gwt repository, register the explicit policy with:
 
 ```json
-{"schema_version":1,"operation":"verify.plan","params":{"derive":true,"mode":"pre-pr","acceptance_commands":["cargo test -p gwt --test ci_pre_pr_contract_test"],"commands":[]}}
+{"schema_version":1,"operation":"verify.plan","params":{"derive":true,"mode":"pre-pr","acceptance_commands":["cargo test -p gwt --test ci_contracts ci_pre_pr_contract_test::"],"commands":[]}}
 ```
 
 Replace the example acceptance test with the tests that fix the current

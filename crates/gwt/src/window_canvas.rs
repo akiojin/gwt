@@ -279,6 +279,12 @@ impl WindowCanvasState {
         bounds: WindowGeometry,
     ) -> PersistedWindowState {
         let (width, height) = preset.default_size();
+        // Keep Agent controls reachable without moving the viewer's camera.
+        let width = if preset.is_agent_terminal() {
+            width.min(bounds.width)
+        } else {
+            width
+        };
         let min_x = bounds.x;
         let min_y = bounds.y;
         let max_x = bounds.x + (bounds.width - width).max(0.0);
@@ -1576,6 +1582,31 @@ mod tests {
         // centers inside the 1440×920 bounds at ((1440-1280)/2, (920-800)/2).
         assert_eq!(window.geometry.x, 80.0);
         assert_eq!(window.geometry.y, 60.0);
+    }
+
+    #[test]
+    fn adding_agent_windows_fits_narrow_visible_width_without_moving_camera() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let viewport = workspace.persisted().viewport.clone();
+        let bounds = WindowGeometry {
+            x: 96.0,
+            y: -48.0,
+            width: 1024.0,
+            height: 1000.0,
+        };
+
+        for preset in [
+            WindowPreset::Agent,
+            WindowPreset::Claude,
+            WindowPreset::Codex,
+        ] {
+            let window = workspace.add_window(preset, bounds.clone());
+            assert_eq!(window.geometry.width, bounds.width);
+            assert_eq!(window.geometry.height, preset.default_size().1);
+            assert!(window.geometry.x >= bounds.x);
+            assert!(window.geometry.x + window.geometry.width <= bounds.x + bounds.width);
+            assert_eq!(workspace.persisted().viewport, viewport);
+        }
     }
 
     #[test]

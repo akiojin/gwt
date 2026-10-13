@@ -17,6 +17,8 @@ test("the title bar offers a reversible split and the split uses Operator tokens
 });
 
 async function fixture() {
+  const { createUiStateStore } = await import("../ui-state-store.js");
+  const model = createUiStateStore({ catalog: { version: 0 } });
   const { createSplitSurfaces } = await import("../split-surfaces.js");
   const { document, window } = parseHTML(html);
   const stage = document.getElementById("canvas-stage");
@@ -43,6 +45,7 @@ async function fixture() {
   const controller = createSplitSurfaces({
     document,
     stage,
+    windowCatalogModel: model,
     onAgentsHost: (host, previewHost) => {
       agentHosts.push([host, previewHost]);
       if (host) host.appendChild(agents); else agents.remove();
@@ -53,7 +56,7 @@ async function fixture() {
     onChange: () => {},
     onLayout: () => {},
   });
-  return { controller, document, window, stage, windows, elements, opened, agents, agentHosts };
+  return { controller, model, document, window, stage, windows, elements, opened, agents, agentHosts };
 }
 
 test("two panes select independently, preserve live nodes and restore canvas geometry", async () => {
@@ -124,6 +127,24 @@ test("same Agents surface keeps the active live host and a preview in the other 
   controller.close();
   assert.equal(agentHosts.at(-1)[0], null);
   assert.equal(agentHosts.at(-1)[1], null);
+});
+
+test("Split reconciles arriving views from catalog commits and unsubscribes", async () => {
+  const { controller, model, windows, elements, stage, document } = await fixture();
+  controller.open("board");
+  controller.select("board", 1);
+  const second = { id: "second-board", preset: "board" };
+  const element = document.createElement("div");
+  stage.appendChild(element);
+  elements.set(second.id, element);
+  windows.push(second);
+  model.update(() => ({ catalog: { version: 1 } }));
+  assert.ok(element.closest(".split-pane") === document.querySelectorAll(".split-pane")[1], "catalog commit mounts the arriving view without manual sync");
+  assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "1");
+  controller.dispose();
+  windows.splice(windows.indexOf(second), 1);
+  model.update(() => ({ catalog: { version: 2 } }));
+  assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "1");
 });
 
 test("Agents hosts its dedicated grid and releases it when switching surfaces", async () => {

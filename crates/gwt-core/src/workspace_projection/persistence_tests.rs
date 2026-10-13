@@ -5,6 +5,152 @@ use crate::paths::{gwt_repo_local_work_event_shard_path, gwt_repo_local_work_eve
 
 use super::*;
 
+/// Compaction removes inline IDs without making their durable events unprojected.
+#[test]
+fn issue_5313_recovery_does_not_replay_compacted_local_history() {
+    for first_kind in [
+        WorkEventKind::Update,
+        WorkEventKind::Done,
+        WorkEventKind::Discard,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let works = temp.path().join("project-state/works.json");
+        let ledger = temp.path().join("work-events-closed.jsonl");
+        let at = Utc.with_ymd_and_hms(2026, 10, 12, 0, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(at);
+        let mut contents = String::new();
+        for index in 0..100 {
+            let mut event = WorkEvent::new(
+                if index == 0 {
+                    first_kind
+                } else {
+                    WorkEventKind::Update
+                },
+                "compacted-work",
+                at + chrono::Duration::seconds(index),
+            );
+            event.id = format!("local-update-{index}");
+            contents.push_str(&serde_json::to_string(&event).unwrap());
+            contents.push('\n');
+            projection.apply_event(event);
+        }
+        save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+        fs::write(&ledger, contents).unwrap();
+        let mut compacted = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        let before = compacted.clone();
+        assert!(compacted.work_items[0].events_compacted_through().is_some());
+        assert!(
+            !recover_unprojected_workspace_work_events_locked(&mut compacted, &works, &ledger,)
+                .unwrap()
+        );
+        assert_eq!(
+            compacted, before,
+            "recovery must preserve the compacted state"
+        );
+        if first_kind == WorkEventKind::Update {
+            // A pending lifecycle event can predate the compacted boundary.
+            let pause = WorkEvent::new(WorkEventKind::Pause, "compacted-work", at);
+            append_workspace_work_event_to_path(&ledger, &pause).unwrap();
+            assert!(recover_unprojected_workspace_work_events_locked(
+                &mut compacted,
+                &works,
+                &ledger
+            )
+            .unwrap());
+            assert!(compacted.work_items[0]
+                .events
+                .iter()
+                .any(|event| event.id == pause.id));
+        }
+    }
+}
+
+/// Pause a GUI cache decode; an independent process must still ensure a Work.
+#[test]
+fn issue_5313_gui_decode_allows_another_process_to_ensure() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let _home = ScopedHome::set(&home);
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let at = Utc.with_ymd_and_hms(2026, 10, 12, 0, 0, 0).unwrap();
+    let works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let mut projection = WorkItemsProjection::empty(at);
+    for index in 0..1000 {
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Start,
+            format!("work-{index}"),
+            at,
+        ));
+    }
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let child_repo = repo.clone();
+    BEFORE_WORK_ITEMS_DECODE.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            run_issue_5313_ensure_child(&child_repo, &home);
+        }));
+    });
+    let mut cache = WorkItemsCache::new();
+    let (snapshot, profile) = cache.load_or_synthesize_shared(&repo).unwrap();
+    assert!(!profile.cache_hit);
+    assert_eq!(
+        snapshot.work_items.len(),
+        1000,
+        "decode owns the earlier snapshot"
+    );
+    let (updated, profile) = cache.load_or_synthesize_shared(&repo).unwrap();
+    assert!(
+        !profile.cache_hit,
+        "the writer invalidates the earlier signature"
+    );
+    assert_eq!(updated.work_items.len(), 1001);
+}
+
+fn run_issue_5313_ensure_child(repo: &Path, home: &Path) {
+    let output = crate::process::hidden_command(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "workspace_projection::persistence::tests::issue_5313_ensure_child",
+            "--nocapture",
+        ])
+        .env("GWT_ISSUE_5313_ENSURE_REPO", repo)
+        .env("GWT_TEST_HOME", home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child ensure failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn issue_5313_ensure_child() {
+    let Ok(repo) = std::env::var("GWT_ISSUE_5313_ENSURE_REPO") else {
+        return;
+    };
+    let _guard = lock_test_env();
+    let _home = ScopedHome::set(Path::new(&std::env::var("GWT_TEST_HOME").unwrap()));
+    let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+        crate::operation_deadline::now() + Duration::from_secs(5),
+    );
+    // workspace.ensure uses this same atomic Work/assignment transaction.
+    transact_workspace_state(Path::new(&repo), |projection, _, _| {
+        projection.id = "child-work".to_string();
+        projection
+            .agents
+            .push(assigned_agent("ensure-child", "codex", "child-work"));
+        let mut event = WorkEvent::new(WorkEventKind::Start, "child-work", Utc::now());
+        event.agent_session_id = Some("ensure-child".to_string());
+        Ok(((), vec![event]))
+    })
+    .expect("another process ensures a Work while GUI decode is paused");
+}
+
 /// Issue #4739: launch publication must repair the already-poisoned Work,
 /// not require a separate workspace.ensure before the first update.
 #[test]
@@ -13214,6 +13360,40 @@ fn find_work_item_for_container_prefers_successor_after_predecessor_heartbeat() 
     assert_eq!(projection.work_items[0].id, predecessor_id);
     assert!(projection.work_items[0].discarded);
     assert_eq!(projection.work_items[0].owner.as_deref(), Some("SPEC-4074"));
+    // Issue #5288 / #4249: legacy automatic repair removed the terminal
+    // predecessor's container. Its stable branch ID and Start lineage still
+    // identify the successor; historical path loss must not resurrect it.
+    projection
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == predecessor_id)
+        .unwrap()
+        .execution_containers
+        .clear();
+    // The successor's explicit Start link remains authority after routine
+    // heartbeat compaction, rather than returning to its terminal predecessor.
+    for index in 0..MAX_INLINE_WORK_EVENTS + 1 {
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Update,
+            &successor_id,
+            now + chrono::Duration::seconds(index as i64 + 6),
+        ));
+    }
+    projection.compact_inline_events();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("works.json");
+    save_workspace_work_items_projection_to_path(&path, &projection).unwrap();
+    let heartbeat = WorkEvent::new(
+        WorkEventKind::Update,
+        &successor_id,
+        now + chrono::Duration::seconds(100),
+    );
+    crate::work_events_intake::ingest_work_events_content(
+        &path,
+        &serde_json::to_string(&heartbeat).unwrap(),
+    )
+    .unwrap();
+    let projection = load_workspace_work_items_from_path(&path).unwrap().unwrap();
 
     let current = find_work_item_for_container(
         &projection,
@@ -13228,6 +13408,106 @@ fn find_work_item_for_container_prefers_successor_after_predecessor_heartbeat() 
         workspace_group_key_for_item(project_root, current),
         predecessor_id
     );
+}
+
+#[test]
+fn current_work_preserves_owner_authority_across_missing_historical_owner() {
+    let project_root = Path::new("/repo");
+    let worktree = Path::new("/wt/issue-4777");
+    let branch = Some("work/issue-4777");
+    let now = Utc.timestamp_opt(9_000, 0).unwrap();
+    let root_id = canonical_work_id(project_root, branch, Some(worktree)).unwrap();
+    let middle_id = successor_work_id(&root_id);
+    let latest_id = successor_work_id(&middle_id);
+
+    for (root_owner, middle_owner, latest_owner) in [
+        (Some("Issue #4777"), None, Some("SPEC-4777")),
+        (Some("Issue #4777"), None, Some("SPEC-4313")),
+        (Some("Issue #4777"), None, None),
+        (Some("Issue #4777"), Some("SPEC-4777"), Some("SPEC #4777")),
+        (None, None, Some("SPEC-4777")),
+        (None, None, Some("SPEC-4313")),
+    ] {
+        let mut projection = WorkItemsProjection::empty(now);
+        let mut start = sample_work_event(&root_id, now);
+        start.owner = root_owner.map(str::to_string);
+        start.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: branch.map(str::to_string),
+            worktree_path: Some(worktree.to_path_buf()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        projection.apply_event(start.clone());
+        projection.apply_event(WorkEvent::new(WorkEventKind::Discard, &root_id, now));
+        let mut middle = start.clone();
+        middle.id = "ownerless-middle-start".to_string();
+        middle.work_item_id = middle_id.clone();
+        middle.related_work_item_id = Some(root_id.clone());
+        middle.owner = middle_owner.map(str::to_string);
+        projection.apply_event(middle);
+        projection.apply_event(WorkEvent::new(WorkEventKind::Discard, &middle_id, now));
+        let mut latest = start;
+        latest.id = "latest-start".to_string();
+        latest.work_item_id = latest_id.clone();
+        latest.related_work_item_id = Some(middle_id.clone());
+        latest.owner = latest_owner.map(str::to_string);
+        projection.apply_event(latest);
+        let before = projection.clone();
+        let expected_id = if matches!(latest_owner, Some("SPEC-4777" | "SPEC #4777")) {
+            &latest_id
+        } else if root_owner.is_none() {
+            // A historical gap cannot authorize a foreign tail.
+            &middle_id
+        } else {
+            &root_id
+        };
+
+        assert_eq!(
+            current_work_id(&projection, project_root, branch, Some(worktree)).as_ref(),
+            Some(expected_id),
+            "latest owner {latest_owner:?}",
+        );
+        assert_eq!(
+            &find_work_item_for_container(&projection, project_root, branch, Some(worktree))
+                .unwrap()
+                .id,
+            expected_id,
+            "latest owner {latest_owner:?}",
+        );
+        assert_eq!(
+            projection, before,
+            "resolution must preserve historical Work"
+        );
+        let launched = current_work_id_for_launch(
+            &projection,
+            project_root,
+            branch,
+            Some(worktree),
+            Some("SPEC-4777"),
+        );
+        if latest_owner == Some("SPEC-4313") {
+            let error = launched.unwrap_err().to_string();
+            assert!(
+                error.contains("expected SPEC-4777, actual SPEC-4313"),
+                "{error}"
+            );
+        } else {
+            assert_eq!(
+                launched.unwrap().as_ref(),
+                Some(&latest_id),
+                "authenticated launch may restore the ownerless current Work"
+            );
+        }
+        if latest_owner.is_none() {
+            projection.apply_event(WorkEvent::new(WorkEventKind::Discard, &latest_id, now));
+            assert_eq!(
+                current_work_id(&projection, project_root, branch, Some(worktree)).as_ref(),
+                Some(&root_id),
+                "an ownerless terminal tail must not become authoritative",
+            );
+        }
+    }
 }
 
 #[test]
@@ -13266,11 +13546,8 @@ fn find_work_item_for_container_rejects_invalid_successor_authority() {
         match invalid {
             "owner" => successor.owner = Some("Issue #4313".to_string()),
             "container" => {
-                successor
-                    .execution_container
-                    .as_mut()
-                    .unwrap()
-                    .worktree_path = Some(PathBuf::from("/wt/other"));
+                successor.execution_container.as_mut().unwrap().branch =
+                    Some("work/other".to_string());
             }
             "link" => successor.related_work_item_id = Some("work-unrelated".to_string()),
             _ => unreachable!(),
@@ -14637,4 +14914,73 @@ fn delete_pending_marker_handle(path: &Path) -> fs::File {
     }
     .expect("mark marker delete-pending");
     file
+}
+
+/// Issue #5208: a contender for `works.lock` used to wait forever when the
+/// caller set no operation deadline, so one long holder silently stalled every
+/// Work writer. The wait is now bounded and the error names the holder.
+#[test]
+fn work_items_lock_wait_without_ambient_deadline_is_bounded_and_names_the_holder() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("project-state/works.json");
+    std::fs::create_dir_all(work_items_path.parent().unwrap()).expect("project-state dir");
+    let holder = crate::operation_deadline::NamedFileLock::acquire_quiet(
+        &work_items_path.with_extension("lock"),
+        WORKSPACE_WORK_ITEMS_LOCK_OPERATION,
+    )
+    .expect("hold works.lock");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let contender_path = work_items_path.clone();
+    std::thread::spawn(move || {
+        WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE
+            .with(|wait| wait.set(Some(std::time::Duration::from_millis(100))));
+        let result = with_workspace_work_items_lock(&contender_path, || Ok(()));
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+
+    let result = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("works.lock acquisition must not wait forever");
+    let message = result.expect_err("a held works.lock must refuse after the bound");
+    assert!(message.contains("deadline expired"), "{message}");
+    assert!(
+        message.contains(WORKSPACE_WORK_ITEMS_LOCK_OPERATION),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("pid={}", std::process::id())),
+        "the error must name the observed holder: {message}"
+    );
+    drop(holder);
+    with_workspace_work_items_lock(&work_items_path, || Ok(()))
+        .expect("a released works.lock is available again");
+}
+
+/// Issue #5208: the Work items locks are per-handle OS locks, so a thread
+/// that re-acquired one it already held waited on itself forever. Refuse it.
+#[test]
+fn work_items_lock_reacquired_on_the_same_thread_is_refused_instead_of_deadlocking() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("project-state/works.json");
+    std::fs::create_dir_all(work_items_path.parent().unwrap()).expect("project-state dir");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let nested_path = work_items_path.clone();
+    std::thread::spawn(move || {
+        let result = with_workspace_work_items_lock(&nested_path, || {
+            let nested = with_workspace_work_items_lock(&nested_path, || Ok(()));
+            Ok(nested.map_err(|error| error.to_string()))
+        });
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+
+    let nested = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a nested works.lock acquisition must not self-deadlock")
+        .expect("the outer acquisition succeeds");
+    let message = nested.expect_err("the nested acquisition must be refused");
+    assert!(message.contains("already held by this thread"), "{message}");
+    with_workspace_work_items_lock(&work_items_path, || Ok(()))
+        .expect("the outer lock and its registration are released");
 }

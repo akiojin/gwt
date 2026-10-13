@@ -30,7 +30,8 @@ pub struct VerificationChild {
     child: std::process::Child,
     process_group: u32,
     accepted: VerificationSpawnAccepted,
-    reaped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // The same lock covers every signal, reap and disarm transition.
+    reaped: std::sync::Arc<std::sync::Mutex<bool>>,
 }
 
 impl VerificationChild {
@@ -59,17 +60,34 @@ impl VerificationChild {
     /// stays allocated while any member exists, and the just-exited child is
     /// still a zombie member until `wait` collects it, so killing the group at
     /// this point cannot land on a recycled group id.
-    pub fn wait(mut self) -> VerificationSpawnFinished {
-        let status = self.child.wait().ok();
+    pub fn wait(self) -> VerificationSpawnFinished {
+        self.wait_with_reclaim(reclaim_group)
+    }
+
+    fn wait_with_reclaim(mut self, reclaim: impl FnOnce(u32) -> bool) -> VerificationSpawnFinished {
+        // Do not hold the lock while waiting for exit: the connection must be
+        // able to cancel a running child. WNOWAIT keeps the leader allocated.
+        #[cfg(unix)]
+        let owns_child = wait_without_reaping(self.child.id()).is_ok();
+        #[cfg(not(unix))]
+        let owns_child = true;
+
+        let mut reaped = self.reaped.lock().unwrap_or_else(|err| err.into_inner());
+        // Descendants may outlive the runner. Cleanup, reap and disarm are one
+        // critical section, so a connection cannot signal between them.
+        // A failed observation cannot authorize a signal (notably ECHILD).
+        let reclaimed_survivors = owns_child && !*reaped && reclaim(self.process_group);
+        let status = if owns_child {
+            self.child.wait().ok()
+        } else {
+            None
+        };
+        *reaped = true;
+        drop(reaped);
         let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
         // Issue #4528: a wait failure also reads `-1`, so only a status that
         // actually names a signal marks the command as killed from outside.
         let signal = status.and_then(crate::cli::verification_record::terminating_signal);
-        // Descendants outlive the runner often enough to be the normal case:
-        // a `cargo test` that exits while a test binary is still winding down
-        // is exactly the shape that hung the full suite in #3845.
-        let reclaimed_survivors = reclaim_group(self.process_group);
-        self.reaped.store(true, std::sync::atomic::Ordering::SeqCst);
         VerificationSpawnFinished {
             exit_code,
             reclaimed_survivors,
@@ -84,9 +102,11 @@ impl Drop for VerificationChild {
         // abandoned: the daemon is shutting down, or a handler unwound. Kill
         // first and reap after, for the same group-id-reuse reason documented
         // on `wait`.
-        if !self.reaped.load(std::sync::atomic::Ordering::SeqCst) {
+        let mut reaped = self.reaped.lock().unwrap_or_else(|err| err.into_inner());
+        if !*reaped {
             reclaim_group(self.process_group);
             let _ = self.child.wait();
+            *reaped = true;
         }
     }
 }
@@ -95,7 +115,7 @@ impl Drop for VerificationChild {
 /// the child itself.
 pub struct VerificationReclaim {
     process_group: u32,
-    reaped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    reaped: std::sync::Arc<std::sync::Mutex<bool>>,
 }
 
 impl Drop for VerificationReclaim {
@@ -103,19 +123,63 @@ impl Drop for VerificationReclaim {
         // Skip a group whose leader has already been reaped: its id is free
         // to be recycled at that point, and killing a recycled group would
         // take down an unrelated process.
-        if !self.reaped.load(std::sync::atomic::Ordering::SeqCst) {
+        let reaped = self.reaped.lock().unwrap_or_else(|err| err.into_inner());
+        if !*reaped {
             reclaim_group(self.process_group);
         }
     }
 }
 
-/// Kill a whole process group. Returns whether anything was still alive.
+/// Observe exit without releasing the owned PID/PGID.
+#[cfg(unix)]
+fn wait_without_reaping(pid: u32) -> std::io::Result<()> {
+    loop {
+        // SAFETY: the buffer is valid, P_PID selects the exact child, and
+        // WNOWAIT leaves its status available to Child::wait after cleanup.
+        let result = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// Kill a whole process group. Returns whether live descendants were present.
 #[cfg(unix)]
 fn reclaim_group(process_group: u32) -> bool {
-    // SAFETY: `killpg` has no memory-safety preconditions. An `ESRCH` result
-    // means the group is already empty, which is the ordinary outcome for a
-    // command that cleaned up after itself.
-    unsafe { libc::killpg(process_group as libc::pid_t, libc::SIGKILL) == 0 }
+    use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+
+    // The exited leader remains a group member until reap. Its presence must
+    // not produce the transcript's "left descendants running" diagnostic.
+    // This snapshot controls reporting only; cleanup is always attempted.
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().without_tasks(),
+    );
+    let descendants = system.processes().iter().any(|(pid, process)| {
+        pid.as_u32() != process_group
+            && !matches!(process.status(), ProcessStatus::Dead | ProcessStatus::Zombie)
+            // SAFETY: getpgid only queries a PID; disappearing processes are
+            // ignored. The owned leader still pins the target group id.
+            && unsafe { libc::getpgid(pid.as_u32() as libc::pid_t) }
+                == process_group as libc::pid_t
+    });
+    // SAFETY: the owned leader is unreaped whenever production calls here,
+    // so the group id cannot be recycled. Reporting never suppresses cleanup.
+    unsafe { libc::killpg(process_group as libc::pid_t, libc::SIGKILL) == 0 && descendants }
 }
 
 #[cfg(not(unix))]
@@ -183,7 +247,7 @@ pub fn spawn(request: &VerificationSpawnRequest) -> Result<VerificationChild, St
             nice,
             nice_reason: priority_reason(nice, degraded_qos_class()),
         },
-        reaped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reaped: std::sync::Arc::new(std::sync::Mutex::new(false)),
     })
 }
 
@@ -434,9 +498,100 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         assert!(
-            handle.reaped.load(std::sync::atomic::Ordering::SeqCst),
+            *handle.reaped.lock().expect("reaped state"),
             "a reaped child must disarm the handle before it drops"
         );
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #5217 AC-1/3: cleanup must run while the exited leader still
+    /// pins its PID/PGID, including when descendants outlive a completed run.
+    #[test]
+    fn completion_reclaims_orphans_before_reaping_the_leader() {
+        let dir = temp_dir("completion-orphans");
+        let child = spawn(&request(
+            &dir,
+            "/bin/sh",
+            &["-c", "sleep 120 & echo $! > grandchild.pid; exit 7"],
+        ))
+        .expect("spawn");
+        let finished = child.wait_with_reclaim(|group| {
+            // SAFETY: the buffer is valid and WNOWAIT only observes this child.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let observed = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    group as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            assert_eq!(observed, 0, "cleanup must precede reap");
+            assert_eq!(unsafe { info.si_pid() }, group as libc::pid_t);
+            reclaim_group(group)
+        });
+        let grandchild = std::fs::read_to_string(dir.join("grandchild.pid"))
+            .expect("grandchild pid")
+            .trim()
+            .parse()
+            .expect("pid");
+        assert_eq!(finished.exit_code, 7);
+        assert_eq!(finished.signal, None);
+        assert!(finished.reclaimed_survivors);
+        assert!(wait_until_gone(grandchild));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #5217 AC-2/3: a connection reclaim that overlaps completion
+    /// cannot enter cleanup until reap and disarm are both finished.
+    #[test]
+    fn completion_disarms_a_competing_reclaim_before_it_can_signal() {
+        let dir = temp_dir("competing-reclaim");
+        let unrelated =
+            spawn(&request(&dir, "/bin/sh", &["-c", "exec sleep 120"])).expect("unrelated group");
+        let child = spawn(&request(&dir, "/bin/sh", &["-c", "exit 0"])).expect("spawn");
+        let mut handle = child.reclaim_handle();
+        // Model a recycled numeric PGID with another group owned by this test;
+        // no PID-wrap timing or unrelated host process is involved.
+        handle.process_group = unrelated.accepted().process_group;
+        let state = std::sync::Arc::clone(&handle.reaped);
+        let mut dropper = None;
+        let finished = child.wait_with_reclaim(|group| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            dropper = Some(std::thread::spawn(move || {
+                ready_tx.send(state.try_lock().is_err()).expect("ready");
+                drop(handle);
+            }));
+            assert!(ready_rx.recv().expect("lock observation"));
+            reclaim_group(group)
+        });
+        dropper.expect("competing reclaim").join().expect("dropper");
+        assert_eq!(finished.exit_code, 0);
+        assert!(!finished.reclaimed_survivors);
+        assert!(alive(unrelated.accepted().pid));
+        drop(unrelated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #5217 AC-2/3: loss of wait ownership must also disarm Drop and
+    /// the connection handle rather than signal a potentially reused group.
+    #[test]
+    fn lost_wait_ownership_cannot_authorize_group_cleanup() {
+        let dir = temp_dir("lost-ownership");
+        let child = spawn(&request(&dir, "/bin/sh", &["-c", "exit 7"])).expect("spawn");
+        let handle = child.reclaim_handle();
+        let mut status = 0;
+        // SAFETY: reap only this test's exact child, simulating ownership loss.
+        assert_eq!(
+            unsafe { libc::waitpid(child.accepted().pid as libc::pid_t, &mut status, 0) },
+            child.accepted().pid as libc::pid_t
+        );
+        let finished = child.wait_with_reclaim(|_| panic!("an unowned group must not be signaled"));
+        assert_eq!(finished.exit_code, -1);
+        assert_eq!(finished.signal, None);
+        assert!(!finished.reclaimed_survivors);
+        assert!(*handle.reaped.lock().expect("disarmed state"));
         drop(handle);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -466,9 +621,14 @@ mod tests {
             &["-c", "echo out; echo err 1>&2; exit 7"],
         ))
         .expect("spawn");
-        let exit_code = child.wait().exit_code;
+        let finished = child.wait();
 
-        assert_eq!(exit_code, 7);
+        assert_eq!(finished.exit_code, 7);
+        assert_eq!(finished.signal, None);
+        assert!(
+            !finished.reclaimed_survivors,
+            "ordinary exit leaves no descendants"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("stdout.log")).expect("stdout"),
             "out\n"

@@ -137,7 +137,7 @@ fn sustained_route_and_operation_overages_survive_separate_processes() {
         )
         .args([
             "--exact",
-            "sustained_route_and_operation_overages_survive_separate_processes",
+            "perf_regression_test::sustained_route_and_operation_overages_survive_separate_processes",
         ])
         .env(CHILD_HOME, home.path())
         .output()

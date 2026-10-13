@@ -412,13 +412,24 @@ fn write_text_file_round_trips_shift_jis_and_euc_jp() {
 fn write_text_file_rejects_conflict_when_mtime_mismatches() {
     let dir = tempdir().expect("tempdir");
     write_at(dir.path(), "race.txt", b"original\n");
+    let path = dir.path().join("race.txt");
+    let initial_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    let set_mtime = |mtime| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open external file")
+            .set_times(std::fs::FileTimes::new().set_modified(mtime))
+            .expect("set external mtime");
+    };
+    set_mtime(initial_mtime);
 
     let limits = ContentLimits::default();
     let before = read_text_file(dir.path(), Path::new("race.txt"), &limits).expect("read");
 
-    // Simulate an external editor mutating the file after we read it.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(dir.path().join("race.txt"), b"external write\n").expect("external write");
+    // Keep the size equal so the conflict is proved by mtime alone.
+    std::fs::write(&path, b"external\n").expect("external write");
+    set_mtime(initial_mtime + std::time::Duration::from_secs(2));
 
     let err = write_text_file(
         dir.path(),
@@ -435,15 +446,19 @@ fn write_text_file_rejects_conflict_when_mtime_mismatches() {
     )
     .expect_err("conflict");
     match err {
-        FileContentError::Conflict { current_size, .. } => {
-            assert_eq!(current_size, b"external write\n".len() as u64);
+        FileContentError::Conflict {
+            current_mtime,
+            current_size,
+        } => {
+            assert_eq!(current_size, before.total_size);
+            assert_ne!(current_mtime, before.mtime);
         }
         other => panic!("expected Conflict, got {other:?}"),
     }
 
     // Disk content must remain the external write — atomic write never ran.
     let on_disk = std::fs::read(dir.path().join("race.txt")).expect("re-read");
-    assert_eq!(on_disk, b"external write\n".to_vec());
+    assert_eq!(on_disk, b"external\n".to_vec());
 }
 
 #[test]

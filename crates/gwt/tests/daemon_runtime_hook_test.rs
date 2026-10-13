@@ -1,9 +1,4 @@
-use std::{
-    ffi::OsString,
-    fs,
-    sync::{mpsc, Mutex, OnceLock},
-    time::Duration,
-};
+use std::{ffi::OsString, fs, sync::mpsc, time::Duration};
 
 use axum::{
     extract::State,
@@ -21,11 +16,8 @@ use gwt_github::{CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, Update
 use serde_json::Value;
 use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
 
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
+fn env_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

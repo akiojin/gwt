@@ -1413,8 +1413,8 @@ mod tests {
             );
             assert!(
                 fix_flow.contains("CI pending/queued --> check at most 3 times")
-                    && fix_flow.contains("`board.post` with `params.kind:\"blocked\"`")
-                    && fix_flow.contains("stop instead of sleeping indefinitely"),
+                    && fix_flow.contains("`params.kind:\"status\"`")
+                    && fix_flow.contains("`issue.monitor.wait`"),
                 "expected bounded CI wait handoff guidance in {relative}"
             );
             assert!(
@@ -2900,6 +2900,52 @@ mod tests {
                 claude.contains(required),
                 "gwt-manage-pr SKILL.md must document drive-to-merge phrase: {required}"
             );
+        }
+    }
+
+    /// Issue #5128 AC-1/2/3: pending-only CI waits must not become human
+    /// escalations, including in the materialized Fix and Deliver references.
+    #[test]
+    fn manage_pr_materializes_pending_wait_without_blocked_escalation() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for file in [
+            "SKILL.md",
+            "references/fix-flow.md",
+            "references/deliver-flow.md",
+        ] {
+            let source = std::fs::read_to_string(
+                workspace_root.join(format!(".claude/skills/gwt-manage-pr/{file}")),
+            )
+            .unwrap();
+            for provider in [".claude", ".codex"] {
+                let relative = format!("{provider}/skills/gwt-manage-pr/{file}");
+                let checked_in = std::fs::read_to_string(workspace_root.join(&relative)).unwrap();
+                let generated =
+                    std::fs::read_to_string(materialized.path().join(&relative)).unwrap();
+                assert_eq!(checked_in, source, "provider mirror drift: {relative}");
+                assert_eq!(generated, source, "materialization drift: {relative}");
+                let prose = generated.split_whitespace().collect::<Vec<_>>().join(" ");
+                for required in [
+                    "pending alone never counts",
+                    "`params.kind:\"status\"`",
+                    "`issue.monitor.wait`",
+                    "owner Issue number",
+                    "`params.number`",
+                    "`resume_condition`",
+                    "`params.clear:true`",
+                    "Do not emit `params.kind:\"blocked\"` or NeedsHuman",
+                    "A human decision, unsafe operation, or actual tool refusal still follows the existing blocked escalation contract",
+                ] {
+                    assert!(prose.contains(required), "{relative} missing: {required}");
+                }
+                assert!(
+                    !generated.contains("(`params.kind:\"blocked\"`) when CI stays pending")
+                        && !generated.contains("then stop instead of sleeping indefinitely"),
+                    "{relative} must retire pending-only blocked handoffs"
+                );
+            }
         }
     }
 

@@ -35,13 +35,17 @@ pub fn handle_with_input(
         // Malformed record fails open for hooks.
         Err(_) => return HookOutput::Silent,
     };
-    // P9a (T-122): a record edited outside the canonical operations must not
-    // release the gate — block with the repair path instead of trusting the
-    // edited status.
+    // P9a (T-122): invalid integrity must not release the gate. The loader
+    // also uses this result for missing/stale generation authority, so the
+    // observation alone cannot prove that a record was manually edited.
     if !execution_state::integrity_ok(&record) {
         let repair = execution_state::integrity_repair_guidance(record.status);
         return HookOutput::stop_block(format!(
-            "Execution control record failed integrity validation: it was edited outside the canonical operations. {repair}",
+            "Execution control record failed integrity validation in this Stop observation. \
+             Run JSON operation `execution.status` for the canonical diagnosis and follow its \
+             `available_recoveries` / `recovery_probes`. Only use a recovery advertised there. \
+             If `execution.repair` returns `execution_repair_not_corrupt`, current authority is not corrupt: \
+             re-run `execution.status` and recheck Stop. When status advertises `execution.repair`: {repair}",
         ));
     }
     // Settlement requires GWT_SESSION_ID; a session without one (a bare,
@@ -256,6 +260,18 @@ mod tests {
             assert!(reason.contains("integrity validation"), "{reason}");
             assert!(reason.contains("execution.repair"), "{reason}");
             assert!(reason.contains("quarantines"), "{reason}");
+            assert!(reason.contains("execution.status"), "{reason}");
+            assert!(reason.contains("available_recoveries"), "{reason}");
+            assert!(reason.contains("recovery_probes"), "{reason}");
+            assert!(reason.contains("execution_repair_not_corrupt"), "{reason}");
+            assert!(
+                reason.contains("current authority is not corrupt"),
+                "{reason}"
+            );
+            assert!(
+                !reason.contains("edited outside the canonical operations"),
+                "{reason}"
+            );
             assert!(!reason.contains("Self-improvement"), "{reason}");
         }
     }

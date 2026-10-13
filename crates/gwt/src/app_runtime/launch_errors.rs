@@ -33,6 +33,7 @@ pub(super) struct LaunchErrorInput {
     session_cache: super::launch::LaunchWizardMemoryCache,
     restored_launch: Option<Option<String>>,
     pub(super) feedback: Option<LaunchFeedbackContext>,
+    pub(super) retryable: bool,
     update_observations: (
         Vec<gwt::update_drain::PaneObservation>,
         Vec<std::path::PathBuf>,
@@ -42,10 +43,11 @@ pub(super) struct LaunchErrorInput {
 }
 
 pub(super) struct PreparedLaunchError {
+    pub(super) retryable: bool,
     issue_number: Option<u64>,
     project_root: Option<std::path::PathBuf>,
     monitor: Option<super::PreparedIssueMonitorLaunchFailure>,
-    handoff_note: Option<String>,
+    handoff_note: Option<(String, bool)>,
     monitor_message: String,
 }
 
@@ -139,12 +141,13 @@ pub(super) fn prepare_launch_error(
             let mode = feedback
                 .and_then(|f| f.issue_monitor_session_mode)
                 .unwrap_or(gwt_agent::SessionMode::Normal);
-            let payload = AppRuntime::issue_monitor_launch_failed_payload(
+            let payload = AppRuntime::issue_monitor_launch_failed_payload_with_retryability(
                 issue_number,
                 &message,
                 delivery_id,
                 delivery_id.map(|_| input.materializer_id.as_str()),
                 mode,
+                input.retryable,
             );
             let publication = match project_root.as_deref() {
                 Some(root) => AppRuntime::publish_issue_monitor_control_owned(root, payload),
@@ -160,6 +163,7 @@ pub(super) fn prepare_launch_error(
                 &message,
                 delivery_id,
                 mode,
+                input.retryable,
                 &input.materializer_id,
                 input.fallback_timeout,
                 publication,
@@ -193,6 +197,7 @@ pub(super) fn prepare_launch_error(
         detail.to_string()
     };
     Some(PreparedLaunchError {
+        retryable: input.retryable,
         issue_number,
         project_root,
         monitor,
@@ -553,6 +558,7 @@ impl AppRuntime {
             session_cache: self.launch_wizard_cache.clone(),
             restored_launch: self.restore_launch_windows.get(window_id).cloned(),
             feedback,
+            retryable: true,
             update_observations: self.capture_update_quiescence_inputs(),
             materializer_id: self.issue_monitor_materializer_id.clone(),
             fallback_timeout: self.issue_monitor_fallback_commit_timeout,
@@ -667,15 +673,25 @@ impl AppRuntime {
             });
             if let Some(issue_number) = monitor_owned_issue {
                 if let Some(handoff) = issue_monitor_autonomous_handoff.as_ref() {
-                    events.extend(self.answered_handoff_launch_failure_events_prepared(
-                        issue_monitor_project_root.as_deref(),
-                        issue_number,
-                        issue_monitor_delivery_id.as_deref(),
-                        handoff,
-                        issue_monitor_autonomous_submit_started,
-                        &detail,
-                        prepared.as_mut().and_then(|p| p.handoff_note.take()),
-                    ));
+                    let (failure_events, committed) = self
+                        .answered_handoff_launch_failure_events_prepared(
+                            issue_monitor_project_root.as_deref(),
+                            issue_number,
+                            issue_monitor_delivery_id.as_deref(),
+                            handoff,
+                            issue_monitor_autonomous_submit_started,
+                            &detail,
+                            prepared.as_mut().and_then(|p| p.handoff_note.take()),
+                        );
+                    events.extend(failure_events);
+                    // The durable retry owns this definitely pre-submit failure.
+                    // Submitted ambiguity and any surviving runtime retain their
+                    // window as evidence for exact reconciliation.
+                    if committed && !self.runtimes.contains_key(&window_id) {
+                        events.extend(
+                            self.close_window_after_issue_monitor_finalize_events(&window_id),
+                        );
+                    }
                 } else {
                     let (failure_events, committed) =
                         if let Some(receipt) = prepared.as_mut().and_then(|p| p.monitor.take()) {
@@ -705,6 +721,23 @@ impl AppRuntime {
                     // the Monitor's `error_message`; only then is the
                     // pre-PTY pane closed. A failed commit retains it.
                     if committed {
+                        if prepared.as_ref().is_some_and(|failure| !failure.retryable)
+                            && self
+                                .pending_fresh_execution_launches
+                                .contains_key(&window_id)
+                        {
+                            events.extend(self.fresh_execution_launch_failed_events_with_pane(
+                                &window_id,
+                                &detail,
+                                super::launch::LaunchPaneDisposition::Retain,
+                            ));
+                            if self
+                                .pending_fresh_execution_launches
+                                .contains_key(&window_id)
+                            {
+                                return events;
+                            }
+                        }
                         tracing::info!(
                             target: "gwt::agent_launch",
                             window_id = %window_id,
@@ -768,7 +801,7 @@ impl AppRuntime {
         }
         if let Some(issue_number) = issue_monitor_issue_number {
             if let Some(handoff) = issue_monitor_autonomous_handoff.as_ref() {
-                events.extend(self.answered_handoff_launch_failure_events_prepared(
+                let (failure_events, _) = self.answered_handoff_launch_failure_events_prepared(
                     issue_monitor_project_root.as_deref(),
                     issue_number,
                     issue_monitor_delivery_id.as_deref(),
@@ -776,7 +809,8 @@ impl AppRuntime {
                     issue_monitor_autonomous_submit_started,
                     &detail,
                     prepared.as_mut().and_then(|p| p.handoff_note.take()),
-                ));
+                );
+                events.extend(failure_events);
             } else {
                 let failure_events =
                     if let Some(receipt) = prepared.as_mut().and_then(|p| p.monitor.take()) {
@@ -816,14 +850,14 @@ impl AppRuntime {
         handoff: &gwt::AutonomousHandoffDeliveryAttempt,
         submit_started: bool,
         detail: &str,
-        prepared_note: Option<String>,
-    ) -> Vec<OutboundEvent> {
+        prepared_note: Option<(String, bool)>,
+    ) -> (Vec<OutboundEvent>, bool) {
         let local_delivery_key = delivery_id
             .map(str::to_string)
             .unwrap_or_else(|| format!("handoff:{}", handoff.handoff_id));
         self.issue_monitor_launch_deliveries
             .remove(&local_delivery_key);
-        let durable_note = prepared_note.unwrap_or_else(|| {
+        let (durable_note, failure_committed) = prepared_note.unwrap_or_else(|| {
             Self::prepare_answered_handoff_failure_note(
                 project_root,
                 handoff,
@@ -833,16 +867,16 @@ impl AppRuntime {
         });
         let Some(context) = project_root.and_then(|root| self.project_context_for_root(root))
         else {
-            return Vec::new();
+            return (Vec::new(), failure_committed);
         };
-        vec![OutboundEvent::project(context.project_key, BackendEvent::IssueMonitorToast {
+        (vec![OutboundEvent::project(context.project_key, BackendEvent::IssueMonitorToast {
             notification_transition: None,
             level: "error".to_string(),
             message: format!(
                 "Issue Monitor could not confirm the exact answered-session submit{durable_note}: {detail}"
             ),
             issue_number: Some(issue_number),
-        }).with_error_project_root(&context.project_root)]
+        }).with_error_project_root(&context.project_root)], failure_committed)
     }
 
     fn prepare_answered_handoff_failure_note(
@@ -850,8 +884,9 @@ impl AppRuntime {
         handoff: &gwt::AutonomousHandoffDeliveryAttempt,
         submit_started: bool,
         detail: &str,
-    ) -> String {
-        project_root.map_or_else(
+    ) -> (String, bool) {
+        let mut failure_committed = false;
+        let note = project_root.map_or_else(
             || "; the owning Project State is unavailable".to_string(),
             |project_root| {
                 let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
@@ -885,12 +920,18 @@ impl AppRuntime {
                         Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Retry {
                             retry_not_before,
                             ..
-                        }) => format!(
-                            "; the definitely pre-submit attempt will retry after {retry_not_before}"
-                        ),
+                        }) => {
+                            failure_committed = true;
+                            format!(
+                                "; the definitely pre-submit attempt will retry after {retry_not_before}"
+                            )
+                        }
                         Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Escalated {
                             ..
-                        }) => "; the bounded retry ladder was exhausted".to_string(),
+                        }) => {
+                            failure_committed = true;
+                            "; the bounded retry ladder was exhausted".to_string()
+                        }
                         Ok(gwt::AutonomousHandoffDeliveryFailureOutcome::Rejected) => {
                             "; the durable attempt no longer matched".to_string()
                         }
@@ -900,7 +941,8 @@ impl AppRuntime {
                     }
                 }
             },
-        )
+        );
+        (note, failure_committed)
     }
 
     pub(super) fn user_facing_launch_error_detail(detail: &str) -> String {
@@ -993,6 +1035,8 @@ impl AppRuntime {
                     id: window_id,
                     status,
                     detail,
+                    error_code: None,
+                    retryable: None,
                 },
             ),
         ]

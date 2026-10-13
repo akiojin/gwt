@@ -98,7 +98,18 @@ struct PendingWorkEventsSource {
 type SourceFingerprints = Vec<(String, String)>;
 type ReloadedWorkEventsSources = (Vec<SharedWorkEventsSource>, SourceFingerprints);
 
+#[cfg(test)]
+thread_local! {
+    /// Issue #5208: every payload read of a work event source on this thread,
+    /// so a test can prove a rebuild does not re-read unchanged sources while
+    /// holding `works.lock`.
+    static WORK_EVENT_SOURCE_READS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn read_work_event_source(path: &Path, kind: WorkEventsSourceKind) -> gwt_core::Result<Arc<str>> {
+    #[cfg(test)]
+    WORK_EVENT_SOURCE_READS.with(|reads| reads.borrow_mut().push(path.to_path_buf()));
     let content = std::fs::read(path)?;
     work_event_source_content(path, kind, &content)
 }
@@ -286,6 +297,21 @@ fn load_pending_sources_for_rebuild(
         fingerprints.push((source.key.clone(), source.fingerprint.clone()));
     }
 
+    // Issue #5208: this loader runs while `works.lock` is held, and every
+    // Work writer in the fleet (SessionStart hooks, workspace.update, Host
+    // continuation/adoption, GUI projection preparation) waits on that lock.
+    // Re-reading every shard of every worktree here held the lock for tens of
+    // minutes on a repository with hundreds of worktrees × thousands of
+    // shards. The pre-lock pass already read and validated each worktree
+    // source, so reuse that content whenever the re-scan observes the same
+    // key and size/mtime/container fingerprint — the same identity the
+    // incremental poll already trusts — and read only new or changed sources.
+    let prelock_reads = pending_sources
+        .iter()
+        .filter(|source| source.reload_from_worktree)
+        .map(|source| (source.key.as_str(), source))
+        .collect::<HashMap<_, _>>();
+
     // Re-scan the already enumerated worktree roots after the projection lock
     // is taken. This catches an immutable shard atomically published between
     // the initial source scan and intake without paying for a second
@@ -295,8 +321,12 @@ fn load_pending_sources_for_rebuild(
         // the read leaves the older fingerprint behind, so the next pass
         // reads the source again.
         let fingerprint = source_fingerprint(&source.metadata, source.container.as_ref());
-        let content = read_work_event_source(&source.events_path, source.kind)?;
-        fingerprints.push((source.key(), fingerprint));
+        let key = source.key();
+        let content = match prelock_reads.get(key.as_str()) {
+            Some(prelock) if prelock.fingerprint == fingerprint => Arc::clone(&prelock.content),
+            _ => read_work_event_source(&source.events_path, source.kind)?,
+        };
+        fingerprints.push((key, fingerprint));
         contents.push(SharedWorkEventsSource::new(content, source.container));
     }
     Ok((contents, fingerprints))
@@ -2798,6 +2828,81 @@ mod tests {
         std::fs::create_dir_all(shard.parent().expect("bucket")).expect("event bucket");
         std::fs::write(&shard, format!("{event}\n")).expect("event shard");
         shard
+    }
+
+    /// Issue #5208: a rebuild holds `works.lock` while it re-scans worktree
+    /// sources. Re-reading every unchanged shard there kept the lock for tens
+    /// of minutes on a large fleet and stalled every Work writer. Unchanged
+    /// sources must reuse their pre-lock read; a shard published while intake
+    /// waits for the lock must still be read and folded.
+    #[test]
+    fn rebuild_reuses_prelock_reads_and_still_folds_shards_published_before_the_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let shard_names = (0..3)
+            .map(|index| {
+                write_shard(
+                    &repo,
+                    &format!("evt-5208-{index}"),
+                    &format!("work-5208-{index}"),
+                )
+                .file_name()
+                .expect("shard name")
+                .to_owned()
+            })
+            .collect::<Vec<_>>();
+        let works = temp.path().join("state/works.json");
+        let state = temp.path().join("state/work-events-intake.json");
+        let late_name = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let late_slot = std::rc::Rc::clone(&late_name);
+        let late_repo = repo.clone();
+        WORK_EVENT_SOURCE_READS.with(|reads| reads.borrow_mut().clear());
+
+        let summary =
+            ingest_project_work_events_paths_with_before_intake(&repo, &works, &state, move || {
+                let late = write_shard(&late_repo, "evt-5208-late", "work-5208-late");
+                *late_slot.borrow_mut() = Some(late.file_name().expect("late shard").to_owned());
+            });
+
+        assert!(summary.projection_rebuilt, "{summary:?}");
+        let reads = WORK_EVENT_SOURCE_READS.with(|reads| reads.take());
+        let reads_of = |name: &std::ffi::OsStr| {
+            reads
+                .iter()
+                .filter(|path| path.file_name() == Some(name))
+                .count()
+        };
+        for name in &shard_names {
+            assert_eq!(
+                reads_of(name),
+                1,
+                "an unchanged shard must not be re-read under works.lock: {reads:?}"
+            );
+        }
+        let late_name = late_name.borrow().clone().expect("late shard written");
+        assert_eq!(
+            reads_of(&late_name),
+            1,
+            "a shard published before the lock must be read under it: {reads:?}"
+        );
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works)
+                .expect("read rebuilt projection")
+                .expect("rebuilt projection");
+        for work_id in [
+            "work-5208-0",
+            "work-5208-1",
+            "work-5208-2",
+            "work-5208-late",
+        ] {
+            assert!(
+                projection.work_items.iter().any(|item| item.id == work_id),
+                "{work_id} must survive the rebuild"
+            );
+        }
     }
 
     /// Two worktrees with one shard each: two intake groups (#4397).

@@ -1,5 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { markdownContent, renderUiContent } from "/ui-content.js";
+import { createUiStateStore } from "/ui-state-store.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -174,7 +175,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       import { createSplitSurfaces } from "/split-surfaces.js";
       import { createAgentsSurface } from "/agents-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
-      import { createPmChat } from "/pm-chat.js";
+      import { createPmChat, createPmWindowModel } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
@@ -490,10 +491,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       });
       let viewportRasterTimer = null;
       let viewportDomApplied = false;
-      // SPEC-2008 camera-focus / FR-094: the Fleet Minimap is instantiated once
-      // the DOM container resolves (see the boot block). applyViewport /
-      // recomputeOperatorTelemetry call it through the optional chain so the
-      // early `applyViewport()` paths run safely before it exists.
+      // The Fleet Minimap mounts once and subscribes to the catalog and camera.
       let fleetMinimap = null;
       // SPEC-3064 Phase 3 (E5): the wizard state (launchWizard /
       // launchWizardOpenError / launchWizardOpening / branch draft /
@@ -504,8 +502,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
       // workspace-cleanup window id moved to /branches-cleanup-surface.js.
-      // SPEC-3064 Phase 3 (E7): windowListOpen / windowListEntries moved to
-      // /project-shell-surface.js.
+      // Window List visibility stays in the shell; its snapshot gate lives in
+      // the shared catalog model below.
       // SPEC-2008 camera-focus: titlebarClickState (the double-click maximize
       // detector) was removed; a titlebar click now always frames the window.
       let appState = {
@@ -514,6 +512,68 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         active_tab_id: null,
         recent_projects: [],
       };
+      const windowCatalogModel = createUiStateStore({
+        catalog: { appState, runtimeStates: {}, focusedId: null, version: 0 },
+        listEntries: [],
+        bounds: { x: 0, y: 0, width: 1, height: 1 },
+      });
+      let reconcilingWindowCatalog = false;
+
+      function catalogActiveWindows(catalog) {
+        const state = catalog.appState;
+        return state.tabs.find(tab => tab.id === state.active_tab_id)?.workspace?.windows || [];
+      }
+
+      function publishWindowCatalog() {
+        if (reconcilingWindowCatalog) return;
+        // Camera echoes and other chrome updates do not invalidate the window
+        // catalog. Keep its reference stable unless a catalog consumer changed.
+        const catalogAppState = {
+          active_tab_id: appState.active_tab_id,
+          tabs: (appState.tabs || []).map(tab => ({ ...tab,
+            workspace: { windows: tab.workspace?.windows || [] },
+          })),
+        };
+        const runtimeStates = Object.fromEntries(windowRuntimeStateMap);
+        windowCatalogModel.update(state => {
+          if (state.catalog.focusedId === focusedId
+              && JSON.stringify(state.catalog.appState) === JSON.stringify(catalogAppState)
+              && JSON.stringify(state.catalog.runtimeStates) === JSON.stringify(runtimeStates)) return state;
+          return { ...state, catalog: {
+            appState: catalogAppState, runtimeStates, focusedId,
+            version: state.catalog.version + 1,
+          } };
+        });
+      }
+
+      // Existing shell callers request a catalog commit; they cannot repaint
+      // just the List while leaving another catalog subscriber stale.
+      function renderWindowList() {
+        publishWindowCatalog();
+      }
+
+      function catalogRuntimeStateForWindow(windowData) {
+        const states = windowCatalogModel.read().catalog.runtimeStates;
+        const sourceState = Object.hasOwn(states, windowData.id) ? states[windowData.id] : windowData.status;
+        return normalizeWindowRuntimeState(sourceState, windowData.preset);
+      }
+
+      function publishWindowCatalogRuntime(windowId, status) {
+        if (reconcilingWindowCatalog) return;
+        windowCatalogModel.update(state => state.catalog.runtimeStates[windowId] === status ? state : ({
+          ...state, catalog: { ...state.catalog,
+            runtimeStates: { ...state.catalog.runtimeStates, [windowId]: status },
+            version: state.catalog.version + 1,
+          },
+        }));
+      }
+
+      function publishWindowCatalogFocus() {
+        if (reconcilingWindowCatalog) return;
+        windowCatalogModel.update(state => state.catalog.focusedId === focusedId ? state : ({
+          ...state, catalog: { ...state.catalog, focusedId, version: state.catalog.version + 1 },
+        }));
+      }
       let hubCatalog = null;
       // Issue #3365: renderedWorkspaceWindowsKey moved into
       // workspaceRenderSync (see /issue-render-sync.js) so a failed sync
@@ -1330,7 +1390,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         syncRunningBranchCleanups();
-        requestVisiblePmConversations();
+        requestVisiblePmReports();
+        requestSupportedAgentRefresh();
       }
 
       function handleSocketMessage(event) {
@@ -1403,11 +1464,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       function handleSocketClose() {
-        for (const [windowId, view] of pmChatViews) {
-          view.pendingSessions.length = 0;
-          view.controller.handleSendResult({ window_id: windowId, ok: false, error: "Connection lost. Delivery could not be confirmed. Your draft has been kept." });
-          view.controller.update({ availability: "unavailable", conversation_id: null, messages: [], detail: "Connection lost. Waiting to reconnect." });
-        }
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher = null;
@@ -2129,7 +2185,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // SPEC-2008 camera-focus / FR-094: every viewport change re-centres the
         // Fleet Minimap radar — the camera stays fixed at the minimap centre and
         // the world (cells) slides under it, mirroring the canvas stage.
-        fleetMinimap?.update();
+        windowCatalogModel.update(state => ({ ...state, bounds: visibleBounds() }));
       }
 
       // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS
@@ -3390,7 +3446,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           geometry,
         );
         applyLocalGeometryToModel(windowId, geometry);
-        fleetMinimap?.renderCells();
+        publishWindowCatalog();
         const runtime = terminalMap.get(windowId);
         sendGeometry(
           windowId,
@@ -3466,8 +3522,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // SPEC-3431 FR-018/FR-021. `pmWindowId` is the canvas id of the window
       // the backend marked `is_pm`; null while no PM pane exists.
       let pmWindowId = null;
+      const pmLauncherModel = createUiStateStore({ workspace: null, paused: false });
 
       function updatePmLauncher(workspace) {
+        pmLauncherModel.update(state => ({ ...state, workspace }));
+      }
+
+      pmLauncherModel.subscribe(state => state, ({ workspace, paused }) => {
         const windows = Array.isArray(workspace?.windows) ? workspace.windows : [];
         const pmWindow = windows.find((windowData) => windowData?.is_pm) || null;
         pmWindowId = pmWindow?.id ?? null;
@@ -3482,6 +3543,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               ? "stopped"
               : "running";
           railEntry.dataset.pmState = state;
+          railEntry.dataset.pmPaused = String(paused);
           // Issue #4777: the hover text says what the PM is, not only its name.
           const role = "your point of contact, not one of the agents";
           railEntry.title =
@@ -3490,6 +3552,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               : state === "stopped"
                 ? `Project Manager (stopped): ${role}. Click to resume`
                 : `Project Manager: ${role}. Click to start`;
+          if (paused) railEntry.title += ". Autonomous loop paused";
         }
 
         const floating = document.getElementById("canvas-pm-launcher");
@@ -3498,7 +3561,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           // reachable on screen, so a visible PM never gets a duplicate CTA.
           floating.hidden = Boolean(pmWindow) && isWindowWithinViewport(pmWindow);
         }
-      }
+      });
 
       // True when the window's rectangle intersects the visible canvas area.
       function isWindowWithinViewport(windowData) {
@@ -3531,11 +3594,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
 
       function recomputeOperatorTelemetry() {
         updateCanvasEmptyState();
-        // SPEC-2008 camera-focus / FR-094: rebuild the Fleet Minimap cells from
-        // the live window set (geometry / agent color / telemetry). Runs on the
-        // same cadence as the canvas empty-state + rail badges, before the
-        // operator-shell-degraded early return so the minimap stays live.
-        fleetMinimap?.renderCells();
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         // SPEC-3038 AS-1.4 (2026-06-20): the rail Windows item badges the
         // open-window count across all project tabs, matching the cross-tab
@@ -3714,6 +3772,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
               windowRuntimeStateSinceMap.set(windowId, Date.now());
             }
             windowRuntimeStateMap.set(windowId, status);
+            publishWindowCatalogRuntime(windowId, status);
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
@@ -3759,7 +3818,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             renderedRuntimeStatusKeys.set(windowId, nextRuntimeStatusKey);
             const element = windowMap.get(windowId);
             if (!element) {
-              renderWindowList();
               return;
             }
             const chip = element.querySelector(".status-chip");
@@ -3820,7 +3878,6 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
                 stopSpinnerAnimation(overlay);
               }
             }
-            renderWindowList();
 
           },
         );
@@ -3895,6 +3952,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         }
         const previousFocusedId = focusedId;
         focusedId = windowId;
+        publishWindowCatalogFocus();
         if (previousFocusedId && previousFocusedId !== windowId) {
           const previousElement = windowMap.get(previousFocusedId);
           previousElement?.classList.remove("focused");
@@ -4856,6 +4914,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // the center is constructed after this factory.
         reportSurfaceError: (error) => notificationCenter.recordError(error),
         resolveSurfaceError: (key) => notificationCenter.resolveError(key),
+        reportSurfaceNotice: (notice) => notificationCenter.recordSurfaceNotice(notice),
+        openSurfaceNotice: (key) => notificationCenter.open(key),
       });
       issueMonitorModel.subscribe(model => model.status, status =>
         window.__operatorShell?.applyIssueMonitorStatus?.(status));
@@ -5246,12 +5306,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         closeCloneProjectModal,
         updateActionAvailability,
         requestWindowList,
-        renderWindowList,
         toggleWindowList,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
-        applyWindowListEvent,
         applyCloneProjectReceiveEvent,
         applyPickerReceiveEvent,
         applyProjectOpenReceiveEvent,
@@ -5260,18 +5318,20 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         handleMigrationModalEscape,
         handleWindowListEscape,
         installProjectShellChrome,
+        dispose: disposeProjectShellSurface,
       } = createProjectShellSurface({
         send,
         createNode,
         // appState / projectError are reassigned in app.js, so the surface
         // reads them through accessors.
         getAppState: () => appState,
+        windowCatalogModel,
         getProjectError: () => projectError,
         activeProjectTab,
         activeWorkspace,
         windowMap,
         appendRenderKeyPart,
-        runtimeStateForWindow,
+        runtimeStateForWindow: catalogRuntimeStateForWindow,
         windowDisplayTitle,
         windowTitleTooltip,
         windowRoleBadgeLabel,
@@ -5379,10 +5439,24 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       const pmChatViews = new Map();
+      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const renderedTerminalPackets = new Map();
+      subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
+        if (!state) return;
+        const packet = state.terminal;
+        if (packet && renderedTerminalPackets.get(state.windowId) !== packet) {
+          if (packet.kind === "terminal_snapshot") frontendUnits.terminalHost.replaceTerminalSnapshot(state.windowId, packet.dataBase64);
+          else frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64);
+          renderedTerminalPackets.set(state.windowId, packet);
+        }
+        const view = pmChatViews.get(state.windowId);
+        if (view) view.logHost.dataset.stateVersion = String(state.revision);
+      });
 
       function disposePmChat(windowId) {
         const view = pmChatViews.get(windowId);
         if (!view) return;
+        view.unsubscribe();
         view.controller.dispose();
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
@@ -5402,8 +5476,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (view) {
           if (view.sessionId !== windowData.session_id) {
             view.sessionId = windowData.session_id;
-            view.controller.setSession(windowData.session_id);
-            requestVisiblePmConversations();
+            bindPmWindowState(windowData.id, windowData.session_id);
+            requestVisiblePmReports();
           }
           return;
         }
@@ -5418,17 +5492,12 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         if (overlay) logHost.append(overlay);
         body.classList.add("pm-conversation-body");
         body.append(root, logHost);
-        view = { root, body, logHost, sessionId: windowData.session_id, pendingSessions: [] };
+        view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
-          send: (message) => {
-            const result = send(message);
-            if (result === "sent") view.pendingSessions.push(view.sessionId);
-            return result;
-          },
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
-            if (!visible) requestVisiblePmConversations();
+            if (!visible) requestVisiblePmReports();
             if (visible) requestAnimationFrame(() => {
               scheduleTerminalFit(windowData.id, false);
               activateTerminalOnReveal(windowData.id);
@@ -5436,19 +5505,24 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           },
         });
         pmChatViews.set(windowData.id, view);
-        requestVisiblePmConversations();
+        bindPmWindowState(windowData.id, windowData.session_id);
+        view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
+          view.controller.update(state);
+          if (state) view.logHost.dataset.stateVersion = String(state.revision);
+        });
+        requestVisiblePmReports();
       }
 
-      function requestVisiblePmConversations() {
+      function requestVisiblePmReports() {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
           const view = pmChatViews.get(windowData.id);
           if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
-            send({ kind: "load_pm_conversation", id: windowData.id });
+            send({ kind: "load_pm_reports", id: windowData.id });
           }
         }
       }
-      window.setInterval(requestVisiblePmConversations, 5000);
+      window.setInterval(requestVisiblePmReports, 5000);
 
       function mountWindowBody(windowData, element) {
         disposePmChat(windowData.id);
@@ -5651,6 +5725,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         applyCustomAgentDeleted,
         applyCustomAgentError,
         applySupportedAgentList,
+        applySupportedAgentMaintenance,
+        requestSupportedAgentRefresh,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
@@ -5984,174 +6060,185 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
 
       function renderWorkspace(workspace) {
-        return traceMeasure(
-          UI_TRACE_EVENT.renderWorkspace,
-          { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
-          () => {
-            const pendingAgentKanbanPlacement =
-              agentKanbanPendingPlacement.consumePlacementMessage(
-                workspace?.windows || [],
-              );
-            if (pendingAgentKanbanPlacement) {
-              send(pendingAgentKanbanPlacement);
-            }
+        const wasReconciling = reconcilingWindowCatalog;
+        reconcilingWindowCatalog = true;
+        let result;
+        try {
+          result = traceMeasure(
+            UI_TRACE_EVENT.renderWorkspace,
+            { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
+            () => {
+              const pendingAgentKanbanPlacement =
+                agentKanbanPendingPlacement.consumePlacementMessage(
+                  workspace?.windows || [],
+                );
+              if (pendingAgentKanbanPlacement) {
+                send(pendingAgentKanbanPlacement);
+              }
 
-            // Issue #3364 — resolve local gesture guards BEFORE anything
-            // (render keys, minimap, telemetry, window elements) reads the
-            // incoming windows: while a gesture is active or a commit's echo
-            // is still in flight, a backlogged stale broadcast must neither
-            // snap the window back nor desync the Fleet Minimap. Suppressed
-            // windows (and their tab-group members, which share geometry
-            // server-side) are patched back to the local truth so the MODEL
-            // stays consistent with the DOM.
-            for (const incomingWindow of workspace?.windows || []) {
-              const decision = resolveIncomingGeometry(geometrySyncState, {
-                id: incomingWindow.id,
-                geometry: incomingWindow.geometry,
-              });
-              if (decision.apply) {
-                continue;
-              }
-              const localGeometry =
-                decision.patchGeometry || domWindowGeometry(incomingWindow.id);
-              if (!localGeometry) {
-                continue;
-              }
-              const suppressedGroupId = windowGroupId(incomingWindow);
-              for (const member of workspace.windows) {
-                if (windowGroupId(member) !== suppressedGroupId) {
+              // Issue #3364 — resolve local gesture guards BEFORE anything
+              // (render keys, minimap, telemetry, window elements) reads the
+              // incoming windows: while a gesture is active or a commit's echo
+              // is still in flight, a backlogged stale broadcast must neither
+              // snap the window back nor desync the Fleet Minimap. Suppressed
+              // windows (and their tab-group members, which share geometry
+              // server-side) are patched back to the local truth so the MODEL
+              // stays consistent with the DOM.
+              for (const incomingWindow of workspace?.windows || []) {
+                const decision = resolveIncomingGeometry(geometrySyncState, {
+                  id: incomingWindow.id,
+                  geometry: incomingWindow.geometry,
+                });
+                if (decision.apply) {
                   continue;
                 }
-                member.geometry = { ...localGeometry };
-              }
-            }
-
-            const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
-              scopeKey: activeViewportScopeKey(),
-            });
-            const viewportChanged = !sameViewportValues(viewport, nextViewport);
-            viewport = nextViewport;
-            if (!viewportDomApplied || viewportChanged) {
-              applyViewport();
-            }
-
-            // SPEC-2008 camera-focus: nothing to re-sync when the window set is
-            // unchanged — windows render at their own geometry and the camera
-            // is driven locally (frameWindow), not per-render. Issue #3365: the
-            // key diff + commit live in workspaceRenderSync so an exception
-            // mid-sync leaves the key uncommitted (the next workspace_state
-            // retries instead of freezing), one poisoned window cannot block
-            // the others, and the telemetry recompute always runs.
-            let activeWindowIdSet = null;
-            workspaceRenderSync.render({
-              key: workspaceWindowsRenderKey(workspace),
-              sync: (isolate) => {
-                activeWindowIdSet = workspaceWindowIdSet(workspace);
-                const visibility = classifyProjectWindowVisibility({
-                  activeWindowIdSet,
-                  allProjectWindowIdSet: allProjectWindowIdSet(),
-                  mountedWindowIds: windowMap.keys(),
-                });
-                isolate("hide_window", visibility.hidden, (windowId) => {
-                  const element = windowMap.get(windowId);
-                  applyVisibilityTransition({
-                    element,
-                    shouldHide: true,
-                    hasTerminal: terminalMap.has(windowId),
-                    onReveal: () => activateTerminalOnReveal(windowId),
-                  });
-                });
-                isolate("remove_window", visibility.removed, (windowId) => {
-                  const element = windowMap.get(windowId);
-                  if (!element) return;
-                  disposePmChat(windowId);
-                  const runtime = terminalMap.get(windowId);
-                  if (runtime && runtime.activationFrame !== null) {
-                    cancelAnimationFrame(runtime.activationFrame);
-                  }
-                  terminalViewportRefreshScheduler?.clear(windowId);
-                  runtime?.cleanup?.();
-                  runtime?.terminal.dispose();
-                  terminalMap.delete(windowId);
-                  decoderMap.delete(windowId);
-                  detailMap.delete(windowId);
-                  windowRuntimeStateMap.delete(windowId);
-                  windowRuntimeStateSinceMap.delete(windowId);
-                  agentCompletionNotifier.forgetWindow(windowId);
-                  agentAttentionToaster.forgetWindow(windowId);
-                  // SPEC #3206: dismiss this window's attention toast from the shared
-                  // alerts stack so a sticky error toast never orphans a gone window.
-                  alertsToasts.dismiss(`attention-${windowId}`);
-                  renderedWindowElementKeys.delete(windowId);
-                  renderedRuntimeStatusKeys.delete(windowId);
-                  renderedAgentKanbanBodyKeys.delete(windowId);
-                  renderedIssuePreviewBodyKeys.delete(windowId);
-                  renderedIssueWindowHeaderKeys.delete(windowId);
-                  pendingOutputMap.delete(windowId);
-                  pendingSnapshotMap.delete(windowId);
-                  terminalOutputBatcher.clear(windowId);
-                  const profileState = profileStateMap.get(windowId);
-                  if (profileState) {
-                    clearProfileSaveTimer(profileState);
-                  }
-                  fileTreeStateMap.delete(windowId);
-                  branchListStateMap.delete(windowId);
-                  profileStateMap.delete(windowId);
-                  boardStateMap.delete(windowId);
-                  logStateMap.delete(windowId);
-                  indexSearchStateMap.delete(windowId);
-                  clearKnowledgeBridgeState(windowId);
-                  workspaceOverviewSurface.deleteState(windowId);
-                  clearBranchCleanupForWindow(windowId);
-                  clearLocalGeometryEdit(geometrySyncState, windowId);
-                  element.remove();
-                  windowMap.delete(windowId);
-                });
-
-                // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
-                // for tab-grouped terminal windows so the newly visible terminal
-                // gets fit + viewport refresh + focus on the same animation frame
-                // cycle. Without this, scrollback wheel input requires a manual
-                // OS-level resize before xterm picks up the new measurement. The
-                // transition logic lives in `terminal-viewport-reflow.js` so a
-                // behavior test (linkedom + element stub) can exercise the
-                // hidden-to-visible activation path directly.
-                isolate("ensure_window", workspace.windows, (windowData) => {
-                  ensureWindow(windowData);
-                  const element = windowMap.get(windowData.id);
-                  if (!element) return;
-                  applyVisibilityTransition({
-                    element,
-                    shouldHide: !visibleWindowData(windowData),
-                    hasTerminal: terminalMap.has(windowData.id),
-                    onReveal: () => activateTerminalOnReveal(windowData.id),
-                  });
-                });
-              },
-              // SPEC-2008 camera-focus: keep the rail window-count badge and the
-              // empty-canvas state in sync with window mounts/unmounts, not only
-              // with agent status events.
-              recompute: recomputeOperatorTelemetry,
-              afterSync: () => {
-                if (splitSurfaces?.isOpen() || agentsHost) return;
-                const topmostId = topmostWindowId(workspace);
-                if (topmostId && activeWindowIdSet?.has(topmostId)) {
-                  focusWindowLocally(topmostId);
-                  scheduleTerminalFocusActivation(topmostId, {
-                    shouldPersistGeometry: false,
-                    reason: "topmost_focus",
-                  });
-                } else {
-                  focusedId = null;
-                  syncSurfaceRail();
+                const localGeometry =
+                  decision.patchGeometry || domWindowGeometry(incomingWindow.id);
+                if (!localGeometry) {
+                  continue;
                 }
-              },
-            });
-            splitSurfaces?.sync();
-            if (agentsHost) agentsSurface.sync(workspace.windows || []);
-            cleanupTextPreviews();
-          },
-        );
+                const suppressedGroupId = windowGroupId(incomingWindow);
+                for (const member of workspace.windows) {
+                  if (windowGroupId(member) !== suppressedGroupId) {
+                    continue;
+                  }
+                  member.geometry = { ...localGeometry };
+                }
+              }
+
+              const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
+                scopeKey: activeViewportScopeKey(),
+              });
+              const viewportChanged = !sameViewportValues(viewport, nextViewport);
+              viewport = nextViewport;
+              if (!viewportDomApplied || viewportChanged) {
+                applyViewport();
+              }
+
+              // SPEC-2008 camera-focus: nothing to re-sync when the window set is
+              // unchanged — windows render at their own geometry and the camera
+              // is driven locally (frameWindow), not per-render. Issue #3365: the
+              // key diff + commit live in workspaceRenderSync so an exception
+              // mid-sync leaves the key uncommitted (the next workspace_state
+              // retries instead of freezing), one poisoned window cannot block
+              // the others, and the telemetry recompute always runs.
+              let activeWindowIdSet = null;
+              workspaceRenderSync.render({
+                key: workspaceWindowsRenderKey(workspace),
+                sync: (isolate) => {
+                  activeWindowIdSet = workspaceWindowIdSet(workspace);
+                  const visibility = classifyProjectWindowVisibility({
+                    activeWindowIdSet,
+                    allProjectWindowIdSet: allProjectWindowIdSet(),
+                    mountedWindowIds: windowMap.keys(),
+                  });
+                  isolate("hide_window", visibility.hidden, (windowId) => {
+                    const element = windowMap.get(windowId);
+                    applyVisibilityTransition({
+                      element,
+                      shouldHide: true,
+                      hasTerminal: terminalMap.has(windowId),
+                      onReveal: () => activateTerminalOnReveal(windowId),
+                    });
+                  });
+                  isolate("remove_window", visibility.removed, (windowId) => {
+                    const element = windowMap.get(windowId);
+                    if (!element) return;
+                    disposePmChat(windowId);
+                    removePmWindowState(windowId);
+                    renderedTerminalPackets.delete(windowId);
+                    const runtime = terminalMap.get(windowId);
+                    if (runtime && runtime.activationFrame !== null) {
+                      cancelAnimationFrame(runtime.activationFrame);
+                    }
+                    terminalViewportRefreshScheduler?.clear(windowId);
+                    runtime?.cleanup?.();
+                    runtime?.terminal.dispose();
+                    terminalMap.delete(windowId);
+                    decoderMap.delete(windowId);
+                    detailMap.delete(windowId);
+                    windowRuntimeStateMap.delete(windowId);
+                    windowRuntimeStateSinceMap.delete(windowId);
+                    agentCompletionNotifier.forgetWindow(windowId);
+                    agentAttentionToaster.forgetWindow(windowId);
+                    // SPEC #3206: dismiss this window's attention toast from the shared
+                    // alerts stack so a sticky error toast never orphans a gone window.
+                    alertsToasts.dismiss(`attention-${windowId}`);
+                    renderedWindowElementKeys.delete(windowId);
+                    renderedRuntimeStatusKeys.delete(windowId);
+                    renderedAgentKanbanBodyKeys.delete(windowId);
+                    renderedIssuePreviewBodyKeys.delete(windowId);
+                    renderedIssueWindowHeaderKeys.delete(windowId);
+                    pendingOutputMap.delete(windowId);
+                    pendingSnapshotMap.delete(windowId);
+                    terminalOutputBatcher.clear(windowId);
+                    const profileState = profileStateMap.get(windowId);
+                    if (profileState) {
+                      clearProfileSaveTimer(profileState);
+                    }
+                    fileTreeStateMap.delete(windowId);
+                    branchListStateMap.delete(windowId);
+                    profileStateMap.delete(windowId);
+                    boardStateMap.delete(windowId);
+                    logStateMap.delete(windowId);
+                    indexSearchStateMap.delete(windowId);
+                    clearKnowledgeBridgeState(windowId);
+                    workspaceOverviewSurface.deleteState(windowId);
+                    clearBranchCleanupForWindow(windowId);
+                    clearLocalGeometryEdit(geometrySyncState, windowId);
+                    element.remove();
+                    windowMap.delete(windowId);
+                  });
+
+                  // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
+                  // for tab-grouped terminal windows so the newly visible terminal
+                  // gets fit + viewport refresh + focus on the same animation frame
+                  // cycle. Without this, scrollback wheel input requires a manual
+                  // OS-level resize before xterm picks up the new measurement. The
+                  // transition logic lives in `terminal-viewport-reflow.js` so a
+                  // behavior test (linkedom + element stub) can exercise the
+                  // hidden-to-visible activation path directly.
+                  isolate("ensure_window", workspace.windows, (windowData) => {
+                    ensureWindow(windowData);
+                    const element = windowMap.get(windowData.id);
+                    if (!element) return;
+                    applyVisibilityTransition({
+                      element,
+                      shouldHide: !visibleWindowData(windowData),
+                      hasTerminal: terminalMap.has(windowData.id),
+                      onReveal: () => activateTerminalOnReveal(windowData.id),
+                    });
+                  });
+                },
+                // SPEC-2008 camera-focus: keep the rail window-count badge and the
+                // empty-canvas state in sync with window mounts/unmounts, not only
+                // with agent status events.
+                recompute: recomputeOperatorTelemetry,
+                afterSync: () => {
+                  if (splitSurfaces?.isOpen() || agentsHost) return;
+                  const topmostId = topmostWindowId(workspace);
+                  if (topmostId && activeWindowIdSet?.has(topmostId)) {
+                    focusWindowLocally(topmostId);
+                    scheduleTerminalFocusActivation(topmostId, {
+                      shouldPersistGeometry: false,
+                      reason: "topmost_focus",
+                    });
+                  } else {
+                    focusedId = null;
+                    syncSurfaceRail();
+                  }
+                },
+              });
+              cleanupTextPreviews();
+            },
+          );
+        } finally {
+          reconcilingWindowCatalog = wasReconciling;
+        }
+        // Subscribers may mount runtimes: publish only after removal, creation
+        // and focus have settled, never with the previous membership.
+        publishWindowCatalog();
+        return result;
       }
 
       const socketTransport = Object.freeze({
@@ -6408,10 +6495,9 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             scheduleKnowledgeRelatedWorkRefresh();
             recomputeOperatorTelemetry();
             break;
-          // SPEC-3064 Phase 3 (E7): window list entries and rendering live
-          // in the project shell surface.
+          // The backend snapshot gates only the List; both views read the catalog.
           case "window_list":
-            applyWindowListEvent(event);
+            windowCatalogModel.update(state => ({ ...state, listEntries: event.windows || [] }));
             break;
           case "provider_usage":
             applyProviderUsageUi({
@@ -6423,30 +6509,14 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
-          case "pm_conversation": {
-            const view = pmChatViews.get(event.id);
-            if (view && event.session_id === view.sessionId) view.controller.update(event.snapshot);
-            break;
-          }
-          case "pane_send_result": {
-            let view = pmChatViews.get(event.window_id);
-            // A pane removed before submit has no window ID in its rejection.
-            // Only an unambiguous failure may unlock a pending PM draft.
-            if (!event.window_id && event.ok === false) {
-              const pending = (activeWorkspace()?.windows || [])
-                .map(windowData => pmChatViews.get(windowData.id))
-                .filter(candidate => candidate?.pendingSessions.length);
-              if (pending.length === 1) view = pending[0];
-            }
-            if (view && view.pendingSessions.length) {
-              const sentSession = view.pendingSessions.shift();
-              if (sentSession === view.sessionId) view.controller.handleSendResult(event);
-            }
+          case "pm_reports": {
+            applyPmWindowReceiveEvent(event);
             break;
           }
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
             frontendUnits.pmSettingsPanel.applyStatus(event);
+            pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":
             applyKnowledgeIssueMonitorStatus(event.status || {});
@@ -6484,10 +6554,10 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             break;
           }
           case "terminal_output":
-            frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_snapshot":
-            frontendUnits.terminalHost.replaceTerminalSnapshot(event.id, event.data_base64);
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_status":
             frontendUnits.terminalHost.applyStatus(
@@ -6767,6 +6837,9 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
             break;
           case "supported_agent_list":
             applySupportedAgentList(event);
+            break;
+          case "supported_agent_maintenance":
+            applySupportedAgentMaintenance(event);
             break;
           // SPEC-1921 2026-05-18 amendment / FR-099: Agent Backends WebSocket
           // events. `agent_backend_list` is a snapshot reply per
@@ -7413,9 +7486,13 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       // semantic state. Cell click flies the camera (frameWindow).
       fleetMinimap = createFleetMinimap({
         container: document.getElementById("fleet-minimap"),
-        getWindows: () => activeWorkspace().windows || [],
-        getVisibleBounds: visibleBounds,
-        getFocusedId: () => focusedId,
+        windowCatalogModel,
+        getWindows: () => {
+          const state = windowCatalogModel.read().catalog.appState;
+          return state.tabs.find(tab => tab.id === state.active_tab_id)?.workspace?.windows || [];
+        },
+        getVisibleBounds: () => windowCatalogModel.read().bounds,
+        getFocusedId: () => windowCatalogModel.read().catalog.focusedId,
         frameWindow,
         windowDisplayTitle,
         // FR-045 (anshin): the cell tooltip/aria-label surfaces each agent's
@@ -7433,11 +7510,16 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         // render a neutral cell with no telemetry dot.
         cellTelemetryState: (windowData) =>
           shouldShowRuntimeStatus(windowData)
-            ? mapAgentTelemetryState(runtimeStateForWindow(windowData))
+            ? mapAgentTelemetryState(catalogRuntimeStateForWindow(windowData))
             : "",
       });
-      // First paint from whatever windows already exist at boot.
-      fleetMinimap.renderCells();
+      window.addEventListener("unload", () => {
+        disposeProjectShellSurface();
+        fleetMinimap.dispose();
+        agentsSurface?.dispose();
+        splitSurfaces?.dispose();
+        windowCatalogModel.dispose();
+      }, { once: true });
 
       window.addEventListener(
         "keydown",
@@ -7595,7 +7677,7 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
         area.classList.toggle("is-agents", host === area);
         agentsSurface.element.hidden = !host;
         (host || area).appendChild(agentsSurface.element);
-        if (host) agentsSurface.sync(activeWorkspace().windows || []);
+        if (host) agentsSurface.sync();
         else {
           for (const [id, previous] of agentPreviousHosts) {
             const runtime = terminalMap.get(id);
@@ -7612,6 +7694,11 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       }
       agentsSurface = createAgentsSurface({
         document,
+        windowCatalogModel,
+        getWindows: catalog => catalogActiveWindows(catalog).map(data => ({
+          ...data, status: catalog.runtimeStates[data.id] ?? data.status,
+        })),
+        isMounted: () => Boolean(agentsHost),
         mountTerminal: (id, root) => {
           const runtime = terminalMap.get(id);
           if (runtime && runtime.terminalContainer !== root && !agentPreviousHosts.get(id)?.container.isConnected) {
@@ -7643,7 +7730,8 @@ import { markdownContent, renderUiContent } from "/ui-content.js";
       splitSurfaces = createSplitSurfaces({
         document,
         stage,
-        getWindows: () => (activeWorkspace().windows || []).filter((data) => !isOffCanvasPlacement(data)),
+        windowCatalogModel,
+        getWindows: catalog => catalogActiveWindows(catalog).filter((data) => !isOffCanvasPlacement(data)),
         getElement: (id) => windowMap.get(id),
         onAgentsHost: setAgentsHost,
         restoreVisibility: (id, element) => { element.hidden = !visibleWindowData(workspaceWindowById(id)); },

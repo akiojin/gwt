@@ -145,6 +145,32 @@ fn an_externally_declared_cfg_test_module_is_scanned_as_whole_file_test_code() {
     assert_eq!(production.kind, SourceKind::CfgTestBlocksOnly);
 }
 
+#[test]
+fn runtime_behavior_modules_are_scanned_as_whole_file_test_code() {
+    let sources = target_sources(&workspace_root());
+    let runtime_tests: Vec<_> = sources
+        .iter()
+        .filter(|source| {
+            source
+                .relative_path
+                .starts_with("crates/gwt/src/app_runtime/tests/")
+                && source.relative_path.ends_with("_tests.rs")
+        })
+        .collect();
+    assert!(
+        !runtime_tests.is_empty(),
+        "runtime behavior tests must live in externally declared test modules"
+    );
+    for source in runtime_tests {
+        assert_eq!(
+            source.kind,
+            SourceKind::WholeFileIsTest,
+            "{} must keep the hygiene gate over every test and fixture",
+            source.relative_path
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scanner unit tests — fixtures, so the rules themselves are covered without
 // depending on whatever the workspace happens to contain today.

@@ -132,6 +132,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
     GWT_HOOK_BIN: "gwtd", GWT_PROJECT_ROOT: project,
+    GWT_DISABLE_BACKGROUND_INDEX: "1",
   });
   await setup.prepare?.({ home, bin, project, env });
   const status = spawnSync(gwtd, [], {
@@ -162,12 +163,17 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     return (await readFile(argvLog, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
   }
   async function stop() {
+    const ownedPid = child?.pid;
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
       current.kill("SIGTERM");
       const deadline = Date.now() + 8_000;
       while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
-      if (current.exitCode === null && current.signalCode === null) current.kill("SIGKILL");
+      if (current.exitCode === null && current.signalCode === null) {
+        current.kill("SIGKILL");
+        const forcedDeadline = Date.now() + 8_000;
+        while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
+      }
     }
     // PTYs can create their own process groups; clean only recorded fixture
     // providers still carrying our unique argv-recorder path in their command.
@@ -177,13 +183,10 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         try { process.kill(launch.pid, "SIGTERM"); } catch { /* exited */ }
       }
     }
-    // Detached helpers of the fixture instance (for example the index runner)
-    // outlive gwt; they are identified by the fixture's unique HOME path.
-    for (const line of spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" }).stdout.split("\n")) {
-      const [pid, ...command] = line.trim().split(/\s+/);
-      if (command.join(" ").includes(home) && Number(pid) !== process.pid) {
-        try { process.kill(Number(pid), "SIGTERM"); } catch { /* exited */ }
-      }
+    if (ownedPid) {
+      const remaining = spawnSync("ps", ["-p", String(ownedPid), "-o", "pid="], { encoding: "utf8" });
+      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, ps_status: remaining.status }), contentType: "application/json" });
+      if (remaining.status !== 1) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
     }
     child = undefined;
   }
@@ -191,39 +194,43 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const urlFile = join(home, `url-${++incarnation}.txt`);
     const logFile = join(home, `gwt-${incarnation}.log`);
     const stream = createWriteStream(logFile);
-    child = spawn(gwt, ["--no-tray", "--no-open"], {
-      cwd: project, env: { ...env, GWT_BROWSER_URL_FILE: urlFile }, stdio: ["ignore", "pipe", "pipe"],
-    });
-    const current = child;
-    let failure: Error | undefined;
-    current.on("error", error => { failure = error; });
-    current.stdout?.pipe(stream, { end: false });
-    current.stderr?.pipe(stream, { end: false });
-    current.on("close", () => stream.end());
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      if (failure) throw failure;
-      if (current.exitCode !== null || current.signalCode !== null) throw new Error(`Fresh gwt exited; see ${logFile}`);
-      try {
-        const candidate = (await readFile(urlFile, "utf8")).trim();
-        if (candidate && (await fetch(candidate, { method: "HEAD", signal: AbortSignal.timeout(2_000) })).ok) {
-          url = candidate;
+    try {
+      child = spawn(gwt, ["--no-tray", "--no-open"], {
+        cwd: project, env: { ...env, GWT_BROWSER_URL_FILE: urlFile }, stdio: ["ignore", "pipe", "pipe"],
+      });
+      const current = child;
+      let failure: Error | undefined;
+      current.on("error", error => { failure = error; });
+      current.stdout?.pipe(stream, { end: false });
+      current.stderr?.pipe(stream, { end: false });
+      current.on("close", () => stream.end());
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        if (failure) throw failure;
+        if (current.exitCode !== null || current.signalCode !== null) throw new Error(`Fresh gwt exited; see ${logFile}`);
+        let readyUrl: string | undefined;
+        try {
+          const candidate = (await readFile(urlFile, "utf8")).trim();
+          if (candidate && (await fetch(candidate, { method: "HEAD", signal: AbortSignal.timeout(2_000) })).ok) {
+            readyUrl = candidate;
+          }
+        } catch { /* Fresh process has not published its URL yet. */ }
+        if (readyUrl) {
+          url = readyUrl;
+          await testInfo.attach("exact-relaunch-fixture", {
+            body: JSON.stringify({ home, argvLog, checkout: root, project, url, pid: current.pid }), contentType: "application/json",
+          });
           return url;
         }
-      } catch { /* Fresh process has not published its URL yet. */ }
-      await delay(100);
+        await delay(100);
+      }
+      throw new Error(`Fresh gwt readiness timed out; see ${logFile}`);
+    } catch (error) {
+      await stop();
+      throw error;
     }
-    throw new Error(`Fresh gwt readiness timed out; see ${logFile}`);
   }
-  try {
-    await start();
-    await testInfo.attach("exact-relaunch-fixture", {
-      body: JSON.stringify({ home, argvLog, checkout: root, project, url }), contentType: "application/json",
-    });
-    return { get url() { return url; }, home, project, branch, argvLog, launches, stop,
-      async restart() { await stop(); return start(); } };
-  } catch (error) {
-    await stop();
-    throw error;
-  }
+  await start();
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, stop,
+    async restart() { await stop(); return start(); } };
 }
