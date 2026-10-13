@@ -172,6 +172,7 @@ fn normalized_handler(value: &str) -> &'static str {
         "action-obligation-record" => "action-obligation-record",
         "pm-delivery-ack" => "pm-delivery-ack",
         "pm-loop-reset" => "pm-loop-reset",
+        "pm-reporting-stop-check" => "pm-reporting-stop-check",
         "discussion-goal-start" => "discussion-goal-start",
         "workflow-policy" => "workflow-policy",
         "autonomous-question-guard" => "autonomous-question-guard",

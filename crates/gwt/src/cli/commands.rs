@@ -127,6 +127,7 @@ pub enum IssueCommand {
         title: String,
         body: String,
         labels: Vec<String>,
+        owner_check: Option<super::hook::pm_spec_survey::IssueOwnerCheck>,
     },
     /// Issue #3865: update a plain Issue in place. Every field is optional and
     /// only the supplied ones are sent; `body` is a whole-body replacement and

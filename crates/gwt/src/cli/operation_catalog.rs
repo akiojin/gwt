@@ -512,6 +512,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.status.set",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.report.post",
         aliases: &[],
     },
