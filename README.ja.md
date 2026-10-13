@@ -1399,6 +1399,13 @@ target と一時領域の実測増分に 20% の余裕を加えて算出して�
 `verify.lease.status` は `capacity`、`running`、`available`、`slots` 内の保持者と ETA、
 共通 FIFO queue を表示します。再試行前に確認してください。
 
+非 resident 予約は最終 refresh から3分間、FIFO の優先権を保持します。
+その後は verification lane の後続が、exclusive admission を要するコマンドも含めて
+入場できます。status は bypass 理由を表示し、元の到着順位と期限は保存します。
+同じ完全な matrix で `verify.run` を再提出すると、元の優先権を回復します。
+新しい attempt は Cargo artifact 待ちに入る前に既存の deferred 予約を引き継ぎ、
+古い attempt の cancel は後継の予約を削除しません。
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.status","params":{}}

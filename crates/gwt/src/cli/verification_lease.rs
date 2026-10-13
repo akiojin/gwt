@@ -1456,6 +1456,9 @@ fn render(
     push_status_fields(out, status, current_project);
 }
 
+const QUEUE_BYPASS_RECOVERY: &str =
+    "FIFO position retained; rerun verify.run with the identical full matrix to reclaim priority";
+
 fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_project: &str) {
     if let Some(capacity) = status.capacity {
         out.push_str(&format!(
@@ -1591,6 +1594,11 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
             entry.attempt_id.as_deref().unwrap_or("unknown"),
             entry.job_status.map(|status| status.as_str()).unwrap_or("unknown"),
         ));
+        if let Some(reason) = &entry.bypass_reason {
+            out.push_str(&format!(
+                "queue[{position}].bypass: {reason}; {QUEUE_BYPASS_RECOVERY}\n"
+            ));
+        }
     }
 }
 
@@ -2093,6 +2101,32 @@ mod tests {
     }
 
     #[test]
+    fn status_explains_bypassed_reservation_recovery() {
+        let entry: HeavyQueueEntry = serde_json::from_value(serde_json::json!({
+            "priority": "manual-rebuild", "queued_at_ms": 1, "waiting_ms": 180000,
+            "resident": false, "bypass_reason": "non-resident reservation grace elapsed"
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render(
+            &mut out,
+            "held",
+            "free",
+            &LeaseStatusSnapshot {
+                queue: vec![entry],
+                ..LeaseStatusSnapshot::default()
+            },
+            "repo",
+        );
+        assert!(
+            out.contains("non-resident reservation grace elapsed"),
+            "{out}"
+        );
+        assert!(out.contains("FIFO position retained"), "{out}");
+        assert!(out.contains("identical full matrix"), "{out}");
+    }
+
+    #[test]
     fn held_status_renders_the_holder_and_remaining_ttl() {
         let mut out = String::new();
         render(
@@ -2119,6 +2153,7 @@ mod tests {
                         resident: true,
                         attempt_id: None,
                         job_status: None,
+                        bypass_reason: None,
                     },
                     HeavyQueueEntry {
                         target: Some("repo--verification--late".to_string()),
@@ -2128,6 +2163,7 @@ mod tests {
                         resident: true,
                         attempt_id: None,
                         job_status: None,
+                        bypass_reason: None,
                     },
                 ],
                 holder_kind: Some("verification".to_string()),
