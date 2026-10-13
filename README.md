@@ -1487,6 +1487,14 @@ volume, based on measured target and temporary growth plus 20% headroom.
 `verify.lease.status` reports `capacity`, `running`, `available`, each holder in
 `slots`, and the shared FIFO queue with holder ETAs. Inspect it before retrying:
 
+A non-resident reservation keeps exclusive FIFO priority for three minutes
+after its last refresh. After that grace, resident work may pass it in the
+verification lane, including commands that require exclusive admission.
+Status reports the bypass reason; the reservation retains its arrival and
+expiry. Rerun `verify.run` with the identical full matrix to reclaim that
+priority. A successor attempt inherits an existing deferred reservation before
+waiting for Cargo artifacts; an older attempt cannot cancel the successor's turn.
+
 ```bash
 gwtd <<'JSON'
 {"schema_version":1,"operation":"verify.lease.status","params":{}}
