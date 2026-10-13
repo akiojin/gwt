@@ -2136,6 +2136,8 @@ fn active_work_projection_with_missing_worktrees_does_not_spawn_git_per_session(
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    // Share the fixture root with every HOME reader throughout the measurement.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
