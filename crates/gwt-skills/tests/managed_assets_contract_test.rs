@@ -229,7 +229,7 @@ fn browser_check_authority_script_rejects_local_build_paths_at_any_depth() {
 
 #[cfg(unix)]
 #[test]
-fn browser_check_authority_prefers_portable_logical_name_for_stable_path_entry() {
+fn browser_check_authority_uses_materialization_resolver_even_with_stable_path_entry() {
     use std::os::unix::fs::PermissionsExt;
 
     let tools = tempfile::tempdir().expect("tools tempdir");
@@ -237,6 +237,15 @@ fn browser_check_authority_prefers_portable_logical_name_for_stable_path_entry()
     fs::write(&fake_gwtd, "#!/bin/sh\nexit 0\n").expect("write fake gwtd");
     fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
         .expect("make fake gwtd executable");
+    let resolver = tools.path().join("checkout-gwtd");
+    // Keep executable writer FDs out of this parallel test process (#3521).
+    assert!(hidden_command("bash")
+        .args(["-c", "printf '%s' \"$CHECK_FIXTURE_SCRIPT\" > \"$1\"\nchmod +x \"$1\"", "write-resolver"])
+        .arg(&resolver)
+        .env("CHECK_FIXTURE_SCRIPT", "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"managed_hook_bin\\\":\\\"/canonical/install/gwtd\\\"}\"}'\n")
+        .status()
+        .unwrap()
+        .success());
     let current_path = std::env::var_os("PATH").unwrap_or_default();
     let path = std::env::join_paths(
         std::iter::once(tools.path().to_path_buf()).chain(std::env::split_paths(&current_path)),
@@ -251,11 +260,38 @@ fn browser_check_authority_prefers_portable_logical_name_for_stable_path_entry()
         .args(["-c", &script])
         .env_remove("GWT_HOOK_BIN")
         .env("PATH", path)
+        .env("CHECKOUT_GWTD", resolver)
+        .env("REPO_ROOT", tools.path())
         .output()
         .expect("run authority resolver with stable PATH entry");
 
     assert!(output.status.success(), "{:?}", output);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "gwtd\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/canonical/install/gwtd\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_authority_fails_closed_when_materialization_resolver_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = hidden_command("bash")
+        .args(["-c", &browser_check_shell_block("hook-authority")])
+        .env_remove("GWT_HOOK_BIN")
+        .env("CHECKOUT_GWTD", "/usr/bin/false")
+        .env("REPO_ROOT", dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "resolver failure must stop preflight"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("managed-hook fallback resolver"),
+        "{:?}",
+        output
+    );
 }
 
 #[cfg(unix)]
@@ -405,9 +441,19 @@ fn browser_check_authority_never_persists_a_path_local_checkout_daemon() {
     let local_bin_dir = repo.path().join("target/debug");
     fs::create_dir_all(&local_bin_dir).expect("target/debug");
     let local_gwtd = local_bin_dir.join("gwtd");
-    fs::write(&local_gwtd, "#!/bin/sh\nexit 0\n").expect("write checkout-local gwtd");
+    fs::write(
+        &local_gwtd,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"managed_hook_bin\\\":\\\"gwtd\\\"}\"}'\n",
+    )
+    .expect("write checkout-local resolver");
     fs::set_permissions(&local_gwtd, fs::Permissions::from_mode(0o755))
         .expect("make checkout-local gwtd executable");
+    let jq = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("jq"))
+        .find(|path| path.is_file())
+        .expect("jq is required for browser-check");
+    std::os::unix::fs::symlink(jq, local_bin_dir.join("jq"))
+        .expect("keep jq available without exposing a host gwtd");
 
     let script = format!(
         "{}\nprintf '%s\\n' \"$CHECK_HOOK_BIN\"",
@@ -426,6 +472,8 @@ fn browser_check_authority_never_persists_a_path_local_checkout_daemon() {
         command
             .args(["-c", &script])
             .env("PATH", &path)
+            .env("CHECKOUT_GWTD", &local_gwtd)
+            .env("REPO_ROOT", repo.path())
             .env_remove("GWT_HOOK_BIN");
         if let Some(inherited) = &inherited {
             command.env("GWT_HOOK_BIN", inherited);
