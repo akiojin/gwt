@@ -386,6 +386,10 @@ async fn run_bound_server(
         mut listener,
         authority_lease,
     } = bound;
+    let _runtime_namespace_gc =
+        crate::runtime_gc::RuntimeNamespaceGcTask::start(gwt_core::paths::gwt_sessions_dir())
+            .map_err(|error| tracing::warn!(%error, "runtime namespace GC worker could not start"))
+            .ok();
     // Keep one handle through listener and worker shutdown: a failed worker
     // must not admit a second daemon while this server still answers IPC.
     let authority_lease = Arc::new(authority_lease);
