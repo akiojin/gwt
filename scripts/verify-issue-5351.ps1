@@ -115,7 +115,7 @@ function Invoke-FixtureGwtd([string]$Operation, [hashtable]$Parameters, [string]
     $errorOutput = $process.StandardError.ReadToEndAsync()
     if (-not $process.WaitForExit(60000)) { $process.Kill($true); throw "$Operation timed out." }
     $envelope = $output.GetAwaiter().GetResult() | ConvertFrom-Json
-    if ($process.ExitCode -ne 0 -or -not $envelope.ok) { throw "$Operation failed: $($errorOutput.GetAwaiter().GetResult())" }
+    if ($process.ExitCode -ne 0 -or -not $envelope.ok) { throw "$Operation failed: $($envelope | ConvertTo-Json -Depth 10 -Compress); stderr=$($errorOutput.GetAwaiter().GetResult())" }
     return $envelope
   } finally { $process.Dispose() }
 }
@@ -193,7 +193,9 @@ try {
   [IO.File]::WriteAllText("$checkHome/fixture.json", (@{home=$checkHome;project=$project;checkout=$repoRoot;pid=$ownedPid;url=$url;provider_log=$providerLog;hook_bin=$hookBin;preferences=$preferencePaths;version=((Get-Content (Join-Path $repoRoot "Cargo.toml") -Raw) -split 'version = "')[1].Split('"')[0]} | ConvertTo-Json))
 
   $version = [IO.File]::ReadAllText((Join-Path $repoRoot 'scripts/playwright-version.txt')).Trim()
-  $deps = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path ([IO.Path]::GetTempPath()) "gwt-playwright-$version" }
+  # Canonical verification gives each command a private TEMP. The pinned cache
+  # remains in the user's stable Windows temp root, outside that child TEMP.
+  $deps = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path $env:LOCALAPPDATA "Temp/gwt-playwright-$version" }
   $cli = Join-Path $deps 'node_modules/playwright/cli.js'
   $resolver = Join-Path $deps 'resolve-playwright.cjs'
   if (-not (Test-Path -LiteralPath $cli) -or -not (Test-Path -LiteralPath $resolver)) {
