@@ -1323,6 +1323,7 @@ test("500-row selection keeps list node identity and updates the right pane with
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML(`
     <section id="knowledge-window">
+      <div class="issue-bridge-root">
       <button data-action="refresh-knowledge"></button>
       <input class="knowledge-search" />
       <button data-issue-filter="open"></button>
@@ -1331,6 +1332,7 @@ test("500-row selection keeps list node identity and updates the right pane with
       <div class="knowledge-status"></div>
       <div class="knowledge-list"></div>
       <div class="knowledge-detail-pane"></div>
+      </div>
     </section>
   `);
   const originalDocument = globalThis.document;

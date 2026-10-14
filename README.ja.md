@@ -436,15 +436,20 @@ Queued 内では順序を変更でき、複数選択の移動は 1 回のキュ�
 Active と Done は実行ライフサイクルに従うため、ドラッグでは変更できません。
 Queued には `auto-refill` などの追加元も表示されます。
 
-検索と Kanban / Split の切り替えは同じ行に並びます。Monitor の状態表示と操作は分離し、
-Settings、Autonomous、Auto-refill と上限、Start monitor / Stop をラベル付きで表示します。
-Auto-refill は**既定で OFF**です。有効にすると、条件を満たす open Issue を設定した
-キュー上限まで自動補充します。空のキューから新しい作業は起動せず、実行中の作業は継続します。
-監視エラーは通知センターで確認できます。詳細ペインには受け入れ基準の進捗と状態別の
-操作を表示します。カードを選び、**Issue / Output** で本文・受け入れ基準とエージェントの
-読み取り専用出力を切り替えます。**Windowize** でエージェントを Canvas へ移せます。
-**Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
-列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
+検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
+Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
+容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
+エラーの詳細と履歴は通知センターで確認できます。⚙ で **Settings → Issues** を開いて
+フォーカスを移し、Max active、Auto-refill と上限、Allowed labels を設定します。
+候補プロファイルは **Settings → Agents** にあります。Auto-refill は**既定で OFF**です。
+有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
+空のキューから新しい作業は起動せず、実行中の作業は継続します。
+
+Kanban は既定で全幅です。カードを選ぶとプレビューが開き、**Issue / Output** で
+本文・受け入れ基準とエージェントの読み取り専用出力を切り替えます。
+**Windowize** でエージェントを Canvas へ移せます。**Close preview** または Escape で
+全幅に戻ります。狭い幅ではプレビューをボードの上に重ね、列は縮めず横スクロールします。
+従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
 **Max active** は新規設定で **Auto** を使用します。推奨値には CPU、空きメモリとディスク、
 GUI の CPU 使用量、他プロジェクトの稼働中エージェントを反映します。稼働中のエージェントが
@@ -460,11 +465,10 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`、共有実測値の `agent_capacity` を返します。
 
-**Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
-ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
+**Settings → Issues** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
 大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
 維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
-設定欄には保存済みラベルと除外件数・Issue 番号を表示します。自動化からは
+自動化からは
 `issue.monitor.config.set` に `{"allowed_labels":["agent:mac"]}` を渡せます。
 `issue.monitor.status` は `allowed_labels`、`label_excluded_count`、
 `label_excluded_issues` を返します。
