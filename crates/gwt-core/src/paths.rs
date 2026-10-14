@@ -428,9 +428,9 @@ pub fn gwt_workspace_work_events_intake_state_path_for_repo_path(repo_path: &Pat
 /// [`resolve_current_worktree_root`] (`git rev-parse --show-toplevel`). This
 /// function remains a utility for resolving the canonical main repository root.
 ///
-/// `gwt-core` cannot depend on `gwt-git`, so this mirrors
-/// `gwt_git::worktree::main_worktree_root`: it asks git for the absolute
-/// `--git-common-dir`, strips a trailing `.git`, and falls back to a
+/// Shares the filesystem identity used by `gwt_git::worktree::main_worktree_root`.
+/// Nested working directories retain Git discovery as a fallback. It resolves
+/// the absolute common directory, strips a trailing `.git`, and falls back to a
 /// first child bare repository for the workspace-home layout (a directory
 /// that contains child bare repos but is not itself a git work tree).
 ///
@@ -438,6 +438,18 @@ pub fn gwt_workspace_work_events_intake_state_path_for_repo_path(repo_path: &Pat
 /// non-repository directory), the input path is returned unchanged so the
 /// caller still gets a deterministic, non-failing repo-local location.
 pub fn resolve_main_worktree_root(repo_path: &Path) -> PathBuf {
+    // Issue #4415: startup callers need the same repository identity, already
+    // recorded by .git/commondir. Reuse it instead of spawning Git per caller.
+    if let Some(common_dir) =
+        crate::repo_hash::repository_common_dir(repo_path).filter(|dir| dir.is_dir())
+    {
+        let root = if common_dir.file_name().is_some_and(|name| name == ".git") {
+            common_dir.parent().unwrap_or(&common_dir)
+        } else {
+            &common_dir
+        };
+        return normalize_windows_child_process_path(root);
+    }
     // Issue #3629 AC-1/AC-2: the workspace-home layout (a directory holding
     // child bare repos and worktrees, itself not a git work tree) is gwt's
     // standard project layout, and asking git first burned a guaranteed
@@ -544,7 +556,7 @@ pub fn resolve_current_worktree_root(repo_path: &Path) -> PathBuf {
     //
     // Canonicalize rather than echoing the caller's spelling: git reports the
     // long Windows form, and callers compare these roots against each other
-    // (and against `resolve_main_worktree_root`, which still shells out). An
+    // (and against `resolve_main_worktree_root`). An
     // 8.3 short path like `AKIOJI~1` names the same directory but is not
     // string-equal, so skipping this would silently split those comparisons.
     if repo_path.join(".git").exists() {
@@ -988,6 +1000,29 @@ mod tests {
             .as_str()
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    /// Issue #4415: six repeated startup requests must reuse repository metadata.
+    #[test]
+    fn startup_common_dir_resolution_reuses_metadata_for_six_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_git_repo(&repo);
+        let expected = normalize_windows_child_process_path(&std::fs::canonicalize(&repo).unwrap());
+        let before = crate::process::thread_git_spawn_count();
+        let started = std::time::Instant::now();
+        for _ in 0..6 {
+            assert_eq!(
+                comparable_path(&resolve_main_worktree_root(&repo)),
+                comparable_path(&expected)
+            );
+        }
+        let spawns = crate::process::thread_git_spawn_count() - before;
+        eprintln!(
+            "common-dir: six requests, {spawns} Git spawns, {:?}",
+            started.elapsed()
+        );
+        assert_eq!(spawns, 0, "startup root resolution must reuse Git metadata");
     }
 
     /// Issue #3629 AC-1/AC-2: the nested-bare workspace-home layout (gwt's

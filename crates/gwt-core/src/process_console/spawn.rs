@@ -531,7 +531,7 @@ async fn spawn_logged_inner(
         }
         let duration_ms = started_at.elapsed().as_millis() as u64;
         if options.forward_output {
-            push_command_summary_to_hub(hub, kind, spawn_id, None, duration_ms);
+            push_command_summary_to_hub(hub, kind, spawn_id, &options.label, None, duration_ms);
         }
         trace_process_end(
             kind,
@@ -592,7 +592,7 @@ async fn spawn_logged_inner(
     let exit_code = status.code();
 
     if options.forward_output {
-        push_command_summary_to_hub(hub, kind, spawn_id, exit_code, duration_ms);
+        push_command_summary_to_hub(hub, kind, spawn_id, &options.label, exit_code, duration_ms);
     }
     trace_process_end(
         kind,
@@ -829,11 +829,12 @@ fn push_command_summary_to_hub(
     hub: &ProcessConsoleHub,
     kind: ProcessKind,
     spawn_id: u64,
+    label: &str,
     exit_code: Option<i32>,
     duration_ms: u64,
 ) {
     if kind == ProcessKind::Git {
-        crate::process::notify_git_command_finished(duration_ms);
+        crate::process::notify_git_command_finished(label, duration_ms);
     }
     let exit = exit_code.map_or_else(|| "?".to_string(), |code| code.to_string());
     hub.push(ProcessLine::new(
@@ -861,7 +862,7 @@ fn finish_failed_launch(
             ProcessStream::Stderr,
             redact::redact_line(&format!("process launch failed: {error}")),
         ));
-        push_command_summary_to_hub(hub, kind, spawn_id, None, duration_ms);
+        push_command_summary_to_hub(hub, kind, spawn_id, label, None, duration_ms);
         tracing::info!(
             target: SUMMARY_TARGET,
             kind = kind.as_str(),
@@ -1250,19 +1251,39 @@ mod tests {
     #[test]
     fn git_completion_observer_covers_both_summary_paths_only_for_git() {
         thread_local! {
-            static OBSERVED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+            static OBSERVED: std::cell::RefCell<Vec<(String, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
         }
-        fn observe(duration_ms: u64) {
-            OBSERVED.with(|observed| observed.borrow_mut().push(duration_ms));
+        fn observe(label: &str, duration_ms: u64) {
+            OBSERVED.with(|observed| observed.borrow_mut().push((label.to_string(), duration_ms)));
         }
         crate::process::set_git_command_observer(observe);
         std::thread::spawn(|| {
             let hub = ProcessConsoleHub::new();
-            crate::process::push_command_summary_to_hub(ProcessKind::Git, 1, Some(0), 120);
-            push_command_summary_to_hub(&hub, ProcessKind::Git, 2, Some(0), 340);
-            crate::process::push_command_summary_to_hub(ProcessKind::Docker, 3, Some(0), 500);
-            push_command_summary_to_hub(&hub, ProcessKind::Docker, 4, Some(0), 500);
-            OBSERVED.with(|observed| assert_eq!(*observed.borrow(), vec![120, 340]));
+            crate::process::push_command_summary_to_hub(
+                ProcessKind::Git,
+                1,
+                "git rev-parse --git-common-dir",
+                Some(0),
+                120,
+            );
+            push_command_summary_to_hub(&hub, ProcessKind::Git, 2, "git status", Some(0), 340);
+            crate::process::push_command_summary_to_hub(
+                ProcessKind::Docker,
+                3,
+                "docker ps",
+                Some(0),
+                500,
+            );
+            push_command_summary_to_hub(&hub, ProcessKind::Docker, 4, "docker ps", Some(0), 500);
+            OBSERVED.with(|observed| {
+                assert_eq!(
+                    *observed.borrow(),
+                    vec![
+                        ("git rev-parse --git-common-dir".to_string(), 120),
+                        ("git status".to_string(), 340)
+                    ]
+                )
+            });
         })
         .join()
         .unwrap();
