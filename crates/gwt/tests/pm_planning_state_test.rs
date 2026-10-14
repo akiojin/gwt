@@ -432,4 +432,34 @@ fn unrecognized_data_is_not_silently_dropped_on_commit() {
     assert!(load_planning_state(&path).is_err());
     assert!(mutate_planning_state(&path, 4, |_| Ok(())).is_err());
     assert_eq!(fs::read(&path).expect("retained unknown data"), before);
+    assert!(corrupt_copies(&path).is_empty());
+}
+
+#[test]
+fn incompatible_valid_json_retries_do_not_create_corrupt_backups() {
+    for document in [
+        json!({"revision": 4, "unknown_policy": "keep me"}),
+        json!(true),
+        json!({"goals": [{"id": 123}]}),
+    ] {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let path = dir.path().join("pm-planning.json");
+        let before = write_fixture(&path, &document);
+        let calls = AtomicUsize::new(0);
+
+        for _ in 0..2 {
+            let error = mutate_planning_state(&path, 4, |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .expect_err("incompatible data must fail closed");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(
+                fs::read(&path).expect("retained incompatible bytes"),
+                before
+            );
+            assert!(corrupt_copies(&path).is_empty(), "document: {document}");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 }

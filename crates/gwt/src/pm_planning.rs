@@ -174,7 +174,11 @@ fn read_state(path: &Path, preserve_corrupt: bool) -> io::Result<PmPlanningState
         Err(error) => return Err(error),
     };
     let mut state: PmPlanningState = serde_json::from_slice(&bytes).map_err(|error| {
-        let diagnosis = if preserve_corrupt {
+        let malformed = matches!(
+            error.classify(),
+            serde_json::error::Category::Syntax | serde_json::error::Category::Eof
+        );
+        let diagnosis = if preserve_corrupt && malformed {
             match preserve_corrupt_copy(path, &bytes) {
                 Ok(backup) => format!("{error}; original retained, backup: {}", backup.display()),
                 Err(backup_error) => {
