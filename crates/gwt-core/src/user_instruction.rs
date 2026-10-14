@@ -154,10 +154,11 @@ fn redact(value: &str) -> String {
     static ASSIGNMENT: OnceLock<Regex> = OnceLock::new();
     static TOKEN: OnceLock<Regex> = OnceLock::new();
     let assignment = ASSIGNMENT.get_or_init(|| Regex::new(
-        r#"(?i)\b([a-z_]*(?:token|password|secret|api[_-]?key)[a-z_]*["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"',;]+)"#
+        r#"(?i)\b([a-z_]*(?:token|password|secret|api[_-]?key|authorization)[a-z_]*["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"',;]+)"#
     ).expect("secret assignment regex"));
     let token = TOKEN.get_or_init(|| {
-        Regex::new(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}").expect("API token regex")
+        Regex::new(r"\b(?:sk-(?:proj-|ant-)?|github_pat_)[A-Za-z0-9_-]{16,}")
+            .expect("API token regex")
     });
     // Redact complete quoted assignments before the line filter can consume
     // their key and leave a whitespace-separated suffix behind.
@@ -219,20 +220,24 @@ mod tests {
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
         let secret = "ghp_0123456789abcdefghijklmnop";
+        let fine_grained = "github_pat_0123456789abcdefghijklmnop_0123456789";
         let mut input = request(&format!(
-            "{secret} password=\"correct horse battery staple\""
+            "{secret} {fine_grained} password=\"correct horse battery staple\""
         ));
         input.answer = "OPENAI_API_KEY=sk-proj-0123456789abcdefghijklmnop".into();
         input.actions = vec![
             "Authorization: Bearer private-value".into(),
             "token=\"correct horse battery staple\"".into(),
+            r#"{"Authorization": "Bearer fixtureCredentialValue0123456789"}"#.into(),
         ];
         let saved = record(&repo, input).unwrap();
         let raw = std::fs::read_to_string(instructions_path(&repo)).unwrap();
         for value in [
             secret,
+            fine_grained,
             "sk-proj-0123456789abcdefghijklmnop",
             "private-value",
+            "fixtureCredentialValue0123456789",
             "horse",
             "battery",
             "staple",
