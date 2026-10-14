@@ -148,6 +148,10 @@ fn red_50_fetch_posts_graphql_with_auth() {
     let body = req.body.as_deref().unwrap_or("");
     let payload: serde_json::Value = serde_json::from_str(body).unwrap();
     assert!(payload.get("query").is_some());
+    assert!(payload["query"]
+        .as_str()
+        .unwrap()
+        .contains("issueOrPullRequest"));
     assert_eq!(payload["variables"]["owner"], "octo");
     assert_eq!(payload["variables"]["repo"], "gwt");
     assert_eq!(payload["variables"]["number"], 2001);
@@ -285,6 +289,40 @@ fn red_52_fetch_returns_not_found() {
     let client = client_with(transport);
     let err = client.fetch(IssueNumber(9999), None).unwrap_err();
     assert!(matches!(err, ApiError::NotFound(IssueNumber(9999))));
+}
+
+#[test]
+fn fetch_distinguishes_a_pull_request_from_an_issue() {
+    for since in [None, Some(UpdatedAt::new("2026-04-08T00:00:00Z"))] {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(
+            r#"{"data":{"repository":{"issue":{"__typename":"PullRequest","number":4122}}}}"#,
+        ));
+        let error = client_with(transport)
+            .fetch(IssueNumber(4122), since.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("PR #4122"), "{error}");
+        assert!(error.contains("not an issue"), "{error}");
+        assert!(error.contains("pr.view"), "{error}");
+        assert!(!error.contains("GraphQL"), "{error}");
+    }
+}
+
+#[test]
+fn fetch_maps_graphql_missing_number_to_not_found() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND","path":["repository","issue"],"message":"Could not resolve to an Issue or PullRequest"}]}"#,
+    ));
+    let error = client_with(transport)
+        .fetch(IssueNumber(9999), None)
+        .unwrap_err();
+    assert!(
+        matches!(error, ApiError::NotFound(IssueNumber(9999))),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("pr.view"));
 }
 
 // -----------------------------------------------------------------------

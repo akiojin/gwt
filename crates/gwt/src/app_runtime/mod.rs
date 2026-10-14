@@ -108,7 +108,8 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
             FrontendEvent::ArrangeWindows { .. }
             | FrontendEvent::UpdateWindowGeometry { .. }
             | FrontendEvent::UpdateTerminalGrid { .. } => AppEventPriority::Layout,
-            FrontendEvent::LoadKnowledgeBridge { .. } => AppEventPriority::Background,
+            FrontendEvent::LoadKnowledgeBridge { .. }
+            | FrontendEvent::CheckKnowledgeRevision { .. } => AppEventPriority::Background,
             _ => AppEventPriority::Foreground,
         },
         UserEvent::AgentFrontend { .. }
@@ -11140,6 +11141,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::CheckKnowledgeRevision { id, .. }
             | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
@@ -11494,6 +11496,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::CheckKnowledgeRevision { id, .. }
             | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
@@ -11896,6 +11899,9 @@ impl AppRuntime {
             FrontendEvent::LoadProfile { id } => self.load_profile_events(&client_id, &id),
             FrontendEvent::LoadLogs { id, scope } => {
                 self.load_logs_scoped_events(&client_id, &id, scope)
+            }
+            FrontendEvent::CheckKnowledgeRevision { id, knowledge_kind } => {
+                self.check_knowledge_revision_events(&client_id, &id, knowledge_kind)
             }
             FrontendEvent::LoadKnowledgeBridge {
                 id,

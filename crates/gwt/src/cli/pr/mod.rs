@@ -23,11 +23,12 @@ pub(super) use gh::{
     edit_or_create_repo_guard, edit_pr_via_gh, extract_pr_url, fetch_current_pr_via_gh,
     fetch_pr_checks_via_gh, fetch_pr_head_sha_via_gh, fetch_pr_quarantine_context_via_gh,
     fetch_pr_review_thread_state_via_gh, fetch_pr_review_threads_via_gh, fetch_pr_reviews_via_gh,
-    mark_pr_ready_via_gh, parse_available_fields, parse_github_remote_url as parse_pr_remote_url,
-    parse_pr_checks_items_json, parse_pr_checks_items_response, parse_pr_number_from_url,
-    probe_github_rate_limit_via_gh, reply_and_resolve_pr_review_threads_via_gh,
-    resolve_pr_fork_url_via_gh, review_thread_has_comment_body, should_reply_to_review_thread,
-    should_resolve_review_thread, update_branch_failure_is_conflict, update_pr_branch_via_gh,
+    mark_pr_ready_via_gh, number_is_issue_via_gh, parse_available_fields,
+    parse_github_remote_url as parse_pr_remote_url, parse_pr_checks_items_json,
+    parse_pr_checks_items_response, parse_pr_number_from_url, probe_github_rate_limit_via_gh,
+    reply_and_resolve_pr_review_threads_via_gh, resolve_pr_fork_url_via_gh,
+    review_thread_has_comment_body, should_reply_to_review_thread, should_resolve_review_thread,
+    update_branch_failure_is_conflict, update_pr_branch_via_gh,
 };
 
 use gwt_git::PrStatus;
@@ -1654,6 +1655,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
         .iter()
         .map(|item| {
             let mut row = serde_json::json!({
+                "kind": "pull_request",
                 "number": item.number,
                 "title": item.title,
                 "url": item.url,
@@ -1775,7 +1777,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
 }
 
 pub(super) fn render_pr(out: &mut String, pr: &PrStatus) {
-    out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
+    out.push_str(&format!("PR #{} [{}] {}\n", pr.number, pr.state, pr.title));
     out.push_str(&format!("url: {}\n", pr.url));
     // SPEC #3835 AC-1: without the head branch the PM had to list every remote
     // `work/*` ref and match commit subjects to find the PR's owner.
@@ -4664,6 +4666,7 @@ mod tests {
         });
         let mut out = String::new();
         render_pr(&mut out, &pr);
+        assert!(out.starts_with("PR #7 [OPEN]"), "{out}");
         assert!(out.contains("head_ref_name: work/issue-3712"), "{out}");
         assert!(
             out.contains("checks: 16 success / 0 failure / 2 skipped / 0 in_progress (of 18)"),
@@ -4732,6 +4735,7 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(env.pr_list_call_count, 1);
         let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(payload["pull_requests"][0]["kind"], "pull_request");
         assert_eq!(
             payload["pull_requests"][0]["owner_issue_source"],
             "head_branch"

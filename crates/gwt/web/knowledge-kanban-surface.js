@@ -598,6 +598,7 @@ export function createKnowledgeKanbanSurface({
   createKnowledgeMarkdownBody,
   windowMap,
   workspaceWindowById,
+  isKnowledgeWindowVisible = () => true,
   getWorkspaceWindows,
   windowCatalogModel,
   pendingIndexOpenTargetsByPreset,
@@ -1000,6 +1001,7 @@ export function createKnowledgeKanbanSurface({
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
+      const knowledgeAutoRefreshModel = createUiStateStore({ revision: 0 });
 
       function issueMonitorStateText(state) {
         switch (String(state || "")) {
@@ -1604,6 +1606,7 @@ export function createKnowledgeKanbanSurface({
             kind: normalizeKnowledgeKind(knowledgeKind),
             entries: [],
             baseEntries: [],
+            entriesRevision: null,
             selectedNumber: null,
             // SPEC #3885 FR-014 / AC-14: the Issue window's view mode. List is
             // the default; split lays the running Issues out as detail +
@@ -1650,7 +1653,7 @@ export function createKnowledgeKanbanSurface({
             queuedSearchQuery: "",
             queuedLoadRefresh: false,
             loadRecoveryTimer: null,
-            loadRecoveryRetryCount: 0,
+            loadSlow: false,
             error: "",
             emptyMessage: "",
             baseEmptyMessage: "",
@@ -1667,6 +1670,11 @@ export function createKnowledgeKanbanSurface({
             dndSnapshot: null,
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
+            autoRefreshDirty: false,
+            autoRefreshChanged: false,
+            autoRefreshRevision: null,
+            revisionPending: false,
+            cacheRevision: null,
           });
         }
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -1715,11 +1723,48 @@ export function createKnowledgeKanbanSurface({
             state.autoRefreshTimer = null;
             return;
           }
-          if (!state.refreshEnabled || knowledgeAutoRefreshIsBusy(state)) {
-            return;
-          }
-          requestKnowledgeBridge(windowId, knowledgeKind, false);
+          state.autoRefreshDirty = true;
+          refreshVisibleKnowledgeWindows();
         }, KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS);
+      }
+
+      function knowledgeWindowIsVisible(windowId) {
+        const data = workspaceWindowById(windowId);
+        const element = windowMap.get(windowId);
+        return Boolean(data && element && !document.hidden && !data.minimized &&
+          (!data.tab_group_id || data.tab_group_active) &&
+          !element.closest?.("[hidden]") && isKnowledgeWindowVisible(windowId));
+      }
+
+      function refreshVisibleKnowledgeWindows() {
+        knowledgeAutoRefreshModel.update(model => ({ revision: model.revision + 1 }));
+      }
+
+      function flushVisibleKnowledgeWindows() {
+        for (const [windowId, state] of knowledgeBridgeStateMap) {
+          if (!state.autoRefreshDirty || state.revisionPending || !state.refreshEnabled ||
+              knowledgeAutoRefreshIsBusy(state) || !knowledgeWindowIsVisible(windowId)) continue;
+          state.autoRefreshDirty = false;
+          if (state.autoRefreshChanged) {
+            state.autoRefreshChanged = false;
+            requestKnowledgeBridge(windowId, state.kind, false);
+            continue;
+          }
+          state.revisionPending = true;
+          send({ kind: "check_knowledge_revision", id: windowId, knowledge_kind: state.kind });
+        }
+      }
+
+      function applyKnowledgeCacheRevision(event) {
+        const state = knowledgeBridgeStateMap.get(event.id);
+        if (!state || !state.revisionPending ||
+            normalizeKnowledgeKind(event.knowledge_kind) !== normalizeKnowledgeKind(state.kind)) return;
+        state.revisionPending = false;
+        if (event.revision !== null && event.revision === state.cacheRevision) return;
+        state.autoRefreshChanged = true;
+        state.autoRefreshRevision = event.revision ?? null;
+        state.autoRefreshDirty = true;
+        refreshVisibleKnowledgeWindows();
       }
 
       function readKanbanHideDonePreference() {
@@ -1773,7 +1818,7 @@ export function createKnowledgeKanbanSurface({
           state.inFlightSearchRequestId = 0;
           state.detailRequestId = 0;
           state.queuedLoadRefresh = false;
-          state.loadRecoveryRetryCount = 0;
+          state.loadSlow = false;
           if (state.loadRecoveryTimer !== null) {
             clearTimeout(state.loadRecoveryTimer);
             state.loadRecoveryTimer = null;
@@ -1825,26 +1870,29 @@ export function createKnowledgeKanbanSurface({
           }
           if (
             !state.loading ||
-            state.loadRequestId !== requestId ||
-            !knowledgeEntriesAreEmpty(state)
+            state.loadRequestId !== requestId
           ) {
             return;
           }
-          if (state.loadRecoveryRetryCount < 1) {
-            state.loadRecoveryRetryCount += 1;
+          // Issue #5413: a slow cache read is still in flight. Show progress
+          // instead of issuing another read that adds backend load.
+          state.loadSlow = true;
+          state.loadRecoveryTimer = setTimeout(() => {
+            state.loadRecoveryTimer = null;
+            if (
+              knowledgeBridgeStateMap.get(windowId) !== state ||
+              !workspaceWindowById(windowId) ||
+              !state.loading ||
+              state.loadRequestId !== requestId
+            ) {
+              return;
+            }
             state.loading = false;
             state.refreshing = false;
-            // Issue #3297: the retry must stay a cache read. Escalating to
-            // refresh=true ran a full remote sync that takes minutes and
-            // always outlived the next 5s timer, turning one slow load into
-            // a guaranteed "Timed out loading cache-backed data".
-            requestKnowledgeBridge(windowId, knowledgeKind, false);
+            state.loadSlow = false;
+            state.error = "Timed out loading cache-backed data";
             renderKnowledgeBridge(windowId);
-            return;
-          }
-          state.loading = false;
-          state.refreshing = false;
-          state.error = "Timed out loading cache-backed data";
+          }, 55000);
           renderKnowledgeBridge(windowId);
         }, 5000);
       }
@@ -1853,7 +1901,7 @@ export function createKnowledgeKanbanSurface({
         clearKnowledgeLoadRecoveryTimer(state);
         state.loading = false;
         state.refreshing = false;
-        state.loadRecoveryRetryCount = 0;
+        state.loadSlow = false;
         const queuedRefresh = state.queuedLoadRefresh;
         state.queuedLoadRefresh = false;
         if (queuedRefresh && workspaceWindowById(windowId)) {
@@ -1866,14 +1914,8 @@ export function createKnowledgeKanbanSurface({
       function requestKnowledgeBridge(windowId, knowledgeKind, refresh = false) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         if (state.loading) {
-          if (refresh && knowledgeEntriesAreEmpty(state)) {
-            clearKnowledgeLoadRecoveryTimer(state);
-            state.loading = false;
-            state.refreshing = false;
-          } else {
-            state.queuedLoadRefresh = state.queuedLoadRefresh || Boolean(refresh);
-            return;
-          }
+          state.queuedLoadRefresh = state.queuedLoadRefresh || Boolean(refresh);
+          return;
         }
         if (state.pendingSearchTimer !== null) {
           clearTimeout(state.pendingSearchTimer);
@@ -1896,6 +1938,7 @@ export function createKnowledgeKanbanSurface({
         state.loadSelectionGeneration = state.selectionGeneration;
         state.loadSelectedNumber = state.selectedNumber;
         state.loading = true;
+        state.loadSlow = false;
         state.refreshing = Boolean(refresh);
         state.searching = false;
         state.queuedLoadRefresh = false;
@@ -2172,6 +2215,10 @@ export function createKnowledgeKanbanSurface({
       // reconnect restarts a degraded still-open window/query at 5 seconds.
       function handleKnowledgeTransportChange(online) {
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (!online && state.revisionPending) {
+            state.revisionPending = false;
+            state.autoRefreshDirty = true;
+          }
           if (!isSilentSemanticKind(state.kind)) {
             continue;
           }
@@ -2221,6 +2268,7 @@ export function createKnowledgeKanbanSurface({
           state.semanticRetryIndex = 0;
           scheduleKnowledgeSemanticRetry(windowId, state.kind, state);
         }
+        if (online) refreshVisibleKnowledgeWindows();
       }
 
       function sendKnowledgeSemanticSearch(windowId, intent) {
@@ -2306,9 +2354,16 @@ export function createKnowledgeKanbanSurface({
         // baseEntries is visible immediately; the semantic completion later
         // replaces it with authoritative rows.
         applyLocalKnowledgeFilter(state, query);
+        queueKnowledgeSearch(windowId, state, intent);
+        renderKnowledgeBridge(windowId);
+      }
+
+      // Dispatch scheduling is separate from changing the visible results so
+      // an unchanged base list can resume a cancelled timer without filtering
+      // authoritative semantic results or replacing their DOM.
+      function queueKnowledgeSearch(windowId, state, intent) {
         if (state.loading && state.baseEntries.length === 0) {
           state.searching = true;
-          renderKnowledgeBridge(windowId);
           return;
         }
         if (
@@ -2318,14 +2373,12 @@ export function createKnowledgeKanbanSurface({
           !state.inFlightSearchIntent
         ) {
           state.searching = false;
-          renderKnowledgeBridge(windowId);
           return;
         }
         if (state.inFlightSearchIntent) {
           state.queuedSearchIntent = intent;
-          state.queuedSearchQuery = query;
+          state.queuedSearchQuery = intent.query;
           state.searching = true;
-          renderKnowledgeBridge(windowId);
           return;
         }
         state.searching = true;
@@ -2358,7 +2411,6 @@ export function createKnowledgeKanbanSurface({
             selectionGeneration: state.selectionGeneration,
           });
         }, 250);
-        renderKnowledgeBridge(windowId);
       }
 
       function dispatchKnowledgeDetailRequest(
@@ -4052,6 +4104,12 @@ export function createKnowledgeKanbanSurface({
         if (!issueSurface && state.searching) {
           return { tone: "info", text: "Searching semantic index" };
         }
+        if (state.loading && state.loadSlow) {
+          return {
+            tone: "info",
+            text: `${issueSurface ? "Loading cache-backed work items" : "Loading cache-backed data"} (taking longer than usual)`,
+          };
+        }
         if (state.loading && state.entries.length > 0) {
           return {
             tone: "info",
@@ -4487,6 +4545,10 @@ export function createKnowledgeKanbanSurface({
         const visibleEntries = filteredIssueEntries(state);
         if (state.error) {
           list.insertBefore(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error), other);
+        } else if (state.loading && state.loadSlow && knowledgeEntriesAreEmpty(state)) {
+          const progress = createNode("div", "knowledge-empty", knowledgeStatusView(state, true).text);
+          progress.setAttribute("role", "status");
+          list.insertBefore(progress, other);
         }
         if (splitMode) {
           const pairs = visibleEntries
@@ -4523,6 +4585,9 @@ export function createKnowledgeKanbanSurface({
           windowId,
           knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
         );
+        // An error changes the list presentation outside the data revision.
+        // The next successful completion must rebuild it to remove that state.
+        if (state.error) state.entriesRevision = null;
         if (state.kind === "issue") {
           issueWindowViewModel.update(() => ({ windowId }));
           return;
@@ -4883,6 +4948,10 @@ export function createKnowledgeKanbanSurface({
       // moved verbatim from app.js; the case arms in app.js delegate here.
       function applyKnowledgeReceiveEvent(event) {
         switch (event.kind) {
+          case "knowledge_revision": {
+            applyKnowledgeCacheRevision(event);
+            break;
+          }
           case "terminal_preview": {
             terminalPreviewText.set(event.id, event.text);
             for (const element of windowMap.values()) {
@@ -4928,11 +4997,24 @@ export function createKnowledgeKanbanSurface({
               break;
             }
             const queuedQuery = state.query.trim();
+            const previousNumber = state.selectedNumber;
+            const unchangedEntries =
+              typeof event.revision === "string" && event.revision.length > 0 &&
+              event.revision === state.entriesRevision && !state.error && !state.renderError;
+            // Missing revisions keep the legacy full-render path. The revision
+            // belongs to the base list; search and detail retain their owners.
+            state.entriesRevision = event.revision || null;
             const incomingEntries = event.entries || [];
             const keepSelectedNumber =
               state.selectedNumber &&
               incomingEntries.some((entry) => entry.number === state.selectedNumber);
             state.baseEntries = incomingEntries;
+            state.cacheRevision = event.cache_revision ?? null;
+            if (state.autoRefreshChanged && state.cacheRevision !== null &&
+                state.cacheRevision === state.autoRefreshRevision) {
+              state.autoRefreshChanged = false;
+              state.autoRefreshDirty = false;
+            }
             state.baseEmptyMessage = event.empty_message || "";
             if (!queuedQuery) {
               state.entries = state.baseEntries.slice();
@@ -4955,18 +5037,38 @@ export function createKnowledgeKanbanSurface({
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.refreshedAt = Date.now();
             state.error = "";
+            const renderCompletion = () => {
+              if (!unchangedEntries) {
+                renderKnowledgeBridge(event.id);
+                return;
+              }
+              const refresh = windowMap.get(event.id)?.querySelector("[data-action='refresh-knowledge']");
+              if (refresh) {
+                refresh.disabled = !state.refreshEnabled ||
+                  (state.loading && !knowledgeEntriesAreEmpty(state));
+              }
+              renderKnowledgeSelection(event.id, state, previousNumber);
+            };
             if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
-              renderKnowledgeBridge(event.id);
+              renderCompletion();
               break;
             }
             if (queuedQuery) {
+              if (unchangedEntries) {
+                if (!state.inFlightSearchIntent && state.pendingSearchTimer === null) {
+                  queueKnowledgeSearch(event.id, state,
+                    updateKnowledgeSearchIntent(state, event.knowledge_kind, queuedQuery));
+                }
+                renderCompletion();
+                break;
+              }
               scheduleKnowledgeSearch(
                 event.id,
                 event.knowledge_kind,
               );
               break;
             }
-            renderKnowledgeBridge(event.id);
+            renderCompletion();
             break;
           }
           case "knowledge_search_results": {
@@ -5240,6 +5342,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       issueMonitorModel.subscribe(model => model.status, syncIssueMonitorErrorReport);
+      knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
       issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly, focusPreview }) => {
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -5302,9 +5405,11 @@ export function createKnowledgeKanbanSurface({
         renderKanbanDrawerBody,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyKnowledgeCacheRevision,
         applyIssueMonitorStatus,
         applyIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
+        refreshVisibleKnowledgeWindows,
       };
 }

@@ -1,10 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use gwt_core::paths::gwt_cache_dir;
-use gwt_github::{Cache, CacheEntry, IssueState, SectionName};
+use gwt_github::{Cache, CacheEntry, IssueState, IssueSummary, SectionName};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -546,18 +547,21 @@ pub fn load_knowledge_bridge(
     if refresh {
         refresh_knowledge_bridge_cache(repo_path, true)?;
     }
-    let entries = load_local_cache_entries_for_repo(repo_path)?;
+    let cache = Cache::new(issue_cache_root_for_repo_path_or_detached(repo_path));
+    let entries = load_cache_summaries(&cache)?;
     let linked_branches = load_linked_branches(repo_path);
     Ok(match kind {
         KnowledgeKind::Issue => build_work_item_view(
             KnowledgeKind::Issue,
-            entries,
+            &cache,
+            &entries,
             linked_branches,
             selected_number,
         ),
         KnowledgeKind::Spec => build_work_item_view(
             KnowledgeKind::Spec,
-            entries,
+            &cache,
+            &entries,
             linked_branches,
             selected_number,
         ),
@@ -593,36 +597,97 @@ pub fn load_knowledge_bridge_detail(
     Ok(detail_for_kind(kind, &entry, &linked_branches))
 }
 
+// Cache roots identify the shared project even when requests come from different worktrees.
+// Weak entries retain a result only while that refresh still has callers.
+#[derive(Default)]
+struct KnowledgeCacheRefreshFlights {
+    active: Mutex<HashMap<PathBuf, Weak<KnowledgeCacheRefreshFlight>>>,
+}
+
+#[derive(Default)]
+struct KnowledgeCacheRefreshFlight {
+    result: OnceLock<Result<bool, String>>,
+}
+
+impl KnowledgeCacheRefreshFlights {
+    fn run(
+        &self,
+        cache_root: &Path,
+        force: bool,
+        mut refresh: impl FnMut() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        loop {
+            let flight = self.join(cache_root);
+            let result = flight.run(&mut refresh);
+            // A forced request may have joined a non-forced TTL skip. Its next
+            // flight must actually sync, while an active sync (or failure) is shared.
+            if !force || result != Ok(false) {
+                return result;
+            }
+        }
+    }
+
+    fn join(&self, cache_root: &Path) -> Arc<KnowledgeCacheRefreshFlight> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.retain(|_, flight| flight.strong_count() > 0);
+        if let Some(flight) = active
+            .get(cache_root)
+            .and_then(Weak::upgrade)
+            .filter(|flight| flight.result.get() != Some(&Ok(false)))
+        {
+            return flight;
+        }
+        let flight = Arc::new(KnowledgeCacheRefreshFlight::default());
+        active.insert(cache_root.to_path_buf(), Arc::downgrade(&flight));
+        flight
+    }
+}
+
+impl KnowledgeCacheRefreshFlight {
+    fn run(&self, refresh: impl FnOnce() -> Result<bool, String>) -> Result<bool, String> {
+        self.result.get_or_init(refresh).clone()
+    }
+}
+
 pub fn refresh_knowledge_bridge_cache(repo_path: &Path, force: bool) -> Result<bool, String> {
+    static FLIGHTS: OnceLock<KnowledgeCacheRefreshFlights> = OnceLock::new();
+
     if !repo_path.is_dir() || issue_cache_root_for_repo_path(repo_path).is_none() {
         return Ok(false);
     }
     let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
-    let outcome = if force {
-        sync_issue_cache_from_remote_with_fingerprint(repo_path, &cache_root)?
-    } else {
-        sync_issue_cache_from_remote_if_stale_with_fingerprint(
-            repo_path,
-            &cache_root,
-            ISSUE_CACHE_TTL,
-        )?
-    };
-    if outcome.source_changed
-        && crate::index_worker::detect_repo_hash(repo_path).is_some()
-        && crate::index_worker::default_rebuild_runner(
-            repo_path,
-            crate::index_worker::IndexRebuildScope::Issues,
-            None,
-        )
-        .is_err()
-    {
-        tracing::debug!(
-            target: "gwt::knowledge_bridge",
-            error_code = "INDEX_REPAIR_FAILED",
-            "issue cache refresh succeeded but issue index rebuild failed"
-        );
-    }
-    Ok(outcome.refreshed)
+    FLIGHTS
+        .get_or_init(KnowledgeCacheRefreshFlights::default)
+        .run(&cache_root, force, || {
+            let outcome = if force {
+                sync_issue_cache_from_remote_with_fingerprint(repo_path, &cache_root)?
+            } else {
+                sync_issue_cache_from_remote_if_stale_with_fingerprint(
+                    repo_path,
+                    &cache_root,
+                    ISSUE_CACHE_TTL,
+                )?
+            };
+            if outcome.source_changed
+                && crate::index_worker::detect_repo_hash(repo_path).is_some()
+                && crate::index_worker::default_rebuild_runner(
+                    repo_path,
+                    crate::index_worker::IndexRebuildScope::Issues,
+                    None,
+                )
+                .is_err()
+            {
+                tracing::debug!(
+                    target: "gwt::knowledge_bridge",
+                    error_code = "INDEX_REPAIR_FAILED",
+                    "issue cache refresh succeeded but issue index rebuild failed"
+                );
+            }
+            Ok(outcome.refreshed)
+        })
 }
 
 pub fn search_knowledge_bridge(
@@ -760,7 +825,11 @@ where
         .load_entry(gwt_github::IssueNumber(issue_number))
         .ok_or_else(|| format!("Issue #{issue_number} disappeared after cache update"))?;
     let linked_branches: HashMap<u64, Vec<String>> = HashMap::new();
-    Ok(work_item_list_item(&refreshed, &linked_branches, None))
+    Ok(work_item_list_item(
+        &IssueSummary::from(&refreshed.snapshot),
+        &linked_branches,
+        None,
+    ))
 }
 
 #[cfg(test)]
@@ -833,11 +902,13 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         });
     }
 
-    let mut entries = load_local_cache_entries_for_repo(repo_path)?
-        .into_iter()
+    let cache = Cache::new(issue_cache_root_for_repo_path_or_detached(repo_path));
+    let summaries = load_cache_summaries(&cache)?;
+    let mut entries = summaries
+        .iter()
         .filter(|entry| candidate_matches_kind(entry, kind))
         .collect::<Vec<_>>();
-    entries.sort_by(issue_entry_sort);
+    entries.sort_by(|left, right| issue_entry_sort(left, right));
     let linked_branches = load_linked_branches(repo_path);
     // FR-098/FR-100: a semantic failure never aborts the completion — the
     // cache-backed/local exact rows below stay usable. Typed transient
@@ -878,14 +949,14 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         .iter()
         .filter(|entry| is_exact_search_match(entry, query))
     {
-        if seen.insert(entry.snapshot.number.0) {
+        if seen.insert(entry.number) {
             list_items.push(list_item_for_kind(kind, entry, &linked_branches, Some(100)));
         }
     }
 
     let entries_by_number = entries
         .iter()
-        .map(|entry| (entry.snapshot.number.0, entry))
+        .map(|entry| (entry.number, entry))
         .collect::<HashMap<_, _>>();
     for hit in hits {
         if !seen.insert(hit.number) {
@@ -909,8 +980,8 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         .filter(|selected| list_items.iter().any(|entry| entry.number == *selected))
         .or_else(|| list_items.first().map(|entry| entry.number));
     let detail = selected_number
-        .and_then(|selected| entries_by_number.get(&selected).copied())
-        .map(|entry| detail_for_kind(kind, entry, &linked_branches))
+        .and_then(|selected| cache.load_entry(gwt_github::IssueNumber(selected)))
+        .map(|entry| detail_for_kind(kind, &entry, &linked_branches))
         .unwrap_or_else(|| empty_detail(search_empty_title(kind), "No semantic matches found."));
 
     Ok(KnowledgeSearchOutcome {
@@ -930,17 +1001,11 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
     })
 }
 
-fn load_local_cache_entries_for_repo(repo_path: &Path) -> Result<Vec<CacheEntry>, String> {
-    let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
-    let cache = Cache::new(cache_root);
-    load_cache_entries(&cache)
-}
-
-fn load_cache_entries(cache: &Cache) -> Result<Vec<CacheEntry>, String> {
-    match cache.list_entries() {
+fn load_cache_summaries(cache: &Cache) -> Result<std::sync::Arc<Vec<IssueSummary>>, String> {
+    match cache.list_summaries() {
         Ok(entries) => Ok(entries),
         Err(gwt_github::CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(Vec::new())
+            Ok(std::sync::Arc::new(Vec::new()))
         }
         Err(error) => Err(format!("failed to read issue cache: {error}")),
     }
@@ -948,21 +1013,24 @@ fn load_cache_entries(cache: &Cache) -> Result<Vec<CacheEntry>, String> {
 
 fn build_work_item_view(
     kind: KnowledgeKind,
-    mut entries: Vec<CacheEntry>,
+    cache: &Cache,
+    summaries: &[IssueSummary],
     linked_branches: HashMap<u64, Vec<String>>,
     selected_number: Option<u64>,
 ) -> KnowledgeBridgeView {
-    entries.sort_by(issue_entry_sort);
+    let mut entries = summaries.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| issue_entry_sort(left, right));
 
     let list_items = entries
         .iter()
         .map(|entry| work_item_list_item(entry, &linked_branches, None))
         .collect::<Vec<_>>();
-    let selected_number = resolve_selected_number(&entries, selected_number);
-    let detail = entries
-        .iter()
-        .find(|entry| Some(entry.snapshot.number.0) == selected_number)
-        .map(|entry| work_item_detail_view(entry, &linked_branches))
+    let selected_number = selected_number
+        .filter(|selected| entries.iter().any(|entry| entry.number == *selected))
+        .or_else(|| entries.first().map(|entry| entry.number));
+    let detail = selected_number
+        .and_then(|selected| cache.load_entry(gwt_github::IssueNumber(selected)))
+        .map(|entry| work_item_detail_view(&entry, &linked_branches))
         .unwrap_or_else(|| empty_detail("Issue Bridge", "No cached work items available."));
 
     KnowledgeBridgeView {
@@ -1048,7 +1116,7 @@ fn knowledge_detail_section(
     }
 }
 
-fn candidate_matches_kind(entry: &CacheEntry, kind: KnowledgeKind) -> bool {
+fn candidate_matches_kind(entry: &IssueSummary, kind: KnowledgeKind) -> bool {
     match kind {
         KnowledgeKind::Issue | KnowledgeKind::Spec => {
             let _ = entry;
@@ -1060,7 +1128,7 @@ fn candidate_matches_kind(entry: &CacheEntry, kind: KnowledgeKind) -> bool {
 
 fn list_item_for_kind(
     kind: KnowledgeKind,
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
@@ -1073,11 +1141,11 @@ fn list_item_for_kind(
 }
 
 fn work_item_list_item(
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
-    if is_spec_entry(entry) {
+    if has_gwt_spec_label(&entry.labels) {
         spec_list_item(entry, linked_branches, match_score)
     } else {
         issue_list_item(entry, linked_branches, match_score)
@@ -1085,19 +1153,19 @@ fn work_item_list_item(
 }
 
 fn issue_list_item(
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
-    let phase_info = extract_phase(&entry.snapshot.labels);
+    let phase_info = extract_phase(&entry.labels);
     KnowledgeListItem {
-        number: entry.snapshot.number.0,
-        title: entry.snapshot.title.clone(),
-        state: issue_state_label(entry.snapshot.state),
-        meta: format!("Updated {}", short_updated_at(&entry.snapshot.updated_at.0)),
-        labels: entry.snapshot.labels.clone(),
+        number: entry.number,
+        title: entry.title.clone(),
+        state: issue_state_label(entry.state),
+        meta: format!("Updated {}", short_updated_at(&entry.updated_at)),
+        labels: entry.labels.clone(),
         linked_branch_count: linked_branches
-            .get(&entry.snapshot.number.0)
+            .get(&entry.number)
             .map(Vec::len)
             .unwrap_or_default(),
         related_work_count: 0,
@@ -1106,7 +1174,7 @@ fn issue_list_item(
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
         is_spec: phase_info.is_spec,
-        parent_spec: parent_spec_from_body(&entry.snapshot.body),
+        parent_spec: parent_spec_from_body(&entry.body),
         monitor_state: None,
         queue_position: None,
         queued_by: None,
@@ -1116,34 +1184,14 @@ fn issue_list_item(
 }
 
 fn spec_list_item(
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
-    let phase_info = extract_phase(&entry.snapshot.labels);
-    KnowledgeListItem {
-        number: entry.snapshot.number.0,
-        title: entry.snapshot.title.clone(),
-        state: issue_state_label(entry.snapshot.state),
-        meta: spec_list_meta(entry),
-        labels: entry.snapshot.labels.clone(),
-        linked_branch_count: linked_branches
-            .get(&entry.snapshot.number.0)
-            .map(Vec::len)
-            .unwrap_or_default(),
-        related_work_count: 0,
-        related_session_count: 0,
-        match_score,
-        phase: phase_info.phase,
-        has_unknown_phase: phase_info.has_unknown_phase,
-        is_spec: phase_info.is_spec,
-        parent_spec: parent_spec_from_body(&entry.snapshot.body),
-        monitor_state: None,
-        queue_position: None,
-        queued_by: None,
-        exclusion_reason: None,
-        related_work_refs: Vec::new(),
-    }
+    let mut item = issue_list_item(entry, linked_branches, match_score);
+    let phase = effective_spec_lifecycle_label(entry.state, &entry.labels);
+    item.meta = format!("{phase} · Updated {}", short_updated_at(&entry.updated_at));
+    item
 }
 
 fn detail_for_kind(
@@ -1168,21 +1216,20 @@ fn work_item_detail_view(
     }
 }
 
-fn is_exact_search_match(entry: &CacheEntry, query: &str) -> bool {
+fn is_exact_search_match(entry: &IssueSummary, query: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {
         return false;
     }
     let query_lower = query.to_lowercase();
-    let number = entry.snapshot.number.0.to_string();
+    let number = entry.number.to_string();
     if query_lower.strip_prefix('#') == Some(number.as_str()) || query_lower == number {
         return true;
     }
-    if entry.snapshot.title.to_lowercase() == query_lower {
+    if entry.title.to_lowercase() == query_lower {
         return true;
     }
     entry
-        .snapshot
         .labels
         .iter()
         .any(|label| label.to_lowercase() == query_lower)
@@ -1278,7 +1325,7 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
         ));
     }
 
-    let phase = effective_spec_lifecycle_label(entry);
+    let phase = effective_spec_lifecycle_label(entry.snapshot.state, &entry.snapshot.labels);
     KnowledgeDetailView {
         number: Some(entry.snapshot.number.0),
         title: entry.snapshot.title.clone(),
@@ -1296,19 +1343,11 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
     }
 }
 
-fn spec_list_meta(entry: &CacheEntry) -> String {
-    let phase = effective_spec_lifecycle_label(entry);
-    format!(
-        "{phase} · Updated {}",
-        short_updated_at(&entry.snapshot.updated_at.0)
-    )
-}
-
-fn effective_spec_lifecycle_label(entry: &CacheEntry) -> &'static str {
-    if entry.snapshot.state == IssueState::Closed {
+fn effective_spec_lifecycle_label(state: IssueState, labels: &[String]) -> &'static str {
+    if state == IssueState::Closed {
         return "Done";
     }
-    let phase_info = extract_phase(&entry.snapshot.labels);
+    let phase_info = extract_phase(labels);
     phase_display_label(phase_info.phase.as_deref())
 }
 
@@ -1323,31 +1362,17 @@ fn phase_display_label(phase: Option<&str>) -> &'static str {
     }
 }
 
-fn resolve_selected_number(entries: &[CacheEntry], selected_number: Option<u64>) -> Option<u64> {
-    selected_number
-        .filter(|selected| {
-            entries
-                .iter()
-                .any(|entry| entry.snapshot.number.0 == *selected)
-        })
-        .or_else(|| entries.first().map(|entry| entry.snapshot.number.0))
-}
-
-fn issue_entry_sort(left: &CacheEntry, right: &CacheEntry) -> std::cmp::Ordering {
-    let left_state = if left.snapshot.state == IssueState::Open {
-        0
-    } else {
-        1
-    };
-    let right_state = if right.snapshot.state == IssueState::Open {
+fn issue_entry_sort(left: &IssueSummary, right: &IssueSummary) -> std::cmp::Ordering {
+    let left_state = if left.state == IssueState::Open { 0 } else { 1 };
+    let right_state = if right.state == IssueState::Open {
         0
     } else {
         1
     };
     left_state
         .cmp(&right_state)
-        .then_with(|| right.snapshot.updated_at.0.cmp(&left.snapshot.updated_at.0))
-        .then_with(|| left.snapshot.number.0.cmp(&right.snapshot.number.0))
+        .then_with(|| right.updated_at.cmp(&left.updated_at))
+        .then_with(|| left.number.cmp(&right.number))
 }
 
 fn issue_state_label(state: IssueState) -> String {
@@ -1405,6 +1430,126 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_runs_sync_and_rebuild_once() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Barrier,
+        };
+
+        let flights = KnowledgeCacheRefreshFlights::default();
+        let joined = Barrier::new(8);
+        let syncs = AtomicUsize::new(0);
+        let rebuilds = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let requests: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let _flight = flights.join(Path::new("project-cache"));
+                        // All requests join the active generation before it completes.
+                        joined.wait();
+                        flights.run(Path::new("project-cache"), true, || {
+                            syncs.fetch_add(1, Ordering::SeqCst);
+                            rebuilds.fetch_add(1, Ordering::SeqCst);
+                            Ok(true)
+                        })
+                    })
+                })
+                .collect();
+            for request in requests {
+                assert_eq!(request.join().expect("refresh thread"), Ok(true));
+            }
+        });
+        assert_eq!(
+            syncs.load(Ordering::SeqCst),
+            1,
+            "one remote sync for eight requests"
+        );
+        assert_eq!(
+            rebuilds.load(Ordering::SeqCst),
+            1,
+            "one index rebuild for eight requests"
+        );
+    }
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_shares_failure_and_allows_retry() {
+        let flights = KnowledgeCacheRefreshFlights::default();
+        let cache = Path::new("project-cache");
+        let leader = flights.join(cache);
+        let follower = flights.join(cache);
+        assert_eq!(
+            flights.run(cache, false, || Err("sync failed".into())),
+            Err("sync failed".into())
+        );
+        assert_eq!(
+            flights.run(cache, true, || panic!("must share the failed sync")),
+            Err("sync failed".into())
+        );
+        drop(leader);
+        drop(follower);
+        assert_eq!(flights.run(cache, true, || Ok(true)), Ok(true));
+    }
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_keeps_projects_independent() {
+        let flights = KnowledgeCacheRefreshFlights::default();
+        // Running another project from inside the first cannot deadlock on a global lock.
+        assert_eq!(
+            flights.run(Path::new("project-a"), false, || {
+                flights.run(Path::new("project-b"), false, || Ok(false))
+            }),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_force_waits_then_syncs_after_fresh_skip() {
+        use std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                mpsc, Barrier,
+            },
+            time::{Duration, Instant},
+        };
+
+        let flights = KnowledgeCacheRefreshFlights::default();
+        let cache = Path::new("project-cache");
+        let flight = flights.join(cache);
+        let release = Barrier::new(2);
+        let (entered, started) = mpsc::channel();
+        let syncs = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let ordinary = scope.spawn(|| {
+                flights.run(cache, false, || {
+                    entered.send(()).expect("signal TTL check");
+                    release.wait();
+                    Ok(false)
+                })
+            });
+            started
+                .recv_timeout(Duration::from_secs(30))
+                .expect("TTL check started");
+            let forced = scope.spawn(|| {
+                flights.run(cache, true, || {
+                    syncs.fetch_add(1, Ordering::SeqCst);
+                    Ok(true)
+                })
+            });
+            // Observe that the forced request joined before allowing the TTL skip to finish.
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Arc::strong_count(&flight) < 3 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let joined = Arc::strong_count(&flight) >= 3;
+            release.wait();
+            assert_eq!(ordinary.join().expect("ordinary refresh"), Ok(false));
+            assert_eq!(forced.join().expect("forced refresh"), Ok(true));
+            assert!(joined, "forced request must wait for the active flight");
+        });
+        assert_eq!(syncs.load(Ordering::SeqCst), 1);
+    }
 
     use gwt_core::test_support::ScopedEnvVar;
 
@@ -1819,7 +1964,7 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(23))
             .expect("load stale closed spec");
 
-        let list_item = spec_list_item(&entry, &HashMap::new(), None);
+        let list_item = spec_list_item(&IssueSummary::from(&entry.snapshot), &HashMap::new(), None);
         assert_eq!(list_item.phase.as_deref(), Some("implementation"));
         assert!(list_item.meta.contains("Done"));
         assert!(!list_item.meta.contains("phase/implementation"));
@@ -1884,7 +2029,12 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(4101))
             .expect("load child issue");
         assert_eq!(
-            issue_list_item(&child_entry, &HashMap::new(), None).parent_spec,
+            issue_list_item(
+                &IssueSummary::from(&child_entry.snapshot),
+                &HashMap::new(),
+                None
+            )
+            .parent_spec,
             Some(3885)
         );
 
@@ -1900,7 +2050,12 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(4102))
             .expect("load orphan issue");
         assert_eq!(
-            issue_list_item(&orphan_entry, &HashMap::new(), None).parent_spec,
+            issue_list_item(
+                &IssueSummary::from(&orphan_entry.snapshot),
+                &HashMap::new(),
+                None
+            )
+            .parent_spec,
             None
         );
 
@@ -1917,7 +2072,12 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(4103))
             .expect("load nested spec");
         assert_eq!(
-            spec_list_item(&nested_entry, &HashMap::new(), None).parent_spec,
+            spec_list_item(
+                &IssueSummary::from(&nested_entry.snapshot),
+                &HashMap::new(),
+                None
+            )
+            .parent_spec,
             Some(3885)
         );
     }

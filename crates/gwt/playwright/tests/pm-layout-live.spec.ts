@@ -26,8 +26,9 @@ test('compact PM Reports shares one scroll at 600, 1280 and 400 pixels', async (
       if (key.startsWith('GWT_SESSION_') || key.startsWith('GWT_HOOK_FORWARD_')) delete env[key];
     }
     const post = (operation: string, params: Record<string, unknown>) => {
-      const result = spawnSync(`${ROOT}/target/debug/gwtd`, [], { cwd: ROOT, env, encoding: 'utf8',
+      const result = spawnSync(`${ROOT}/target/debug/gwtd`, [], { cwd: ROOT, env, encoding: 'utf8', timeout: 30_000,
         input: JSON.stringify({ schema_version: 1, operation, params }) });
+      expect(result.error, result.error?.message).toBeUndefined();
       expect(result.status, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout).ok).toBe(true);
     };
