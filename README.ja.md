@@ -412,6 +412,9 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   開けます。`System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
+  System には保存値・有効値と、更新の保留理由も表示します。変更は GUI から
+  行い、エージェントは `update.settings.status` で読み取れます。
+  この設定は Issue Monitor の設定から除外されています。
 - `PR` — pull-request workflow surface。詳細な一覧機能は cache-backed PR source の整備に依存します
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は

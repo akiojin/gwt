@@ -417,7 +417,6 @@ pub(super) fn run<E: CliEnv>(
             max_active,
             max_active_auto,
             auto_close_merged_issues,
-            auto_apply_updates,
             launch_agent,
             update_drain,
         } => run_monitor_config_set(
@@ -429,7 +428,6 @@ pub(super) fn run<E: CliEnv>(
             max_active,
             max_active_auto,
             auto_close_merged_issues,
-            auto_apply_updates,
             launch_agent.as_deref(),
             update_drain,
             out,
@@ -948,11 +946,6 @@ pub(crate) fn load_monitor_agent_status(
         // trusted from the payload so a pre-#4413 publication — which only a
         // live monitor could have produced — is labelled the same way.
         status.source = crate::IssueMonitorStatusSource::Daemon;
-        status.auto_apply_updates = authority.auto_apply_updates();
-        status.auto_apply_updates_effective = Some(authority.auto_apply_updates_enabled());
-        if let Some(gui) = status.gui_status.as_mut() {
-            gui.auto_apply_updates = authority.auto_apply_updates_enabled();
-        }
         // Keep reported counts and owners together before current capacity,
         // durable identity, and closed-Issue action reconciliation.
         let capacity = launch_capacity(&status, active_session_count, configured_max_active);
@@ -3418,7 +3411,6 @@ fn apply_monitor_config_set(
     max_active: Option<usize>,
     max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
-    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
     update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     caller_is_resident_pm: bool,
@@ -3430,7 +3422,6 @@ fn apply_monitor_config_set(
         max_active,
         max_active_auto,
         auto_close_merged_issues,
-        auto_apply_updates,
         launch_agent,
         update_drain.as_ref(),
         caller_is_resident_pm,
@@ -3465,9 +3456,6 @@ fn apply_monitor_config_set(
         candidate
             .switch_launch_profile_agent(launch_agent)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-    }
-    if let Some(auto_apply_updates) = auto_apply_updates {
-        candidate.set_auto_apply_updates(Some(auto_apply_updates))?;
     }
     apply_update_drain(&mut candidate, update_drain);
     *prefs = candidate.prefs();
@@ -3507,7 +3495,6 @@ fn validate_monitor_config_set(
     max_active: Option<usize>,
     max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
-    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
     update_drain: Option<&crate::IssueMonitorUpdateDrainControl>,
     caller_is_resident_pm: bool,
@@ -3524,7 +3511,6 @@ fn validate_monitor_config_set(
         && max_active.is_none()
         && !max_active_auto
         && auto_close_merged_issues.is_none()
-        && auto_apply_updates.is_none()
         && launch_agent.is_none()
         && update_drain.is_none()
     {
@@ -3569,7 +3555,6 @@ fn run_monitor_config_set<E: CliEnv>(
     max_active: Option<usize>,
     max_active_auto: bool,
     auto_close_merged_issues: Option<bool>,
-    auto_apply_updates: Option<bool>,
     launch_agent: Option<&str>,
     update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     out: &mut String,
@@ -3585,7 +3570,6 @@ fn run_monitor_config_set<E: CliEnv>(
         max_active,
         max_active_auto,
         auto_close_merged_issues,
-        auto_apply_updates,
         launch_agent,
         update_drain.as_ref(),
         caller_is_resident_pm,
@@ -3617,7 +3601,6 @@ fn run_monitor_config_set<E: CliEnv>(
                 "max_active_agents": max_active,
                 "max_active_mode": max_active_auto.then_some("auto"),
                 "auto_close_merged_issues": auto_close_merged_issues,
-                "auto_apply_updates": auto_apply_updates,
                 "launch_agent": launch_agent,
                 "update_drain": update_drain,
                 // SPEC #4778 AC-1: the daemon re-checks this against the PM
@@ -3644,7 +3627,6 @@ fn run_monitor_config_set<E: CliEnv>(
                 max_active,
                 max_active_auto,
                 auto_close_merged_issues,
-                auto_apply_updates,
                 launch_agent,
                 update_drain.clone(),
                 caller_is_resident_pm,
@@ -3672,8 +3654,6 @@ fn run_monitor_config_set<E: CliEnv>(
             "auto_close_merged_issues_effective": prefs
                 .auto_close_merged_issues
                 .unwrap_or(prefs.autonomous_mode),
-            "auto_apply_updates": monitor.auto_apply_updates_enabled(),
-            "auto_apply_updates_effective": monitor.auto_apply_updates_enabled(),
             "launch_profile": prefs.launch_profile.as_ref().map(|profile| {
                 crate::issue_monitor_launch_profile_summary(&profile.clone().into())
             }),
@@ -6173,7 +6153,6 @@ mod tests {
         .expect("projection wire format deserializes");
 
         assert_eq!(status.gui_status, None);
-        assert_eq!(status.auto_apply_updates_effective, None);
         assert!(agent_status_blocked_by_claim(&status, 42).is_some());
         assert!(agent_status_blocked_by_claim(&status, 7).is_none());
         assert!(agent_status_blocked_by_claim(&status, 99).is_none());
@@ -9578,8 +9557,6 @@ mod tests {
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
             autonomous_mode: true,
-            auto_apply_updates: None,
-            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -9639,8 +9616,6 @@ mod tests {
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
             autonomous_mode: true,
-            auto_apply_updates: None,
-            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -9786,8 +9761,6 @@ mod tests {
                 label_excluded_count: 0,
                 label_excluded_issues: Vec::new(),
                 autonomous_mode: true,
-                auto_apply_updates: None,
-                auto_apply_updates_effective: None,
                 has_launch_profile: true,
                 quota_hold: None,
                 update_drain: None,
@@ -9907,8 +9880,6 @@ mod tests {
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
             autonomous_mode: true,
-            auto_apply_updates: None,
-            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -10193,8 +10164,6 @@ mod tests {
                 "max_active": 3,
                 "enabled": true,
                 "autonomous_mode": false,
-                "auto_apply_updates": false,
-                "auto_apply_updates_effective": false,
                 "has_launch_profile": false,
                 "launch_profile_summary": "configure before auto start",
                 "launch_profile_candidates": [],
@@ -11105,7 +11074,6 @@ mod tests {
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
-                auto_apply_updates: None,
             },
             &mut out,
         )
@@ -11138,7 +11106,6 @@ mod tests {
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
-                auto_apply_updates: None,
             },
             &mut out,
         )
@@ -11149,58 +11116,6 @@ mod tests {
         assert_eq!(ledgers(&cleared), ledgers(&before));
         let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply json");
         assert!(reply["update_drain"].is_null());
-    }
-
-    #[test]
-    fn issue_monitor_config_set_auto_apply_updates_writes_global_setting() {
-        let tmp = TempDir::new().unwrap();
-        let _home = ScopedGwtHome::set(tmp.path().join("home"));
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let mut env = crate::cli::TestEnv::new(repo.clone());
-        let mut out = String::new();
-        let code = run(
-            &mut env,
-            IssueCommand::MonitorConfigSet {
-                project_root: Some(repo.clone()),
-                allowed_labels: None,
-                enabled: None,
-                autonomous_mode: None,
-                max_active: None,
-                max_active_auto: false,
-                auto_close_merged_issues: None,
-                auto_apply_updates: Some(true),
-                launch_agent: None,
-                update_drain: None,
-            },
-            &mut out,
-        )
-        .unwrap();
-        assert_eq!(code, 0);
-        let path = gwt_core::paths::gwt_config_path();
-        assert!(
-            path.exists(),
-            "legacy config setter must persist app-wide config"
-        );
-        let saved: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(
-            saved
-                .get("auto_apply_updates")
-                .and_then(toml::Value::as_bool),
-            Some(true)
-        );
-        assert!(
-            crate::IssueMonitorState::new(crate::IssueMonitorConfig::default())
-                .status_view()
-                .auto_apply_updates
-        );
-        let prefs =
-            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
-                .unwrap();
-        assert!(
-            !prefs.autonomous_mode,
-            "global setting cannot authorize autonomous operation"
-        );
     }
 
     #[test]
@@ -11232,7 +11147,6 @@ mod tests {
                 max_active: Some(3),
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
@@ -11259,7 +11173,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
@@ -11297,7 +11210,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: true,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
@@ -11699,7 +11611,6 @@ mod tests {
                     max_active: None,
                     max_active_auto: false,
                     auto_close_merged_issues: None,
-                    auto_apply_updates: None,
                     launch_agent: None,
                     update_drain: None,
                 },
@@ -11786,7 +11697,6 @@ mod tests {
                     max_active: None,
                     max_active_auto: false,
                     auto_close_merged_issues: None,
-                    auto_apply_updates: None,
                     launch_agent: None,
                     update_drain: None,
                 },
@@ -12639,8 +12549,6 @@ mod tests {
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
             autonomous_mode: true,
-            auto_apply_updates: None,
-            auto_apply_updates_effective: None,
             has_launch_profile: true,
             quota_hold: None,
             update_drain: None,
@@ -14191,7 +14099,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             },
@@ -14234,7 +14141,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: Some("Claude".to_string()),
                 update_drain: None,
             },

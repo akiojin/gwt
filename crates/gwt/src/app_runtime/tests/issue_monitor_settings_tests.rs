@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn app_runtime_update_settings_protocol_belongs_to_update_domain() {
+    assert!(serde_json::from_value::<FrontendEvent>(serde_json::json!({
+        "kind": "set_issue_monitor_auto_apply_updates", "enabled": true
+    }))
+    .is_err());
+    for request in [
+        serde_json::json!({ "kind": "get_update_settings" }),
+        serde_json::json!({ "kind": "set_auto_apply_updates", "enabled": false }),
+    ] {
+        assert!(serde_json::from_value::<FrontendEvent>(request).is_ok());
+    }
+}
+
+#[test]
+fn app_runtime_update_settings_retains_live_drain_blockers() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        update_drain: Some(gwt::IssueMonitorUpdateDrain {
+            version: "99.0.0".into(),
+            since: "2026-10-14T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Manual,
+            automatic: Some(false),
+            blocking: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    assert!(
+        matches!(runtime.update_settings_event(Some(&repo)), BackendEvent::UpdateSettings { status, .. }
+        if status.update_drain.as_ref().unwrap().blocking.iter().any(|blocker| matches!(blocker, gwt::update_drain::UpdateBlocker::ActivePane { .. })))
+    );
+}
+
+#[test]
 fn app_runtime_system_settings_get_survives_a_corrupt_legacy_auto_apply_project() {
     let temp = tempdir().unwrap();
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());

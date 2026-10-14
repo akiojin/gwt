@@ -434,6 +434,9 @@ Common windows include:
   `Issues` section. `System > Auto-apply updates` applies across all projects
   when at least one open project has Autonomous enabled. Legacy project
   values migrate once: any enabled value enables the application setting.
+  System shows the saved and effective values and pending-update blockers.
+  Change the preference in the GUI; agents can read it with
+  `update.settings.status`. It is no longer an Issue Monitor setting.
 - `PR` — pull-request workflow surface; detailed list support depends on the
   cache-backed PR source as it lands
 

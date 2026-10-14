@@ -6936,8 +6936,10 @@ import { createUiStateStore } from "/ui-state-store.js";
             };
             renderSystemPanelInAllSettingsWindows();
             break;
-          case "system_settings":
+          case "update_settings":
             applyGlobalUpdateSettings(event);
+            break;
+          case "system_settings":
             // SPEC-1933 US-4: backend echoed the on-disk language value.
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
             if (
@@ -6967,7 +6969,6 @@ import { createUiStateStore } from "/ui-state-store.js";
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings_updated":
-            applyGlobalUpdateSettings(event);
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
             if (
               systemSettingsInteractionGuard.defer({
@@ -6991,6 +6992,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings_error":
+            applyGlobalUpdateSettings(event);
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
             if (
               systemSettingsInteractionGuard.defer({

@@ -989,7 +989,6 @@ export function createKnowledgeKanbanSurface({
         agent_capacity: null,
         total_candidates: 0,
         autonomous_mode: false,
-        auto_apply_updates: false,
         allowed_labels: [],
         label_excluded_count: 0,
         label_excluded_issues: [],
