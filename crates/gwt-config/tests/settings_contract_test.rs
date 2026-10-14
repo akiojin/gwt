@@ -7,6 +7,8 @@
 //! never touched.
 
 use std::num::NonZeroU16;
+#[cfg(unix)]
+use std::path::Path;
 
 use gwt_config::{ConfigError, Settings};
 
@@ -194,7 +196,7 @@ fn persist_embedded_port_preserves_unknown_keys_comments_and_minimal_shape() {
 #[cfg(unix)]
 #[test]
 fn persist_embedded_port_updates_symlink_target_without_replacing_link() {
-    use std::{os::unix::fs::symlink, path::Path};
+    use std::os::unix::fs::symlink;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let managed_dir = dir.path().join("managed");

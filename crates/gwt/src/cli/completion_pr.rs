@@ -63,7 +63,7 @@ pub(super) fn admit<E: CliEnv>(
         if fields.number != pr.number || fields.url != pr.url || fields.head_ref_name != branch {
             return Err(refuse("PR does not belong to the execution branch"));
         }
-        if snapshot.head_sha != verified_head {
+        if !verification::preserves_verified_head(&worktree, verified_head, &snapshot.head_sha) {
             return Err(refuse("PR head differs from the verified HEAD"));
         }
         if snapshot.state == PrState::Closed {
@@ -90,7 +90,7 @@ pub(super) fn admit<E: CliEnv>(
         .fetch_pr_head_sha(pr.number)
         .map_err(|error| refuse(&error.to_string()))?
         .as_deref()
-        != Some(verified_head)
+        != Some(snapshot.head_sha.as_str())
     {
         return Err(refuse(
             "PR head changed or became unreadable during validation",
@@ -106,6 +106,9 @@ pub(super) fn admit<E: CliEnv>(
             .fetch_completion_pr(pr.number)
             .map_err(|error| refuse(&format!("post-Ready PR read failed: {error}")))?;
         validate(&ready)?;
+        if ready.head_sha != snapshot.head_sha {
+            return Err(refuse("PR head changed during pr.ready"));
+        }
         if ready.state == PrState::Open && ready.inventory.is_draft {
             return Err(refuse("PR is still Draft after pr.ready"));
         }
@@ -113,7 +116,7 @@ pub(super) fn admit<E: CliEnv>(
             .fetch_pr_head_sha(pr.number)
             .map_err(|error| refuse(&error.to_string()))?
             .as_deref()
-            != Some(verified_head)
+            != Some(snapshot.head_sha.as_str())
         {
             return Err(refuse(
                 "PR head changed or became unreadable during pr.ready",

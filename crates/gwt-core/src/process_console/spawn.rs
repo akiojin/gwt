@@ -2102,7 +2102,9 @@ mod tests {
         let ready_parent = parent_file.clone();
         let ready_descendant = descendant_file.clone();
         let error = with_spawn_ready_for_tests(
-            Duration::from_secs(1),
+            // Reserve the full 1s cleanup grace for the positive reap case;
+            // a 1s fixture budget only leaves 250ms on a loaded Windows host.
+            Duration::from_secs(5),
             move || {
                 let parent = wait_for_pid_file_windows(&ready_parent);
                 let descendant = wait_for_pid_file_windows(&ready_descendant);
