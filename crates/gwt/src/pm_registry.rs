@@ -4146,7 +4146,7 @@ fn persist_untrusted_inspection_failure_if_safe(project_dir: &Path, error: &io::
 pub fn refresh_pm_worktree_for_repo_path(repo_path: &Path) -> io::Result<PmWorktreeRefreshOutcome> {
     let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
     let worktree = project_dir.join("pm/worktree");
-    let git_root = match gwt_git::worktree::main_worktree_root(repo_path) {
+    let git_root = match gwt_git::repository::git_health::validate_project_git(repo_path) {
         Ok(git_root) => git_root,
         Err(error) => {
             let error = io::Error::other(error.to_string());

@@ -718,6 +718,36 @@ fn pm_ensure_refuses_a_second_in_flight_worktree_preparation() {
 /// The synchronous path only logged, so a PM that never appeared — a Git error,
 /// a full disk — was indistinguishable from one that was simply disabled.
 #[test]
+fn pm_git_metadata_failure_waits_for_repair_then_starts_normally() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    fs::rename(repo.join(".git"), temp.path().join("saved-git")).unwrap();
+    fs::write(repo.join(".git"), "gitdir: /mnt/e/gwt/worktrees/develop\n").unwrap();
+    let first = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .unwrap_err()
+        .to_string();
+    let after_first = gwt_core::process::thread_git_spawn_count();
+    let second = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(gwt_core::process::thread_git_spawn_count(), after_first);
+    assert_eq!(first, second);
+    assert!(first.contains("Git needs attention"), "{first}");
+    assert!(first.contains(".git:1"), "{first}");
+    assert!(first.contains("E:/gwt/worktrees/develop"), "{first}");
+    fs::remove_file(repo.join(".git")).unwrap();
+    fs::rename(temp.path().join("saved-git"), repo.join(".git")).unwrap();
+    let prepared = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo).unwrap();
+    assert!(prepared.worktree.join(".git").is_file());
+}
+
+#[test]
 fn failed_pm_worktree_preparation_is_reported_and_spawns_nothing() {
     let _env_lock = env_test_lock()
         .lock()

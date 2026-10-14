@@ -1387,6 +1387,9 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) issue_monitor_claim_renewals_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Latest published read model; capacity refreshes preserve scan/queue authority.
     pub(crate) issue_monitor_status_cache: std::cell::RefCell<Option<gwt::IssueMonitorStatusView>>,
+    /// One actionable notice shared by PM preparation and Monitor snapshots.
+    pub(crate) project_attention_notice:
+        std::cell::RefCell<Option<(String, chrono::DateTime<chrono::Utc>)>>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
@@ -1487,6 +1490,7 @@ pub(crate) fn initial_project_states(
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
+                    project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
                         gwt_core::workspace_projection::WorkItemsCache::new(),
@@ -4139,6 +4143,7 @@ impl AppRuntime {
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
+                    project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
                         gwt_core::workspace_projection::WorkItemsCache::new(),
@@ -9800,10 +9805,80 @@ impl AppRuntime {
             return Vec::new();
         };
         self.remember_issue_monitor_status(Some(project_root), &status);
-        vec![OutboundEvent::project(
+        let mut events = self.project_attention_events(
+            project_root,
+            status.last_error.as_deref(),
+            status.last_scan_at.as_deref(),
+        );
+        events.push(OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::IssueMonitorStatus { status },
-        )]
+        ));
+        events
+    }
+
+    /// Read-only projection: the worker supplied the diagnosis; the GUI does
+    /// no Git discovery or metadata I/O while deduplicating the notice.
+    fn project_attention_events(
+        &self,
+        project_root: &Path,
+        error: Option<&str>,
+        validated_scan_at: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let Some(state) = self.project_state_for_root(project_root) else {
+            return Vec::new();
+        };
+        let Some(error) = error else {
+            let validated =
+                validated_scan_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok());
+            if state
+                .project_attention_notice
+                .borrow()
+                .as_ref()
+                .is_some_and(|(_, since)| validated.is_some_and(|at| at > *since))
+            {
+                state.project_attention_notice.take();
+            }
+            return Vec::new();
+        };
+        let start = if let Some(start) = error.find("Git needs attention") {
+            start
+        } else if error.starts_with("Issue Monitor authority recovery is blocked")
+            || error.starts_with("Issue Monitor scan stalled")
+        {
+            0
+        } else {
+            return Vec::new();
+        };
+        let diagnosis = &error[start..];
+        if state
+            .project_attention_notice
+            .borrow()
+            .as_ref()
+            .is_some_and(|(previous, _)| {
+                previous == diagnosis
+                    || (previous.starts_with("Git needs attention")
+                        && diagnosis.starts_with("Git needs attention"))
+            })
+        {
+            return Vec::new();
+        }
+        state
+            .project_attention_notice
+            .replace(Some((diagnosis.to_string(), chrono::Utc::now())));
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
+        vec![OutboundEvent::project(
+            context.project_key,
+            BackendEvent::IssueMonitorToast {
+                notification_transition: None,
+                level: "error".to_string(),
+                message: diagnosis.to_string(),
+                issue_number: None,
+            },
+        )
+        .with_error_project_root(&context.project_root)]
     }
 
     /// A daemon frame without capacity fields has no provenance for an Auto
@@ -9930,13 +10005,22 @@ impl AppRuntime {
         self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
         self.fill_update_drain_blocking(&mut status, &monitor);
         self.remember_issue_monitor_status(project_root, &status);
+        let mut attention_events = project_root
+            .map(|root| {
+                self.project_attention_events(
+                    root,
+                    status.last_error.as_deref(),
+                    status.last_scan_at.as_deref(),
+                )
+            })
+            .unwrap_or_default();
         let status_event = BackendEvent::IssueMonitorStatus {
             status: Box::new(status),
         };
         let inbox_event = BackendEvent::IssueMonitorInbox {
             items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
         };
-        match client_id {
+        let mut events = match client_id {
             Some(client_id) => vec![
                 OutboundEvent::reply(client_id.to_string(), status_event),
                 OutboundEvent::reply(client_id.to_string(), inbox_event),
@@ -9949,7 +10033,9 @@ impl AppRuntime {
                     ]
                 })
                 .unwrap_or_default(),
-        }
+        };
+        attention_events.append(&mut events);
+        attention_events
     }
 
     fn apply_issue_monitor_launch_profile_status(

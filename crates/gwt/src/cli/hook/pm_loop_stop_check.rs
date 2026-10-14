@@ -705,7 +705,10 @@ mod tests {
         let retry_now = chrono::Utc::now();
         record_degraded_refresh_at(
             &worktree,
-            &io::Error::new(io::ErrorKind::TimedOut, "operation deadline expired during git"),
+            &io::Error::new(
+                io::ErrorKind::TimedOut,
+                "operation deadline expired during git",
+            ),
             retry_now,
             prefs.worktree_freshness.clone(),
         );

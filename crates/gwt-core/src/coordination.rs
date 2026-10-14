@@ -2182,6 +2182,16 @@ fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
 }
 
 fn resolve_coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
+    if let Some(common) = crate::repo_hash::repository_common_dir(worktree_root).filter(|dir| {
+        dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
+    }) {
+        let root = if common.file_name().is_some_and(|name| name == ".git") {
+            common.parent()?
+        } else {
+            &common
+        };
+        return Some(dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
+    }
     // Issue #3629 AC-1/AC-2: a workspace-home layout root cannot resolve
     // through git — skip the guaranteed exit-128 spawn and use the child
     // bare repository directly.
@@ -6725,6 +6735,17 @@ mod tests {
             output.status.success(),
             "git init failed: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+
+        let before = COORDINATION_GIT_SPAWNS.with(std::cell::Cell::get);
+        assert_eq!(
+            resolve_coordination_repo_root(&repo),
+            Some(dunce::canonicalize(&repo).unwrap())
+        );
+        assert_eq!(
+            COORDINATION_GIT_SPAWNS.with(std::cell::Cell::get),
+            before,
+            "exact Git metadata must not spawn repository discovery in a prompt"
         );
 
         let snapshot = load_snapshot(&repo).unwrap();

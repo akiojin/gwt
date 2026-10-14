@@ -2334,6 +2334,7 @@ pub fn load_cached_issue_monitor_candidates(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitHubRemoteResolutionError {
+    MetadataNeedsAttention(String),
     CommandSpawnFailed(String),
     GitCommandFailed {
         status_code: Option<i32>,
@@ -2347,6 +2348,7 @@ pub enum GitHubRemoteResolutionError {
 impl fmt::Display for GitHubRemoteResolutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MetadataNeedsAttention(diagnosis) => f.write_str(diagnosis),
             Self::CommandSpawnFailed(error) => {
                 write!(f, "git remote get-url origin could not be started: {error}")
             }
@@ -2387,6 +2389,11 @@ fn github_remote_owner_and_repo_with_program(
     repo_path: &Path,
     program: impl Into<std::ffi::OsString>,
 ) -> Result<(String, String), GitHubRemoteResolutionError> {
+    if let Some(diagnosis) = gwt_git::repository::git_health::cached_metadata_failure(repo_path) {
+        return Err(GitHubRemoteResolutionError::MetadataNeedsAttention(
+            diagnosis,
+        ));
+    }
     let git_root = gwt_git::worktree::main_worktree_root(repo_path)
         .unwrap_or_else(|_| repo_path.to_path_buf());
     let output = gwt_core::process_console::spawn_logged_blocking(
@@ -2399,6 +2406,17 @@ fn github_remote_owner_and_repo_with_program(
             .forward_output(false),
     )
     .map_err(|error| GitHubRemoteResolutionError::CommandSpawnFailed(error.to_string()))?;
+    if !output.success() {
+        if let Some(diagnosis) = gwt_git::repository::git_health::record_metadata_failure(
+            repo_path,
+            "git remote get-url origin",
+            &output.stderr,
+        ) {
+            return Err(GitHubRemoteResolutionError::MetadataNeedsAttention(
+                diagnosis,
+            ));
+        }
+    }
     github_remote_owner_and_repo_from_get_url_output(
         output.success(),
         output.exit_code,
@@ -4943,6 +4961,59 @@ mod tests {
         assert_eq!(
             github_remote_owner_and_repo(tmp.path()).expect("workspace home origin"),
             ("owner".to_string(), "repo".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_remote_fatal_metadata_failure_waits_for_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let marker = repo.join(".git");
+        std::fs::write(&marker, "gitdir: /mnt/e/gwt/worktrees/develop\n").unwrap();
+        let fake_git = temp.path().join("git");
+        gwt_core::test_support::write_executable_script(
+            &fake_git,
+            r#"#!/bin/sh
+printf 'attempt\n' >> attempts
+if [ -e repaired ]; then
+  printf '%s\n' 'https://github.com/owner/repo.git'
+  exit 0
+fi
+printf '%s\n' "fatal: Invalid path '/mnt': No such file or directory" >&2
+exit 128
+"#,
+        )
+        .unwrap();
+        let first = github_remote_owner_and_repo_with_program(&repo, fake_git.as_os_str())
+            .unwrap_err()
+            .to_string();
+        let second = github_remote_owner_and_repo_with_program(&repo, fake_git.as_os_str())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("attempts")).unwrap(),
+            "attempt\n"
+        );
+        assert_eq!(first, second);
+        assert!(first.contains("Git needs attention"), "{first}");
+        assert!(first.contains("git remote get-url origin"), "{first}");
+        assert!(first.contains("Invalid path '/mnt'"), "{first}");
+        assert!(
+            first.contains(&format!("{}:1", marker.display())),
+            "{first}"
+        );
+        assert!(first.contains("E:/gwt/worktrees/develop"), "{first}");
+        std::fs::write(&marker, "gitdir: .git-admin\n").unwrap();
+        std::fs::write(repo.join("repaired"), "").unwrap();
+        assert_eq!(
+            github_remote_owner_and_repo_with_program(&repo, fake_git.as_os_str()).unwrap(),
+            ("owner".to_string(), "repo".to_string()),
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("attempts")).unwrap(),
+            "attempt\nattempt\n"
         );
     }
 

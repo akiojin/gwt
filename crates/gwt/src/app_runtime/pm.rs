@@ -2925,6 +2925,9 @@ impl AppRuntime {
         state
             .pending_pm_worktree_preparations
             .remove(continuation.project_root());
+        if result.is_ok() {
+            state.project_attention_notice.take();
+        }
         let tab_id = continuation.tab_id().to_string();
         let mut events = match result {
             Err(error) => {
@@ -3006,6 +3009,9 @@ impl AppRuntime {
         project_root: &Path,
         error: &str,
     ) -> Vec<OutboundEvent> {
+        if error.contains("Git needs attention") {
+            return self.project_attention_events(project_root, Some(error), None);
+        }
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
         };

@@ -14,6 +14,63 @@ test.describe("PM startup responsiveness (isolated checkout)", () => {
   test.setTimeout(180_000);
   test.use({ viewport: { width: 1440, height: 1000 } });
 
+  test("broken project Git configuration shows one diagnosis and recovers after repair", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info, {
+      async prepare({ home, bin, project, env }) {
+        env.LANG = "en_US.UTF-8";
+        env.LC_ALL = "en_US.UTF-8";
+        const git = (...args: string[]) => execFileSync("git", ["-C", project, ...args], { env, encoding: "utf8" });
+        const origin = join(home, "origin.git");
+        git("clone", "--bare", "--quiet", project, origin);
+        git("remote", "add", "origin", origin);
+        git("fetch", "--quiet", "origin");
+        git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+        const gh = join(bin, "gh");
+        writeFileSync(gh, "#!/bin/sh\nif [ \"$1 $2\" = 'auth token' ]; then exit 1; fi\nif [ \"$1\" = '--version' ]; then echo 'gh version 2.80.0'; else echo '[]'; fi\n");
+        chmodSync(gh, 0o755);
+      },
+      async beforeStart({ preferences }) {
+        await writeFile(join(preferences, "pm.json"), JSON.stringify({ settings: {
+          auto_start: false, launch_profile: { agent_id: "codex" },
+        } }));
+      },
+    });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const config = join(fixture.project, ".git", "config");
+    const healthy = await readFile(config, "utf8");
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+      await writeFile(config, `${healthy}\n[core\n`);
+      await page.locator("#op-pm-entry").click();
+      const notices = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .filter(({ payload }: any) => payload.kind === "issue_monitor_toast" && payload.message?.includes("Git needs attention"))
+        .map(({ payload }: any) => payload.message as string));
+      await expect.poll(notices, { timeout: 30_000 }).toHaveLength(1);
+      expect((await notices())[0]).toContain("git rev-parse --git-common-dir");
+      expect((await notices())[0]).toContain("Git stderr:");
+      await expect(page.locator('.workspace-window[data-pm="true"]')).toHaveCount(0);
+      const pmStatusCount = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .filter(({ payload }: any) => payload.kind === "pm_status").length);
+      const previousStatusCount = await pmStatusCount();
+      await page.locator("#op-pm-entry").click();
+      await expect.poll(pmStatusCount).toBeGreaterThan(previousStatusCount);
+      expect(await notices()).toHaveLength(1);
+      await writeFile(config, healthy);
+      await page.locator("#op-pm-entry").click();
+      await expect(page.locator('.workspace-window[data-pm="true"]')).toHaveCount(1, { timeout: 90_000 });
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
+      expect(await readFile(config, "utf8")).toBe(healthy);
+      expect(errors).toEqual([]);
+      await info.attach("recovered-pm", { body: await page.screenshot(), contentType: "image/png" });
+    } finally {
+      await writeFile(config, healthy);
+      await fixture.stop();
+    }
+  });
+
   test("788 unrelated registrations preserve canonical PM launch and a bounded prompt hook", async ({ page }, info) => {
     let preferences = "";
     let childEnv: NodeJS.ProcessEnv = {};
@@ -22,6 +79,8 @@ test.describe("PM startup responsiveness (isolated checkout)", () => {
     }).trim();
     const fixture = await startExactRelaunchFixture(info, {
       async prepare({ home, bin, project, env }) {
+        env.LANG = "en_US.UTF-8";
+        env.LC_ALL = "en_US.UTF-8";
         childEnv = env;
         // Only local Git and this deterministic gh executable are available.
         const gh = join(bin, "gh");

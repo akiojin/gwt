@@ -4639,6 +4639,9 @@ pub struct IssueMonitorState {
     #[serde(default, skip)]
     legacy_git_launch_failure_migration_tombstones: BTreeMap<u64, String>,
     last_scan_at: Option<String>,
+    /// A startup authority failure is a scan blocker, not a completed scan.
+    #[serde(skip)]
+    scan_recovery_blocked: bool,
     /// Issue #3628 (AC-5): when the fleet went to zero running agents while it
     /// still had runnable work. `None` while the fleet is healthy.
     #[serde(default)]
@@ -7090,6 +7093,7 @@ impl IssueMonitorState {
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             legacy_git_launch_failure_migration_tombstones: BTreeMap::new(),
             last_scan_at: None,
+            scan_recovery_blocked: false,
             agent_blackout_since: None,
             last_error: None,
             launch_auth_required: false,
@@ -9884,6 +9888,11 @@ impl IssueMonitorState {
     pub fn record_control_commit_error(&mut self, error: impl Into<String>) {
         self.last_error = Some(error.into());
         self.launch_auth_required = false;
+    }
+
+    pub(crate) fn record_authority_recovery_blocked(&mut self, error: impl Into<String>) {
+        self.scan_recovery_blocked = true;
+        self.record_control_commit_error(error);
     }
 
     pub fn record_launch_auth_required(&mut self, now: impl Into<String>) {
@@ -12943,6 +12952,12 @@ impl IssueMonitorState {
         status.gui_status = Some(self.status_view_at(now));
         status.scan_stall = self.scan_stall_at(now);
         status.agent_blackout = self.agent_blackout_at(now);
+        if self.scan_recovery_blocked && status.enabled {
+            status.stall_reason = Some(IssueMonitorStallReason::Unknown);
+            status.gui_action = None;
+            status.slot_occupancy = None;
+            status.active_launches_incomplete = true;
+        }
         status
     }
 
@@ -13093,6 +13108,9 @@ impl IssueMonitorState {
         if !self.config.enabled {
             return None;
         }
+        if self.scan_recovery_blocked {
+            return self.last_error.clone();
+        }
         let Some(last_scan_at) = self.last_scan_at.as_deref() else {
             // The #3633 state itself: enabled, queued work, and no driver has
             // ever completed a scan for this project.
@@ -13116,12 +13134,9 @@ impl IssueMonitorState {
     /// caller-supplied clock so daemon publication and tests stay deterministic.
     pub fn status_view_at(&self, now: &str) -> IssueMonitorStatusView {
         let mut status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
-        // Issue #3628 (AC-5): set before the current-error early return below. A
-        // total outage always leaves a failure in `last_error`, so anything
-        // reported after that guard is unreachable in exactly the situation it
-        // exists for.
+        // Fleet blackout is independent of the current scan/error state.
         status.agent_blackout = self.agent_blackout_at(now);
-        if !status.enabled || matches!(status.state.as_str(), "error" | "auth_required") {
+        if !status.enabled || self.scan_recovery_blocked || status.state == "auth_required" {
             return status;
         }
         let Some(last_scan_at) = status.last_scan_at.as_deref() else {
@@ -13135,9 +13150,11 @@ impl IssueMonitorState {
         };
         if elapsed_secs >= self.config.poll_interval_secs.saturating_mul(3) {
             status.state = "error".to_string();
-            status.last_error = Some(format!(
-                "Issue Monitor scan stalled; last scan at {last_scan_at}"
-            ));
+            let diagnosis = format!("Issue Monitor scan stalled; last scan at {last_scan_at}");
+            status.last_error = Some(match status.last_error.take() {
+                Some(failure) => format!("{diagnosis}; previous failure: {failure}"),
+                None => diagnosis,
+            });
         }
         status
     }
