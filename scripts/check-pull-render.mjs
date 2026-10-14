@@ -55,7 +55,7 @@ export function scanModule(source, file, { modules, rootName } = {}) {
     scopes.set(node, current);
     if (node.type === "ImportDeclaration") {
       for (const specifier of node.specifiers) if (specifier.type === "ImportSpecifier") current.bindings.set(specifier.local.name,
-        { imported: specifier.imported.name, module: join(dirname(file), node.source.value.replace(/^\//, "")) });
+        { imported: specifier.imported.name, module: join(dirname(file), node.source.value.replace(/^\//, "")).replaceAll("\\", "/") });
     }
     if (node.type === "VariableDeclarator" && node.id.type === "Identifier") {
       const fn = functionPattern.test(node.init?.type || "") ? node.init : null;

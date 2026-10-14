@@ -1010,6 +1010,8 @@ export function createKnowledgeKanbanSurface({
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
+      // Receive publishes invalidation; the view owns projection/layout reads.
+      const knowledgeEventRefreshModel = createUiStateStore({ kind: null, revision: 0 });
 
       function issueMonitorStateText(state) {
         switch (String(state || "")) {
@@ -1293,10 +1295,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function scheduleIssueMonitorProjectionRefresh() {
-        for (const state of knowledgeBridgeStateMap.values()) {
-          if (normalizeKnowledgeKind(state.kind) === "issue") state.eventRefreshDirty = true;
-        }
-        scheduleKnowledgeEventRefresh();
+        knowledgeEventRefreshModel.update(model => ({ kind: "monitor", revision: model.revision + 1 }));
       }
 
       // SPEC #3885 Phase 5 (T-033 / FR-022): "+ New" registers an Issue from a
@@ -1916,6 +1915,10 @@ export function createKnowledgeKanbanSurface({
       }
 
       function scheduleKnowledgeRelatedWorkRefresh(forceReload = false) {
+        knowledgeEventRefreshModel.update(model => ({ kind: "projection", forceReload, revision: model.revision + 1 }));
+      }
+
+      function refreshKnowledgeWorkSnapshot(forceReload) {
         const projection = getActiveWorkProjection?.();
         const issueKey = workAssociationKey(projection, "issue");
         const prKey = workAssociationKey(projection, "pr");
@@ -1970,6 +1973,10 @@ export function createKnowledgeKanbanSurface({
 
       // Called after document, project-tab, and window visibility has settled.
       function resumeKnowledgeEventRefresh() {
+        knowledgeEventRefreshModel.update(model => ({ kind: "resume", revision: model.revision + 1 }));
+      }
+
+      function resumeVisibleKnowledgeEventRefresh() {
         if (relatedWorkRefreshTimer !== null) return;
         if ([...knowledgeBridgeStateMap].some(([id, state]) =>
           isKnowledgeWindowVisible(id) &&
@@ -5279,6 +5286,16 @@ export function createKnowledgeKanbanSurface({
       }
 
       issueMonitorModel.subscribe(model => model.status, syncIssueMonitorErrorReport);
+      knowledgeEventRefreshModel.subscribe(model => model, ({ kind, forceReload }) => {
+        if (kind === "projection") refreshKnowledgeWorkSnapshot(forceReload);
+        if (kind === "monitor") {
+          for (const state of knowledgeBridgeStateMap.values()) {
+            if (normalizeKnowledgeKind(state.kind) === "issue") state.eventRefreshDirty = true;
+          }
+          scheduleKnowledgeEventRefresh();
+        }
+        if (kind === "resume") resumeVisibleKnowledgeEventRefresh();
+      });
       issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly, focusPreview }) => {
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
