@@ -56,8 +56,12 @@ async function toggleMonitor(page: Page, enabled: boolean): Promise<void> {
 }
 
 async function selectCapacityMode(page: Page, mode: "auto" | "manual"): Promise<void> {
+  const control = panel(page, "issues").getByLabel("Max active mode", { exact: true });
+  // Match native dropdown interaction so status echoes retain the editing control.
+  await control.focus();
+  await expect(control).toBeFocused();
   const before = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
-  await panel(page, "issues").getByLabel("Max active mode", { exact: true }).selectOption(mode);
+  await control.selectOption(mode);
   await page.waitForFunction(({ before, mode }) => ((window as any).__gwtPlaywrightMessages ?? [])
     .some(({ sequence, payload }: any) => sequence > before && payload.kind === "issue_monitor_status"
       && (payload.status.max_active_agents_override == null ? "auto" : "manual") === mode),
