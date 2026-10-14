@@ -230,20 +230,54 @@ test.describe("Issue #5322 Settings", () => {
         await expect(panel(page, "system")).toContainText("Application settings");
         await expect(panel(page, "system")).toContainText(/at least one open project.*Autonomous/);
 
-        // The retained JSON setter must also refresh already-open Settings.
+        await expect(panel(page, "system")).toContainText("Saved: On · Effective: On");
+        await expect(panel(page, "system")).toContainText("No update pending");
+        // Update policy is GUI-only; the PM has a dedicated read-only view.
         const cliEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
           !/^(GWT_|CODEX_|CLAUDE_|GIT_)/i.test(key)
           && !["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"].includes(key.toUpperCase())));
-        const cli = spawnSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
+        const runCli = (operation: string, params: Record<string, unknown> = {}) => spawnSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
           cwd: a.root, env: { ...cliEnv, HOME: backend.home, USERPROFILE: backend.home },
-          input: JSON.stringify({ schema_version: 1, operation: "issue.monitor.config.set", params: { auto_apply_updates: false } }),
+          input: JSON.stringify({ schema_version: 1, operation, params }),
           encoding: "utf8", timeout: 30_000,
         });
-        expect(cli.status, cli.stderr).toBe(0);
-        expect(JSON.parse(cli.stdout).ok).toBe(true);
-        for (const current of [page, pageB]) await sendLiveGwtEvent(current, { kind: "list_issue_monitor" });
+        for (const enabled of [false, true]) {
+          const rejected = runCli("issue.monitor.config.set", { auto_apply_updates: enabled });
+          expect(rejected.status).not.toBe(0);
+          expect(rejected.stderr + rejected.stdout).toMatch(/unknown parameter/i);
+          expect(rejected.stderr + rejected.stdout).toContain("Settings > System");
+        }
+        const status = runCli("update.settings.status");
+        expect(status.status, status.stderr).toBe(0);
+        expect(JSON.parse(JSON.parse(status.stdout).output)).toMatchObject({
+          auto_apply_updates: true, auto_apply_updates_effective: true,
+        });
+        expect(await readPreferences(a)).not.toHaveProperty("auto_apply_updates");
+        await expect(updates).toBeChecked();
+        const configPath = join(backend.home, ".gwt/config.toml");
+        const savedConfig = await readFile(configPath, "utf8");
+        try {
+          await writeFile(configPath, "invalid = [\n");
+          await updates.evaluate((input: HTMLInputElement) => input.click());
+          await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+            .some(({ payload }: any) => payload.kind === "system_settings_error"));
+          await expect(updates).toBeChecked();
+        } finally { await writeFile(configPath, savedConfig); }
+        await updates.uncheck();
         await expect(updates).not.toBeChecked();
         await expect(updatesB).not.toBeChecked();
+        await expect(panel(page, "system")).toContainText("Saved: Off · Effective: Off");
+        // A pending update targets a future version; applied-version holds
+        // are deliberately reconciled away by the existing runtime policy.
+        const drain = runCli("issue.monitor.config.set", {
+          update_drain: { reason: "manual", version: "99.0.0", automatic: false },
+        });
+        expect(drain.status, drain.stderr).toBe(0);
+        await sendLiveGwtEvent(page, { kind: "get_update_settings" });
+        await expect(panel(page, "system")).toContainText(/Update .* pending/);
+        expect(runCli("issue.monitor.config.set", { update_drain: false }).status).toBe(0);
+        await sendLiveGwtEvent(page, { kind: "get_update_settings" });
+        await expect(panel(page, "system")).toContainText("No update pending");
         await updates.check();
         await expect(updatesB).toBeChecked();
 

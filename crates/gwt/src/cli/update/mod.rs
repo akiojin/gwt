@@ -1,4 +1,4 @@
-//! `gwtd update` — manual update check and apply.
+//! Manual update check/apply and read-only update settings status.
 //!
 //! SPEC-1942 SC-027 split: `mod.rs` keeps the public CLI entry points
 //! (`UpdateRunMode`, `parse_args`, `run`, `run_internal_apply_update`,
@@ -13,6 +13,27 @@ mod tests;
 use gwt_core::update::{InstallerKind, PreparedPayload, UpdateState};
 
 use ops::{RealUpdateCliOps, UpdateCliOps};
+
+pub(super) fn run_settings_status<E: super::CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    out: &mut String,
+) -> Result<i32, gwt_github::SpecOpsError> {
+    let requested = project_root.unwrap_or_else(|| env.repo_path());
+    let canonical = std::fs::canonicalize(requested).map_err(super::io_as_api_error)?;
+    if !canonical.is_dir() {
+        return Err(super::io_as_api_error(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "update.settings.status project_root must be a directory",
+        )));
+    }
+    let project_root = gwt_core::paths::resolve_current_worktree_root(&canonical);
+    gwt_core::paths::record_operation_project_store(&project_root);
+    let status = crate::update_settings::status(&project_root).map_err(super::io_as_api_error)?;
+    out.push_str(&serde_json::to_string(&status).map_err(super::serde_as_api_error)?);
+    out.push('\n');
+    Ok(0)
+}
 
 /// Parsed form of `gwtd update` arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]

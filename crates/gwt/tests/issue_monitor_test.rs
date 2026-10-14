@@ -1389,14 +1389,14 @@ fn scan_candidates_ignores_claims_until_launch_time() {
 }
 
 #[test]
-fn agent_and_gui_status_share_the_global_auto_apply_projection() {
+fn agent_and_gui_status_omit_auto_apply_updates() {
     let temp = tempfile::tempdir().unwrap();
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-    for (saved, now) in [
-        (Some(false), "2026-07-27T10:00:29Z"),
-        (None, "2026-07-27T10:00:30Z"),
+    for (enabled, now) in [
+        (false, "2026-07-27T10:00:29Z"),
+        (true, "2026-07-27T10:00:30Z"),
     ] {
-        gwt::update_settings::set(Some(saved.unwrap_or(true))).unwrap();
+        gwt::update_settings::set(Some(enabled)).unwrap();
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig {
                 poll_interval_secs: 10,
@@ -1405,7 +1405,6 @@ fn agent_and_gui_status_share_the_global_auto_apply_projection() {
             IssueMonitorPrefs {
                 enabled: true,
                 autonomous_mode: true,
-                auto_apply_updates: saved,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -1419,16 +1418,11 @@ fn agent_and_gui_status_share_the_global_auto_apply_projection() {
             serde_json::to_value(&gui).expect("serialize GUI status")
         );
         assert_eq!(agent["last_error"], serde_json::Value::Null);
-        assert_eq!(
-            agent.get("auto_apply_updates"),
-            Some(&serde_json::json!(saved.unwrap_or(true))),
-            "every projection reads the same global setting"
-        );
-        assert_eq!(
-            agent["auto_apply_updates_effective"],
-            serde_json::json!(gui.auto_apply_updates)
-        );
-        assert_eq!(gui.auto_apply_updates, saved.unwrap_or(true));
+        let gui = serde_json::to_value(gui).expect("serialize GUI status");
+        for status in [&agent, &gui] {
+            assert!(status.get("auto_apply_updates").is_none());
+            assert!(status.get("auto_apply_updates_effective").is_none());
+        }
     }
 }
 

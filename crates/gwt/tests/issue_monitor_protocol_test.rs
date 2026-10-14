@@ -256,7 +256,6 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         status: Box::new(IssueMonitorStatusView {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
-            auto_apply_updates: false,
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
