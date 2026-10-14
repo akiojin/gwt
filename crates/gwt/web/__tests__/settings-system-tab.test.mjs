@@ -102,7 +102,7 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
     { kind: "set_agent_auto_update", enabled: true },
   ]);
   assert.match(panel.textContent, /next.*startup/i);
-  assert.match(panel.textContent, /npm/i);
+  assert.match(panel.textContent, /installed agents with a verified update route/i);
   assert.match(panel.textContent, /agent windows/i);
   const supportedAgentsModel = createUiStateStore({
     agents, autoUpdate: false, maintenanceByAgent: {},
