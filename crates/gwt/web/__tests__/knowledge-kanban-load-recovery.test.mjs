@@ -1314,6 +1314,119 @@ test("a new query filters baseEntries locally before semantic results arrive (T-
   });
 });
 
+test("unchanged entry revisions retain rows while completing loads and preserving selection/search", async () => {
+  const mod = await importSurfaceModule();
+  const { document } = parseHTML(`
+    <section id="knowledge-window"><div class="issue-bridge-root">
+      <button data-action="refresh-knowledge"></button>
+      <input class="knowledge-search" />
+      <div class="knowledge-status"></div><div class="knowledge-list"></div>
+      <div class="knowledge-detail-pane"></div>
+    </div></section>
+  `);
+  const originalDocument = globalThis.document;
+  globalThis.document = document;
+  try {
+    await withPatchedTimersAsync(async ({ fire }) => {
+      const element = document.getElementById("knowledge-window");
+      const sent = [];
+      const createNode = (tag, className = "", text = "") => {
+        const node = document.createElement(tag);
+        node.className = className;
+        node.textContent = text;
+        return node;
+      };
+      const surface = createSurface(mod, sent, "issue", {
+        windowMap: new Map([["win-1", element]]), createNode,
+        createKnowledgeMarkdownBody: () => document.createElement("div"),
+      });
+      const state = surface.ensureKnowledgeBridgeState("win-1", "issue");
+      const receive = (revision, entries = [ROW_A, ROW_B]) => surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+        request_id: state.loadRequestId, revision, entries,
+        selected_number: ROW_A.number, refresh_enabled: true,
+      });
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v1");
+      surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
+      const originalRow = element.querySelector('[data-issue-number="2"]');
+      const refresh = element.querySelector('[data-action="refresh-knowledge"]');
+      refresh.disabled = true;
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v1");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === originalRow,
+        "same revision must preserve list DOM nodes");
+      assert.equal(state.loading, false);
+      assert.equal(state.refreshing, false);
+      assert.equal(state.loadRecoveryTimer, null);
+      assert.equal(refresh.disabled, false, "load completion must re-enable refresh");
+      assert.equal(state.selectedNumber, ROW_B.number);
+      assert.equal(element.querySelector(".knowledge-detail-title").textContent, ROW_B.title);
+      assert.equal(originalRow.classList.contains("selected"), true);
+
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+        request_id: state.loadRequestId, message: "Temporary load error",
+      });
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v1");
+      assert.ok(!element.querySelector(".knowledge-list").textContent.includes("Issue load failed"),
+        "a later successful response must clear the rendered load error");
+
+      receive("rows-v2", [ROW_A, { ...ROW_B, title: "Updated beta" }]);
+      assert.ok(element.querySelector('[data-issue-number="2"]') !== originalRow);
+      assert.ok(element.querySelector(".knowledge-list").textContent.includes("Updated beta"));
+      const updatedRow = element.querySelector('[data-issue-number="2"]');
+      receive(undefined, [ROW_A, { ...ROW_B, title: "Legacy beta" }]);
+      assert.ok(element.querySelector('[data-issue-number="2"]') !== updatedRow,
+        "events without revision retain their full-render compatibility path");
+
+      receive("rows-v2");
+      state.query = "Alpha";
+      surface.scheduleKnowledgeSearch("win-1", "issue");
+      const filteredRow = element.querySelector('[data-issue-number="1"]');
+      assert.ok(filteredRow);
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v2");
+      assert.ok(element.querySelector('[data-issue-number="1"]') === filteredRow,
+        "same revision must retain filtered list nodes while resuming a cancelled search timer");
+      assert.equal(state.query, "Alpha");
+      assert.deepEqual(state.entries.map(entry => entry.number), [ROW_A.number]);
+      fire(timer => timer.delay === 250);
+      assert.equal(sent.at(-1).kind, "search_knowledge_bridge",
+        "a list completion must still dispatch the queued query");
+      assert.equal(sent.at(-1).query, "Alpha");
+      assert.ok(element.querySelector('[data-issue-number="1"]') === filteredRow,
+        "resuming and dispatching the query must preserve the filtered list nodes");
+      assert.equal(state.selectedNumber, ROW_B.number);
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_search_results", id: "win-1", knowledge_kind: "issue",
+        query: "Alpha", request_id: sent.at(-1).request_id,
+        entries: [ROW_B, ROW_A], refresh_enabled: true,
+      });
+      const semanticRow = element.querySelector('[data-issue-number="2"]');
+      assert.ok(semanticRow);
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v2");
+      assert.deepEqual(state.entries.map(entry => entry.number), [ROW_B.number, ROW_A.number],
+        "same base revision must preserve authoritative semantic results");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
+        "same revision must retain semantic result nodes");
+      receive("rows-v2");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
+        "an already reserved search must not redraw the list");
+      fire(timer => timer.delay === 250);
+      receive("rows-v2");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
+        "an in-flight search must not redraw the list");
+      assert.equal(state.queuedSearchIntent, null, "the in-flight search must not be duplicated");
+      surface.clearKnowledgeBridgeState("win-1");
+    });
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
 test("500-row selection keeps list node identity and updates the right pane within p95 50ms", async () => {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML(`

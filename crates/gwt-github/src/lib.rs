@@ -28,8 +28,8 @@ pub mod spec_validate;
 
 pub use body::{ParseError as BodyParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
 pub use cache::{
-    Cache, CacheEntry, CacheError, CacheGeneration, CacheMeta, IssueValidationReceipt,
-    ValidatedCacheEntry, VersionedCacheEntry,
+    Cache, CacheEntry, CacheError, CacheGeneration, CacheMeta, IssueSummary,
+    IssueValidationReceipt, ValidatedCacheEntry, VersionedCacheEntry,
 };
 pub use client::{
     fake::FakeIssueClient, ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient,
