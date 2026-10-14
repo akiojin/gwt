@@ -864,6 +864,60 @@ fn restore_drain_with_no_restored_windows_finishes_inside_500ms() {
 }
 
 #[test]
+fn pm_startup_worker_keeps_its_budget_when_the_parent_deadline_has_expired() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .expect("trusted PM checkout with managed assets")
+        .worktree;
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    {
+        let expired = gwt_core::operation_deadline::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(expired);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expired);
+        let error = gwt_core::operation_deadline::ensure_remaining("parent dispatch")
+            .expect_err("the parent budget really has expired");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        runtime.spawn_pm_worktree_preparation(
+            super::super::pm::PmWorktreeContinuation::FreshSpawn {
+                tab_id: "tab-1".to_string(),
+                project_root: repo.clone(),
+            },
+        );
+    }
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    let windows = &runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows;
+    assert_eq!(windows.len(), 1, "the worker must prepare and start the PM");
+    assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert!(worktree.join(".git").is_file());
+    assert_eq!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn pm_ensure_refreshes_existing_unregistered_pm_worktree_to_latest_origin_develop() {
     let _pm_gate = super::super::pm::test_gate::PmEnsureTestGuard::enable();
     let _env_lock = env_test_lock()

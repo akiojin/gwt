@@ -823,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_4686_user_prompt_defers_a_contended_pm_refresh() {
+    fn issue_4975_user_prompt_reads_snapshot_while_pm_refresh_is_contended() {
         use fs2::FileExt;
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -853,12 +853,12 @@ mod tests {
 
         let output = result.expect("refresh contention must not fail the prompt");
         let HookOutput::HookSpecificAdditionalContext { text, .. } = output else {
-            panic!("deferred refresh must be visible: {output:?}");
+            panic!("unobserved freshness must be visible: {output:?}");
         };
-        assert!(text.contains("refresh deferred"), "{text}");
-        assert!(text.contains("pid=unknown"), "legacy holder: {text}");
-        // Once acquisition succeeds, an invalid PM Git identity still fails.
-        assert!(handle_with_input("UserPromptSubmit", "{}", &worktree, None).is_err());
+        assert!(text.contains("last recorded freshness"), "{text}");
+        assert!(text.contains("state=Unknown"), "{text}");
+        // Prompt reads a snapshot; launch and completed Stop validate Git.
+        assert!(handle_with_input("UserPromptSubmit", "{}", &worktree, None).is_ok());
     }
 
     #[test]

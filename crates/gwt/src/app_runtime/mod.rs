@@ -3568,13 +3568,161 @@ const ISSUE_MONITOR_SCAN_BUDGET: std::time::Duration = std::time::Duration::from
 /// everything it had just learned and the monitor never advanced.
 const ISSUE_MONITOR_COMMIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Issue #3934: run the generation reaper on the Issue Monitor scan cadence.
+/// Recovery is independent of scan frequency, with no queued catch-up jobs.
+const SCAN_GENERATION_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Default)]
+struct ScanGenerationReaperState {
+    running: bool,
+    last_started: Option<Instant>,
+}
+
+impl ScanGenerationReaperState {
+    fn try_reserve(&mut self, now: Instant) -> bool {
+        if self.running
+            || self.last_started.is_some_and(|last| {
+                now.saturating_duration_since(last) < SCAN_GENERATION_REAPER_INTERVAL
+            })
+        {
+            return false;
+        }
+        self.running = true;
+        self.last_started = Some(now);
+        true
+    }
+}
+
+fn scan_generation_reapers() -> &'static Mutex<HashMap<PathBuf, ScanGenerationReaperState>> {
+    static REAPERS: std::sync::OnceLock<Mutex<HashMap<PathBuf, ScanGenerationReaperState>>> =
+        std::sync::OnceLock::new();
+    REAPERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct ScanGenerationReaperFlight(PathBuf);
+
+impl Drop for ScanGenerationReaperFlight {
+    fn drop(&mut self) {
+        if let Some(state) = scan_generation_reapers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&self.0)
+        {
+            state.running = false;
+        }
+        #[cfg(test)]
+        scan_generation_reaper_completed().notify_all();
+    }
+}
+
+/// The prefs path already identifies the canonical project store, so linked
+/// worktrees and duplicate tabs share one reservation without another Git probe.
+fn enqueue_scan_generation_reaper(project_root: &Path, prefs_path: &Path) {
+    if !scan_generation_reapers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(prefs_path.to_path_buf())
+        .or_default()
+        .try_reserve(Instant::now())
+    {
+        return;
+    }
+    // Captured before spawn: even an OS spawn failure drops the reservation.
+    // Unwinding the worker releases it as well, without queuing another worker.
+    let flight = ScanGenerationReaperFlight(prefs_path.to_path_buf());
+    let project_root = project_root.to_path_buf();
+    #[cfg(test)]
+    let user_home = gwt_config::home::user_home().expect("test user home");
+    if let Err(error) = std::thread::Builder::new()
+        .name("gwt-generation-reaper".to_string())
+        .spawn(move || {
+            let _flight = flight;
+            // The recovery can outlive the scan fixture's process-global HOME.
+            #[cfg(test)]
+            let _home = gwt_core::test_support::ScopedGwtHome::set(user_home);
+            reap_scan_defunct_active_generations(&project_root);
+        })
+    {
+        tracing::warn!(%error, "could not schedule scan Active generation recovery");
+    }
+}
+
+#[cfg(test)]
+fn scan_generation_reaper_completed() -> &'static std::sync::Condvar {
+    static COMPLETED: std::sync::Condvar = std::sync::Condvar::new();
+    &COMPLETED
+}
+
+#[cfg(test)]
+fn wait_scan_generation_reaper(prefs_path: &Path) {
+    let states = scan_generation_reapers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (states, _) = scan_generation_reaper_completed()
+        .wait_timeout_while(states, std::time::Duration::from_secs(30), |states| {
+            states.get(prefs_path).is_some_and(|state| state.running)
+        })
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        !states.get(prefs_path).is_some_and(|state| state.running),
+        "generation recovery did not finish"
+    );
+}
+
+#[cfg(test)]
+type ScanGenerationReaperTestHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+fn scan_generation_reaper_test_hooks(
+) -> &'static Mutex<HashMap<PathBuf, ScanGenerationReaperTestHook>> {
+    static HOOKS: std::sync::OnceLock<Mutex<HashMap<PathBuf, ScanGenerationReaperTestHook>>> =
+        std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+struct ScopedScanGenerationReaperTestHook(PathBuf);
+
+#[cfg(test)]
+impl ScopedScanGenerationReaperTestHook {
+    fn set(prefs_path: &Path, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        assert!(scan_generation_reaper_test_hooks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(prefs_path.to_path_buf(), Arc::new(hook))
+            .is_none());
+        Self(prefs_path.to_path_buf())
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedScanGenerationReaperTestHook {
+    fn drop(&mut self) {
+        scan_generation_reaper_test_hooks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+/// Issue #3934: recover generations after startup without changing the exact
+/// liveness checks and execution leases used by startup recovery.
 ///
 /// The scan worker has no `AppRuntime`, so it protects nothing by identity;
 /// it does not need to. Startup's protection list exists only for sessions it
 /// is about to restore, and every window this process already owns publishes a
 /// live runtime sidecar that the exact revalidation reads as `Live`.
 fn reap_scan_defunct_active_generations(project_root: &Path) {
+    #[cfg(test)]
+    {
+        let hook = scan_generation_reaper_test_hooks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
+            .cloned();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     let worktrees = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
         Ok(entries) => entries
             .into_iter()
@@ -3645,19 +3793,12 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
         .map_err(|error| format!("load Issue Monitor prefs failed: {error}"))?;
-    // Issue #3934: reclaim the execution generations of holders that are gone
-    // before this tick decides what it may launch. The startup reaper used to
-    // be the only one, so a holder Session that died between GUI restarts kept
-    // its owner permanently unlaunchable and the only recovery left was
-    // registering the same work under a fresh Issue number.
-    //
-    // Issue #3964 AC-1: this runs before the authority probe on purpose. The
-    // reaper is local recovery under its own leases, not a scan effect, and a
-    // live daemon — which owns scan authority in production and has no reaper
-    // of its own — used to make this worker defer before it ever got here, so
-    // the scan-cadence recovery never ran after startup.
+    // Issue #4975 AC-A3: worktree inventory and recovery have their own worker
+    // so a slow holder inspection cannot delay this Monitor tick. Reserve
+    // before the authority probe (#3964): daemon-owned scans still need local
+    // recovery, which retains its exact liveness revalidation and own leases.
     if prefs.enabled {
-        reap_scan_defunct_active_generations(project_root);
+        enqueue_scan_generation_reaper(project_root, &prefs_path);
     }
 
     // Cheap authority probe before any remote I/O. The lease is intentionally
@@ -7320,9 +7461,36 @@ impl AppRuntime {
 
     /// RuntimeHook records arrival immediately, then resolves and publishes the
     /// heartbeat outside the GUI callback. A replaced pane cannot use its queued job.
-    pub(crate) fn schedule_runtime_hook_heartbeat(&mut self, project_root: &Path, window_id: &str) {
+    pub(crate) fn schedule_runtime_hook_heartbeat(
+        &mut self,
+        project_root: &Path,
+        window_id: &str,
+        gwt_session_id: Option<&str>,
+        source_event: &str,
+        occurred_at: &str,
+    ) {
+        let observe = {
+            let gwt_session_id = gwt_session_id.unwrap_or_default().to_owned();
+            let source_event = source_event.to_owned();
+            let occurred_at = occurred_at.to_owned();
+            let window_id = window_id.to_owned();
+            move |outcome: &'static str, issue_number: Option<u64>| {
+                tracing::info!(
+                    target: "gwt.hook.delivery",
+                    stage = "heartbeat",
+                    outcome,
+                    gwt_session_id,
+                    source_event,
+                    occurred_at,
+                    window_id,
+                    issue_number = ?issue_number,
+                    "runtime hook delivery"
+                );
+            }
+        };
         let now_instant = chrono::Utc::now();
         if !self.take_issue_monitor_heartbeat_slot(window_id, now_instant) {
+            observe("throttled", None);
             return;
         }
         let issue_number_hint = self
@@ -7338,6 +7506,7 @@ impl AppRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(window_id)
             .copied();
+        let worker_observe = observe.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             let is_current = || {
                 generations
@@ -7348,6 +7517,7 @@ impl AppRuntime {
                     == expected_generation
             };
             if !is_current() {
+                worker_observe("stale", issue_number_hint);
                 return;
             }
             let issue_number = issue_number_hint.or_else(|| {
@@ -7357,13 +7527,15 @@ impl AppRuntime {
                     .launched_window_issue(&worker_window_id)
             });
             if !is_current() {
+                worker_observe("stale", issue_number);
                 return;
             }
             let Some(issue_number) = issue_number else {
+                worker_observe("unbound", None);
                 return;
             };
             let now = now_instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            if let Err(error) = Self::publish_issue_monitor_control_owned(
+            match Self::publish_issue_monitor_control_owned(
                 &project_root,
                 serde_json::json!({
                     "heartbeat": {
@@ -7373,13 +7545,19 @@ impl AppRuntime {
                     },
                 }),
             ) {
-                tracing::debug!(
-                    error = %error,
-                    window_id = worker_window_id,
-                    "issue monitor heartbeat daemon publish failed (non-fatal)"
-                );
+                // Control success is the daemon's receipt after durable commit.
+                Ok(()) => worker_observe("committed_ack", Some(issue_number)),
+                Err(error) => {
+                    worker_observe("publish_unconfirmed", Some(issue_number));
+                    tracing::debug!(
+                        error = %error,
+                        window_id = worker_window_id,
+                        "issue monitor heartbeat daemon publish failed (non-fatal)"
+                    );
+                }
             }
         }) {
+            observe("enqueue_failed", issue_number_hint);
             tracing::debug!(
                 error = %error,
                 window_id,
