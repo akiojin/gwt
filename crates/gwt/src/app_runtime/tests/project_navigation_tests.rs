@@ -2715,9 +2715,13 @@ fn app_runtime_supported_agents_lists_catalog_and_distinguishes_missing_versions
     }
     assert_eq!(rows[0]["installed"], true);
     assert_eq!(rows[0]["installed_version"], "2.1.0");
-    assert_eq!(rows[0]["up_to_date"], true);
+    assert_eq!(rows[0]["up_to_date"], false);
     assert_eq!(rows[0]["update_available"], false);
-    assert_eq!(rows[0]["available_version"], "2.1.0");
+    assert!(rows[0]["available_version"].is_null());
+    assert!(rows[0]["update_check_error"]
+        .as_str()
+        .expect("native update check reason")
+        .contains("native release channel"));
     assert_eq!(payload["auto_update"], false);
     assert_eq!(payload["maintenance_pending"], false);
     let profile_only = rows.iter().find(|row| row["id"] == "grok").unwrap();
