@@ -1974,6 +1974,7 @@ impl SessionRuntimeState {
 
     /// Save the runtime state to a JSON sidecar file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let _publication = runtime_publication_lease(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2008,6 +2009,43 @@ impl SessionRuntimeState {
         serde_json::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
+}
+
+/// Retain this shared lease from reading a runtime sidecar through publishing
+/// its replacement. GC takes the exclusive counterpart only during unlink.
+/// Acquire after any Session lease; paths outside the PID runtime layout have
+/// no namespace to collect and return `None`. Contention is bounded by the
+/// existing Session persistence wait, rather than stalling a hook indefinitely.
+pub fn runtime_publication_lease(path: &Path) -> io::Result<Option<File>> {
+    let publication = path
+        .parent()
+        .and_then(Path::parent)
+        .filter(|root| root.file_name().is_some_and(|name| name == "runtime"))
+        .and_then(Path::parent)
+        .map(crate::runtime_gc::runtime_publication_lock)
+        .transpose()?;
+    if let Some(publication) = publication.as_ref() {
+        let deadline = Instant::now() + SESSION_LEASE_WAIT;
+        loop {
+            match FileExt::try_lock_shared(publication) {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(error);
+                    }
+                    std::thread::sleep(
+                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(publication)
 }
 
 /// Return the JSON sidecar path for a session runtime state record.

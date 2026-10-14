@@ -1,6 +1,66 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.120.0] - 2026-10-14
+
+### Bug Fixes
+
+- **hooks:** Share managed fallback with browser checks
+- **test:** Share isolated HOME and guard global settings IO
+- **test:** Allow short Unix temporary fixtures during verification
+- **test:** Recognize macOS temporary roots during nested verification
+- **test:** Guard pending updates and isolate audit subprocesses
+- **test:** Guard update metadata before all file mutations
+- **test:** Trust operating system temporary roots for home isolation
+- **test:** Scope home guard subprocess regression to unix
+- **test:** Use short temporary roots for socket contract fixtures
+- **test:** Pin projection performance fixture to shared HOME
+- **home:** Resolve Windows test storage from process token
+- **pm:** Share validation for captured Q&A reports
+- **pm:** 空白を含む引用符付き指示トークンを完全に伏せる
+- **pm:** Redact fine-grained tokens and quoted authorization
+- **agents:** Query supported catalog metadata concurrently
+- **monitor:** Recover restart-stranded launch slots and error targets
+- **pr:** Share canonical bookkeeping head freshness
+- **update:** Clear applied cross-project drains
+- **pm:** Avoid repeated prompt refresh deadline failures
+- **runtime:** Skip ledger decoding for dead session census namespaces
+- **runtime:** Preserve orphan evidence across the census scan
+- **runtime:** Bound concurrent work event intake memory
+- **runtime:** Preserve reopened project context during intake
+- **runtime:** Keep memory budget producers alive while sampling
+- **test:** Allow memory fixture traces to finish saving
+- **test:** Isolate intake fixtures and finish owned cleanup
+
+### Features
+
+- **pm:** ユーザー指示をQ&Aと原子的に記録して検索する
+- **monitor:** 成功 ACK に結び付く正確な起動 tier を投影
+
+### Miscellaneous Tasks
+
+- **work:** #5270 の受け入れ監査記録を配送する
+- **work:** Record issue 5270 delivery audit
+- **work:** Record user instruction delivery handoff
+- **work:** Record final user instruction delivery state
+- **work:** Record performance path inventory for #3820
+- **work:** Record applied drain delivery relaunch
+- **work:** Record issue 5381 delivery PR
+
+### Testing
+
+- Isolate sentinel matrix from live launch context
+- Report unexpected precommit launch errors
+- **home:** Diagnose Windows temporary HOME rejection
+- **verify:** Compare Windows driver failures across HOME changes
+- **verify:** Retire completed Windows HOME comparison
+- **pm:** 再起動後の Reports 復元完了を待つ
+- **config:** Gate unix-only contract import
+- **work:** Allow durable publication to finish under ci load
+- **update:** Stabilize canonical headed verification fixtures
+- **process:** Use hang guard for detached child fixture
+- **runtime:** Isolate knowledge bridge cache fixtures
+
 ## [9.119.0] - 2026-10-14
 
 ### Features

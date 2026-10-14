@@ -108,6 +108,7 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
         theme: themeFor(info), backend: backendFor(info), errors,
         messages: await page.evaluate(() => (window as any).__gwtPlaywrightMessages ?? []),
         npm: await lines(join(backendFor(info).home, "npm-argv.jsonl")),
+        metadata: await lines(join(backendFor(info).home, "metadata-events.jsonl")),
         providers: await lines(join(backendFor(info).home, "provider-argv.jsonl")),
       }, null, 2), contentType: "application/json" });
       expect(errors, "console and page errors across the complete live flow").toEqual([]);
@@ -120,6 +121,7 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     const unknown = panel.locator('[data-agent-id="codex"]');
     await expect(unknown).toContainText("Installed");
     await expect(unknown).toContainText("Unknown (version unavailable)");
+    if (process.env.GWT_L3_BACKENDS) await expect(unknown).toContainText("Fixture Codex metadata unavailable");
     const missing = panel.locator(`[data-agent-id="${MISSING_AGENT}"]`);
     await expect(missing).toContainText("Not installed");
     await expect(missing).not.toContainText("Unknown");
@@ -127,6 +129,17 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     expect(state.agents.map((agent: any) => agent.id)).toEqual([
       "claude", "codex", "grok", "agy", "opencode", "openclaw", "hermes", "gh",
     ]);
+    if (process.env.GWT_L3_BACKENDS) {
+      const metadata = await lines<{ id: string; stage: string }>(join(backendFor(info).home, "metadata-events.jsonl"));
+      const codexStarted = metadata.findIndex(event => event.id === "codex" && event.stage === "started");
+      const claudeFinished = metadata.findIndex(event => event.id === "claude" && event.stage === "finished");
+      expect(codexStarted, "Codex begins while the first Claude metadata query waits").toBeGreaterThanOrEqual(0);
+      expect(claudeFinished, "Claude completes after observing the other package start").toBeGreaterThan(codexStarted);
+      expect(state.agents.find((agent: any) => agent.id === "claude").available_version).toBe("2.1.0");
+      expect(state.agents.find((agent: any) => agent.id === "codex").update_check_error)
+        .toContain("Fixture Codex metadata unavailable");
+      expect(state.agents.find((agent: any) => agent.id === "grok").available_version).toBe("2.0.0");
+    }
     await settings.getByRole("tab", { name: "System", exact: true }).click();
     await expect(panel).toBeHidden();
     await settings.getByRole("tab", { name: "Supported Agents", exact: true }).click();
@@ -194,7 +207,7 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     const backend = backendFor(info), row = panel.locator('[data-agent-id="grok"]');
     const installerCount = async () => (await lines<string[]>(join(backend.home, "npm-argv.jsonl")))
       .filter(args => args[0] === "install").length;
-    const launches = () => lines<{ pid: number }>(join(backend.home, "provider-argv.jsonl"));
+    const launches = () => lines<{ pid: number; ppid: number }>(join(backend.home, "provider-argv.jsonl"));
     let windowId = "";
     await expect(row).toContainText("1.0.0");
     try {
@@ -211,7 +224,10 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
       windowId = pane.id;
       const runtimePath = join(backend.home, ".gwt/sessions/runtime", String(backend.pid), `${pane.session_id}.json`);
       const runtime = async () => JSON.parse(await readFile(runtimePath, "utf8"));
-      await expect.poll(async () => (await runtime()).child_pid).toBe(provider.pid);
+      // Windows Host launches keep the selected interactive shell as the PTY
+      // child; the Node fixture is its child. POSIX launches exec the fixture.
+      await expect.poll(async () => (await runtime()).child_pid)
+        .toBe(process.platform === "win32" ? provider.ppid : provider.pid);
       const before = await runtime(), installsBefore = await installerCount();
       expect(alive(provider.pid), "the test fixture is an actual live PTY child").toBe(true);
       const after = await cursor(page);
