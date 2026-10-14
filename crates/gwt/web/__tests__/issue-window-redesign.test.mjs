@@ -9,6 +9,7 @@ import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -710,6 +711,57 @@ test("T-7b.2a: tier chips show only reported minimums and agent failures with at
   assert.doesNotMatch(select.getAttribute("aria-description"), /currently running|successfully started/i);
   surface.applyIssueMonitorStatus({ ...STATUS });
   assert.equal(body.querySelectorAll('[data-kind="tier"]').length, 0, "omitted facts clear stale chips");
+});
+
+test("T-7b.2b.2: Running tier follows exact confirmation and raw catalog runtime", async (t) => {
+  const agent = { id: "agent-11", status: "running", linked_issue_number: 11 };
+  const windowCatalogModel = createUiStateStore({ catalog: {
+    appState: { tabs: [{ workspace: { windows: [agent, { id: "win-1", z_index: 1 }] } }] }, runtimeStates: {},
+  } });
+  const { body, surface, state } = await makeFixture({ surface: { windowCatalogModel } });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  state.entries = [entry(11, "launched")];
+  const facts = { issue_number: 11, confirmed_launch: { tier: 0, window_id: agent.id, delivery_id: "delivery-11" } };
+  const report = value => surface.applyIssueMonitorStatus({ ...STATUS, tier_facts: [value] });
+  const chip = () => body.querySelector('[data-key="tier-running"]');
+  report(facts);
+  assert.equal(chip()?.textContent, "Running tier 0", "confirmation itself proves a launch, without recorded history");
+  const selectedRow = body.querySelector(".knowledge-row-select");
+  windowCatalogModel.update(model => ({ catalog: { ...model.catalog, focusedId: "win-1", version: 1 } }));
+  assert.ok(body.querySelector(".knowledge-row-select") === selectedRow, "focusing the Issues window must preserve the click target");
+  windowCatalogModel.update(model => ({ catalog: { ...model.catalog,
+    appState: { tabs: [{ workspace: { windows: [agent, { id: "win-1", z_index: 2 }] } }] },
+  } }));
+  assert.ok(body.querySelector(".knowledge-row-select") === selectedRow, "the server focus response must preserve the pressed row");
+  assert.ok(chip().classList.contains("knowledge-monitor-chip"));
+  assert.equal(chip().hasAttribute("tabindex"), false);
+  assert.match(body.querySelector(".knowledge-row-select").getAttribute("aria-description"), /acknowledged.*zero-based.*running/i);
+  report({ ...facts, recorded_launch_tier: 2 });
+  assert.equal(chip()?.textContent, "Running tier 0", "history never replaces exact tier");
+  for (const status of ["stopped", "unknown", "", "starting", "idle", "waiting", "error"]) {
+    windowCatalogModel.update(model => ({ catalog: { ...model.catalog, runtimeStates: { [agent.id]: status } } }));
+    assert.equal(chip(), null, `${status || "empty"} raw state overrides persisted running`);
+  }
+  windowCatalogModel.update(model => ({ catalog: { ...model.catalog, runtimeStates: { [agent.id]: "running" } } }));
+  assert.equal(chip()?.textContent, "Running tier 0");
+  report({ ...facts, confirmed_launch: { ...facts.confirmed_launch, window_id: "different-agent" } });
+  assert.equal(chip(), null, "another running window for this issue cannot prove the confirmation");
+  report({ ...facts, confirmed_launch: { ...facts.confirmed_launch, delivery_id: "" } });
+  assert.equal(chip(), null, "incomplete confirmation fails closed");
+  report(facts);
+  windowCatalogModel.update(model => ({ catalog: { ...model.catalog,
+    appState: { tabs: [{ workspace: { windows: [{ ...agent, linked_issue_number: 12 }] } }] },
+  } }));
+  assert.equal(chip(), null, "a replaced issue identity clears Running");
+  windowCatalogModel.update(model => ({ catalog: { ...model.catalog,
+    appState: { tabs: [{ workspace: { windows: [] } }] },
+  } }));
+  assert.equal(chip(), null, "removed windows cannot remain Running");
+  surface.applyIssueMonitorStatus(STATUS);
+  assert.doesNotMatch(body.querySelector(".knowledge-row-select").getAttribute("aria-description"), /acknowledged/i);
+  surface.clearKnowledgeBridgeState("win-1");
+  windowCatalogModel.update(model => ({ catalog: { ...model.catalog, runtimeStates: {} } }));
+  assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false, "catalog subscription is disposed with the window");
 });
 
 test("T-7a: explanation styling extends the shared popover with Operator tokens", () => {
