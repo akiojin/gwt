@@ -4,7 +4,7 @@ use std::{
 };
 
 use gwt_core::paths::gwt_cache_dir;
-use gwt_github::{Cache, CacheEntry, IssueState, SectionName};
+use gwt_github::{Cache, CacheEntry, IssueState, IssueSummary, SectionName};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -546,18 +546,21 @@ pub fn load_knowledge_bridge(
     if refresh {
         refresh_knowledge_bridge_cache(repo_path, true)?;
     }
-    let entries = load_local_cache_entries_for_repo(repo_path)?;
+    let cache = Cache::new(issue_cache_root_for_repo_path_or_detached(repo_path));
+    let entries = load_cache_summaries(&cache)?;
     let linked_branches = load_linked_branches(repo_path);
     Ok(match kind {
         KnowledgeKind::Issue => build_work_item_view(
             KnowledgeKind::Issue,
-            entries,
+            &cache,
+            &entries,
             linked_branches,
             selected_number,
         ),
         KnowledgeKind::Spec => build_work_item_view(
             KnowledgeKind::Spec,
-            entries,
+            &cache,
+            &entries,
             linked_branches,
             selected_number,
         ),
@@ -760,7 +763,11 @@ where
         .load_entry(gwt_github::IssueNumber(issue_number))
         .ok_or_else(|| format!("Issue #{issue_number} disappeared after cache update"))?;
     let linked_branches: HashMap<u64, Vec<String>> = HashMap::new();
-    Ok(work_item_list_item(&refreshed, &linked_branches, None))
+    Ok(work_item_list_item(
+        &IssueSummary::from(&refreshed.snapshot),
+        &linked_branches,
+        None,
+    ))
 }
 
 #[cfg(test)]
@@ -833,11 +840,13 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         });
     }
 
-    let mut entries = load_local_cache_entries_for_repo(repo_path)?
-        .into_iter()
+    let cache = Cache::new(issue_cache_root_for_repo_path_or_detached(repo_path));
+    let summaries = load_cache_summaries(&cache)?;
+    let mut entries = summaries
+        .iter()
         .filter(|entry| candidate_matches_kind(entry, kind))
         .collect::<Vec<_>>();
-    entries.sort_by(issue_entry_sort);
+    entries.sort_by(|left, right| issue_entry_sort(left, right));
     let linked_branches = load_linked_branches(repo_path);
     // FR-098/FR-100: a semantic failure never aborts the completion — the
     // cache-backed/local exact rows below stay usable. Typed transient
@@ -878,14 +887,14 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         .iter()
         .filter(|entry| is_exact_search_match(entry, query))
     {
-        if seen.insert(entry.snapshot.number.0) {
+        if seen.insert(entry.number) {
             list_items.push(list_item_for_kind(kind, entry, &linked_branches, Some(100)));
         }
     }
 
     let entries_by_number = entries
         .iter()
-        .map(|entry| (entry.snapshot.number.0, entry))
+        .map(|entry| (entry.number, entry))
         .collect::<HashMap<_, _>>();
     for hit in hits {
         if !seen.insert(hit.number) {
@@ -909,8 +918,8 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         .filter(|selected| list_items.iter().any(|entry| entry.number == *selected))
         .or_else(|| list_items.first().map(|entry| entry.number));
     let detail = selected_number
-        .and_then(|selected| entries_by_number.get(&selected).copied())
-        .map(|entry| detail_for_kind(kind, entry, &linked_branches))
+        .and_then(|selected| cache.load_entry(gwt_github::IssueNumber(selected)))
+        .map(|entry| detail_for_kind(kind, &entry, &linked_branches))
         .unwrap_or_else(|| empty_detail(search_empty_title(kind), "No semantic matches found."));
 
     Ok(KnowledgeSearchOutcome {
@@ -930,17 +939,11 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
     })
 }
 
-fn load_local_cache_entries_for_repo(repo_path: &Path) -> Result<Vec<CacheEntry>, String> {
-    let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
-    let cache = Cache::new(cache_root);
-    load_cache_entries(&cache)
-}
-
-fn load_cache_entries(cache: &Cache) -> Result<Vec<CacheEntry>, String> {
-    match cache.list_entries() {
+fn load_cache_summaries(cache: &Cache) -> Result<std::sync::Arc<Vec<IssueSummary>>, String> {
+    match cache.list_summaries() {
         Ok(entries) => Ok(entries),
         Err(gwt_github::CacheError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(Vec::new())
+            Ok(std::sync::Arc::new(Vec::new()))
         }
         Err(error) => Err(format!("failed to read issue cache: {error}")),
     }
@@ -948,21 +951,24 @@ fn load_cache_entries(cache: &Cache) -> Result<Vec<CacheEntry>, String> {
 
 fn build_work_item_view(
     kind: KnowledgeKind,
-    mut entries: Vec<CacheEntry>,
+    cache: &Cache,
+    summaries: &[IssueSummary],
     linked_branches: HashMap<u64, Vec<String>>,
     selected_number: Option<u64>,
 ) -> KnowledgeBridgeView {
-    entries.sort_by(issue_entry_sort);
+    let mut entries = summaries.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| issue_entry_sort(left, right));
 
     let list_items = entries
         .iter()
         .map(|entry| work_item_list_item(entry, &linked_branches, None))
         .collect::<Vec<_>>();
-    let selected_number = resolve_selected_number(&entries, selected_number);
-    let detail = entries
-        .iter()
-        .find(|entry| Some(entry.snapshot.number.0) == selected_number)
-        .map(|entry| work_item_detail_view(entry, &linked_branches))
+    let selected_number = selected_number
+        .filter(|selected| entries.iter().any(|entry| entry.number == *selected))
+        .or_else(|| entries.first().map(|entry| entry.number));
+    let detail = selected_number
+        .and_then(|selected| cache.load_entry(gwt_github::IssueNumber(selected)))
+        .map(|entry| work_item_detail_view(&entry, &linked_branches))
         .unwrap_or_else(|| empty_detail("Issue Bridge", "No cached work items available."));
 
     KnowledgeBridgeView {
@@ -1048,7 +1054,7 @@ fn knowledge_detail_section(
     }
 }
 
-fn candidate_matches_kind(entry: &CacheEntry, kind: KnowledgeKind) -> bool {
+fn candidate_matches_kind(entry: &IssueSummary, kind: KnowledgeKind) -> bool {
     match kind {
         KnowledgeKind::Issue | KnowledgeKind::Spec => {
             let _ = entry;
@@ -1060,7 +1066,7 @@ fn candidate_matches_kind(entry: &CacheEntry, kind: KnowledgeKind) -> bool {
 
 fn list_item_for_kind(
     kind: KnowledgeKind,
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
@@ -1073,11 +1079,11 @@ fn list_item_for_kind(
 }
 
 fn work_item_list_item(
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
-    if is_spec_entry(entry) {
+    if has_gwt_spec_label(&entry.labels) {
         spec_list_item(entry, linked_branches, match_score)
     } else {
         issue_list_item(entry, linked_branches, match_score)
@@ -1085,19 +1091,19 @@ fn work_item_list_item(
 }
 
 fn issue_list_item(
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
-    let phase_info = extract_phase(&entry.snapshot.labels);
+    let phase_info = extract_phase(&entry.labels);
     KnowledgeListItem {
-        number: entry.snapshot.number.0,
-        title: entry.snapshot.title.clone(),
-        state: issue_state_label(entry.snapshot.state),
-        meta: format!("Updated {}", short_updated_at(&entry.snapshot.updated_at.0)),
-        labels: entry.snapshot.labels.clone(),
+        number: entry.number,
+        title: entry.title.clone(),
+        state: issue_state_label(entry.state),
+        meta: format!("Updated {}", short_updated_at(&entry.updated_at)),
+        labels: entry.labels.clone(),
         linked_branch_count: linked_branches
-            .get(&entry.snapshot.number.0)
+            .get(&entry.number)
             .map(Vec::len)
             .unwrap_or_default(),
         related_work_count: 0,
@@ -1106,7 +1112,7 @@ fn issue_list_item(
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
         is_spec: phase_info.is_spec,
-        parent_spec: parent_spec_from_body(&entry.snapshot.body),
+        parent_spec: parent_spec_from_body(&entry.body),
         monitor_state: None,
         queue_position: None,
         queued_by: None,
@@ -1116,34 +1122,14 @@ fn issue_list_item(
 }
 
 fn spec_list_item(
-    entry: &CacheEntry,
+    entry: &IssueSummary,
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
-    let phase_info = extract_phase(&entry.snapshot.labels);
-    KnowledgeListItem {
-        number: entry.snapshot.number.0,
-        title: entry.snapshot.title.clone(),
-        state: issue_state_label(entry.snapshot.state),
-        meta: spec_list_meta(entry),
-        labels: entry.snapshot.labels.clone(),
-        linked_branch_count: linked_branches
-            .get(&entry.snapshot.number.0)
-            .map(Vec::len)
-            .unwrap_or_default(),
-        related_work_count: 0,
-        related_session_count: 0,
-        match_score,
-        phase: phase_info.phase,
-        has_unknown_phase: phase_info.has_unknown_phase,
-        is_spec: phase_info.is_spec,
-        parent_spec: parent_spec_from_body(&entry.snapshot.body),
-        monitor_state: None,
-        queue_position: None,
-        queued_by: None,
-        exclusion_reason: None,
-        related_work_refs: Vec::new(),
-    }
+    let mut item = issue_list_item(entry, linked_branches, match_score);
+    let phase = effective_spec_lifecycle_label(entry.state, &entry.labels);
+    item.meta = format!("{phase} · Updated {}", short_updated_at(&entry.updated_at));
+    item
 }
 
 fn detail_for_kind(
@@ -1168,21 +1154,20 @@ fn work_item_detail_view(
     }
 }
 
-fn is_exact_search_match(entry: &CacheEntry, query: &str) -> bool {
+fn is_exact_search_match(entry: &IssueSummary, query: &str) -> bool {
     let query = query.trim();
     if query.is_empty() {
         return false;
     }
     let query_lower = query.to_lowercase();
-    let number = entry.snapshot.number.0.to_string();
+    let number = entry.number.to_string();
     if query_lower.strip_prefix('#') == Some(number.as_str()) || query_lower == number {
         return true;
     }
-    if entry.snapshot.title.to_lowercase() == query_lower {
+    if entry.title.to_lowercase() == query_lower {
         return true;
     }
     entry
-        .snapshot
         .labels
         .iter()
         .any(|label| label.to_lowercase() == query_lower)
@@ -1278,7 +1263,7 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
         ));
     }
 
-    let phase = effective_spec_lifecycle_label(entry);
+    let phase = effective_spec_lifecycle_label(entry.snapshot.state, &entry.snapshot.labels);
     KnowledgeDetailView {
         number: Some(entry.snapshot.number.0),
         title: entry.snapshot.title.clone(),
@@ -1296,19 +1281,11 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
     }
 }
 
-fn spec_list_meta(entry: &CacheEntry) -> String {
-    let phase = effective_spec_lifecycle_label(entry);
-    format!(
-        "{phase} · Updated {}",
-        short_updated_at(&entry.snapshot.updated_at.0)
-    )
-}
-
-fn effective_spec_lifecycle_label(entry: &CacheEntry) -> &'static str {
-    if entry.snapshot.state == IssueState::Closed {
+fn effective_spec_lifecycle_label(state: IssueState, labels: &[String]) -> &'static str {
+    if state == IssueState::Closed {
         return "Done";
     }
-    let phase_info = extract_phase(&entry.snapshot.labels);
+    let phase_info = extract_phase(labels);
     phase_display_label(phase_info.phase.as_deref())
 }
 
@@ -1323,31 +1300,17 @@ fn phase_display_label(phase: Option<&str>) -> &'static str {
     }
 }
 
-fn resolve_selected_number(entries: &[CacheEntry], selected_number: Option<u64>) -> Option<u64> {
-    selected_number
-        .filter(|selected| {
-            entries
-                .iter()
-                .any(|entry| entry.snapshot.number.0 == *selected)
-        })
-        .or_else(|| entries.first().map(|entry| entry.snapshot.number.0))
-}
-
-fn issue_entry_sort(left: &CacheEntry, right: &CacheEntry) -> std::cmp::Ordering {
-    let left_state = if left.snapshot.state == IssueState::Open {
-        0
-    } else {
-        1
-    };
-    let right_state = if right.snapshot.state == IssueState::Open {
+fn issue_entry_sort(left: &IssueSummary, right: &IssueSummary) -> std::cmp::Ordering {
+    let left_state = if left.state == IssueState::Open { 0 } else { 1 };
+    let right_state = if right.state == IssueState::Open {
         0
     } else {
         1
     };
     left_state
         .cmp(&right_state)
-        .then_with(|| right.snapshot.updated_at.0.cmp(&left.snapshot.updated_at.0))
-        .then_with(|| left.snapshot.number.0.cmp(&right.snapshot.number.0))
+        .then_with(|| right.updated_at.cmp(&left.updated_at))
+        .then_with(|| left.number.cmp(&right.number))
 }
 
 fn issue_state_label(state: IssueState) -> String {
@@ -1819,7 +1782,7 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(23))
             .expect("load stale closed spec");
 
-        let list_item = spec_list_item(&entry, &HashMap::new(), None);
+        let list_item = spec_list_item(&IssueSummary::from(&entry.snapshot), &HashMap::new(), None);
         assert_eq!(list_item.phase.as_deref(), Some("implementation"));
         assert!(list_item.meta.contains("Done"));
         assert!(!list_item.meta.contains("phase/implementation"));
@@ -1884,7 +1847,12 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(4101))
             .expect("load child issue");
         assert_eq!(
-            issue_list_item(&child_entry, &HashMap::new(), None).parent_spec,
+            issue_list_item(
+                &IssueSummary::from(&child_entry.snapshot),
+                &HashMap::new(),
+                None
+            )
+            .parent_spec,
             Some(3885)
         );
 
@@ -1900,7 +1868,12 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(4102))
             .expect("load orphan issue");
         assert_eq!(
-            issue_list_item(&orphan_entry, &HashMap::new(), None).parent_spec,
+            issue_list_item(
+                &IssueSummary::from(&orphan_entry.snapshot),
+                &HashMap::new(),
+                None
+            )
+            .parent_spec,
             None
         );
 
@@ -1917,7 +1890,12 @@ Extra context.
             .load_entry(gwt_github::IssueNumber(4103))
             .expect("load nested spec");
         assert_eq!(
-            spec_list_item(&nested_entry, &HashMap::new(), None).parent_spec,
+            spec_list_item(
+                &IssueSummary::from(&nested_entry.snapshot),
+                &HashMap::new(),
+                None
+            )
+            .parent_spec,
             Some(3885)
         );
     }

@@ -1581,6 +1581,7 @@ export function createKnowledgeKanbanSurface({
             kind: normalizeKnowledgeKind(knowledgeKind),
             entries: [],
             baseEntries: [],
+            entriesRevision: null,
             selectedNumber: null,
             // SPEC #3885 FR-014 / AC-14: the Issue window's view mode. List is
             // the default; split lays the running Issues out as detail +
@@ -4493,6 +4494,9 @@ export function createKnowledgeKanbanSurface({
           windowId,
           knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
         );
+        // An error changes the list presentation outside the data revision.
+        // The next successful completion must rebuild it to remove that state.
+        if (state.error) state.entriesRevision = null;
         if (state.kind === "issue") {
           issueWindowViewModel.update(() => ({ windowId }));
           return;
@@ -4888,6 +4892,13 @@ export function createKnowledgeKanbanSurface({
               break;
             }
             const queuedQuery = state.query.trim();
+            const previousNumber = state.selectedNumber;
+            const unchangedEntries =
+              typeof event.revision === "string" && event.revision.length > 0 &&
+              event.revision === state.entriesRevision && !state.error && !state.renderError;
+            // Missing revisions keep the legacy full-render path. The revision
+            // belongs to the base list; search and detail retain their owners.
+            state.entriesRevision = event.revision || null;
             const incomingEntries = event.entries || [];
             const keepSelectedNumber =
               state.selectedNumber &&
@@ -4915,8 +4926,20 @@ export function createKnowledgeKanbanSurface({
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.refreshedAt = Date.now();
             state.error = "";
+            const renderCompletion = () => {
+              if (!unchangedEntries) {
+                renderKnowledgeBridge(event.id);
+                return;
+              }
+              const refresh = windowMap.get(event.id)?.querySelector("[data-action='refresh-knowledge']");
+              if (refresh) {
+                refresh.disabled = !state.refreshEnabled ||
+                  (state.loading && !knowledgeEntriesAreEmpty(state));
+              }
+              renderKnowledgeSelection(event.id, state, previousNumber);
+            };
             if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
-              renderKnowledgeBridge(event.id);
+              renderCompletion();
               break;
             }
             if (queuedQuery) {
@@ -4926,7 +4949,7 @@ export function createKnowledgeKanbanSurface({
               );
               break;
             }
-            renderKnowledgeBridge(event.id);
+            renderCompletion();
             break;
           }
           case "knowledge_search_results": {

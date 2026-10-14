@@ -341,6 +341,35 @@ mod related_snapshot_cache_tests {
     }
 
     #[test]
+    fn knowledge_entries_revision_tracks_rows_but_not_request_or_selection() {
+        let revision = |view, request_id| {
+            let events = knowledge_view_events(
+                "client".into(),
+                "window".into(),
+                KnowledgeKind::Issue,
+                request_id,
+                view,
+            );
+            let event = serde_json::to_value(&events[0].event).expect("serialize entries");
+            event["revision"]
+                .as_str()
+                .expect("list revision")
+                .to_owned()
+        };
+        let original = search_view(42);
+        let initial = revision(original.clone(), Some(1));
+        let mut selected = original.clone();
+        selected.selected_number = None;
+        assert_eq!(initial, revision(selected, Some(2)));
+        let mut monitor_changed = original.clone();
+        monitor_changed.entries[0].queue_position = Some(1);
+        assert_ne!(initial, revision(monitor_changed, Some(3)));
+        let mut status_changed = original;
+        status_changed.refresh_enabled = false;
+        assert_ne!(initial, revision(status_changed, Some(4)));
+    }
+
+    #[test]
     fn normalized_key_and_generation_reject_a_late_completion() {
         let directory = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
@@ -868,6 +897,14 @@ fn knowledge_view_events(
     request_id: Option<u64>,
     view: gwt::KnowledgeBridgeView,
 ) -> Vec<OutboundEvent> {
+    use sha2::{Digest, Sha256};
+
+    // Hash after joining Work/Monitor projections so their row changes are
+    // visible even when the underlying Issue cache did not change.
+    let revision = hex::encode(Sha256::digest(
+        serde_json::to_vec(&(&view.entries, &view.empty_message, view.refresh_enabled))
+            .expect("knowledge list fields are serializable"),
+    ));
     vec![
         OutboundEvent::reply(
             client_id.clone(),
@@ -875,6 +912,7 @@ fn knowledge_view_events(
                 id: id.clone(),
                 knowledge_kind: kind,
                 request_id,
+                revision,
                 entries: view.entries,
                 selected_number: view.selected_number,
                 empty_message: view.empty_message,
