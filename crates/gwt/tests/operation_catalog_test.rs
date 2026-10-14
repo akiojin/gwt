@@ -60,7 +60,10 @@ fn an_invented_name_falls_back_to_the_namespace_listing() {
 #[test]
 fn gwtd_answers_a_mistyped_operation_with_candidates() {
     use std::io::Write;
+    let home = tempfile::tempdir().expect("child home");
     let mut child = gwt_core::process::hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

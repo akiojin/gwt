@@ -30,11 +30,14 @@ pub fn enabled() -> bool {
 /// value and takes precedence over migration, including explicit OFF.
 pub fn set(value: Option<bool>) -> io::Result<bool> {
     let path = gwt_core::paths::gwt_config_path();
+    let lock_path = path.with_extension("update-settings.lock");
+    gwt_config::home::assert_test_path(&path);
+    gwt_config::home::assert_test_path(&lock_path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let _lock = gwt_core::operation_deadline::NamedFileLock::acquire(
-        &path.with_extension("update-settings.lock"),
+        &lock_path,
         "automatic update settings",
     )?;
     let enabled =
@@ -86,6 +89,26 @@ fn legacy_projects_enabled() -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn escaping_update_settings_paths_are_rejected_before_lock_creation() {
+        let outside = std::path::Path::new("/__gwt_protected_test_home__/update-settings.toml");
+        assert!(!outside.parent().unwrap().exists());
+        for filename in ["config.toml", "config.update-settings.lock"] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let directory = home.path().join(".gwt");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::os::unix::fs::symlink(outside, directory.join(filename)).unwrap();
+            assert!(std::panic::catch_unwind(|| super::set(Some(true))).is_err());
+            if filename == "config.toml" {
+                assert!(!directory.join("config.update-settings.lock").exists());
+            } else {
+                assert!(!directory.join("config.toml").exists());
+            }
+        }
+    }
+
     #[test]
     fn auto_apply_updates_global_setter_and_snapshot_use_scoped_home() {
         let home = tempfile::tempdir().unwrap();

@@ -4191,8 +4191,7 @@ fn hold_clock_label(reset_at: &str) -> String {
 /// run unattended from one that cannot. `None` means "do not decide", never
 /// "unsupported".
 fn custom_coding_agent_definition(agent_id: &str) -> Option<gwt_agent::CustomCodingAgent> {
-    let home = dirs::home_dir()?;
-    let config_path = gwt_config::Settings::global_config_path_for_home(&home);
+    let config_path = gwt_config::Settings::global_config_path()?;
     crate::custom_agents_service::list_custom_agents(&config_path)
         .ok()?
         .into_iter()
