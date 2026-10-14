@@ -209,27 +209,38 @@ try {
 } finally {
   foreach ($key in $savedRunner.Keys) { [Environment]::SetEnvironmentVariable($key, $savedRunner[$key]) }
   if ($anchor) { $anchor.Abort(); $anchor.Dispose() }
+  $cleanupErrors = [Collections.Generic.List[string]]::new()
+  $guiStopped = $false
   if ($gui) {
-    if (-not $gui.HasExited) { $gui.Kill($true) }
-    if (-not $gui.WaitForExit(10000)) { throw "Owned GUI PID $($gui.Id) remains." }
-    [IO.File]::WriteAllText("$checkHome/startup.log", $stdout.GetAwaiter().GetResult())
-    [IO.File]::WriteAllText("$checkHome/stderr.log", $stderr.GetAwaiter().GetResult())
-    $gui.Dispose()
+    try {
+      if (-not $gui.HasExited) { $gui.Kill($true) }
+      $guiStopped = $gui.WaitForExit(10000)
+      if ($guiStopped) {
+        [IO.File]::WriteAllText("$checkHome/startup.log", $stdout.GetAwaiter().GetResult())
+        [IO.File]::WriteAllText("$checkHome/stderr.log", $stderr.GetAwaiter().GetResult())
+      } else {
+        $cleanupErrors.Add("Owned GUI PID $($gui.Id) remains.")
+      }
+    } catch { $cleanupErrors.Add("Owned GUI cleanup failed: $($_.Exception.Message)") }
+    finally { $gui.Dispose() }
   }
   foreach ($file in Get-ChildItem -LiteralPath "$checkHome/workload" -File -Filter '*.json') {
-    $receipt = [IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json
-    $producerProcess = Get-Process -Id $receipt.pid -ErrorAction SilentlyContinue
-    if ($producerProcess) {
-      $created = ([DateTimeOffset]$producerProcess.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()
-      if ([Math]::Abs($created - $receipt.started_at) -lt 1000) {
-        $producerProcess.Kill($true)
-        if (-not $producerProcess.WaitForExit(10000)) { throw "Owned producer PID $($receipt.pid) remains." }
+    try {
+      $receipt = [IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json
+      $producerProcess = Get-Process -Id $receipt.pid -ErrorAction SilentlyContinue
+      if ($producerProcess) {
+        $created = ([DateTimeOffset]$producerProcess.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()
+        if ([Math]::Abs($created - $receipt.started_at) -lt 1000) {
+          $producerProcess.Kill($true)
+          if (-not $producerProcess.WaitForExit(10000)) { $cleanupErrors.Add("Owned producer PID $($receipt.pid) remains.") }
+        }
       }
-    }
+    } catch { $cleanupErrors.Add("Owned producer cleanup failed ($($file.Name)): $($_.Exception.Message)") }
   }
   [IO.File]::WriteAllText("$checkHome/shutdown.json", (@{
-    owned_gui_stopped=($null -ne $gui);stopped_at=[DateTime]::UtcNow.ToString('o');test_exit_code=$exitCode
+    owned_gui_stopped=$guiStopped;stopped_at=[DateTime]::UtcNow.ToString('o');test_exit_code=$exitCode;cleanup_errors=@($cleanupErrors)
   } | ConvertTo-Json -Depth 4))
+  if ($cleanupErrors.Count) { throw ($cleanupErrors -join '; ') }
   Write-Output "Evidence: $checkHome; owned process cleanup finished."
 }
 exit $exitCode

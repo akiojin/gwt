@@ -1618,6 +1618,7 @@ mod tests {
     #[test]
     fn worktree_group_discovery_is_lazy_between_worktrees() {
         let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let entries = ["first", "later"].map(|name| gwt::worktree_inventory::WorktreeEntry {
             id: name.into(),
             kind: gwt::worktree_inventory::WorktreeEntryKind::Workspace,
@@ -1644,6 +1645,7 @@ mod tests {
     #[test]
     fn validated_local_payloads_share_only_identical_bytes() {
         let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let first = temp.path().join("first.jsonl");
         let second = temp.path().join("second.jsonl");
         let bytes = format!(
