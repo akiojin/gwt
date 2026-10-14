@@ -242,6 +242,16 @@ test("Issue #5321 Settings integrates Issues at 1280px without duplicate surface
   await settings.locator(".titlebar").click();
   await expect(issuesRail).toHaveAttribute("aria-pressed", "true");
   await assertSingleSurface();
+  await page.getByRole("button", { name: "Split view", exact: true }).click();
+  const left = page.getByRole("region", { name: "Left pane", exact: true });
+  await left.locator('[data-settings-tab="system"]').click();
+  await expect(left.locator('[data-settings-panel="issues"]')).toBeHidden();
+  await confirm(page, [3, 4]);
+  await expect(left.locator('[data-settings-tab="system"]')).toHaveAttribute("aria-selected", "true");
+  await issuesRail.click();
+  await expect(left.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
+  await expect(left.locator(".issue-queue-board")).toBeVisible();
+  await page.getByRole("button", { name: "Close split", exact: true }).click();
 });
 
 test("Issue #5321 preview keyboard focus opens and returns with Escape", async ({ page }) => {

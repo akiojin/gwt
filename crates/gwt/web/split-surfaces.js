@@ -134,6 +134,9 @@ export function createSplitSurfaces({
     selections[index] = surface;
     active = index;
     sync();
+    if (surface === "issues") {
+      panes[index].querySelector('[data-settings-tab="issues"]')?.click();
+    }
     return true;
   }
 
