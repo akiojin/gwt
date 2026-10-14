@@ -50,6 +50,8 @@ mod migration_e2e_test;
 mod migration_single_branch_test;
 #[path = "../perf_regression_test.rs"]
 mod perf_regression_test;
+#[path = "../pm_planning_state_test.rs"]
+mod pm_planning_state_test;
 #[path = "../project_open_e2e_contract_test.rs"]
 mod project_open_e2e_contract_test;
 #[path = "../project_runtime_ownership_test.rs"]
