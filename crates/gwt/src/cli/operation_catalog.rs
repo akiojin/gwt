@@ -198,6 +198,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "execution.settle_delivered",
+        aliases: &[],
+    },
+    Operation {
         name: "execution.status",
         aliases: &[],
     },
@@ -508,6 +512,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.status.set",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.report.post",
         aliases: &[],
     },
@@ -541,6 +549,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pr.create",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.create_from_ci",
         aliases: &[],
     },
     Operation {

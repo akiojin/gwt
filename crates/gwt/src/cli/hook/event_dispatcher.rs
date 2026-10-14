@@ -40,6 +40,15 @@ pub fn handle_with_input(
         "Stop" => handle_stop(event, input, worktree_root, current_session),
         other => Err(HookError::InvalidEvent(other.to_string())),
     };
+    let result = result.map(|output| match IntentBoundaryEvent::from_name(event) {
+        Some(intent_event) => append_pm_standing_context(
+            output,
+            intent_event,
+            worktree_root,
+            super::is_resident_pm_worktree(worktree_root),
+        ),
+        None => output,
+    });
     let additional_context_bytes = result
         .as_ref()
         .ok()
@@ -143,6 +152,9 @@ fn handle_user_prompt_submit(
     input: &str,
     worktree_root: &Path,
 ) -> Result<HookOutput, HookError> {
+    // PM reporting has its own settlement path; ordinary producing obligations
+    // deliberately remain unarmed in this window.
+    super::pm_reporting::handle_user_prompt_submit(worktree_root, input)?;
     // The three bookkeeping writes below are independent of RuntimeState and
     // Board reminder planning. Start them together so a contended Work refresh
     // contributes its slowest substage to the prompt wall clock, not the sum of
@@ -244,6 +256,11 @@ fn handle_user_prompt_submit(
                     output?,
                     IntentBoundaryEvent::UserPromptSubmit,
                     pm_refresh_context?,
+                );
+                let output = append_additional_context(
+                    output,
+                    IntentBoundaryEvent::UserPromptSubmit,
+                    super::pm_reporting::monitor_reminder(worktree_root),
                 );
                 let output = append_additional_context(
                     output,
@@ -461,8 +478,12 @@ fn handle_stop(
     })?;
     // Evaluate the stop-checks lazily, one at a time: the first StopBlock
     // wins and the remaining checks must NOT run.
-    let stop_checks: [(&str, StopCheck<'_>); 8] = [
-        // SPEC-3431 FR-012: the resident PM's loop driver runs first — for the
+    let stop_checks: [(&str, StopCheck<'_>); 9] = [
+        (
+            "pm-reporting-stop-check",
+            Box::new(|| super::pm_reporting::handle_stop(worktree_root, current_session)),
+        ),
+        // SPEC-3431 FR-012: after the reporting obligation, the PM loop runs — for the
         // PM every other stop gate is either exempt (FR-029) or fail-open, and
         // the loop continuation must not be shadowed by one of them.
         (
@@ -621,6 +642,25 @@ fn append_pending_discussion_goal_context(
         return output;
     };
     append_additional_context(output, event, Some(pending_discussion_goal_context(&goal)))
+}
+
+fn append_pm_standing_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+    worktree_root: &Path,
+    is_pm: bool,
+) -> HookOutput {
+    if !is_pm || event == IntentBoundaryEvent::Stop {
+        return output;
+    }
+    // Reload the machine-local source at every PM intent boundary; Board
+    // reminder throttling must never hide a newly recorded user instruction.
+    let text = gwt_core::user_instruction::standing_context(worktree_root).unwrap_or_else(|_| {
+        "Standing user instructions unavailable: the machine-local store could not be read. \
+         Do not assume there are no standing instructions."
+            .into()
+    });
+    append_additional_context(output, event, (!text.is_empty()).then_some(text))
 }
 
 fn append_additional_context(
@@ -916,6 +956,15 @@ mod tests {
 
     #[test]
     fn degraded_remote_board_and_hook_live_fail_open_within_prompt_budget() {
+        degraded_remote_prompt_budget(Duration::ZERO);
+    }
+
+    #[test]
+    fn degraded_remote_prompt_budget_excludes_scheduler_pauses() {
+        degraded_remote_prompt_budget(Duration::from_millis(300));
+    }
+
+    fn degraded_remote_prompt_budget(scheduler_pause: Duration) {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -972,9 +1021,17 @@ mod tests {
         let _provider =
             crate::board_provider::test_provider_override::force_prompt_provider(provider);
 
-        let started = Instant::now();
-        let result = handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id));
-        let elapsed = started.elapsed();
+        let mut result = None;
+        let (cpu, wall) = measure_hook_work(|| {
+            std::thread::sleep(scheduler_pause);
+            result = Some(handle_with_input(
+                "UserPromptSubmit",
+                &input,
+                &worktree,
+                Some(&session.id),
+            ));
+        });
+        let result = result.expect("measured prompt result");
         let records: Vec<Value> = std::fs::read_to_string(&profile_path)
             .expect("read hook profile")
             .lines()
@@ -994,9 +1051,12 @@ mod tests {
             result.is_ok(),
             "degraded endpoints must fail open: {result:?}"
         );
+        // Match the warm prompt CPU gate: scheduler pauses and I/O waits
+        // stay diagnostic; the transport deadline tests guard remote waits.
+        eprintln!("degraded prompt: hook thread CPU={cpu:?}; wall-clock={wall:?}; stages={timing_summary:?}");
         assert!(
-            elapsed < Duration::from_millis(250),
-            "degraded prompt must stay below 250ms, got {elapsed:?}: {timing_summary:?}"
+            cpu < Duration::from_millis(250),
+            "degraded prompt hook thread CPU must stay below 250ms: cpu={cpu:?}, wall={wall:?}: {timing_summary:?}"
         );
         assert!(
             server
@@ -1505,6 +1565,127 @@ mod tests {
             .expect("PreToolUse output");
 
         assert_eq!(output, HookOutput::Silent);
+    }
+
+    #[test]
+    fn session_start_injects_standing_user_instructions_for_the_pm() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
+        std::fs::create_dir_all(&worktree).unwrap();
+        let saved = gwt_core::user_instruction::record(
+            &worktree,
+            gwt_core::user_instruction::UserInstructionInput {
+                original: "報告には判断理由も記載してください。".into(),
+                summary: "判断理由を報告する".into(),
+                answer: "理由を報告します。".into(),
+                actions: vec![],
+                issue_numbers: vec![5342],
+                kind: gwt_core::user_instruction::UserInstructionKind::Standing,
+                supersedes: vec![],
+            },
+        )
+        .unwrap();
+
+        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
+            panic!("PM startup must inject its standing instructions: {output:?}");
+        };
+        assert_eq!(event, IntentBoundaryEvent::SessionStart);
+        assert!(text.contains(&saved.id), "{text}");
+        assert!(text.contains(&saved.summary), "{text}");
+        assert!(!text.contains(&saved.original), "inject only the summary");
+
+        let store_path = gwt_core::user_instruction::instructions_path(&worktree);
+        std::fs::write(store_path, b"invalid instruction snapshot").unwrap();
+        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let mut stdout = Vec::new();
+        output.serialize_to(&mut stdout).unwrap();
+        let envelope: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            envelope["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+        assert!(envelope["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("Standing user instructions unavailable"));
+    }
+
+    #[test]
+    fn standing_user_instructions_reload_at_each_pm_prompt() {
+        use gwt_core::user_instruction::{record, UserInstructionInput, UserInstructionKind};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let input = UserInstructionInput {
+            original: "報告には判断理由も記載してください。".into(),
+            summary: "判断理由を報告する".into(),
+            answer: "理由を報告します。".into(),
+            actions: vec![],
+            issue_numbers: vec![5342],
+            kind: UserInstructionKind::Standing,
+            supersedes: vec![],
+        };
+        let first = record(&repo, input.clone()).unwrap();
+        let initial = append_pm_standing_context(
+            HookOutput::Silent,
+            IntentBoundaryEvent::SessionStart,
+            &repo,
+            true,
+        );
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = initial else {
+            panic!("standing instructions must reach PM startup");
+        };
+        assert!(text.contains(&first.id), "{text}");
+
+        let latest = record(
+            &repo,
+            UserInstructionInput {
+                summary: "報告には根拠リンクを記載する".into(),
+                supersedes: vec![first.id.clone()],
+                ..input
+            },
+        )
+        .unwrap();
+        let base = HookOutput::hook_specific_additional_context(
+            IntentBoundaryEvent::UserPromptSubmit,
+            "Board reminder",
+        );
+        let next = append_pm_standing_context(
+            base.clone(),
+            IntentBoundaryEvent::UserPromptSubmit,
+            &repo,
+            true,
+        );
+        let HookOutput::HookSpecificAdditionalContext { event, text } = next else {
+            panic!("standing instructions must reach each PM prompt");
+        };
+        assert_eq!(event, IntentBoundaryEvent::UserPromptSubmit);
+        assert!(text.contains("Board reminder"), "{text}");
+        assert!(
+            text.contains(&latest.id) && text.contains(&latest.summary),
+            "{text}"
+        );
+        assert!(!text.contains(&first.id), "superseded instruction: {text}");
+        assert_eq!(
+            append_pm_standing_context(base.clone(), event, &repo, false),
+            base
+        );
+        let stop = HookOutput::system_message("Stop reminder");
+        assert_eq!(
+            append_pm_standing_context(stop.clone(), IntentBoundaryEvent::Stop, &repo, true),
+            stop
+        );
     }
 
     /// AC-1/AC-2: the decision policy reaches the agent at every intent

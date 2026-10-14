@@ -306,17 +306,13 @@ fn assert_public_ws_agent_route_boundary(
             fixture.stderr()
         );
     }
-    let owned_pid = sysinfo::Pid::from_u32(fixture.pid());
+    let owned_pid = fixture.pid();
     drop(fixture);
-    let mut processes = sysinfo::System::new();
-    processes.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[owned_pid]),
-        true,
-        sysinfo::ProcessRefreshKind::nothing(),
-    );
+    // A terminated Windows process object can remain in a Toolhelp snapshot
+    // while another handle is open. Probe its exit signal, not PID membership.
     assert!(
-        processes.process(owned_pid).is_none(),
-        "WindowsRealGwtFixture leaked its owned gwt process"
+        !gwt::process::is_host_process_alive(owned_pid),
+        "WindowsRealGwtFixture leaked its owned gwt process {owned_pid}"
     );
 }
 

@@ -155,6 +155,7 @@ function applyEntries(surface, load, entries, selectedNumber) {
     empty_message: "",
     refresh_enabled: true,
   });
+  if (selectedNumber != null) surface.requestKnowledgeDetail("win-1", "issue", selectedNumber);
 }
 
 function click(node) {

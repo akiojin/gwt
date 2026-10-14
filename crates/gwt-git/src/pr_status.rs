@@ -1277,9 +1277,7 @@ impl PrInventoryCache {
             std::fs::create_dir_all(parent)?;
         }
         let rendered = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-        std::fs::write(&tmp, rendered)?;
-        std::fs::rename(&tmp, path)
+        gwt_core::atomic_file::write_atomic(path, rendered.as_bytes())
     }
 
     fn age_secs(&self, now: DateTime<Utc>) -> Option<i64> {
@@ -1583,6 +1581,22 @@ pub fn collect_unlanded_work_branches(
         });
     }
     Ok(probes)
+}
+
+/// Budget/TTL-aware observation without advancing the resident PM's history.
+pub fn fetch_pr_inventory_cached(
+    repo_path: &Path,
+    cache_path: &Path,
+    options: &PrInventoryOptions,
+) -> Result<PrInventoryRead> {
+    fetch_pr_inventory_cached_with(
+        repo_path,
+        cache_path,
+        &BudgetLedger::global(),
+        Utc::now(),
+        options,
+        run_gh_command,
+    )
 }
 
 /// Fetch open PRs, classify them, and fold the read into the per-project

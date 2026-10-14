@@ -381,6 +381,7 @@ fn prepare_issue_monitor_answer(
         &request.project_root,
         &branch,
         request.issue_number,
+        request.linked_issue_kind,
         agent_id,
         sessions_dir,
         cache,
@@ -424,6 +425,7 @@ fn prepare_issue_monitor_launch(
             project_root,
             &branch,
             request.issue_number,
+            request.linked_issue_kind,
             &profile.agent_id,
             sessions_dir,
             cache,
@@ -2494,15 +2496,24 @@ impl AppRuntime {
             previous_profiles,
         ) {
             Ok(()) => {
+                let target_branch =
+                    knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
+                let delivery = gwt::issue_monitor_owner_branch_delivery(
+                    &project_root,
+                    &base_branch_name,
+                    &target_branch,
+                );
                 if let Some(session) = self.launch_wizard_for_mut(&context) {
                     session.issue_monitor_launch_issue_number = Some(issue_number);
                     session.origin = super::LaunchWizardOrigin::IssueMonitor;
                     session
                         .wizard
                         .apply(gwt::LaunchWizardAction::SetInitialPrompt {
-                            value: gwt::issue_monitor_launch_prompt(
+                            value: gwt::issue_monitor_launch_prompt_for_base(
                                 linked_issue_kind,
                                 issue_number,
+                                &base_branch_name,
+                                delivery,
                             ),
                         });
                 }
@@ -3685,6 +3696,7 @@ impl AppRuntime {
                     &project_root,
                     &target_branch,
                     issue_number,
+                    linked_issue_kind,
                     delivery_id,
                     &agent_id,
                     Some(Ok(Some(*resume))),
@@ -3738,6 +3750,7 @@ impl AppRuntime {
                 &project_root,
                 &target_branch,
                 issue_number,
+                linked_issue_kind,
                 delivery_id,
                 agent_id,
                 None,
@@ -3810,12 +3823,29 @@ impl AppRuntime {
             .ok()
             .unwrap_or(false);
 
+        let materializer_id = self.issue_monitor_materializer_id.clone();
         let record_launch_tier = || -> Result<(), String> {
             if review_prompt.is_none() {
                 if let Some(tier) = tier {
-                    gwt::mutate_issue_monitor_prefs(
+                    gwt::try_mutate_issue_monitor_prefs(
                         &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
-                        |prefs| prefs.record_tier_launch(issue_number, tier),
+                        |prefs| {
+                            if let Some(delivery_id) = delivery_id.as_deref() {
+                                if !prefs.record_launch_delivery_tier(
+                                    issue_number,
+                                    delivery_id,
+                                    &materializer_id,
+                                    &proposed_window_id,
+                                    tier,
+                                ) {
+                                    return Err(std::io::Error::other(
+                                        "launch tier no longer matches the claimed delivery window",
+                                    ));
+                                }
+                            }
+                            prefs.record_tier_launch(issue_number, tier);
+                            Ok(())
+                        },
                     )
                     .map_err(|error| {
                         format!("Could not record Issue Monitor launch tier: {error}")
@@ -3863,6 +3893,7 @@ impl AppRuntime {
                 &project_root,
                 &target_branch,
                 issue_number,
+                linked_issue_kind,
                 delivery_id.clone(),
                 &profile_agent_id,
                 prepared
@@ -3901,9 +3932,20 @@ impl AppRuntime {
                 issue_number,
                 delivery_id.as_deref(),
             );
-            gwt::issue_monitor_launch_prompt_with_requeue_reason(
-                linked_issue_kind,
-                issue_number,
+            // Issue #5043: a relaunch whose owner branch still holds
+            // undelivered source is told to deliver it, not to close over it.
+            let delivery = gwt::issue_monitor_owner_branch_delivery(
+                &project_root,
+                &base_branch_name,
+                &target_branch,
+            );
+            gwt::append_issue_monitor_requeue_reason(
+                gwt::issue_monitor_launch_prompt_for_base(
+                    linked_issue_kind,
+                    issue_number,
+                    &base_branch_name,
+                    delivery,
+                ),
                 requeue_reason.as_deref(),
             )
         });
@@ -4005,6 +4047,7 @@ impl AppRuntime {
             LaunchWizardLaunchRequest::Agent(config) => Some(config.session_mode),
             LaunchWizardLaunchRequest::Shell(_) => None,
         };
+        record_launch_tier()?;
         let feedback = LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
@@ -4018,7 +4061,6 @@ impl AppRuntime {
             // owns the launch binding the implementation window holds.
             issue_monitor_review_dispatch: review_prompt.is_some(),
         };
-        record_launch_tier()?;
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
                 .spawn_agent_window_with_feedback_at_geometry(
@@ -4070,6 +4112,7 @@ impl AppRuntime {
         project_root: &Path,
         target_branch: &str,
         issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
         profile_agent_id: &str,
         prepared: Option<Result<Option<PreparedIssueMonitorResume>, String>>,
@@ -4084,6 +4127,7 @@ impl AppRuntime {
                 project_root,
                 target_branch,
                 issue_number,
+                linked_issue_kind,
                 profile_agent_id,
                 &self.sessions_dir,
                 &self.launch_wizard_cache,
@@ -6818,6 +6862,7 @@ fn prepare_issue_monitor_resume(
     project_root: &Path,
     target_branch: &str,
     issue_number: u64,
+    linked_issue_kind: gwt::LinkedIssueKind,
     profile_agent_id: &str,
     sessions_dir: &Path,
     cache: &LaunchWizardMemoryCache,
@@ -6903,7 +6948,18 @@ fn prepare_issue_monitor_resume(
     }
     // Building a resume config resolves its working directory's Git remote and runner.
     // Keep that work with the other launch facts, before returning to the GUI.
-    let config = super::launch_config_from_persisted_session(&session);
+    let mut config = super::launch_config_from_persisted_session(&session);
+    if autonomous_handoff.is_none() && linked_issue_kind == gwt::LinkedIssueKind::Issue {
+        let base_branch = gwt::start_work::resolve_launch_agent_base_branch(project_root)?;
+        let delivery =
+            gwt::issue_monitor_owner_branch_delivery(project_root, &base_branch, target_branch);
+        config.args.push(gwt::issue_monitor_launch_prompt_for_base(
+            linked_issue_kind,
+            issue_number,
+            &base_branch,
+            delivery,
+        ));
+    }
     let workspace_resume_context = workspace_resume_context_for_work_item(
         project_root,
         Some(session.branch.as_str()),

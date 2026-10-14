@@ -7090,7 +7090,7 @@ body.route-body {
   flex-wrap: wrap;
   gap: var(--space-2);
 }
-.knowledge-monitor-controls { flex: 1; }
+.knowledge-monitor-controls { flex: 0 0 auto; }
 .knowledge-monitor-status { padding-right: var(--space-3); border-right: 1px solid var(--color-border); }
 .knowledge-monitor-refill-limit { display: flex; align-items: center; gap: var(--space-1); font-size: var(--type-xs); }
 .knowledge-monitor-refill-limit input { width: 4em; }
@@ -7137,5 +7137,69 @@ body.route-body {
 
 .issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
 .issue-bridge-root[data-preview-hidden="true"] .knowledge-detail-pane { display: none; }
+/* Issue #5321: compact summary and selection preview. */
+.issue-bridge-root { container-type: inline-size; }
+.issue-bridge-root .knowledge-monitor-bar {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  overflow-x: auto;
+}
+.issue-bridge-root .knowledge-monitor-status,
+.issue-bridge-root .knowledge-monitor-controls {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+.issue-bridge-root .knowledge-monitor-status {
+  padding-right: 0;
+  border-right: 0;
+}
+.issue-bridge-root .knowledge-monitor-controls { margin-left: 0; }
+.issue-bridge-root .knowledge-monitor-capacity-badge {
+  order: 0;
+  flex-shrink: 1;
+  max-width: 22ch;
+}
+.issue-bridge-root .knowledge-monitor-controls { order: 1; }
+.issue-bridge-root .knowledge-monitor-bar [data-action="monitor-settings"] { margin-left: 0; }
+.issue-bridge-root .issue-list-shell { grid-template-columns: minmax(0, 1fr) minmax(320px, 34%); }
+.issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
+.issue-bridge-root .knowledge-list-pane { grid-area: 1 / 1; }
+.issue-bridge-root .modal-shell.issue-preview-shell {
+  grid-area: 1 / 2;
+  width: auto;
+  max-height: none;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  border-radius: 0;
+  box-shadow: none;
+}
+.issue-bridge-root .modal-header.issue-detail-tabs { align-items: center; }
+.issue-preview-close { margin-left: auto; }
+.issue-queue-column .knowledge-row-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.issue-preview-shell .knowledge-detail-title {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+@container (max-width: 1100px) {
+  .issue-bridge-root[data-view-mode="list"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
+  .issue-bridge-root[data-view-mode="list"] .modal-shell.issue-preview-shell {
+    grid-area: 1 / 1;
+    justify-self: end;
+    width: min(460px, 85%);
+    z-index: 1;
+    box-shadow: var(--shadow-2);
+  }
+}
+/* /Issue #5321 */
 .issue-detail-tabs { flex-shrink: 0; padding: var(--space-2); }
 .issue-detail-provenance { color: var(--color-text-muted); font-size: var(--type-xs); }

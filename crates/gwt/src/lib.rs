@@ -56,6 +56,7 @@ pub(crate) mod path_filter;
 pub mod perf;
 pub mod persistence;
 pub mod pm_conversation;
+pub mod pm_current;
 pub mod pm_registry;
 pub mod preset;
 pub mod process;
@@ -74,6 +75,7 @@ pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
 pub mod update_drain;
+pub mod update_settings;
 pub mod web_protocol_enums;
 pub mod window_canvas;
 pub mod window_state;
@@ -160,14 +162,15 @@ pub use index_worker::{
 };
 pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
-    bind_autonomous_handoff_delivery_target_from_prefs, clear_issue_monitor_authority_fence,
-    clear_wait_on_record, decide_merged_issue_settlement, declare_wait_on_record,
-    delegation_recorded, establish_issue_monitor_authority_fence, invalidate_wait_on_record,
-    is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
+    append_issue_monitor_requeue_reason, bind_autonomous_handoff_delivery_target_from_prefs,
+    clear_issue_monitor_authority_fence, clear_wait_on_record, decide_merged_issue_settlement,
+    declare_wait_on_record, delegation_recorded, establish_issue_monitor_authority_fence,
+    invalidate_wait_on_record, is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
     issue_monitor_authority_fence_path, issue_monitor_launch_delivery_requeue_reason,
     issue_monitor_launch_plan, issue_monitor_launch_profile_pool_summary,
     issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
-    issue_monitor_launch_prompt_with_requeue_reason, issue_monitor_prefs_path_for_repo_path,
+    issue_monitor_launch_prompt_for_base, issue_monitor_launch_prompt_with_requeue_reason,
+    issue_monitor_owner_branch_delivery, issue_monitor_prefs_path_for_repo_path,
     load_issue_monitor_authority_fence, load_issue_monitor_prefs,
     mark_autonomous_handoff_delivered_from_prefs,
     mark_autonomous_handoff_delivery_ambiguous_from_prefs, merge_issue_monitor_profiles_set,

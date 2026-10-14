@@ -103,7 +103,7 @@ pub use persistence::{
 };
 pub(crate) use persistence::{
     apply_workspace_container_detachments, save_workspace_work_items_projection_after_rebuild,
-    with_workspace_work_items_lock, write_atomic,
+    write_atomic, WorkItemsIntakeSnapshot,
 };
 pub use projection::{
     workspace_projection_default_created_at, GitDetails, WorkspaceCleanupCandidate,

@@ -405,6 +405,13 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   (Auto は OS locale を参照し、`C` / `POSIX` や未設定時は English にフォール
   バック)。設定はグローバルで `~/.gwt/config.toml` の `[ai].language` に保存
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
+  アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
+  Autonomous、Max active、キュー補充、許可ラベルを、`Agents` では起動
+  プロファイルと候補の順序・優先条件を編集できます。プロジェクト欄には
+  編集対象の名前を表示し、Issue ウィンドウの ⚙ からその `Issues` 欄を
+  開けます。`System > Auto-apply updates` は全プロジェクト共通で、開いて
+  いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
+  旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
 - `PR` — pull-request workflow surface。詳細な一覧機能は cache-backed PR source の整備に依存します
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
@@ -429,15 +436,20 @@ Queued 内では順序を変更でき、複数選択の移動は 1 回のキュ�
 Active と Done は実行ライフサイクルに従うため、ドラッグでは変更できません。
 Queued には `auto-refill` などの追加元も表示されます。
 
-検索と Kanban / Split の切り替えは同じ行に並びます。Monitor の状態表示と操作は分離し、
-Settings、Autonomous、Auto-refill と上限、Start monitor / Stop をラベル付きで表示します。
-Auto-refill は**既定で OFF**です。有効にすると、条件を満たす open Issue を設定した
-キュー上限まで自動補充します。空のキューから新しい作業は起動せず、実行中の作業は継続します。
-監視エラーは通知センターで確認できます。詳細ペインには受け入れ基準の進捗と状態別の
-操作を表示します。カードを選び、**Issue / Output** で本文・受け入れ基準とエージェントの
-読み取り専用出力を切り替えます。**Windowize** でエージェントを Canvas へ移せます。
-**Hide preview / Show preview** でボードを全幅に広げたり、詳細ペインを再表示したりできます。
-列は縮めず横スクロールします。従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
+検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
+Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
+容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
+エラーの詳細と履歴は通知センターで確認できます。⚙ で **Settings → Issues** を開いて
+フォーカスを移し、Max active、Auto-refill と上限、Allowed labels を設定します。
+候補プロファイルは **Settings → Agents** にあります。Auto-refill は**既定で OFF**です。
+有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
+空のキューから新しい作業は起動せず、実行中の作業は継続します。
+
+Kanban は既定で全幅です。カードを選ぶとプレビューが開き、**Issue / Output** で
+本文・受け入れ基準とエージェントの読み取り専用出力を切り替えます。
+**Windowize** でエージェントを Canvas へ移せます。**Close preview** または Escape で
+全幅に戻ります。狭い幅ではプレビューをボードの上に重ね、列は縮めず横スクロールします。
+従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
 **Max active** は新規設定で **Auto** を使用します。推奨値には CPU、空きメモリとディスク、
 GUI の CPU 使用量、他プロジェクトの稼働中エージェントを反映します。稼働中のエージェントが
@@ -453,11 +465,10 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`、共有実測値の `agent_capacity` を返します。
 
-**Allowed labels** で、この端末の Monitor が拾う Issue をラベルで指定できます。
-ラベルを1件ずつ追加・削除し、保存済みリストのいずれかに一致する Issue が対象になります。
+**Settings → Issues** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
 大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
 維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
-設定欄には保存済みラベルと除外件数・Issue 番号を表示します。自動化からは
+自動化からは
 `issue.monitor.config.set` に `{"allowed_labels":["agent:mac"]}` を渡せます。
 `issue.monitor.status` は `allowed_labels`、`label_excluded_count`、
 `label_excluded_issues` を返します。
@@ -1010,13 +1021,32 @@ gwt が対処メッセージを表示）。
 ## PM のプロジェクト設定
 
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
-**Copy** ボタン付きで表示します。閲覧専用で、ターミナル操作には **Execution log** を
-使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存し、
-再起動後も保持します。自動失効・件数制限はなく、空でない本文は 1 件 64 KiB までです。
+**Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、
+**Report kind** で種類を絞り込めます。閲覧専用で、ターミナル操作には **Execution log** を
+使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存します。
+指示を記録した Q&A は同じ machine-local project store の `project-state/user-instructions.json`
+を正本とし、1 回の原子的な保存で報告と指示を保持します。再起動後も保持し、自動失効・件数制限は
+ありません。空でない報告本文は 1 件 64 KiB までです。
 
-登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker`）と
-`body` で投稿し、`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
-使用します。投稿成功は保存と読み戻しの確認を意味し、失敗時は明示的なエラーを返します。
+登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker` / `qa`）と
+`body` で投稿します。`qa` には、ユーザーの質問・指示を要約した空でない `question` が必須で、
+`body` に回答・取った行動・結果を記載します。`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
+使用します。投稿成功は永続化の確認を意味し、失敗時は明示的なエラーを返します。
+
+PM の Q&A 投稿には、原文 `original`、種別 `kind`（`standing` / `one_off` / `question`）、
+`actions`、`issue_numbers` を持つ `instruction` を含めます。任意の `supersedes` に旧指示の ID を
+指定すると、旧レコードを残したまま `superseded_by` で置換先を記録します。秘密値は保存前に伏せます。
+Memory 検索で原文と結果を検索でき、取り消されていない常設指示は PM の起動時と各ターンに再読込します。
+
+**PM の現在** カードは報告履歴の上に常時表示されます。PM の説明と、稼働窓・キュー先頭・
+人への引き継ぎ件数・リリース PR・未適用の更新という自動の事実を分け、取得できない情報は
+不明と表示します。PM は `pm.status.set` で説明を更新します。`items` は 1〜3 件で、
+`kind`（`working` / `waiting`）、`text`、RFC3339 の `started_at` を指定します。
+`next_trigger` は必須、`user_action` は任意です。更新停止の警告は既定で 15 分後に表示し、
+`stale_after_minutes` で変更できます。`pm.status` は最新の説明・保持された状態履歴・
+報告の診断情報を返します。説明と Monitor の状態が同じ場合は時刻を更新しません。
+人間との PM の各ターンは、Q&A 報告の保存に成功してから終了します。定期的な自動サイクルは
+この終了条件の対象外です。
 
 常駐 PM は gwt 所有の runtime ディレクトリで起動します。リポジトリの skill、
 hook、`AGENTS.md`、`CLAUDE.md` は project の data として読めますが、PM の設定には
@@ -1332,6 +1362,12 @@ Markdown 描画を選びます。移行対象と受け入れ条件は
 残りの最初のコマンドの取得待機が時間切れになると、記録を置き換えず既存の記録を保持します。
 途中の時間切れでは、先行コマンドの結果を未完了・非 PASS の `deferred` 記録に残します。
 
+単一 package の library は、正のテスト名 filter があれば Light です。
+Nextest の `-E 'test(=module::case)'` または
+`--filterset='test(=module::case)'` も、厳密一致 filter 1 個なら対応します。
+名前に使えるのは ASCII 英数字・underscore・colon です。複数の filterset、広域・複合式、
+package / target の選択範囲を広げる指定は Heavy のままです。
+
 次の短命な non-Cargo ゲートは Light として Heavy lease を取らずに実行します。
 
 | コマンド | 資源を限定できる根拠 |
@@ -1379,6 +1415,13 @@ GC の空き容量閾値を残してディスク容量を予約します。
 target と一時領域の実測増分に 20% の余裕を加えて算出しています。
 `verify.lease.status` は `capacity`、`running`、`available`、`slots` 内の保持者と ETA、
 共通 FIFO queue を表示します。再試行前に確認してください。
+
+非 resident 予約は最終 refresh から3分間、FIFO の優先権を保持します。
+その後は verification lane の後続が、exclusive admission を要するコマンドも含めて
+入場できます。status は bypass 理由を表示し、元の到着順位と期限は保存します。
+同じ完全な matrix で `verify.run` を再提出すると、元の優先権を回復します。
+新しい attempt は Cargo artifact 待ちに入る前に既存の deferred 予約を引き継ぎ、
+古い attempt の cancel は後継の予約を削除しません。
 
 ```bash
 gwtd <<'JSON'

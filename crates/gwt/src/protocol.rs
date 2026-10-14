@@ -166,13 +166,31 @@ impl IndexSearchScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IndexSearchTarget {
-    Issue { number: u64 },
-    Spec { spec_id: u64 },
-    Memory { heading: String, date: String },
-    Discussion { heading: String, date: String },
-    Board { entry_id: String },
-    Work { work_id: String },
-    File { path: String },
+    Issue {
+        number: u64,
+    },
+    Spec {
+        spec_id: u64,
+    },
+    Memory {
+        heading: String,
+        date: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_instruction: Option<Box<gwt_core::user_instruction::UserInstruction>>,
+    },
+    Discussion {
+        heading: String,
+        date: String,
+    },
+    Board {
+        entry_id: String,
+    },
+    Work {
+        work_id: String,
+    },
+    File {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -963,15 +981,17 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
-    /// Issue #3906 AC-1: explicit auto-apply-updates override. Persisted as
-    /// `auto_apply_updates` in the Issue Monitor prefs; without an override
-    /// the setting follows `autonomous_mode`.
+    /// Issue #5322: update the global auto-apply-updates preference shared
+    /// by every project and the Hub.
     SetIssueMonitorAutoApplyUpdates {
         enabled: bool,
     },
+    /// Read the current project's complete saved launch profile pool.
+    GetIssueMonitorProfiles,
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         usage_threshold_percent: Option<u8>,
+        request_id: Option<u64>,
     },
     SetIssueMonitorMaxActiveAgents {
         #[serde(deserialize_with = "deserialize_positive_capacity_override")]
@@ -1970,6 +1990,8 @@ pub enum UpdateAutoApplyPhase {
     Scheduled,
     Postponed,
     Cancelled,
+    /// Automatic apply needs an administrator; retain the staged manual action.
+    ElevationRequired,
     Applying,
 }
 
@@ -2089,6 +2111,8 @@ pub enum BackendEvent {
         id: String,
         session_id: Option<String>,
         reports: Vec<PmReportView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     },
     /// Origin-client completion receipt for one authenticated pane snapshot
@@ -2190,6 +2214,13 @@ pub enum BackendEvent {
         /// Boxed: the view is by far the largest payload in this enum
         /// (clippy `large_enum_variant`), and every broadcast clones it.
         status: Box<IssueMonitorStatusView>,
+    },
+    /// Client-scoped Settings snapshot, in saved launch candidate order.
+    IssueMonitorProfiles {
+        project_root: String,
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
     },
     /// Client-scoped failure for one label save; uncertain writes can still commit.
     IssueMonitorAllowedLabelsWriteFailed {
@@ -2738,6 +2769,7 @@ pub enum BackendEvent {
     /// Settings > System > Language select.
     SystemSettings {
         language: String,
+        auto_apply_updates: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
         /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
@@ -2804,6 +2836,7 @@ pub enum BackendEvent {
     /// optimistic UI with the authoritative config state.
     SystemSettingsUpdated {
         language: String,
+        auto_apply_updates: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
         /// SPEC-2959: persisted Board provider echoed back for reconciliation.
@@ -3072,6 +3105,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "pm_status",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_profiles",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "issue_monitor_status",
@@ -3543,6 +3581,7 @@ impl BackendEvent {
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
+            BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
             BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
                 "issue_monitor_allowed_labels_write_failed"
             }
@@ -3723,11 +3762,15 @@ mod tests {
         assert!(matches!(request, FrontendEvent::LoadPmReports { id } if id == "pm"));
         let event = BackendEvent::PmReports {
             id: "pm".into(), session_id: Some("session".into()), error: None,
+            current: None,
             reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
-                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress,
+                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
                 body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
                 created_at: chrono::Utc::now(),
-            })],
+            }), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
+                "id": "qa", "kind": "qa", "question": "Can we ship?",
+                "body": "**Yes.** Checks passed.", "created_at": "2026-10-13T00:00:00Z"
+            })).unwrap())],
         };
         let value = serde_json::to_value(&event).unwrap();
         let html = value["reports"][0]["body_html"].as_str().unwrap();
@@ -3742,6 +3785,12 @@ mod tests {
         }
         assert!(!html.contains("<script>"));
         assert_eq!(value["reports"][0]["kind"], "progress");
+        assert_eq!(value["reports"][1]["kind"], "qa");
+        assert_eq!(value["reports"][1]["question"], "Can we ship?");
+        assert!(value["reports"][1]["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<strong>Yes.</strong>"));
         assert_eq!(
             event.delivery_policy().delivery,
             BackendEventDeliveryClass::Snapshot
@@ -3830,6 +3879,26 @@ mod tests {
         assert!(
             errors.contains("project_context_for_root"),
             "control errors must resolve their explicit project owner"
+        );
+    }
+
+    #[test]
+    fn update_auto_apply_elevation_required_serializes_without_a_grace() {
+        let phase: super::UpdateAutoApplyPhase =
+            serde_json::from_value(serde_json::json!("elevation_required"))
+                .expect("administrator-required phase is part of the update protocol");
+        let event = BackendEvent::UpdateAutoApply {
+            version: "9.106.0".into(),
+            phase,
+            grace_secs: None,
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "kind": "update_auto_apply",
+                "version": "9.106.0",
+                "phase": "elevation_required",
+            })
         );
     }
 

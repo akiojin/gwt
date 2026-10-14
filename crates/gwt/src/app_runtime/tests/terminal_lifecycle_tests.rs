@@ -2763,6 +2763,7 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
                 version: version.into(),
                 since: "2026-10-13T00:00:00Z".into(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
                 blocking: Vec::new(),
             }),
             ..Default::default()
@@ -2783,6 +2784,7 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
             version: version.into(),
             since: "2026-10-13T00:00:00Z".into(),
             reason: gwt::IssueMonitorUpdateDrainReason::Manual,
+            automatic: None,
             blocking: Vec::new(),
         });
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
@@ -2803,6 +2805,7 @@ fn stage_host_drain_update(temp: &Path, version: &str) {
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
         downloaded_at: "2026-10-13T00:00:00Z".into(),
+        origin: gwt_core::update::PendingUpdateOrigin::Automatic,
         auto_apply_deferred: false,
     })
     .unwrap();
@@ -2820,6 +2823,7 @@ fn issue_5351_update_drain_host_hold_requires_pending_update_and_supports_host_w
             version: "99.0.0".into(),
             since: "2026-10-13T00:00:00Z".into(),
             reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
             blocking: Vec::new(),
         }),
         ..Default::default()
@@ -2864,6 +2868,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
             version: "99.0.0".to_string(),
             since: "2026-10-10T08:21:17Z".to_string(),
             reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
             blocking: Vec::new(),
         }),
         ..Default::default()
@@ -2930,6 +2935,7 @@ fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
                 version: "99.0.0".into(),
                 since: "2026-10-10T08:21:17Z".into(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
                 blocking: Vec::new(),
             }),
             ..Default::default()

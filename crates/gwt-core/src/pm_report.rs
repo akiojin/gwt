@@ -18,14 +18,29 @@ pub enum PmReportKind {
     Progress,
     Decision,
     Blocker,
+    Qa,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmReport {
     pub id: String,
     pub kind: PmReportKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
     pub body: String,
     pub created_at: DateTime<Utc>,
+}
+
+impl From<&crate::user_instruction::UserInstruction> for PmReport {
+    fn from(record: &crate::user_instruction::UserInstruction) -> Self {
+        Self {
+            id: record.id.clone(),
+            kind: PmReportKind::Qa,
+            question: Some(record.summary.clone()),
+            body: record.answer.clone(),
+            created_at: record.created_at,
+        }
+    }
 }
 
 /// Reports share the repository's machine-local project store and never expire.
@@ -33,8 +48,18 @@ pub fn reports_path(repo_path: &Path) -> PathBuf {
     crate::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm-reports.jsonl")
 }
 
-/// A successful post has been appended, synced and read back while holding the lock.
-pub fn post_report(repo_path: &Path, kind: PmReportKind, body: &str) -> Result<PmReport> {
+/// Validate fields shared by legacy Reports and instruction-backed Q&A.
+pub fn validate_report_input(kind: PmReportKind, body: &str, question: Option<&str>) -> Result<()> {
+    if kind == PmReportKind::Qa && question.is_none_or(|value| value.trim().is_empty()) {
+        return Err(GwtError::Config(
+            "PM Q&A report question must be nonempty".into(),
+        ));
+    }
+    if question.is_some_and(|value| value.len() > 64 * 1024) {
+        return Err(GwtError::Config(
+            "PM report question must not exceed 64 KiB".into(),
+        ));
+    }
     if body.trim().is_empty() {
         return Err(GwtError::Config("PM report body must be nonempty".into()));
     }
@@ -43,6 +68,17 @@ pub fn post_report(repo_path: &Path, kind: PmReportKind, body: &str) -> Result<P
             "PM report body must not exceed 64 KiB".into(),
         ));
     }
+    Ok(())
+}
+
+/// A successful post has been appended, synced and read back while holding the lock.
+pub fn post_report(
+    repo_path: &Path,
+    kind: PmReportKind,
+    body: &str,
+    question: Option<&str>,
+) -> Result<PmReport> {
+    validate_report_input(kind, body, question)?;
     let path = reports_path(repo_path);
     fs::create_dir_all(path.parent().expect("report store has a parent"))?;
     let mut file = OpenOptions::new()
@@ -57,6 +93,7 @@ pub fn post_report(repo_path: &Path, kind: PmReportKind, body: &str) -> Result<P
     let report = PmReport {
         id: uuid::Uuid::new_v4().to_string(),
         kind,
+        question: question.map(str::to_owned),
         body: body.to_owned(),
         created_at: Utc::now(),
     };
@@ -117,13 +154,23 @@ fn sync_report_parent(_path: &Path) -> io::Result<()> {
 
 pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
     let path = reports_path(repo_path);
-    let mut file = match File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+    let mut reports = match File::open(&path) {
+        Ok(mut file) => {
+            FileExt::lock_shared(&file)?;
+            read_reports(&mut file, &path)?
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error.into()),
     };
-    FileExt::lock_shared(&file)?;
-    read_reports(&mut file, &path)
+    // Captured Q&A and its instruction share one durable source. Legacy
+    // reports remain readable without introducing a second write transaction.
+    reports.extend(
+        crate::user_instruction::load(repo_path)?
+            .iter()
+            .map(PmReport::from),
+    );
+    reports.sort_by_key(|report| report.created_at);
+    Ok(reports)
 }
 
 fn read_reports(file: &mut File, path: &Path) -> Result<Vec<PmReport>> {
@@ -165,9 +212,15 @@ mod tests {
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
         assert!(load_reports(&repo).unwrap().is_empty());
-        let first = post_report(&repo, PmReportKind::Progress, "# Progress\n\n- Done").unwrap();
-        let second =
-            post_report(&repo, PmReportKind::Decision, "Keep the existing terminal").unwrap();
+        let first =
+            post_report(&repo, PmReportKind::Progress, "# Progress\n\n- Done", None).unwrap();
+        let second = post_report(
+            &repo,
+            PmReportKind::Decision,
+            "Keep the existing terminal",
+            None,
+        )
+        .unwrap();
         assert_ne!(first.id, second.id);
         assert!(reports_path(&repo).starts_with(home.path().join(".gwt/projects")));
         assert!(reports_path(&repo).ends_with("project-state/pm-reports.jsonl"));
@@ -182,22 +235,79 @@ mod tests {
     }
 
     #[test]
+    fn qa_reports_preserve_question_with_legacy_records() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let path = reports_path(&repo);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = ["progress", "decision", "blocker"]
+            .map(|kind| {
+                serde_json::json!({
+                    "id": kind, "kind": kind, "body": "Existing report",
+                    "created_at": "2026-10-13T00:00:00Z"
+                })
+                .to_string()
+            })
+            .join("\n");
+        fs::write(&path, format!("{legacy}\n")).unwrap();
+        let qa = post_report(
+            &repo,
+            PmReportKind::Qa,
+            "Yes. Verified the checks.",
+            Some("Can we ship?"),
+        )
+        .unwrap();
+
+        let reports = load_reports(&repo).unwrap();
+        assert_eq!(reports.len(), 4);
+        for report in &reports[..3] {
+            assert!(serde_json::to_value(report)
+                .unwrap()
+                .get("question")
+                .is_none());
+        }
+        assert_eq!(reports[3], qa);
+        assert_eq!(
+            serde_json::to_value(&reports[3]).unwrap()["question"],
+            "Can we ship?"
+        );
+    }
+
+    #[test]
     fn report_validation_and_storage_failures_are_explicit() {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
-        let blank = post_report(&repo, PmReportKind::Progress, " \n ").unwrap_err();
+        for question in [None, Some(" \n ")] {
+            let error = post_report(&repo, PmReportKind::Qa, "Answer", question).unwrap_err();
+            assert!(
+                error.to_string().contains("question must be nonempty"),
+                "{error}"
+            );
+        }
+        let blank = post_report(&repo, PmReportKind::Progress, " \n ", None).unwrap_err();
         assert!(blank.to_string().contains("nonempty"), "{blank}");
         let oversized =
-            post_report(&repo, PmReportKind::Progress, &"x".repeat(65_537)).unwrap_err();
+            post_report(&repo, PmReportKind::Progress, &"x".repeat(65_537), None).unwrap_err();
         assert!(oversized.to_string().contains("64 KiB"), "{oversized}");
+        let oversized_question = "あ".repeat(21_846);
+        for kind in [PmReportKind::Qa, PmReportKind::Progress] {
+            let error = post_report(&repo, kind, "Answer", Some(&oversized_question)).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("question must not exceed 64 KiB"),
+                "{error}"
+            );
+        }
         let path = reports_path(&repo);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::create_dir(&path).unwrap();
-        assert!(post_report(&repo, PmReportKind::Blocker, "Cannot write").is_err());
+        assert!(post_report(&repo, PmReportKind::Blocker, "Cannot write", None).is_err());
         assert!(load_reports(&repo).is_err());
         std::fs::remove_dir(&path).unwrap();
-        post_report(&repo, PmReportKind::Progress, "Complete record").unwrap();
+        post_report(&repo, PmReportKind::Progress, "Complete record", None).unwrap();
         let mut truncated = std::fs::read_to_string(&path).unwrap();
         truncated.pop();
         std::fs::write(&path, &truncated).unwrap();
@@ -205,7 +315,7 @@ mod tests {
             load_reports(&repo).is_err(),
             "an incomplete final record must be reported"
         );
-        assert!(post_report(&repo, PmReportKind::Blocker, "Must not append").is_err());
+        assert!(post_report(&repo, PmReportKind::Blocker, "Must not append", None).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), truncated);
     }
 
@@ -214,7 +324,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
-        let previous = post_report(&repo, PmReportKind::Progress, "Previously saved").unwrap();
+        let previous =
+            post_report(&repo, PmReportKind::Progress, "Previously saved", None).unwrap();
         let path = reports_path(&repo);
         let original = fs::read(&path).unwrap();
         let report = PmReport {

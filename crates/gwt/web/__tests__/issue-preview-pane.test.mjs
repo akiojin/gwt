@@ -151,6 +151,7 @@ function applyEntries(surface, load, entries, selectedNumber) {
     empty_message: "",
     refresh_enabled: true,
   });
+  if (selectedNumber != null) surface.requestKnowledgeDetail("win-1", "issue", selectedNumber);
 }
 
 test("issuePreviewWindowsForIssue binds previews to their host Issue window", async () => {
@@ -199,10 +200,14 @@ test("issuePreviewWindowsForIssue binds previews to their host Issue window", as
   assert.deepEqual(issuePreviewWindowsForIssue(windows, "win-1", 9999), []);
 });
 
-test("queue preview defaults to Issue, switches output and preserves visibility across refresh", async (t) => {
+test("Issue #5321: selection opens preview, close restores full width and selecting reopens", async (t) => {
   const fixture = await makeFixture({ workspaceWindows: [previewWindow("agent-1", 3671)] });
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
-  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], 3671);
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], null);
+  const root = fixture.body.querySelector(".issue-bridge-root");
+  assert.equal(root.dataset.previewHidden, "true");
+  fixture.body.querySelector('[data-issue-number="3671"] .knowledge-row-select').click();
+  assert.equal(root.dataset.previewHidden, "false");
   assert.ok(!fixture.body.querySelector(".issue-preview"));
   fixture.body.querySelector('[data-issue-detail-view="output"]').click();
   assert.equal(fixture.body.querySelectorAll(".issue-preview").length, 1);
@@ -210,7 +215,7 @@ test("queue preview defaults to Issue, switches output and preserves visibility 
   assert.ok(!fixture.body.querySelector(".issue-preview"));
   fixture.surface.renderKnowledgeBridge("win-1");
   assert.equal(fixture.body.querySelector(".issue-bridge-root").dataset.previewHidden, "true");
-  fixture.body.querySelector('[data-action="toggle-issue-preview"]').click();
+  fixture.body.querySelector('[data-issue-number="3671"] .knowledge-row-select').click();
   assert.equal(fixture.body.querySelectorAll(".issue-preview").length, 1);
   fixture.body.querySelector('[data-issue-detail-view="issue"]').click();
   assert.ok(!fixture.body.querySelector(".issue-preview"));
@@ -527,7 +532,7 @@ test("queue output explains queued and completed issues without agents", async (
     state.entries = [{ ...knowledgeEntry(3671), ...extra }];
     state.selectedNumber = 3671;
     state.issueDetailView = "output";
-    fixture.surface.renderKnowledgeBridge("win-1");
+    fixture.surface.requestKnowledgeDetail("win-1", "issue", 3671);
     assert.equal(fixture.body.querySelector(".issue-preview-empty")?.textContent, reason);
   }
 });

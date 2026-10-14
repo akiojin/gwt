@@ -21,6 +21,7 @@ fn app_runtime_monitor_resume_from_terminal_owner_retains_execution_authority() 
         MonitorProviderConversationFixture::Present,
         MonitorNativeHolderFixture::None,
         false,
+        LinkedIssueKind::Spec,
         gwt::cli::execution_state::ExecutionSettlement::Blocked {
             reason: "monitor predecessor failed".to_string(),
             missing_verification: Some("successor verification pending".to_string()),
@@ -195,6 +196,7 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             MonitorProviderConversationFixture::Present,
             MonitorNativeHolderFixture::None,
             true,
+            LinkedIssueKind::Spec,
             settlement,
         );
         let unique_head = if case.contains("ownerless") {
@@ -2835,4 +2837,56 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
         saved_summary, previewed_summary,
         "the previewed summary must be the one the Monitor reports after the save"
     );
+}
+
+/// Issue #5043 AC-2: an ordinary Resume must deliver an ahead owner branch.
+#[test]
+fn app_runtime_monitor_plain_issue_resume_receives_delivery_prompt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "plain-issue-delivery",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    fs::write(fixture.worktree.join("fix.rs"), "fn fixed() {}\n").expect("write source");
+    run_git(&fixture.worktree, &["add", "fix.rs"]);
+    run_git(&fixture.worktree, &["commit", "-qm", "undelivered fix"]);
+
+    prepare_monitor_relaunch(
+        &mut fixture,
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    let result = take_monitor_launch_complete("plain-issue-delivery", &fixture.recorded_events);
+    let (process, .., session_mode, _, _) = result.as_ref().expect("ordinary Issue Resume");
+    assert_eq!(*session_mode, gwt_agent::SessionMode::Resume);
+    let prompt = process
+        .args
+        .iter()
+        .find(|argument| {
+            argument.contains("verify.run, a pull request, and its merge into develop")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "Resume must receive the delivery prompt: {:?}",
+                process.args
+            )
+        });
+    assert!(prompt.contains("against origin/develop"), "{prompt}");
+    assert!(!prompt.contains("close Issue #3165 and finish"), "{prompt}");
 }

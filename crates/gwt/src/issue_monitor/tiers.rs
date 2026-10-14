@@ -20,6 +20,113 @@ impl IssueMonitorTierRecord {
     }
 }
 
+/// Exact acknowledged launch evidence, not proof of current process liveness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorConfirmedLaunchTier {
+    pub tier: u8,
+    pub window_id: String,
+    pub delivery_id: String,
+}
+
+/// Read-only tier facts for presentation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorTierFacts {
+    pub issue_number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_launch: Option<IssueMonitorConfirmedLaunchTier>,
+    /// Max-merged history written before spawn, not the latest or running tier
+    /// and not proof that an agent successfully started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_launch_tier: Option<u8>,
+    /// Recorded exact Work-done observation, not a GitHub merge observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_landing_tier: Option<u8>,
+    pub history_floor: u8,
+    /// Explicit operator minimum, including zero; never an exact profile lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_tier_override: Option<u8>,
+    /// Only classified agent failures, excluding infrastructure and unknown.
+    pub agent_failures: u32,
+    /// Auto-selection starting floor; availability can select a higher tier.
+    /// Absent for manual profiles or when the Issue's spec status is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_minimum_tier: Option<u8>,
+}
+
+impl IssueMonitorState {
+    pub(super) fn tier_facts(&self, auto_tier_count: Option<usize>) -> Vec<IssueMonitorTierFacts> {
+        let spec_by_issue = auto_tier_count.map(|_| {
+            self.inbox
+                .iter()
+                .map(|item| (item.issue.number, has_gwt_spec_label(&item.issue.labels)))
+                .collect::<BTreeMap<_, _>>()
+        });
+        self.issue_tiers
+            .keys()
+            .chain(self.tier_overrides.keys())
+            .chain(self.autonomous_records.keys())
+            .chain(self.launch_confirmations.keys())
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|issue_number| {
+                let history = self.issue_tiers.get(&issue_number);
+                let history_floor = history.map_or(0, |record| record.floor);
+                let minimum_tier_override = self.tier_overrides.get(&issue_number).copied();
+                let agent_failures = self
+                    .autonomous_records
+                    .get(&issue_number)
+                    .map_or(0, AutonomousIssueRecord::tier_input);
+                let next_minimum_tier = auto_tier_count.and_then(|count| {
+                    spec_by_issue.as_ref()?.get(&issue_number).map(|is_spec| {
+                        tier_for(
+                            agent_failures,
+                            *is_spec,
+                            history_floor.max(minimum_tier_override.unwrap_or(0)),
+                            count.min(255) as u8,
+                        )
+                    })
+                });
+                IssueMonitorTierFacts {
+                    issue_number,
+                    confirmed_launch: self.confirmed_launch_tier(issue_number),
+                    recorded_launch_tier: history.and_then(|record| record.launch_tier),
+                    recorded_landing_tier: history.and_then(|record| record.landing_tier),
+                    history_floor,
+                    minimum_tier_override,
+                    agent_failures,
+                    next_minimum_tier,
+                }
+            })
+            .collect()
+    }
+
+    fn confirmed_launch_tier(&self, issue_number: u64) -> Option<IssueMonitorConfirmedLaunchTier> {
+        if !self.active_launches.contains(&issue_number)
+            || self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+        {
+            return None;
+        }
+        let window_id = self.launched_windows.get(&issue_number)?;
+        let ack = self.launch_confirmations.get(&issue_number)?;
+        if ack.window_id != *window_id
+            || self.launch_bindings.get(window_id) != Some(&issue_number)
+            || ack.claim_id.is_none()
+            || ack.claim_id.as_ref() != self.launched_claims.get(&issue_number)
+        {
+            return None;
+        }
+        Some(IssueMonitorConfirmedLaunchTier {
+            tier: ack.tier?,
+            window_id: window_id.clone(),
+            delivery_id: ack.delivery_id.clone()?,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IssueMonitorTierSelection {
     pub tier: u8,
@@ -66,6 +173,29 @@ fn default_launch_tiers() -> Vec<Vec<IssueMonitorLaunchProfile>> {
 }
 
 impl IssueMonitorPrefs {
+    /// Bind selection to the claimed fresh launch before materialization.
+    pub fn record_launch_delivery_tier(
+        &mut self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_id: &str,
+        window_id: &str,
+        tier: u8,
+    ) -> bool {
+        let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
+            delivery.issue_number == issue_number
+                && delivery.delivery_id == delivery_id
+                && delivery.materializer_id.as_deref() == Some(materializer_id)
+                && delivery.materializer_window_id.as_deref() == Some(window_id)
+                && delivery.materialized_window_id.is_none()
+                && delivery.workspace_durable_window_id.is_none()
+        }) else {
+            return false;
+        };
+        delivery.selected_tier = Some(tier);
+        true
+    }
+
     pub fn effective_launch_tiers(&self) -> Vec<Vec<IssueMonitorLaunchProfile>> {
         if !self.launch_auto {
             vec![self.launch_profile_pool()]

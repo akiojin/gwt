@@ -1,5 +1,6 @@
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { join } from "node:path";
 
 // #4499: real Chromium and checkout assets, deterministic protocol projections.
 // This suite proves the queue UI contract, not a real agent launch.
@@ -18,7 +19,11 @@ test.beforeEach(async ({ page }, info) => {
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
   if (!liveUrl) await installEmbeddedRoutes(page);
-  await installBackend(page, info.title.startsWith("four columns preserve"), info.title.startsWith("Issue #5287"));
+  await installBackend(page, {
+    inboxFirst: info.title.startsWith("Issue #5287"),
+    includeAgent: info.title.startsWith("T-7a:"),
+    observeSkipped: info.title.startsWith("four columns preserve"),
+  });
   await page.goto(liveUrl || APP_URL);
   await expect(page.locator(".issue-queue-board")).toBeVisible();
   await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
@@ -39,6 +44,117 @@ async function confirm(page: Page, numbers: number[], extra = {}) {
 async function drag(page: Page, number: number, target: Locator) {
   await row(page, number).dragTo(target);
 }
+async function titleMetrics(title: Locator) {
+  return title.evaluate(element => {
+    const oneLine = element.cloneNode(false) as HTMLElement;
+    oneLine.textContent = "M";
+    Object.assign(oneLine.style, { position: "absolute", visibility: "hidden", width: `${element.clientWidth}px`, height: "auto" });
+    element.parentElement!.appendChild(oneLine);
+    const lineHeight = oneLine.getBoundingClientRect().height;
+    oneLine.remove();
+    return { height: element.getBoundingClientRect().height, lineHeight,
+      fits: element.scrollHeight <= element.clientHeight && element.scrollWidth <= element.clientWidth };
+  });
+}
+
+test("Issue #5321 responsive summary and on-demand preview", async ({ page }, info) => {
+  const before = process.env.GWT_ISSUE_5321_PHASE === "before";
+  const phase = before ? "before" : "after";
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const root = page.locator(".issue-bridge-root");
+  const pane = root.locator(".knowledge-list-pane");
+  const detail = root.locator(".knowledge-detail-pane");
+  const capture = async (name: string) => {
+    const path = process.env.GWT_ISSUE_5321_EVIDENCE
+      ? join(process.env.GWT_ISSUE_5321_EVIDENCE, `${phase}-${theme}-${name}.png`)
+      : info.outputPath(`${phase}-${theme}-${name}.png`);
+    await page.screenshot({ path });
+    await info.attach(`${phase}-${theme}-${name}`, { path, contentType: "image/png" });
+  };
+  for (const width of [900, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.locator(".workspace-window").evaluate((element, width) => {
+      // The fixture's initial wide window auto-fits the canvas. Use physical
+      // CSS pixels for the responsive acceptance instead of camera scaling.
+      document.getElementById("canvas-stage")!.style.transform = "none";
+      Object.assign((element as HTMLElement).style, { left: "8px", top: "8px", width: `${width - 80}px`, height: "860px" });
+    }, width);
+    await capture(`${width}-default`);
+    if (before) continue;
+    await expect(root).toHaveAttribute("data-preview-hidden", "true");
+    await expect(detail).not.toBeVisible();
+    const paneBox = (await pane.boundingBox())!;
+    const shellBox = (await root.locator(".issue-list-shell").boundingBox())!;
+    expect(Math.abs(paneBox.width - shellBox.width), "default Kanban uses the full list width").toBeLessThan(2);
+    const statusBox = (await root.getByRole("group", { name: "Monitor status", exact: true }).boundingBox())!;
+    const controlsBox = (await root.getByRole("group", { name: "Monitor controls", exact: true }).boundingBox())!;
+    expect(Math.abs(statusBox.y + statusBox.height / 2 - controlsBox.y - controlsBox.height / 2), "summary status and controls share one row").toBeLessThan(2);
+    expect(controlsBox.x - statusBox.x - statusBox.width, "summary has no large central gap").toBeLessThan(40);
+    expect((await root.locator(".knowledge-monitor-bar").boundingBox())!.height, "summary stays compact").toBeLessThan(60);
+    const title = "First backlog issue with a long descriptive title that preserves every word in the preview while each Kanban card stays compact and readable across both viewport sizes";
+    await page.evaluate(title => (window as any).__queueTitle(1, title), title);
+    const cardTitle = row(page, 1).locator(".knowledge-row-title");
+    await expect(cardTitle).toHaveText(title);
+    const cardMetrics = await titleMetrics(cardTitle);
+    expect(cardMetrics.height, "long card title is at most two lines").toBeLessThanOrEqual(cardMetrics.lineHeight * 2 + 1);
+    await row(page, 1).locator(".knowledge-row-select").click();
+    await expect(root).toHaveAttribute("data-preview-hidden", "false");
+    await expect(detail).toBeVisible();
+    const previewTitle = detail.locator(".knowledge-detail-title");
+    await expect(previewTitle).toHaveText(title);
+    const previewMetrics = await titleMetrics(previewTitle);
+    expect(previewMetrics.fits, "preview shows the complete title without clipping").toBe(true);
+    expect(previewMetrics.height, "preview title wraps naturally").toBeGreaterThan(previewMetrics.lineHeight * 2);
+    if (width === 900) {
+      const openPaneBox = (await pane.boundingBox())!;
+      expect(Math.abs(openPaneBox.width - paneBox.width), "narrow preview overlays the full width board").toBeLessThan(2);
+    } else {
+      expect((await pane.boundingBox())!.width, "wide preview shares the list shell").toBeLessThan(paneBox.width - 100);
+    }
+    await capture(`${width}-preview`);
+    await detail.locator('[data-action="close-issue-preview"]').click();
+    await expect(root).toHaveAttribute("data-preview-hidden", "true");
+    expect(Math.abs((await pane.boundingBox())!.width - shellBox.width), "closing preview restores full width").toBeLessThan(2);
+    await page.evaluate(() => (window as any).__queueTitle(1, "First backlog issue"));
+  }
+  if (before) return;
+  const statusPill = root.locator(".knowledge-monitor-pill");
+  for (const [extra, label, tone] of [
+    [{ enabled: false, state: "disabled", active_count: 0 }, "Stopped", "idle"],
+    [{ enabled: true, state: "idle", active_count: 0, queue_len: 0 }, "Waiting · Empty", "idle"],
+    [{ enabled: true, state: "active", active_count: 1, max_active_agents: 2, queue_len: 2 }, "Running", "active"],
+    [{ enabled: true, state: "active", active_count: 2, max_active_agents: 2, queue_len: 2 }, "Waiting · Full", "idle"],
+    [{ enabled: true, state: "error", active_count: 0, last_error: "Fixture current failure" }, "⚠ Error", "blocked"],
+  ] as const) {
+    await page.evaluate(extra => (window as any).__queueStatus({ last_error: null, quota_hold: null, ...extra }), extra);
+    await expect(statusPill).toHaveText(label);
+    await expect(statusPill).toHaveAttribute("data-tone", tone);
+  }
+  await statusPill.click();
+  await expect(page.locator('[data-error-key="issue-monitor:last_error"]')).toContainText("Fixture current failure");
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  await page.evaluate(() => (window as any).__queueStatus({ state: "idle", last_error: null, active_count: 0, queue_len: 0 }));
+  await expect(statusPill).toHaveText("Waiting · Empty");
+  await expect(statusPill).toHaveAttribute("data-tone", "idle");
+  await page.setViewportSize({ width: 900, height: 1000 });
+  await page.locator(".workspace-window").evaluate(element => { (element as HTMLElement).style.width = "820px"; });
+  await root.getByRole("button", { name: "Split", exact: true }).click();
+  await expect(root).toHaveAttribute("data-view-mode", "split");
+  const splitList = (await pane.boundingBox())!;
+  const splitDetail = (await detail.boundingBox())!;
+  expect(splitList.x + splitList.width, "narrow Split keeps its interactive list beside the detail pane").toBeLessThanOrEqual(splitDetail.x + 1);
+});
+
+test("Issue #5321 preview keyboard focus opens and returns with Escape", async ({ page }) => {
+  const select = row(page, 1).locator(".knowledge-row-select");
+  const detail = page.locator(".knowledge-detail-pane");
+  await select.focus();
+  await select.press("Enter");
+  await expect(detail).toBeFocused();
+  await detail.press("Escape");
+  await expect(detail).not.toBeVisible();
+  await expect(select).toBeFocused();
+});
 
 test("pending SessionStart diagnosis clears when late readiness arrives", async ({page}) => {
   const diagnosis = "SessionStart readiness pending: hooks.json missing; check hook discovery and works.lock contention";
@@ -135,20 +251,22 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
   const searchBox=await page.locator(".knowledge-search").boundingBox();
   const modeBox=await page.locator(".knowledge-view-mode").boundingBox();
   expect(Math.abs(searchBox!.y-modeBox!.y), "search and view mode share one filter row").toBeLessThan(2);
-  await expect(page.locator('[data-action="monitor-settings"]')).toHaveText("⚙ Settings");
+  await expect(page.locator('[data-action="monitor-settings"]')).toHaveAttribute("aria-label", "Issues settings");
   await expect(page.locator('[data-action="refresh-knowledge"]')).toHaveText("↻ Refresh");
   await expect(page.getByRole("group",{name:"Monitor status",exact:true})).toBeVisible();
   await expect(page.getByRole("group",{name:"Monitor controls",exact:true})).toBeVisible();
   const pane=page.locator(".issue-bridge-root .knowledge-list-pane");
+  await expect(page.locator(".issue-bridge-root")).toHaveAttribute("data-preview-hidden","true");
+  const fullWidth=(await pane.boundingBox())!.width;
+  await row(page,3).locator(".knowledge-row-select").click();
   const visibleWidth=(await pane.boundingBox())!.width;
-  await page.getByRole("button",{name:"Hide preview",exact:true}).click();
+  expect(fullWidth).toBeGreaterThan(visibleWidth+100);
+  await page.locator('.knowledge-detail-pane [data-action="close-issue-preview"]').click();
   await expect(page.locator(".issue-bridge-root")).toHaveAttribute("data-preview-hidden","true");
   const hiddenWidth=(await pane.boundingBox())!.width;
   expect(hiddenWidth).toBeGreaterThan(visibleWidth+100);
   expect(Math.abs(hiddenWidth-(await page.locator(".issue-list-shell").boundingBox())!.width), "hidden preview gives the board full width").toBeLessThan(2);
   await expect(page.locator(".knowledge-detail-pane")).not.toBeVisible();
-  await page.getByRole("button",{name:"Show preview",exact:true}).click();
-  await expect(page.locator(".issue-bridge-root")).toHaveAttribute("data-preview-hidden","false");
   await page.locator(".workspace-window").evaluate(element => { (element as HTMLElement).style.width="850px"; });
   for (const phase of ["backlog","queued","active","done"]) {
     expect((await column(page,phase).boundingBox())!.width).toBeGreaterThanOrEqual(262);
@@ -162,6 +280,175 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
   await expect(column(page,"queued")).toContainText("Nothing will launch until an issue is queued.");
 });
 
+test("T-7a: current labels explain themselves with keyboard focus and hover", async ({ page }) => {
+  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  const controlMessages = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
+    message.kind.startsWith("set_issue_monitor_") || message.kind.startsWith("issue_monitor_queue_")
+      || message.kind === "update_viewport"));
+  const before = await controlMessages();
+  const queueMetric = page.locator('[data-metric="queue"]');
+  await queueMetric.focus();
+  await page.keyboard.press("Tab");
+  const autonomous = page.getByRole("switch", { name: "Autonomous mode" });
+  await expect(autonomous).toBeFocused();
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveText("Allow eligible issues to run without waiting for human approval.");
+  await expect(autonomous).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await autonomous.hover();
+  // Capture can refresh native hover, so finish the keyboard checks first.
+  await page.screenshot({ path: test.info().outputPath("issue-control-explanation.png") });
+  await page.keyboard.press("Escape");
+  await expect(popup).not.toBeVisible();
+  await page.mouse.move(1590, 1090);
+  await expect(popup).not.toBeVisible();
+  await expect(autonomous).toBeFocused();
+
+  for (const phase of ["backlog", "queued", "active", "done"]) {
+    const heading = column(page, phase).locator(".issue-queue-heading");
+    await heading.focus();
+    await expect(heading).toBeFocused();
+    await expect(popup).toBeVisible();
+    await expect(popup).toHaveText(await heading.getAttribute("aria-description") as string);
+  }
+  const queued = column(page, "queued").locator(".issue-queue-heading");
+  await queued.focus();
+  const backlog = column(page, "backlog").locator(".issue-queue-heading");
+  await backlog.hover();
+  await expect(popup).toHaveText(await backlog.getAttribute("aria-description") as string);
+  const hoverPopup = await popup.boundingBox();
+  await page.mouse.move(hoverPopup!.x + 20, hoverPopup!.y + 10);
+  await expect(popup).toHaveText(await backlog.getAttribute("aria-description") as string);
+  await confirm(page, [3, 4, 1]);
+  await expect(column(page, "queued").locator(".issue-queue-heading")).toHaveText("Queued · 3");
+  await expect(column(page, "queued").locator(".issue-queue-heading")).toBeFocused();
+  await expect(popup).toHaveText(await backlog.getAttribute("aria-description") as string);
+  await page.mouse.move(1590, 1090);
+  await expect(popup).toBeVisible();
+  await page.keyboard.press("Escape");
+  await confirm(page, [3, 4, 1, 2]);
+  await expect(column(page, "queued").locator(".issue-queue-heading")).toHaveText("Queued · 4");
+  await expect(column(page, "queued").locator(".issue-queue-heading")).toBeFocused();
+  await expect(popup).not.toBeVisible();
+  await expect(popup).toContainText("launch order");
+  await page.locator(".knowledge-search").focus();
+  await page.mouse.move(1590, 1090);
+  await queued.hover();
+  await expect(popup).toBeVisible();
+  await expect(popup).toContainText("launch order");
+  const box = await popup.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(1600);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(1100);
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await expect(popup).toBeVisible();
+  await confirm(page, [3, 4]);
+  await expect(queued).toHaveText("Queued · 2");
+  await expect(popup).toBeVisible();
+  await expect(queued).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await page.mouse.move(1590, 1090);
+  await expect(popup).not.toBeVisible();
+  await page.locator("#op-notifications-button").focus();
+  await queued.hover();
+  await expect(popup).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(popup).not.toBeVisible();
+  // Leave the hover target before checking keyboard-only focus explanations.
+  await page.mouse.move(1590, 1090);
+  for (const selector of [
+    '.knowledge-monitor-pill', '[data-metric="active"]', '[data-metric="queue"]',
+    '[data-action="monitor-settings"]', '[data-action="monitor-toggle"]',
+    '[data-action="monitor-autonomous"]',
+  ]) {
+    const target = page.locator(selector);
+    await target.focus();
+    await expect(target).toBeFocused();
+    await expect(popup).toBeVisible();
+    await expect(popup).toHaveText(await target.getAttribute("aria-description") as string);
+  }
+  const select = row(page, 4).locator(".knowledge-row-select");
+  await expect(page.locator('.knowledge-monitor-pill')).toHaveCSS("cursor", "default");
+  await select.focus();
+  await expect(popup).toContainText("Auto-refill added this issue");
+  expect(await controlMessages()).toEqual(before);
+  await page.keyboard.press("Enter");
+  const source = page.locator(".issue-detail-provenance");
+  await source.focus();
+  await expect(popup).toContainText("Auto-refill added this issue");
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => (window as any).__queueRefreshDetail());
+  await expect(page.locator(".issue-detail-title")).toHaveText("Refreshed issue");
+  await expect(source).toBeFocused();
+  await expect(popup).not.toBeVisible();
+  await expect(popup).toContainText("Auto-refill added this issue");
+  await page.locator(".knowledge-search").focus();
+  await row(page, 4).locator(".knowledge-row-badge").hover();
+  await expect(popup).toBeVisible();
+  const cardBox = await row(page, 4).boundingBox();
+  const cardPopup = await popup.boundingBox();
+  await page.mouse.move(cardBox!.x + 20, cardBox!.y + cardBox!.height - 1);
+  await expect(popup).toBeVisible();
+  await page.mouse.move(cardPopup!.x + 20, cardPopup!.y + 10);
+  await expect(popup).toBeVisible();
+  await source.focus();
+  await expect(popup).toContainText("Auto-refill added this issue");
+  await expect(popup).toBeVisible();
+  await row(page, 5).locator(".knowledge-row-select").focus();
+  await expect(popup).toHaveText("The agent is working on this issue.");
+  await row(page, 5).locator(".knowledge-row-select").click();
+  await page.getByRole("button", { name: "Output", exact: true }).click();
+  for (const selector of [".issue-preview .knowledge-monitor-chip", ".issue-split-pair .knowledge-row-badge"]) {
+    if (selector.startsWith(".issue-split")) await page.getByRole("button", { name: "Split", exact: true }).click();
+    const badge = page.locator(selector);
+    await badge.focus();
+    await expect(badge).toBeFocused();
+    await expect(popup).toHaveText("The agent is working on this issue.");
+    await badge.hover();
+    await expect(popup).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.mouse.move(1590, 1090);
+    await expect(popup).not.toBeVisible();
+  }
+});
+
+
+test("T-7b.2a: tier minimums and failures explain reported facts and clear on omission", async ({page}) => {
+  await confirm(page, [3, 4], { tier_facts: [
+    { issue_number: 3, recorded_launch_tier: 0, history_floor: 1, minimum_tier_override: 0,
+      agent_failures: 2, next_minimum_tier: 1 },
+    { issue_number: 4, history_floor: 0, minimum_tier_override: 2, agent_failures: 3, next_minimum_tier: 2 },
+  ] });
+  const chips = row(page, 3).locator('[data-kind="tier"]');
+  await expect(chips).toHaveText(["Min tier 0", "2 agent failures → ≥ tier 1"]);
+  await expect(row(page, 4).locator('[data-kind="tier"]')).toHaveCount(0);
+  const select = row(page, 3).locator(".knowledge-row-select");
+  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  await page.mouse.move(1590, 1090);
+  await select.focus();
+  await expect(popup).toContainText("zero-based");
+  await expect(popup).toContainText("not a profile lock");
+  await expect(popup).toContainText("availability can select a higher tier");
+  await expect(select).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await expect(select.locator('[tabindex="0"]')).toHaveCount(0);
+  await chips.last().hover();
+  await expect(popup).toContainText("2 classified agent failures");
+  await expect(popup).toContainText("Infrastructure and unknown failures are excluded");
+  await page.screenshot({path: test.info().outputPath("issue-tier-chips.png")});
+  const before = await page.evaluate(() => (window as any).__queueMessages.length);
+  await page.keyboard.press("Escape");
+  await expect(popup).not.toBeVisible();
+  await page.evaluate(() => (window as any).__queueOmitTierFacts());
+  await expect(row(page, 3).locator('[data-kind="tier"]')).toHaveCount(0);
+  // Refresh restores row focus; move away so returning actually opens its new explanation.
+  await page.locator(".knowledge-search").focus();
+  await select.focus();
+  await expect(popup).toBeVisible();
+  await expect(popup).not.toContainText("zero-based");
+  const controls = await page.evaluate(before => (window as any).__queueMessages.slice(before).filter((message: any) =>
+    /^(set_|issue_monitor_queue_|update_viewport|input$)/.test(message.kind)), before);
+  expect(controls, "reading and dismissing facts sends no controls").toEqual([]);
+});
 
 test("card selection keeps issue body, acceptance and provenance beside switchable output", async ({page}) => {
   const detail=page.locator(".knowledge-detail-pane");
@@ -241,18 +528,20 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
 });
 
 test("auto-refill starts off and toggle and limit use server-confirmed values", async ({ page }) => {
-  const toggle=page.getByRole("switch",{name:"Auto-refill queue",exact:true});
-  await expect(toggle).toHaveAttribute("aria-checked","false");
+  await page.getByRole("button", {name:"Issues settings",exact:true}).click();
+  const issues = page.locator('[data-settings-panel="issues"]');
+  await expect(issues).toBeFocused();
+  const toggle=issues.getByLabel("Auto-refill",{exact:true});
+  await expect(toggle).not.toBeChecked();
   await toggle.click();
   await expect.poll(()=>messages(page)).toEqual([{kind:"set_issue_monitor_auto_refill",enabled:true,limit:3}]);
-  await expect(toggle).toHaveAttribute("aria-checked","false");
   await confirm(page,[3,4],{terminal_queue_auto_refill:true});
-  await expect(toggle).toHaveAttribute("aria-checked","true");
-  await page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true}).fill("5");
-  await page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true}).press("Tab");
+  await expect(toggle).toBeChecked();
+  await issues.getByLabel("Refill limit",{exact:true}).fill("5");
+  await issues.getByLabel("Refill limit",{exact:true}).press("Tab");
   await expect.poll(async()=>(await messages(page)).at(-1)).toEqual({kind:"set_issue_monitor_auto_refill",enabled:true,limit:5});
   await confirm(page,[3,4],{terminal_queue_auto_refill_limit:5});
-  await expect(page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true})).toHaveValue("5");
+  await expect(issues.getByLabel("Refill limit",{exact:true})).toHaveValue("5");
 });
 
 test("live launched state survives stale cache and retains full queue positions", async ({ page }) => {
@@ -294,9 +583,9 @@ test("an unfocused Issue window reflects a launch while animation frames are sus
   await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
 });
 
-async function installBackend(page: Page, observeSkipped: boolean, inboxFirst = false) {
+async function installBackend(page: Page, { includeAgent = false, observeSkipped = false, inboxFirst = false } = {}) {
   const projectKey=new URL(liveUrl||APP_URL).pathname.split("/")[2];
-  await page.addInitScript(({projectKey,observeSkipped,inboxFirst})=>{
+  await page.addInitScript(({projectKey, includeAgent, observeSkipped, inboxFirst})=>{
     const fixture=window as any;
     fixture.__queueMessages=[];
     const status:any={enabled:false,state:"disabled",active_count:1,max_active_agents:1,
@@ -321,6 +610,16 @@ async function installBackend(page: Page, observeSkipped: boolean, inboxFirst = 
         fixture.__queueConfirm=(numbers:number[],extra:any)=>{
         Object.assign(status,{terminal_queue:numbers.map(number=>({number,queued_by:number===4?"auto-refill":"operator"})),queue_len:numbers.length},extra);
         this.emit({kind:"issue_monitor_status",status});
+      }; fixture.__queueStatus=(extra:any)=>{
+        Object.assign(status,extra);
+        this.emit({kind:"issue_monitor_status",status});
+      }; fixture.__queueTitle=(number:number,title:string)=>{
+        const entry=entries.find(entry=>entry.number===number);
+        if(entry) entry.title=title;
+        this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
+      }; fixture.__queueOmitTierFacts=()=>{
+        delete status.tier_facts;
+        this.emit({kind:"issue_monitor_status",status});
       }; fixture.__queueAddForeground=()=>{
         const workspace=fixture.__queueWorkspace;
         workspace.tabs[0].workspace.windows.push({id:"tab-queue::console",title:"Console",preset:"console",
@@ -328,15 +627,26 @@ async function installBackend(page: Page, observeSkipped: boolean, inboxFirst = 
         this.emit({kind:"workspace_state",workspace});
       }; fixture.__queueInbox=(items:unknown[])=>this.dispatchEvent(new MessageEvent("message",{
         data:JSON.stringify({kind:"issue_monitor_inbox",items})
-      })); setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
+      })); fixture.__queueRefreshDetail=()=>this.emit({...fixture.__queueLastDetail,
+        detail:{...fixture.__queueLastDetail.detail,title:"Refreshed issue"}});
+        setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
       emit(payload:unknown) {const data=JSON.stringify(payload);setTimeout(()=>this.dispatchEvent(new MessageEvent("message",{data})),0);}
       send(raw:string) {
         const message=JSON.parse(raw);fixture.__queueMessages.push(message);
         if(message.kind==="frontend_ready") { fixture.__queueWorkspace={app_version:"playwright",tabs:[{
           id:"tab-queue",title:"Queue fixture",project_root:"/fixture",project_key:projectKey,kind:"git",
           workspace:{viewport:{x:0,y:0,zoom:1},windows:[{id:"tab-queue::issue-1",title:"Issues",preset:"issue",
-            geometry:{x:40,y:40,width:1470,height:950},z_index:1,status:"running",persist:true,minimized:false,maximized:false}]} }],active_tab_id:"tab-queue",recent_projects:[]};
+            geometry:{x:40,y:40,width:1470,height:950},z_index:1,status:"running",persist:true,minimized:false,maximized:false},
+            ...(includeAgent ? [{id:"tab-queue::agent-5",session_id:"agent-5-session",title:"Issue 5 agent",preset:"agent",agent_id:"codex",
+              geometry:{x:80,y:80,width:900,height:600},z_index:2,status:"running",persist:true,minimized:false,maximized:false,
+              placement:{kind:"issue_preview",issue_window_id:"tab-queue::issue-1",issue_number:5}}] : [])]} }],active_tab_id:"tab-queue",recent_projects:[]};
           this.emit({kind:"workspace_state",workspace:fixture.__queueWorkspace}); }
+        else if(message.kind==="create_window" && message.preset==="settings") {
+          const workspace=fixture.__queueWorkspace;
+          workspace.tabs[0].workspace.windows.push({id:"tab-queue::settings",title:"Settings",preset:"settings",
+            geometry:{x:100,y:80,width:700,height:800},z_index:3,status:"running",persist:true,minimized:false,maximized:false});
+          this.emit({kind:"workspace_state",workspace});
+        }
         else if(message.kind==="list_issue_monitor") {
           this.emit({kind:"issue_monitor_status",status});
           if (inboxFirst) this.emit({kind:"issue_monitor_inbox",items:entries.map(issue=>({issue,
@@ -346,10 +656,13 @@ async function installBackend(page: Page, observeSkipped: boolean, inboxFirst = 
           fixture.__queueLoad={id:message.id,knowledge_kind:"issue",request_id:message.request_id};
           if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
         }
-        else if(message.kind==="select_knowledge_bridge_entry") this.emit({kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}});
+        else if(message.kind==="select_knowledge_bridge_entry") {
+          fixture.__queueLastDetail={kind:"knowledge_detail",id:message.id,knowledge_kind:"issue",request_id:message.request_id,detail:{number:message.number,title:entries.find(e=>e.number===message.number)?.title,state:message.number===6?"closed":"open",labels:[],sections:[{title:"Description",body:`Description for #${message.number}`,body_html:`<p>Description for #${message.number}</p>`},{title:"Acceptance criteria",body:`AC-${message.number}: expected behavior`,body_html:`<p>AC-${message.number}: expected behavior</p>`}],related_works:[]}};
+          this.emit(fixture.__queueLastDetail);
+        }
       }
       close(){this.readyState=3;this.dispatchEvent(new CloseEvent("close"));}
     }
     Object.defineProperty(window,"WebSocket",{configurable:true,value:FixtureSocket});
-  },{projectKey,observeSkipped,inboxFirst});
+  },{projectKey, includeAgent, observeSkipped, inboxFirst});
 }

@@ -120,6 +120,58 @@ into this generated skill supplements the PM contract.
   surface with `pm.report.post` (`kind`: `progress` / `decision` /
   `blocker`, `body` in the user's language), in addition to the
   conversation. Keep the body to the same at-a-glance format.
+- After answering a user's question or instruction, post exactly one Q&A
+  report in the same turn with `pm.report.post`, `kind: "qa"`, required
+  `question`, and `body`. Summarize the question or instruction in `question`;
+  include the answer and the actions taken with their results in `body`,
+  naming Issue numbers created, changed, or launched. If none were taken,
+  state "No action" and why. Write both fields in the user's language.
+  This rule takes precedence over unchanged-cycle silence and digest suppression.
+
+## User instruction memory
+
+- Search past user instructions before judgment, Issue registration, or rulings
+  using the `search` JSON operation with `scopes: ["memory"]` and a query about
+  the current topic. Results carry the full record in `target.user_instruction`.
+  If `stale_scopes` contains `memory`, wait for refresh and retry before making
+  the decision; an old verified snapshot does not establish current instructions.
+- Apply relevant standing records whose `superseded_by` is null. In the answer
+  and Q&A Report, include an "Applied past instructions" line in the user's
+  language, naming the record IDs and their effect, or state that none apply.
+- With every user Q&A post, include an `instruction` object: copy the user's
+  `original` without summarizing, classify `kind` as `standing`, `one_off`, or
+  `question`, and supply `actions` (including outcomes or the reason for no
+  action) and `issue_numbers`. `question` and `body` provide the saved summary
+  and answer. Secrets are redacted before the single atomic save; the record
+  is also the source of its Report, so do not make a second memory/report post.
+- When a newer instruction clearly contradicts an active standing instruction,
+  explain the conflict and which newer instruction applies in the answer and
+  Report. Supply the old record IDs in `supersedes` on that same Q&A post. The
+  store sets `superseded_by` atomically; never delete old records. If both
+  instructions still apply and the conflict is unresolved, use the existing
+  decision policy rather than inventing a priority.
+- Startup and each turn reload active standing instructions from durable
+  machine-local records into the PM context. Treat an unavailable-store
+  diagnostic as missing evidence, not an empty instruction list. Existing
+  `memory.add` work-note lessons remain separate from these records.
+
+## Current PM status
+
+- Maintain the current-status card separately from Reports with
+  `pm.status.set`. Send `items`, each with `kind`: `working` or `waiting`,
+  a short `text` in the user's language, and an RFC 3339 `started_at`.
+  Include a concrete `next_trigger` and `user_action` as the action the
+  user must take, or JSON null when no user action is needed.
+  `stale_after_minutes` defaults to 15; pass it only when a different
+  stale threshold is needed.
+- Update the card in the same turn whenever work changes, a wait starts
+  or ends, a user action is added or completed, or a launch or stop
+  decision is made. Remove ended work/waits and clear completed user
+  actions with `user_action:null`; describe the next observable trigger.
+- Preserve `started_at` while the same work or wait continues. Start a
+  new timestamp only for a new work or waiting interval. Do not update
+  current status during an unchanged cycle or use it as a keepalive.
+  Milestone digests and the Q&A reporting obligation still apply.
 
 ## Request intake via sub-agents
 
@@ -178,14 +230,29 @@ You own the backlog for its whole life, not just at creation.
   the deciding one: a search that returns nothing does not establish that
   no owner exists, because the result turns on the words you happened to
   choose. Only `issue.spec.list` settles the owner.
-- When a `gwt-spec` owns the area, register the work as that spec's
-  implementation Issue: a plain Issue whose body names the parent spec
-  and whose acceptance criteria include registering the change in that
-  spec's `spec` / `plan` / `tasks` sections. Do not fold the work into
-  the spec's sections instead of registering it, and do not register it
-  standalone. The reason is that the Issue Monitor launches Issues, not
-  spec sections, so work written only into a spec never runs — while a
-  standalone Issue splits the area's history away from its owner.
+- Read the candidate owner's body and `spec` / `plan` / `tasks` sections,
+  then all addenda, corrections, and comments. Do not decide from the
+  original body or a search snippet alone.
+- Check freshness against current develop, source code, tests, merged PRs,
+  and closed Issues. Identify what is already implemented and what remains;
+  do not register landed work again because an old description is stale.
+- Update the existing owner's FR/AC when it already covers the request.
+  Create an independently deliverable child Issue only when a concrete
+  delivery or verification boundary requires one; explain why the owner
+  alone cannot hold that work. Name the parent spec in the child's body
+  and include updating the parent's `spec` / `plan` / `tasks` sections in
+  its acceptance criteria. An existing owner is not a reason to register
+  a child automatically or to register the same work standalone.
+- Record the owner decision and its rationale in one to three lines,
+  including the search queries, in the owner/child Issue Notes or the
+  Board when no new Issue is needed. For `issue.create`, carry the same
+  evidence in `params` as `owner_check`: `owner_spec` is a positive spec number
+  or explicit null when no spec owns the area. With no owner,
+  `search_queries` must contain the nonempty queries you ran. With an
+  owner, `reason` must explain why a separate child is necessary. For example:
+  `{"owner_spec":null,"search_queries":["PM current state"]}` or
+  `{"owner_spec":3431,"search_queries":["PM current state"],"reason":"Independent current-state delivery and verification"}`.
+  A recent spec survey does not replace this per-registration evidence.
 - Count the family before you register a defect you hit while working.
   Search for the same failure mode and count how many Issues already
   describe it, closed ones included. At three or more you are looking at
@@ -1899,6 +1966,32 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn contract_updates_current_status_in_the_same_turn_as_state_changes() {
+        let current = section("## Current PM status");
+        for phrase in [
+            "`pm.status.set`",
+            "`items`",
+            "`kind`: `working` or `waiting`",
+            "`text`",
+            "`started_at`",
+            "`next_trigger`",
+            "`user_action`",
+            "`stale_after_minutes` defaults to 15",
+            "in the same turn",
+            "a wait starts or ends",
+            "a user action is added or completed",
+            "a launch or stop decision is made",
+            "Do not update current status during an unchanged cycle",
+            "Preserve `started_at` while the same work or wait continues",
+        ] {
+            assert!(
+                current.contains(phrase),
+                "missing current-status rule: {phrase}"
+            );
+        }
+    }
+
     /// A PM that registers every defect it trips over keeps the backlog
     /// flat: on 2026-09-25 it closed seven Issues, opened seven, and left the
     /// open count exactly where it started, with every new Issue the next
@@ -1931,13 +2024,8 @@ mod tests {
         }
     }
 
-    /// Issue #4680 AC-1 / AC-2: the search clause told the PM to run
-    /// `gwt-search` and nothing else, so a PM that followed it to the letter
-    /// still registered #4677 standalone while SPEC-1921 owned the area. The
-    /// contract now names `issue.spec.list` as the step that settles the
-    /// owner, says in so many words that a semantic search cannot settle it,
-    /// and fixes what to do once an owner is found — rather than leaving that
-    /// to PM discretion, which is how the precedent went unwritten.
+    /// Issue #5349 AC-7: retain the complete owner survey, then read all
+    /// amendments and check what has landed before updating or splitting.
     #[test]
     fn contract_settles_the_owning_spec_before_registering_and_says_what_to_do_with_it() {
         let body = body();
@@ -1955,15 +2043,36 @@ mod tests {
             "does not establish that",
             "no owner exists",
             "Only `issue.spec.list` settles the owner",
-            // AC-2: one written outcome, with both wrong turns named.
-            "register the work as that spec's",
-            "acceptance criteria include registering the change in that",
-            "Do not fold the work into",
-            "do not register it",
-            "standalone",
-            "launches Issues, not",
+            "all addenda, corrections, and comments",
+            "current develop, source code, tests, merged PRs, and closed Issues",
+            "Update the existing owner's FR/AC",
+            "an independently deliverable child Issue",
+            "one to three lines",
+            "the search queries",
+            "`owner_check`",
+            "`owner_spec`",
+            "`search_queries`",
+            "`reason`",
         ] {
             assert!(body.contains(phrase), "missing phrase: {phrase}");
+        }
+        let registration = section("## Issues: registering, updating, curating");
+        let mut previous = 0;
+        for step in [
+            "Then search",
+            "all addenda, corrections, and comments",
+            "current develop, source code, tests, merged PRs, and closed Issues",
+            "Update the existing owner's FR/AC",
+            "one to three lines",
+        ] {
+            let position = registration
+                .find(step)
+                .unwrap_or_else(|| panic!("missing: {step}"));
+            assert!(
+                position > previous,
+                "registration steps out of order: {step}"
+            );
+            previous = position;
         }
     }
 
@@ -2961,6 +3070,45 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, codex, "mirrors must be byte-identical");
         assert_eq!(claude, render_skill_md());
         let intake = unwrapped(&claude);
+        for phrase in [
+            "`pm.status.set`",
+            "a wait starts or ends",
+            "a user action is added or completed",
+            "a launch or stop decision is made",
+            "all addenda, corrections, and comments",
+            "current develop, source code, tests, merged PRs, and closed Issues",
+            "Update the existing owner's FR/AC",
+            "`owner_check`",
+            "one to three lines",
+        ] {
+            assert!(
+                intake.contains(phrase),
+                "missing generated PM rule: {phrase}"
+            );
+        }
+        for phrase in [
+            "After answering a user's question or instruction, post exactly one Q&A report in the same turn",
+            "`kind: \"qa\"`",
+            "required `question`",
+            "Summarize the question or instruction in `question`",
+            "include the answer and the actions taken with their results in `body`",
+            "Issue numbers created, changed, or launched",
+            "state \"No action\" and why",
+            "Write both fields in the user's language",
+            "takes precedence over unchanged-cycle silence and digest suppression",
+            "Search past user instructions before judgment, Issue registration, or rulings",
+            "`scopes: [\"memory\"]`",
+            "If `stale_scopes` contains `memory`, wait for refresh",
+            "include an `instruction` object",
+            "`original` without summarizing",
+            "Applied past instructions",
+            "`supersedes`",
+            "`superseded_by`",
+            "never delete old records",
+            "Startup and each turn reload active standing instructions",
+        ] {
+            assert!(intake.contains(phrase), "missing generated Q&A rule `{phrase}`");
+        }
         assert!(intake.contains("Before registration, offer one optional line"));
         assert!(intake.contains("If the user opts in, follow the existing `gwt-discussion` skill"));
         assert!(intake.contains("If the user says no or gives no answer"));

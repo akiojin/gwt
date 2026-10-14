@@ -127,6 +127,7 @@ pub enum IssueCommand {
         title: String,
         body: String,
         labels: Vec<String>,
+        owner_check: Option<super::hook::pm_spec_survey::IssueOwnerCheck>,
     },
     /// Issue #3865: update a plain Issue in place. Every field is optional and
     /// only the supplied ones are sent; `body` is a whole-body replacement and
@@ -374,6 +375,8 @@ pub enum IssueCommand {
 /// SPEC-1942 command model for `pr.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
+    /// Narrow Ready-creation path backed by exact canonical GitHub CI.
+    CreateFromCi(crate::cli::pr::ci_delivery::CiCreateRequest),
     Current,
     /// Independent canonical-record/remote-head diagnostic; never admits a PR mutation.
     HeadCheck {
