@@ -599,6 +599,7 @@ export function createKnowledgeKanbanSurface({
   windowMap,
   workspaceWindowById,
   getWorkspaceWindows,
+  windowCatalogModel,
   pendingIndexOpenTargetsByPreset,
   knowledgeKindForPreset,
   focusWindowLocally,
@@ -837,8 +838,28 @@ export function createKnowledgeKanbanSurface({
       function issueTierChips(issueNumber) {
         const facts = issueMonitorModel.read().status.tier_facts?.find(item => item.issue_number === issueNumber);
         const isTier = value => Number.isInteger(value) && value >= 0;
-        if (!facts || (!isTier(facts.recorded_launch_tier) && !isTier(facts.recorded_landing_tier))) return [];
+        if (!facts) return [];
         const chips = [];
+        const confirmed = facts.confirmed_launch;
+        const catalog = windowCatalogModel?.read().catalog;
+        if (isTier(confirmed?.tier) && confirmed.tier <= 255
+            && typeof confirmed.window_id === "string" && confirmed.window_id.trim()
+            && typeof confirmed.delivery_id === "string" && confirmed.delivery_id.trim()) {
+          const agent = catalog?.appState.tabs.flatMap(tab => tab.workspace?.windows || [])
+            .find(windowData => windowData.id === confirmed.window_id);
+          const linkedIssue = agent?.placement?.kind === "issue_preview"
+            ? agent.placement.issue_number : agent?.linked_issue_number;
+          const runtime = Object.hasOwn(catalog?.runtimeStates || {}, confirmed.window_id)
+            ? catalog.runtimeStates[confirmed.window_id] : agent?.status;
+          // Display normalization maps unknown to running; evidence must use the raw state.
+          if (agent && Number(linkedIssue) === issueNumber
+              && (agent.linked_issue_number == null || Number(agent.linked_issue_number) === issueNumber)
+              && runtime === "running") {
+            chips.push({ kind: "tier", key: "tier-running", label: `Running tier ${confirmed.tier}`,
+              explanation: `Acknowledged launch tier ${confirmed.tier} (zero-based tiers); the matching agent window currently reports running.` });
+          }
+        }
+        if (!isTier(facts.recorded_launch_tier) && !isTier(facts.recorded_landing_tier)) return chips;
         if (isTier(facts.minimum_tier_override)) {
           chips.push({ kind: "tier", key: "tier-minimum", label: `Min tier ${facts.minimum_tier_override}`,
             explanation: `Explicit minimum tier ${facts.minimum_tier_override} (tiers are zero-based). This minimum is not a profile lock; availability can select a higher tier. Recorded launch attempts describe history.` });
@@ -4720,6 +4741,12 @@ export function createKnowledgeKanbanSurface({
                 if (mounted) renderKnowledgeBridge(windowData.id);
               }),
             ];
+            if (windowCatalogModel && state.kind === "issue") {
+              state.monitorSubscriptions.push(windowCatalogModel.subscribe(model =>
+                JSON.stringify([model.catalog.appState, model.catalog.runtimeStates]), () => {
+                if (mounted) renderKnowledgeBridge(windowData.id);
+              }));
+            }
             mounted = true;
           }
           const laneFilter = body.querySelector("[data-issue-lane-filter]");
