@@ -441,7 +441,18 @@ fn observe_with_processes(
     group_alive: impl Fn(u32) -> bool,
 ) -> SessionInventory {
     let mut inventory = SessionInventory::default();
-    let candidates = read_candidates(project_root, sessions_dir, None, &mut inventory);
+    let candidates = read_candidates_with_liveness(
+        Some(project_root),
+        sessions_dir,
+        None,
+        &mut inventory,
+        |host_pid, runtime| {
+            processes.contains_key(&host_pid)
+                || runtime
+                    .child_pid
+                    .is_some_and(|pid| processes.contains_key(&pid) || group_alive(pid))
+        },
+    );
     observe_candidates(
         candidates,
         processes,
@@ -535,6 +546,54 @@ fn read_candidates_scope(
     session_id: Option<&str>,
     inventory: &mut SessionInventory,
 ) -> Vec<RuntimeCandidate> {
+    let mut legacy_parents = None;
+    read_candidates_with_liveness(
+        project_root,
+        sessions_dir,
+        session_id,
+        inventory,
+        |host_pid, runtime| {
+            if crate::process::is_host_process_alive(host_pid)
+                || runtime.child_pid.filter(|pid| *pid > 0).is_some_and(|pid| {
+                    crate::process::is_host_process_alive(pid)
+                        || crate::process::is_process_group_alive(pid)
+                })
+            {
+                return true;
+            }
+            // A legacy orphan may have no recorded child PID. Preserve the
+            // parent-PID evidence used by missing-ledger recovery, including
+            // Windows, where a child's parent PID survives its parent's exit.
+            // Take at most one minimal snapshot; never collect environments.
+            let (observed, parents) = legacy_parents.get_or_insert_with(|| {
+                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+                let mut system = System::new();
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::nothing(),
+                );
+                (
+                    !system.processes().is_empty(),
+                    system
+                        .processes()
+                        .values()
+                        .filter_map(|process| process.parent().map(|pid| pid.as_u32()))
+                        .collect::<BTreeSet<_>>(),
+                )
+            });
+            !*observed || parents.contains(&host_pid)
+        },
+    )
+}
+
+fn read_candidates_with_liveness(
+    project_root: Option<&Path>,
+    sessions_dir: &Path,
+    session_id: Option<&str>,
+    inventory: &mut SessionInventory,
+    mut may_be_live: impl FnMut(u32, &SessionRuntimeState) -> bool,
+) -> Vec<RuntimeCandidate> {
     let project_root = project_root.map(normalized);
     let repo_hash = project_root
         .as_deref()
@@ -569,6 +628,16 @@ fn read_candidates_scope(
             if session_id.is_some_and(|expected| expected != id) {
                 continue;
             }
+            // Runtime JSON is small; decode the Session ledger only if this
+            // namespace still has live or uncertain process evidence. Keep
+            // errors until after the original ledger/scope checks below.
+            let runtime = SessionRuntimeState::load(&path);
+            if runtime
+                .as_ref()
+                .is_ok_and(|runtime| !may_be_live(host_pid, runtime))
+            {
+                continue;
+            }
             let session = match Session::load(&sessions_dir.join(format!("{id}.toml"))) {
                 Ok(session) => session,
                 Err(error) => {
@@ -589,7 +658,7 @@ fn read_candidates_scope(
             if project_root.is_some() && !same_repo && !same_root {
                 continue;
             }
-            match SessionRuntimeState::load(&path) {
+            match runtime {
                 Ok(runtime) => candidates.push(RuntimeCandidate {
                     host_pid,
                     path,
@@ -824,6 +893,78 @@ mod tests {
     use gwt_agent::{AgentId, AgentStatus};
 
     #[test]
+    fn absent_host_and_child_skip_session_ledger_without_removing_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, 2_000_000_000, "dead");
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Stopped);
+        runtime.child_pid = Some(2_000_000_001);
+        runtime.child_started_at = Some(20);
+        runtime.save(&path).unwrap();
+        std::fs::write(sessions.join("dead.toml"), "invalid Session TOML").unwrap();
+
+        let mut inventory = SessionInventory::default();
+        let candidates = read_candidates_scope(None, &sessions, None, &mut inventory);
+
+        assert!(candidates.is_empty());
+        assert!(
+            inventory.uncertainties.is_empty(),
+            "a definitively dead namespace must not decode its Session ledger: {:?}",
+            inventory.uncertainties
+        );
+        assert!(path.exists(), "census is read-only; GC belongs to #5384");
+    }
+
+    #[test]
+    fn orphan_child_keeps_live_count_and_missing_identity_uncertainty() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let mut session = Session::new(temp.path(), "orphan", AgentId::Codex);
+        session.id = "orphan".to_string();
+        session.project_state_root = Some(temp.path().to_path_buf());
+        session.save(&sessions).unwrap();
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, 2_000_000_000, &session.id);
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Running);
+        runtime.child_pid = Some(std::process::id());
+        runtime.child_started_at = crate::process::host_process_start_time(std::process::id());
+        assert!(runtime.child_started_at.is_some());
+        runtime.save(&path).unwrap();
+
+        let live = observe_sessions(temp.path(), &sessions);
+        assert_eq!(live.sessions.len(), 1);
+        assert_eq!(live.sessions[0].session_id, session.id);
+        assert!(live.uncertainties.is_empty());
+
+        runtime.child_started_at = None;
+        runtime.save(&path).unwrap();
+        let uncertain = observe_sessions(temp.path(), &sessions);
+        assert!(uncertain.sessions.is_empty());
+        assert_eq!(uncertain.uncertainties.len(), 1);
+        assert_eq!(uncertain.uncertainties[0].reason, "child_identity_missing");
+    }
+
+    #[test]
+    fn orphan_process_group_remains_uncertain_after_early_filtering() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        save_runtime(
+            &sessions,
+            temp.path(),
+            temp.path(),
+            "orphan-group",
+            Some((201, 20)),
+        );
+        let inventory =
+            observe_with_processes(temp.path(), &sessions, &BTreeMap::new(), |pid| pid == 201);
+        assert!(inventory.sessions.is_empty());
+        assert_eq!(inventory.uncertainties.len(), 1);
+        assert_eq!(
+            inventory.uncertainties[0].reason,
+            "child_exited_with_live_process_group"
+        );
+    }
+
+    #[test]
     fn namespace_pid_presence_without_recorded_host_identity_is_not_live_session_proof() {
         let mut runtime = SessionRuntimeState::new(AgentStatus::Stopped);
         assert!(
@@ -948,7 +1089,18 @@ mod tests {
         resources: &MachineProcessResources,
     ) -> MachineSessionInventory {
         let mut inventory = SessionInventory::default();
-        let candidates = read_candidates_scope(None, sessions_dir, None, &mut inventory);
+        let candidates = read_candidates_with_liveness(
+            None,
+            sessions_dir,
+            None,
+            &mut inventory,
+            |host_pid, runtime| {
+                processes.contains_key(&host_pid)
+                    || runtime
+                        .child_pid
+                        .is_some_and(|pid| processes.contains_key(&pid))
+            },
+        );
         let attribution = candidate_attribution(&candidates);
         observe_candidates(
             candidates,
@@ -1223,7 +1375,13 @@ mod tests {
         }
         save_runtime(&sessions, temp.path(), temp.path(), "live", Some((201, 20)));
         let mut observed = SessionInventory::default();
-        let candidates = read_candidates(temp.path(), &sessions, None, &mut observed);
+        let candidates = read_candidates_with_liveness(
+            Some(temp.path()),
+            &sessions,
+            None,
+            &mut observed,
+            |_, _| true,
+        );
         let processes = BTreeMap::from([(100, 99), (201, 20), (202, 0)]);
         observe_candidates(
             candidates,
@@ -1258,7 +1416,13 @@ mod tests {
         runtime.host_started_at = None;
         runtime.save(&path).unwrap();
         let mut inventory = SessionInventory::default();
-        let candidates = read_candidates(temp.path(), &sessions, None, &mut inventory);
+        let candidates = read_candidates_with_liveness(
+            Some(temp.path()),
+            &sessions,
+            None,
+            &mut inventory,
+            |_, _| true,
+        );
         let processes = BTreeMap::from([(100, 10), (201, 0)]);
         observe_candidates(
             candidates,
@@ -1348,7 +1512,13 @@ mod tests {
         ]);
         let observe = |processes: &BTreeMap<u32, u64>| {
             let mut inventory = SessionInventory::default();
-            let candidates = read_candidates(temp.path(), &sessions, None, &mut inventory);
+            let candidates = read_candidates_with_liveness(
+                Some(temp.path()),
+                &sessions,
+                None,
+                &mut inventory,
+                |_, _| true,
+            );
             observe_candidates(
                 candidates,
                 processes,
