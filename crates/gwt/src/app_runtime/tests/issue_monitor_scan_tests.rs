@@ -988,6 +988,7 @@ fn generation_recovery_reservation_is_single_flight_and_periodic() {
 #[test]
 fn generation_recovery_releases_its_reservation_when_the_worker_unwinds() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     assert!(super::super::scan_generation_reapers()
         .lock()
@@ -1014,6 +1015,7 @@ fn generation_recovery_releases_its_reservation_when_the_worker_unwinds() {
 #[test]
 fn issue_monitor_prefs_snapshot_is_readable_while_its_writer_lock_is_held() {
     let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
     gwt::save_issue_monitor_prefs(
         &prefs_path,
