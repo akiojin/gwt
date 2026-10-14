@@ -480,10 +480,11 @@ board; columns scroll horizontally instead of shrinking. The legacy
 free memory and disk space, the GUI's CPU use, and live agents in other projects.
 Registered projects without live agents consume no share. **Machine budget**
 shows the limiting resource and distinguishes the Monitor's implementation/review
-limit from the total including PM agents. Auto pauses new admissions while required
-measurements are unavailable; running agents continue.
-Initial measurements of large `target` directories can take several minutes;
-the same pause applies when a previous measurement expires during refresh.
+limit from the total including PM agents. While measurements are incomplete or
+expired, Auto retains its last accepted limit or the saved limit (one for new
+settings). Missing or still-scanning `target` directories do not stop launches.
+A complete measurement can still reduce the limit to zero; status and the error
+ledger explain which resource or live-agent consumption reduced capacity.
 Enter a positive number to keep a **Manual** override, or select **Use Auto** to
 follow the recommendation again. Existing saved limits remain Manual. Values above
 the recommendation are allowed, with a warning that verification may not finish and
