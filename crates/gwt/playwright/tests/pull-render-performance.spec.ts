@@ -137,6 +137,15 @@ test.describe('pull-render runner contract', () => {
   });
 
   test('timing validation rejects missing boundaries and missed cadence while accepting jitter', () => {
+    const schedule = spawnSync(process.execPath, ['--input-type=module', '-e',
+      `const { reportDeadlineOffsetMs } = await import(process.argv[1]); console.log(JSON.stringify(typeof reportDeadlineOffsetMs === 'function' ? Array.from({ length: 360 }, (_, index) => reportDeadlineOffsetMs(1800, index)) : []));`,
+      pathToFileURL(RUNNER).href], { encoding: 'utf8', timeout: 10_000 });
+    expect(schedule.status, schedule.stderr).toBe(0);
+    const deadlines: number[] = JSON.parse(schedule.stdout);
+    expect(deadlines).toHaveLength(360);
+    expect(deadlines[0]).toBe(1000);
+    expect(deadlines.at(-1)).toBe(1_790_000);
+    expect(deadlines.every((value, index) => index === 0 || value > deadlines[index - 1])).toBe(true);
     const run: any = { seconds: 10, samples: 10, ws_payload_bytes: 100, reports_posted: 2,
       metrics: { ws_payload_bytes_per_second: { mean: 10 }, backend_cpu_percent: { mean: 10 } },
       timing: { barrier_at: 0, ws: { start: 0, end: 10_000, counter_start: 0, counter_end: 100, start_lateness_ms: 0 },
@@ -172,6 +181,8 @@ test.describe('pull-render runner contract', () => {
     expect.soft(validate(early)).toContain('barrier clock mismatch');
     const overtime = structuredClone(run); overtime.report_timings[0].finished = overtime.report_timings[0].started + 30_001;
     expect.soft(validate(overtime)).toContain('Reports timeout');
+    const outsideWindow = structuredClone(run); outsideWindow.report_timings[1].finished = run.timing.ws.end + 1;
+    expect(validate(outsideWindow)).toContain('Reports completion/window mismatch');
     const missingTimeout = structuredClone(run); delete missingTimeout.report_timings[0].timed_out;
     expect.soft(validate(missingTimeout)).toContain('Reports completion/window mismatch');
   });
@@ -319,9 +330,11 @@ test.describe('pull-render runner contract', () => {
         ws_at: (index + 1) * 1000, ws_counter: (index + 1) * 1000 / 1800,
         cpu_at: (index + 1) * 1000 + 1, cpu_counter: (index + 1) / 10,
         cpu_probe_duration_ms: 1, collected_at: (index + 1) * 1000 + 2 })) },
-      report_timings: Array.from({ length: 360 }, (_, index) => ({ sequence: index + 1,
-        deadline: 1000 + index * 5000, started: 1000 + index * 5000, finished: 1001 + index * 5000,
-        pid: index + 1000, exit_code: 0, timed_out: false })) });
+      report_timings: Array.from({ length: 360 }, (_, index) => {
+        const deadline = 1000 + 1_789_000 * index / 359;
+        return { sequence: index + 1, deadline, started: deadline, finished: deadline + 1,
+          pid: index + 1000, exit_code: 0, timed_out: false };
+      }) });
     (baseline as any).timing.browser_clock = [{ before: 0, after: 10, browser: 5 }, { before: 1800000, after: 1800010, browser: 1800005 }];
     const hostTicks = Array.from({ length: 1801 }, (_, k) => ({ at: k * 1000, busy_ms: k * 200, total_ms: k * 1000, logical_cpus: 1 }));
     (baseline as any).raw.seconds.forEach((row: any, k: number) => Object.assign(row, { renderer_rss_bytes: 10, renderer_heap_bytes: 10,
@@ -922,7 +935,7 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
     });
     reportTask = (async () => {
       for (let index = 0; index < Math.ceil(manifest.seconds / 5); index++) {
-        const deadline = measureStart + 1000 + index * 5000;
+        const deadline = measureStart + manifest.report_deadlines_ms[index];
         await waitUntil(deadline);
         if (reportsClosed) return;
         if (performance.now() >= deadline + 5000) { invalidReasons.push('Reports cadence missed'); return; }

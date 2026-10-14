@@ -32,6 +32,13 @@ export function parseOptions(args) {
     validate_only: values['validate-only'], ac17_pass: false };
 }
 
+export function reportDeadlineOffsetMs(seconds, index) {
+  const count = Math.ceil(seconds / 5);
+  // Reserve ten seconds for completion; short diagnostic smoke keeps its cadence.
+  if (seconds <= 10 || count === 1) return 1000 + index * 5000;
+  return 1000 + (seconds * 1000 - 11_000) * index / (count - 1);
+}
+
 function statistics(values) {
   const sorted = [...values].sort((a, b) => a - b);
   return { count: values.length, mean: values.reduce((sum, value) => sum + value, 0) / values.length,
@@ -184,7 +191,7 @@ export function validateMeasurementTiming(run) {
     || !equal(run.metrics?.backend_cpu_percent?.mean, 100 * (cpu.counter_end - cpu.counter_start) / ((cpu.end - cpu.start) / 1000))) reasons.add('CPU counter/window mismatch');
   if (reports.length !== Math.ceil(run.seconds / 5) || reports.length !== run.reports_posted) reasons.add('Reports metadata incomplete');
   reports.forEach((report, index) => {
-    const deadline = barrier + 1000 + index * 5000;
+    const deadline = barrier + reportDeadlineOffsetMs(run.seconds, index);
     if (!finite(report.deadline, report.started, report.finished, report.pid) || report.sequence !== index + 1
       || report.deadline !== deadline || report.started < deadline || report.started >= deadline + 5000) reasons.add('Reports cadence missed');
     if (report.finished < report.started || report.finished > ws.end || report.exit_code !== 0 || report.timed_out !== false) reasons.add('Reports completion/window mismatch');
@@ -497,6 +504,7 @@ async function run(options) {
       source_diff_sha256: createHash('sha256').update(sourceDiff.stdout).digest('hex'), source_dirty: sourceDiff.stdout.length > 0,
       host: hostname(), platform: process.platform, architecture: process.arch, profile: 'debug',
       binary_sha256: createHash('sha256').update(await readFile(gwt)).digest('hex'),
+      report_deadlines_ms: Array.from({ length: Math.ceil(options.seconds / 5) }, (_, index) => reportDeadlineOffsetMs(options.seconds, index)),
       workload_hash: createHash('sha256').update(WORKLOAD_SOURCE).digest('hex'), agentDir, barrier };
     manifest.fixture_hash = createHash('sha256').update(fixtureText).update(fixtureCommit).digest('hex');
     manifest.fixture_commit = fixtureCommit;

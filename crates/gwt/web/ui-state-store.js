@@ -26,8 +26,16 @@ function snapshot(value) {
   if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
     throw new TypeError('UI state must contain plain objects and arrays');
   }
-  const copy = Array.isArray(value) ? value.map(snapshot)
-    : Object.fromEntries(Object.entries(value).map(([key, child]) => [key, snapshot(child)]));
+  let copy;
+  if (Array.isArray(value)) copy = value.map(snapshot);
+  else {
+    copy = {};
+    for (const key of Object.keys(value)) {
+      const child = snapshot(value[key]);
+      if (key === '__proto__') Object.defineProperty(copy, key, { value: child, enumerable: true });
+      else copy[key] = child;
+    }
+  }
   owned.add(copy);
   return Object.freeze(copy);
 }

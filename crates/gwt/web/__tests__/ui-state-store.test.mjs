@@ -19,8 +19,11 @@ test('one model update reaches every view, including a newly mounted view', () =
 });
 
 test('push payloads and renderer code cannot mutate the canonical snapshot', () => {
-  const payload = { turns: [{ id: '1' }] };
+  const payload = JSON.parse('{"turns":[{"id":"1"}],"__proto__":{"id":"data"}}');
   const store = createUiStateStore(payload);
+  assert.equal(Object.getPrototypeOf(store.read()), Object.prototype);
+  assert.equal(Object.hasOwn(store.read(), '__proto__'), true);
+  assert.throws(() => { store.read().__proto__.id = 'renderer'; }, TypeError);
   payload.turns[0].id = 'outside';
   assert.equal(store.read().turns[0].id, '1');
   assert.throws(() => { store.read().turns[0].id = 'renderer'; }, TypeError);

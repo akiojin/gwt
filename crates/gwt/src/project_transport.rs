@@ -618,6 +618,7 @@ struct QueuedOutbound {
     coalesce_key: Option<String>,
     terminal_pane: Option<String>,
     stream_seq: Option<u64>,
+    terminal_slice: Option<(u64, u64)>,
 }
 
 #[derive(Default)]
@@ -698,11 +699,11 @@ impl ClientQueue {
             return false;
         }
         let terminal_slice = if let Some(pane) = &message.terminal_pane {
-            let current = state
+            let base_revision = state
                 .terminal_slice_revision
-                .entry(pane.clone())
-                .or_default();
-            let base_revision = *current;
+                .get(pane)
+                .copied()
+                .unwrap_or(0);
             let Some(revision) = base_revision
                 .checked_add(1)
                 .filter(|revision| *revision <= MAX_TERMINAL_SLICE_REVISION)
@@ -714,7 +715,11 @@ impl ClientQueue {
                 self.notify.notify_one();
                 return true;
             };
-            *current = revision;
+            if let Some(current) = state.terminal_slice_revision.get_mut(pane) {
+                *current = revision;
+            } else {
+                state.terminal_slice_revision.insert(pane.clone(), revision);
+            }
             Some((base_revision, revision))
         } else {
             None
@@ -734,11 +739,12 @@ impl ClientQueue {
                     .iter_mut()
                     .find(|entry| entry.kind == message.kind)
                 {
-                    entry.payload = self.queued_payload(message, terminal_slice);
+                    entry.payload = message.payload.clone();
+                    entry.terminal_slice = terminal_slice;
                 } else {
                     state
                         .entries
-                        .push_back(self.queued(message, terminal_slice));
+                        .push_back(Self::queued(message, terminal_slice));
                 }
             }
             QueueClass::SnapshotLatest => {
@@ -747,7 +753,8 @@ impl ClientQueue {
                 if let Some(entry) = state.entries.iter_mut().find(|entry| {
                     entry.kind == message.kind && entry.coalesce_key == message.coalesce_key
                 }) {
-                    entry.payload = self.queued_payload(message, terminal_slice);
+                    entry.payload = message.payload.clone();
+                    entry.terminal_slice = terminal_slice;
                     entry.stream_seq = message.stream_seq;
                 } else {
                     if state.entries.len() >= LOSSLESS_HARD_CAP {
@@ -758,7 +765,7 @@ impl ClientQueue {
                     }
                     state
                         .entries
-                        .push_back(self.queued(message, terminal_slice));
+                        .push_back(Self::queued(message, terminal_slice));
                 }
             }
             QueueClass::Lossy => {
@@ -775,7 +782,7 @@ impl ClientQueue {
                 }
                 state
                     .entries
-                    .push_back(self.queued(message, terminal_slice));
+                    .push_back(Self::queued(message, terminal_slice));
             }
             QueueClass::Lossless => {
                 if state.entries.len() >= LOSSLESS_HARD_CAP {
@@ -786,7 +793,7 @@ impl ClientQueue {
                 }
                 state
                     .entries
-                    .push_back(self.queued(message, terminal_slice));
+                    .push_back(Self::queued(message, terminal_slice));
             }
         }
         drop(state);
@@ -794,39 +801,14 @@ impl ClientQueue {
         false
     }
 
-    fn queued_payload(
-        &self,
-        message: &PreparedOutbound,
-        terminal_slice: Option<(u64, u64)>,
-    ) -> SharedOutboundPayload {
-        let Some((base_revision, revision)) = terminal_slice else {
-            return message.payload.clone();
-        };
-        let payload = message.payload.clone();
-        let epoch = self.terminal_slice_epoch;
-        // Add connection-specific metadata only when drained, outside the
-        // producer mutex. All non-terminal payloads keep their shared encoding.
-        SharedOutboundPayload::Deferred(Arc::new(LazyLock::new(Box::new(move || {
-            let prefix = payload
-                .strip_suffix('}')
-                .expect("backend event JSON object");
-            Arc::from(format!(
-                r#"{prefix},"slice":{{"epoch":"{epoch}","base_revision":{base_revision},"revision":{revision}}}}}"#
-            ))
-        }))))
-    }
-
-    fn queued(
-        &self,
-        message: &PreparedOutbound,
-        terminal_slice: Option<(u64, u64)>,
-    ) -> QueuedOutbound {
+    fn queued(message: &PreparedOutbound, terminal_slice: Option<(u64, u64)>) -> QueuedOutbound {
         QueuedOutbound {
-            payload: self.queued_payload(message, terminal_slice),
+            payload: message.payload.clone(),
             kind: message.kind,
             coalesce_key: message.coalesce_key.clone(),
             terminal_pane: message.terminal_pane.clone(),
             stream_seq: message.stream_seq,
+            terminal_slice,
         }
     }
 
@@ -921,8 +903,20 @@ impl ClientQueue {
         // Materialization can encode a large patch or wait for another
         // client's shared encoding. Never hold the producer's queue mutex.
         drop(state);
+        let payload = if let Some((base_revision, revision)) = entry.terminal_slice {
+            let epoch = self.terminal_slice_epoch;
+            let prefix = entry
+                .payload
+                .strip_suffix('}')
+                .expect("backend event JSON object");
+            format!(
+                r#"{prefix},"slice":{{"epoch":"{epoch}","base_revision":{base_revision},"revision":{revision}}}}}"#
+            )
+        } else {
+            entry.payload.to_string()
+        };
         Some(DrainStep::Message {
-            payload: entry.payload.to_string(),
+            payload,
             repair_panes,
         })
     }
@@ -4205,11 +4199,18 @@ mod tests {
         let queue = ClientQueue::default();
         for round in 0..2 {
             for pane in 0..5 {
-                queue.enqueue(&terminal_output_at(
+                let prepared = terminal_output_at(
                     &format!("pane-{pane}"),
                     &format!("raw-{round}-{pane}"),
                     100 + round * 5 + pane,
-                ));
+                );
+                let shared = prepared.payload.serialized().clone();
+                queue.enqueue(&prepared);
+                let state = queue.state.lock().unwrap();
+                assert!(
+                    Arc::ptr_eq(state.entries.back().unwrap().payload.serialized(), &shared),
+                    "terminal enqueue must retain the shared payload until sender drain"
+                );
             }
         }
         queue.enqueue(&prepare_outbound(&lossless_error("unchanged")));
