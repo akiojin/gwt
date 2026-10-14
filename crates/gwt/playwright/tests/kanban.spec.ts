@@ -188,7 +188,8 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(refresh).toBeEnabled();
     // Issue #5413: a pending read owns the load until the bounded deadline.
     // Manual retry is available after that deadline, without overlapping reads.
-    await page.clock.runFor(60_100);
+    await page.clock.runFor(5100);
+    await page.clock.fastForward(55_000);
     await expect(page.getByRole("button", { name: /^Issue load failed/ })).toBeVisible();
     await refresh.click();
 

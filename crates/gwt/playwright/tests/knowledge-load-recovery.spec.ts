@@ -46,7 +46,8 @@ test.describe("Issue #5413: cache-backed load recovery", () => {
     await surface.screenshot({ path: slowScreenshot });
     await info.attach("slow-load", { path: slowScreenshot, contentType: "image/png" });
 
-    await page.clock.runFor(55_000);
+    // Skip repeated animation callbacks while advancing to the load deadline.
+    await page.clock.fastForward(55_000);
     await expect(surface.getByRole("button", { name: /^Issue load failed/ })).toBeVisible();
     await expect.poll(() => reports(page)).toContain("Timed out loading cache-backed data");
     expect(await loadRequests(page)).toHaveLength(1);
