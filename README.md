@@ -161,11 +161,15 @@ custom agents.
 
 **Settings > Supported Agents** shows the complete catalog, installation status,
 and installed versions. Install missing CLIs there; update actions appear when
-npm metadata confirms a newer version. Agents without supported version metadata
-show that limitation and require manual updates.
+official distribution metadata confirms a newer version: npm for Codex, Grok,
+OpenCode and OpenClaw, and the platform manifest for Antigravity. Claude native
+and Hermes require manual updates because their effective update channel cannot
+be verified. `gh copilot` also requires manual updates because the detected
+distribution may differ from the extension updater's target. The row explains
+these limitations. Metadata failures disable updates and show the reason.
 
 Automatic agent updates are off by default. When enabled, gwt checks installed
-npm agents at the next app startup and updates only known newer versions, with
+agents with a verified update route at the next app startup and updates only known newer versions, with
 no live agent panes (including the Project Manager) or pending launches. Manual
 installs and updates also require those agents to be closed. Missing agents are
 never installed automatically.
