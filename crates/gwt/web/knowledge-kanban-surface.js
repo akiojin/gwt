@@ -1002,6 +1002,7 @@ export function createKnowledgeKanbanSurface({
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
       const knowledgeAutoRefreshModel = createUiStateStore({ revision: 0 });
+      const knowledgeCompletionViewModel = createUiStateStore({ windowId: null });
 
       function issueMonitorStateText(state) {
         switch (String(state || "")) {
@@ -5038,16 +5039,9 @@ export function createKnowledgeKanbanSurface({
             state.refreshedAt = Date.now();
             state.error = "";
             const renderCompletion = () => {
-              if (!unchangedEntries) {
-                renderKnowledgeBridge(event.id);
-                return;
-              }
-              const refresh = windowMap.get(event.id)?.querySelector("[data-action='refresh-knowledge']");
-              if (refresh) {
-                refresh.disabled = !state.refreshEnabled ||
-                  (state.loading && !knowledgeEntriesAreEmpty(state));
-              }
-              renderKnowledgeSelection(event.id, state, previousNumber);
+              knowledgeCompletionViewModel.update(() => ({
+                windowId: event.id, unchangedEntries, previousNumber,
+              }));
             };
             if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
               renderCompletion();
@@ -5343,6 +5337,22 @@ export function createKnowledgeKanbanSurface({
 
       issueMonitorModel.subscribe(model => model.status, syncIssueMonitorErrorReport);
       knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
+      // List completion publishes data in receive; the synchronous view owns
+      // both the full rebuild and revision-preserving selection updates.
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber }) => {
+        const state = knowledgeBridgeStateMap.get(windowId);
+        if (!state) return;
+        if (!unchangedEntries) {
+          renderKnowledgeBridge(windowId);
+          return;
+        }
+        const refresh = windowMap.get(windowId)?.querySelector("[data-action='refresh-knowledge']");
+        if (refresh) {
+          refresh.disabled = !state.refreshEnabled ||
+            (state.loading && !knowledgeEntriesAreEmpty(state));
+        }
+        renderKnowledgeSelection(windowId, state, previousNumber);
+      });
       issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly, focusPreview }) => {
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
