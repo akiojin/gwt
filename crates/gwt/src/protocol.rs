@@ -735,6 +735,10 @@ pub enum FrontendEvent {
     LoadProcessConsole {
         id: String,
     },
+    CheckKnowledgeRevision {
+        id: String,
+        knowledge_kind: KnowledgeKind,
+    },
     LoadKnowledgeBridge {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -2392,6 +2396,11 @@ pub enum BackendEvent {
         id: String,
         lines: Vec<gwt_core::process_console::ProcessLine>,
     },
+    KnowledgeRevision {
+        id: String,
+        knowledge_kind: KnowledgeKind,
+        revision: Option<String>,
+    },
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -2400,6 +2409,8 @@ pub enum BackendEvent {
         selected_number: Option<u64>,
         empty_message: Option<String>,
         refresh_enabled: bool,
+        #[serde(default)]
+        cache_revision: Option<String>,
     },
     KnowledgeSearchResults {
         id: String,
@@ -3232,6 +3243,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "knowledge_revision",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "knowledge_search_results",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3610,6 +3626,7 @@ impl BackendEvent {
             BackendEvent::ProcessLine { .. } => "process_line",
             BackendEvent::ProcessConsoleSnapshot { .. } => "process_console_snapshot",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
+            BackendEvent::KnowledgeRevision { .. } => "knowledge_revision",
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
             BackendEvent::ProjectIndexSearchResults { .. } => "project_index_search_results",
             BackendEvent::ProjectIndexSearchError { .. } => "project_index_search_error",

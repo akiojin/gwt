@@ -1967,6 +1967,7 @@ import { createUiStateStore } from "/ui-state-store.js";
               deriveCurrentProjectWorkspaceIds(tab?.workspace || {}),
             );
             renderWindowList();
+            refreshVisibleKnowledgeWindows();
           },
         );
       }
@@ -4857,6 +4858,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
+        refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
         sendKnowledgeSemanticSearchNow,
@@ -4864,6 +4866,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
+        isKnowledgeWindowVisible: (id) => elementHasLayoutBox(windowMap.get(id)),
         getWorkspaceWindows: () =>
           allProjectWindowIds()
             .map((windowId) => workspaceWindowById(windowId))
@@ -6693,6 +6696,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           // SPEC-3064 Phase 3 (E6d): knowledge bridge state and rendering
           // live in the knowledge kanban surface.
           case "knowledge_entries":
+          case "knowledge_revision":
           case "knowledge_search_results":
           case "knowledge_detail":
           case "terminal_preview":
@@ -7866,6 +7870,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         rearmVisibleTerminalViewportRefreshes();
+        refreshVisibleKnowledgeWindows();
       });
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {

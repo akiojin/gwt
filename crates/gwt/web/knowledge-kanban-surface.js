@@ -598,6 +598,7 @@ export function createKnowledgeKanbanSurface({
   createKnowledgeMarkdownBody,
   windowMap,
   workspaceWindowById,
+  isKnowledgeWindowVisible = () => true,
   getWorkspaceWindows,
   windowCatalogModel,
   pendingIndexOpenTargetsByPreset,
@@ -1665,6 +1666,9 @@ export function createKnowledgeKanbanSurface({
             dndSnapshot: null,
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
+            autoRefreshDirty: false,
+            revisionPending: false,
+            cacheRevision: null,
           });
         }
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -1713,11 +1717,27 @@ export function createKnowledgeKanbanSurface({
             state.autoRefreshTimer = null;
             return;
           }
-          if (!state.refreshEnabled || knowledgeAutoRefreshIsBusy(state)) {
-            return;
-          }
-          requestKnowledgeBridge(windowId, knowledgeKind, false);
+          state.autoRefreshDirty = true;
+          refreshVisibleKnowledgeWindows();
         }, KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS);
+      }
+
+      function knowledgeWindowIsVisible(windowId) {
+        const data = workspaceWindowById(windowId);
+        const element = windowMap.get(windowId);
+        return Boolean(data && element && !document.hidden && !data.minimized &&
+          (!data.tab_group_id || data.tab_group_active) &&
+          !element.closest?.("[hidden]") && isKnowledgeWindowVisible(windowId));
+      }
+
+      function refreshVisibleKnowledgeWindows() {
+        for (const [windowId, state] of knowledgeBridgeStateMap) {
+          if (!state.autoRefreshDirty || state.revisionPending || !state.refreshEnabled ||
+              knowledgeAutoRefreshIsBusy(state) || !knowledgeWindowIsVisible(windowId)) continue;
+          state.autoRefreshDirty = false;
+          state.revisionPending = true;
+          send({ kind: "check_knowledge_revision", id: windowId, knowledge_kind: state.kind });
+        }
       }
 
       function readKanbanHideDonePreference() {
@@ -2170,6 +2190,10 @@ export function createKnowledgeKanbanSurface({
       // reconnect restarts a degraded still-open window/query at 5 seconds.
       function handleKnowledgeTransportChange(online) {
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (!online && state.revisionPending) {
+            state.revisionPending = false;
+            state.autoRefreshDirty = true;
+          }
           if (!isSilentSemanticKind(state.kind)) {
             continue;
           }
@@ -2219,6 +2243,7 @@ export function createKnowledgeKanbanSurface({
           state.semanticRetryIndex = 0;
           scheduleKnowledgeSemanticRetry(windowId, state.kind, state);
         }
+        if (online) refreshVisibleKnowledgeWindows();
       }
 
       function sendKnowledgeSemanticSearch(windowId, intent) {
@@ -4874,6 +4899,18 @@ export function createKnowledgeKanbanSurface({
       // moved verbatim from app.js; the case arms in app.js delegate here.
       function applyKnowledgeReceiveEvent(event) {
         switch (event.kind) {
+          case "knowledge_revision": {
+            const state = knowledgeBridgeStateMap.get(event.id);
+            if (!state || !state.revisionPending ||
+                normalizeKnowledgeKind(event.knowledge_kind) !== normalizeKnowledgeKind(state.kind)) break;
+            state.revisionPending = false;
+            if (event.revision !== null && event.revision === state.cacheRevision) break;
+            state.autoRefreshDirty = true;
+            if (!knowledgeWindowIsVisible(event.id) || knowledgeAutoRefreshIsBusy(state)) break;
+            state.autoRefreshDirty = false;
+            requestKnowledgeBridge(event.id, state.kind, false);
+            break;
+          }
           case "terminal_preview": {
             terminalPreviewText.set(event.id, event.text);
             for (const element of windowMap.values()) {
@@ -4924,6 +4961,7 @@ export function createKnowledgeKanbanSurface({
               state.selectedNumber &&
               incomingEntries.some((entry) => entry.number === state.selectedNumber);
             state.baseEntries = incomingEntries;
+            state.cacheRevision = event.cache_revision ?? null;
             state.baseEmptyMessage = event.empty_message || "";
             if (!queuedQuery) {
               state.entries = state.baseEntries.slice();
@@ -5297,5 +5335,6 @@ export function createKnowledgeKanbanSurface({
         applyIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
+        refreshVisibleKnowledgeWindows,
       };
 }

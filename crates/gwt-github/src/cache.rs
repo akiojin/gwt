@@ -294,12 +294,39 @@ impl Cache {
         mutation: impl FnOnce() -> Result<T, CacheError>,
     ) -> Result<T, CacheError> {
         self.invalidate_validation_receipt_unlocked(number)?;
+        let before = self.load_entry(number);
         let result = mutation();
         let final_invalidation = self.invalidate_validation_receipt_unlocked(number);
+        let after = self.load_entry(number);
+        let unchanged = match (&before, &after) {
+            (Some(before), Some(after)) => {
+                persisted_snapshots_match(&before.snapshot, &after.snapshot)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        // Publish after the mutation, including partial failures. Receipt and
+        // per-Issue generation renewal alone do not invalidate list readers.
+        if !unchanged || result.is_err() {
+            write_atomic(
+                &self.root.join("source-revision"),
+                Uuid::new_v4().to_string().as_bytes(),
+            )?;
+        }
         match (result, final_invalidation) {
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),
             (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    /// O(1) source revision for list readers, shared across cache writers.
+    /// Legacy caches start at the empty revision until their first mutation.
+    pub fn revision(&self) -> Result<String, CacheError> {
+        match fs::read_to_string(self.root.join("source-revision")) {
+            Ok(revision) => Ok(revision),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => Err(error.into()),
         }
     }
 
