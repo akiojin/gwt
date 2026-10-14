@@ -6,7 +6,9 @@
 //! and the global config path layout. The real `~/.gwt/config.toml` is
 //! never touched.
 
-use std::{num::NonZeroU16, path::Path};
+use std::num::NonZeroU16;
+#[cfg(unix)]
+use std::path::Path;
 
 use gwt_config::{ConfigError, Settings};
 
@@ -266,9 +268,10 @@ fn load_from_path_reports_parse_error_for_missing_file() {
 
 #[test]
 fn global_config_path_for_home_is_dot_gwt_config_toml() {
-    let home = Path::new("home-fixture");
+    let temporary = tempfile::tempdir().unwrap();
+    let home = temporary.path();
     assert_eq!(
         Settings::global_config_path_for_home(home),
-        Path::new("home-fixture").join(".gwt").join("config.toml")
+        home.join(".gwt").join("config.toml")
     );
 }

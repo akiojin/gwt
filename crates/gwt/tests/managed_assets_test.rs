@@ -1141,7 +1141,7 @@ fn run_browser_check_hook_audit(
     path: Option<&std::ffi::OsStr>,
 ) -> Output {
     let script = format!(
-        "{}\n{}",
+        "test \"$HOME\" = \"$CHECK_HOME\" && test \"$USERPROFILE\" = \"$CHECK_HOME\" || exit 90\n{}\n{}",
         browser_check_shell_block("hook-authority"),
         browser_check_shell_block("hook-audit")
     );
@@ -1151,6 +1151,8 @@ fn run_browser_check_hook_audit(
         .current_dir(worktree)
         .env("REPO_ROOT", worktree)
         .env("CHECK_HOME", worktree)
+        .env("HOME", worktree)
+        .env("USERPROFILE", worktree)
         .env("CHECKOUT_GWTD", env!("CARGO_BIN_EXE_gwtd"))
         .env("GWT_HOOK_BIN", expected_hook_bin)
         .env("GWT_BIN_PATH", "/ambient/stale/target/debug/gwtd")

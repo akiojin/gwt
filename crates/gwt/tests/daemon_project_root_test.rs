@@ -46,7 +46,8 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new().expect("fixture tempdir");
+        // Nested verification TMPDIRs can exceed the Unix socket path limit.
+        let root = TempDir::new_in("/tmp").expect("short fixture tempdir");
         let home = root.path().join("home");
         let gwt_home = home.join(".gwt");
         let caller = root.path().join("caller");

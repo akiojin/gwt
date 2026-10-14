@@ -1907,7 +1907,7 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
     gwt::update_settings::set(Some(false)).unwrap();
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    assert!(runtime.update_staged_events("9.99.0").is_empty());
+    assert!(runtime.update_staged_events("99.0.0").is_empty());
     assert!(gwt::load_issue_monitor_prefs(&prefs_path)
         .expect("reload")
         .update_drain
@@ -1915,7 +1915,7 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
 
     seed(None);
     gwt::update_settings::set(Some(true)).unwrap();
-    let events = runtime.update_staged_events("9.99.0");
+    let events = runtime.update_staged_events("99.0.0");
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -1925,14 +1925,14 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
         .expect("drain status broadcast");
     let drain = status.update_drain.as_ref().expect("drain raised");
     assert_eq!(drain.reason, gwt::IssueMonitorUpdateDrainReason::Auto);
-    assert_eq!(drain.version, "9.99.0");
+    assert_eq!(drain.version, "99.0.0");
     assert!(
         drain.blocking.is_empty(),
         "no agent pane, claim, execution or lease"
     );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     let persisted_drain = persisted.update_drain.expect("drain persisted");
-    assert_eq!(persisted_drain.version, "9.99.0");
+    assert_eq!(persisted_drain.version, "99.0.0");
     assert!(persisted.autonomous_mode);
     assert_eq!(
         persisted.effect_authority_epoch, 7,
@@ -1981,7 +1981,7 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
         .expect("prepare claim");
     monitor.set_update_drain(
         gwt::IssueMonitorUpdateDrainReason::Auto,
-        "9.99.0",
+        "99.0.0",
         "2026-09-06T01:00:00Z",
     );
 
@@ -2043,13 +2043,13 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
 
-    let events = runtime.update_staged_events_with("9.99.0", None);
+    let events = runtime.update_staged_events_with("99.0.0", None);
     let log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap_or_default();
     assert!(
         log.lines().any(|line| {
             let entry: serde_json::Value = serde_json::from_str(line).expect("update log JSON");
             entry["stage"] == "drain_started"
-                && entry["version"] == "9.99.0"
+                && entry["version"] == "99.0.0"
                 && serde_json::from_str::<serde_json::Value>(
                     entry["blockers"].as_str().unwrap_or("null"),
                 )
@@ -2068,7 +2068,7 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "drain start is recorded once: {toasts:?}");
     assert!(
-        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("draining"),
+        toasts[0].1.contains("99.0.0") && toasts[0].1.contains("draining"),
         "notice names the version and the drain: {}",
         toasts[0].1
     );
@@ -2112,7 +2112,7 @@ fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain()
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.rebuild_window_lookup();
-    runtime.update_staged_events_with("9.110.0", None);
+    runtime.update_staged_events_with("99.0.0", None);
     let raised = gwt_core::update::load_update_wait_observation(&repo).expect("observation");
     assert_eq!(raised.reason, "waiting for drain evaluation");
     let next = chrono::DateTime::parse_from_rfc3339(
@@ -2209,7 +2209,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
     runtime.update_download_in_flight = Some("manual-client".into());
-    let events = runtime.update_staged_events_with("9.99.0", None);
+    let events = runtime.update_staged_events_with("99.0.0", None);
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -2220,7 +2220,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let drain = status.update_drain.as_ref().expect("drain raised");
     assert_eq!(drain.reason, gwt::IssueMonitorUpdateDrainReason::Auto);
     assert_eq!(drain.automatic, Some(false));
-    assert_eq!(drain.version, "9.99.0");
+    assert_eq!(drain.version, "99.0.0");
     assert_eq!(
         drain.blocking,
         vec![gwt::update_drain::UpdateBlocker::ActivePane {
@@ -2233,7 +2233,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "drain start recorded once: {toasts:?}");
     assert!(
-        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("draining"),
+        toasts[0].1.contains("99.0.0") && toasts[0].1.contains("draining"),
         "the auto path's notice is reused: {}",
         toasts[0].1
     );
@@ -2250,7 +2250,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
             .update_drain
             .as_ref()
             .map(|drain| drain.version.as_str()),
-        Some("9.99.0"),
+        Some("99.0.0"),
         "the hold is persisted for the Issue Monitor"
     );
     assert!(persisted.enabled, "the drain is a hold, not enabled:false");
@@ -2273,7 +2273,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let quiet_tab = sample_project_tab("tab-2", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut quiet = sample_runtime(temp.path(), vec![quiet_tab], Some("tab-2"));
     assert!(
-        quiet.update_staged_events_with("9.99.0", None).is_empty(),
+        quiet.update_staged_events_with("99.0.0", None).is_empty(),
         "a quiet host keeps the manual Restart now path"
     );
     assert!(
@@ -2309,7 +2309,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
             autonomous_mode: true,
             auto_apply_updates: Some(false),
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: "9.99.0".to_string(),
+                version: "99.0.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,
@@ -2400,7 +2400,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
                 version,
                 phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
                 grace_secs: Some(60),
-            } if version == "9.99.0"
+            } if version == "99.0.0"
         )),
         "the grace is announced to the CTA: {scheduled:?}"
     );
@@ -2544,7 +2544,7 @@ fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
                     enabled: true,
                     autonomous_mode: true,
                     update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                        version: "9.99.0".into(),
+                        version: "99.0.0".into(),
                         since: since.to_rfc3339(),
                         reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                         automatic: None,
@@ -2638,7 +2638,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
             enabled: true,
             autonomous_mode: true,
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: "9.99.0".to_string(),
+                version: "99.0.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,
@@ -2699,7 +2699,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("update log JSON"))
         .find(|entry| entry["stage"] == "drain_blocked")
         .expect("the bounded warning records drain blockers in the update log");
-    assert_eq!(entry["version"], "9.99.0");
+    assert_eq!(entry["version"], "99.0.0");
     let blockers: serde_json::Value =
         serde_json::from_str(entry["blockers"].as_str().expect("serialized blockers"))
             .expect("blocker JSON");
@@ -2713,7 +2713,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
         "unchanged blockers must not emit a log on every tick"
     );
     assert!(
-        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("Sample"),
+        toasts[0].1.contains("99.0.0") && toasts[0].1.contains("Sample"),
         "the notice names the blocking pane: {}",
         toasts[0].1
     );
@@ -2735,7 +2735,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
                 version,
                 phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
                 grace_secs: Some(60),
-            } if version == "9.99.0"
+            } if version == "99.0.0"
         )),
         "the grace is announced to the CTA: {scheduled:?}"
     );
@@ -2802,7 +2802,7 @@ fn app_runtime_cancel_update_auto_apply_releases_the_drain_and_stops_the_tick() 
             enabled: true,
             autonomous_mode: true,
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: "9.99.0".to_string(),
+                version: "99.0.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,
@@ -2835,7 +2835,7 @@ fn app_runtime_cancel_update_auto_apply_releases_the_drain_and_stops_the_tick() 
                 version,
                 phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
                 ..
-            } if version == "9.99.0"
+            } if version == "99.0.0"
         )),
         "the CTA learns about the cancellation: {events:?}"
     );
@@ -2890,15 +2890,15 @@ fn app_runtime_staged_update_falls_back_to_manual_when_auto_apply_is_refused() {
     for refusal in [
         gwt::update_drain::UpdateAutoApplyRefusal::RequiresElevation,
         gwt::update_drain::UpdateAutoApplyRefusal::PreviousFailure {
-            version: "9.99.0".to_string(),
+            version: "99.0.0".to_string(),
         },
     ] {
-        let events = runtime.update_staged_events_with("9.99.0", Some(refusal.clone()));
+        let events = runtime.update_staged_events_with("99.0.0", Some(refusal.clone()));
         let log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap_or_default();
         assert!(
             log.lines().any(|line| {
                 let entry: serde_json::Value = serde_json::from_str(line).unwrap();
-                entry["stage"] == "pending_refused" && entry["reason"] == refusal.notice("9.99.0")
+                entry["stage"] == "pending_refused" && entry["reason"] == refusal.notice("99.0.0")
             }),
             "automatic apply refusal must be in the update log: {log}"
         );
@@ -2917,7 +2917,7 @@ fn app_runtime_staged_update_falls_back_to_manual_when_auto_apply_is_refused() {
         );
         assert_eq!(toasts[0].0, "warn");
         assert!(
-            toasts[0].1.contains("9.99.0") && toasts[0].1.contains("manually"),
+            toasts[0].1.contains("99.0.0") && toasts[0].1.contains("manually"),
             "the notice names the manual fallback: {}",
             toasts[0].1
         );
@@ -4344,11 +4344,14 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         "effect-3165",
         &Utc::now().to_rfc3339(),
     ));
-    gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
-        &monitor.prefs(),
-    )
-    .expect("seed delivery");
+    let mut prefs = monitor.prefs();
+    prefs.launch_auto = true;
+    prefs.launch_tiers = vec![vec![codex_issue_monitor_launch_profile()]; 3];
+    // Higher history is not the selected tier for this fresh launch.
+    prefs.record_tier_launch(3165, 2);
+    prefs.issue_tiers.get_mut(&3165).unwrap().floor = 0;
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("seed delivery");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -4396,6 +4399,11 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     let durable_writes_before_ack = runtime.persist_dispatcher.durable_write_count();
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let pending_before_ack = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(&pending_before_ack).unwrap()["pending_launch_deliveries"][0]
+            ["selected_tier"],
+        1
+    );
     let _ = runtime.issue_monitor_launch_completed_delivery_events(
         &repo,
         3165,
@@ -4456,6 +4464,11 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         ack
     };
     runtime.handle_issue_monitor_launch_delivery_ack(*ack);
+    let acknowledged = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(&acknowledged).unwrap()["launch_confirmations"]["3165"]["tier"],
+        1
+    );
     assert!(
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
             .expect("reload prefs")
@@ -4740,7 +4753,10 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
             &now,
         ));
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-        gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
+        let mut prefs = monitor.prefs();
+        prefs.launch_auto = true;
+        prefs.launch_tiers = vec![vec![codex_issue_monitor_launch_profile()]; 3];
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed delivery");
         let mut tab = sample_project_tab(
             "tab-1",
             "Repo",
@@ -4811,6 +4827,13 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
             .filter(|window| window.preset == WindowPreset::Agent)
             .count();
         let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        if expect_adoption {
+            assert!(
+                serde_json::to_value(&prefs).unwrap()["launch_confirmations"]["3165"]["tier"]
+                    .is_null(),
+                "adopting a pane must not attribute a newly selected profile to it"
+            );
+        }
         let reloaded =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone());
         if expect_adoption {
@@ -5587,7 +5610,7 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
         drain: Some((
             gwt::IssueMonitorPrefs::default(),
             gwt::IssueMonitorUpdateDrain {
-                version: "9.99.0".into(),
+                version: "99.0.0".into(),
                 since: now.to_rfc3339(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,

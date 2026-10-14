@@ -3292,7 +3292,10 @@ fn failed_precommit_fresh_launch_does_not_orphan_its_persisted_session() {
             _ => None,
         })
         .expect("failed LaunchComplete event");
-    assert!(launch_error.detail.contains("Host capability issuer"));
+    assert!(
+        launch_error.detail.contains("Host capability issuer"),
+        "expected Host capability issuer failure, got {launch_error:?}",
+    );
     let persisted_candidates = fs::read_dir(&sessions_dir)
         .expect("read sessions dir")
         .flatten()

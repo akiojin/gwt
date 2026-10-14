@@ -22,7 +22,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use gwt_core::work_events_intake::{
@@ -30,6 +30,8 @@ use gwt_core::work_events_intake::{
     rebuild_work_events_with_shared_loader, work_events_intake_group_of, SharedWorkEventsSource,
     WorkEventsIntakeStore,
 };
+
+use crate::app_runtime::ProjectContext;
 #[cfg(test)]
 use gwt_core::work_events_intake::{
     ingest_work_events_content, load_work_events_intake_state, save_work_events_intake_state,
@@ -50,6 +52,70 @@ const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str = "source-context-v10-legacy-log-
 /// Tree path of the persistent core inside a worktree / commit.
 const EVENTS_TREE_PATH: &str = ".gwt/work/events.jsonl";
 const EVENTS_TREE_DIR: &str = ".gwt/work/events";
+
+/// One worker and one coalesced follow-up per project, including forced opens.
+#[derive(Default)]
+pub(crate) struct WorkEventsIngestQueue {
+    pending: Mutex<HashMap<gwt_core::repo_hash::ProjectKey, Option<ProjectContext>>>,
+}
+
+pub(crate) struct WorkEventsIngestWorker {
+    queue: Arc<WorkEventsIngestQueue>,
+    project: gwt_core::repo_hash::ProjectKey,
+    active: bool,
+}
+
+impl WorkEventsIngestQueue {
+    pub(crate) fn request(
+        self: &Arc<Self>,
+        context: ProjectContext,
+    ) -> Option<WorkEventsIngestWorker> {
+        let project = context.project_key.clone();
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(requested) = pending.get_mut(&project) {
+            *requested = Some(context);
+            return None;
+        }
+        pending.insert(project.clone(), None);
+        Some(WorkEventsIngestWorker {
+            queue: Arc::clone(self),
+            project,
+            active: true,
+        })
+    }
+}
+
+impl WorkEventsIngestWorker {
+    pub(crate) fn finish_pass(&mut self) -> Option<ProjectContext> {
+        let mut pending = self
+            .queue
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(context) = pending.get_mut(&self.project).and_then(Option::take) {
+            Some(context)
+        } else {
+            pending.remove(&self.project);
+            self.active = false;
+            None
+        }
+    }
+}
+
+impl Drop for WorkEventsIngestWorker {
+    fn drop(&mut self) {
+        if self.active {
+            self.queue
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.project);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum WorkEventsSourceKind {
@@ -111,6 +177,22 @@ fn read_work_event_source(path: &Path, kind: WorkEventsSourceKind) -> gwt_core::
     WORK_EVENT_SOURCE_READS.with(|reads| reads.borrow_mut().push(path.to_path_buf()));
     let content = std::fs::read(path)?;
     work_event_source_content(path, kind, &content)
+}
+
+fn read_shared_work_event_source(
+    path: &Path,
+    kind: WorkEventsSourceKind,
+    cache: &mut HashMap<String, Arc<str>>,
+) -> gwt_core::Result<Arc<str>> {
+    // Validate every path before sharing: a shard filename hashes its event id,
+    // not its payload, and identical ids may carry different historical bytes.
+    let content = read_work_event_source(path, kind)?;
+    let digest = content_fingerprint(&content);
+    if let Some(previous) = cache.get(&digest).filter(|previous| **previous == content) {
+        return Ok(Arc::clone(previous));
+    }
+    cache.insert(digest, Arc::clone(&content));
+    Ok(content)
 }
 
 fn work_event_source_content(
@@ -310,18 +392,33 @@ fn load_pending_sources_for_rebuild(
     // snapshot is captured. This catches an immutable shard published between
     // the initial source scan and intake without paying for a second
     // `git worktree list` process.
-    for source in worktree_event_sources(worktree_entries)? {
-        // The scan took metadata before this content read: a write racing
-        // the read leaves the older fingerprint behind, so the next pass
-        // reads the source again.
-        let fingerprint = source_fingerprint(&source.metadata, source.container.as_ref());
-        let key = source.key();
-        let content = match prelock_reads.get(key.as_str()) {
-            Some(prelock) if prelock.fingerprint == fingerprint => Arc::clone(&prelock.content),
-            _ => read_work_event_source(&source.events_path, source.kind)?,
-        };
-        fingerprints.push((key, fingerprint));
-        contents.push(SharedWorkEventsSource::new(content, source.container));
+    let mut shared_content = pending_sources
+        .iter()
+        .map(|source| {
+            (
+                content_fingerprint(&source.content),
+                Arc::clone(&source.content),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for group in worktree_group_scans(worktree_entries) {
+        for (source, _) in group?.sources {
+            // The scan took metadata before this content read: a write racing
+            // the read leaves the older fingerprint behind, so the next pass
+            // reads the source again.
+            let fingerprint = source_fingerprint(&source.metadata, source.container.as_ref());
+            let key = source.key();
+            let content = match prelock_reads.get(key.as_str()) {
+                Some(prelock) if prelock.fingerprint == fingerprint => Arc::clone(&prelock.content),
+                _ => read_shared_work_event_source(
+                    &source.events_path,
+                    source.kind,
+                    &mut shared_content,
+                )?,
+            };
+            fingerprints.push((key, fingerprint));
+            contents.push(SharedWorkEventsSource::new(content, source.container));
+        }
     }
     Ok((contents, fingerprints))
 }
@@ -499,30 +596,19 @@ where
         }
     };
     phases.mark("worktree_list");
-    let local_groups = match worktree_event_sources(worktree_entries) {
-        Ok(sources) => local_group_scans(sources),
-        Err(error) => {
-            tracing::warn!(%error, "work events ingest: worktree event source discovery failed");
-            source_discovery_failed = true;
-            Vec::new()
-        }
-    };
-    phases.mark("worktree_scan");
-    for group in &local_groups {
+    let mut shared_local_content = HashMap::new();
+    // Keep only one worktree's descriptors alive. A fleet checkout can expose
+    // the same thousands of shards through hundreds of worktrees.
+    for group in worktree_group_scans(worktree_entries) {
+        let group = match group {
+            Ok(group) => group,
+            Err(error) => {
+                tracing::warn!(%error, "work events ingest: worktree event source discovery failed");
+                source_discovery_failed = true;
+                continue;
+            }
+        };
         discovered_groups.insert(group.name.clone(), (group.snapshot.clone(), true));
-    }
-    let vanished_local = store
-        .group_names()
-        .filter(|name| name.starts_with(SOURCE_WORKTREE) && !discovered_groups.contains_key(*name))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    for name in vanished_local {
-        rebuild_required |= store.group(&name).is_some_and(|group| group.sources > 0);
-        vanished_groups.push(name);
-    }
-
-    let mut new_local_keys = HashSet::new();
-    for group in &local_groups {
         let verified = store
             .group(&group.name)
             .and_then(|stored| stored.snapshot.as_deref())
@@ -542,6 +628,7 @@ where
             })
             .collect::<BTreeMap<_, _>>();
         summary.sources_rederived += discovered.len();
+        let mut new_local_keys = HashSet::new();
         if !rebuild_required {
             match group_additions(&mut store, &group.name, &discovered) {
                 Some(keys) => {
@@ -551,26 +638,20 @@ where
                 None => rebuild_required = true,
             }
         }
-        scanned_groups.insert(
-            group.name.clone(),
-            ScannedGroup {
-                snapshot: group.snapshot.clone(),
-                discovered,
-            },
-        );
-    }
-
-    for group in &local_groups {
-        let scanned = scanned_groups.get(&group.name);
         for (source, key) in &group.sources {
             if !rebuild_required && !new_local_keys.contains(key) {
                 continue;
             }
-            let fingerprint = scanned
-                .and_then(|scanned| scanned.discovered.get(key).cloned())
+            let fingerprint = discovered
+                .get(key)
+                .cloned()
                 .unwrap_or_else(|| source_fingerprint_in_context(&source.metadata, &group.context));
             before_source_read(&source.events_path);
-            let content = match read_work_event_source(&source.events_path, source.kind) {
+            let content = match read_shared_work_event_source(
+                &source.events_path,
+                source.kind,
+                &mut shared_local_content,
+            ) {
                 Ok(content) => content,
                 Err(error) => {
                     tracing::warn!(%error, path = %source.events_path.display(), "work events ingest: worktree shard read failed");
@@ -586,7 +667,25 @@ where
                 reload_from_worktree: true,
             });
         }
+        scanned_groups.insert(
+            group.name,
+            ScannedGroup {
+                snapshot: group.snapshot,
+                discovered,
+            },
+        );
     }
+    let vanished_local = store
+        .group_names()
+        .filter(|name| name.starts_with(SOURCE_WORKTREE) && !discovered_groups.contains_key(*name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for name in vanished_local {
+        rebuild_required |= store.group(&name).is_some_and(|group| group.sources > 0);
+        vanished_groups.push(name);
+    }
+    drop(shared_local_content);
+    phases.mark("worktree_scan");
     phases.mark("worktree_read");
 
     // 2) Fetched origin/* refs — checkout-free blob reads. Close-kind
@@ -1199,6 +1298,17 @@ fn local_group_scans(sources: Vec<WorkEventsSource>) -> Vec<LocalGroupScan> {
         .collect()
 }
 
+fn worktree_group_scans(
+    entries: &[gwt::worktree_inventory::WorktreeEntry],
+) -> impl Iterator<Item = gwt_core::Result<LocalGroupScan>> + '_ {
+    entries.iter().flat_map(
+        |entry| match worktree_event_sources(std::slice::from_ref(entry)) {
+            Ok(sources) => local_group_scans(sources).into_iter().map(Ok).collect(),
+            Err(error) => vec![Err(error)],
+        },
+    )
+}
+
 fn validate_work_event_store_path(events_dir: &Path) -> gwt_core::Result<bool> {
     let mut managed_paths = events_dir.ancestors().take(3).collect::<Vec<_>>();
     managed_paths.reverse();
@@ -1455,6 +1565,116 @@ fn immutable_metadata_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_ingest_coalesces_bursts_and_releases_failed_workers() {
+        let queue = Arc::new(WorkEventsIngestQueue::default());
+        let project = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
+        let other = gwt_core::repo_hash::ProjectKey::parse("fedcba9876543210").unwrap();
+        let context = |project: &gwt_core::repo_hash::ProjectKey, generation| {
+            crate::app_runtime::ProjectContext {
+                tab_id: format!("tab-{generation}"),
+                project_key: project.clone(),
+                generation,
+                project_root: PathBuf::from(format!("root-{generation}")),
+            }
+        };
+        let mut worker = queue.request(context(&project, 0)).expect("first worker");
+        for generation in 1..=100 {
+            assert!(queue.request(context(&project, generation)).is_none());
+        }
+        let independent = queue
+            .request(context(&other, 0))
+            .expect("independent project");
+        assert_eq!(
+            worker.finish_pass(),
+            Some(context(&project, 100)),
+            "one follow-up preserves the latest reopened tab, root and generation"
+        );
+        assert!(
+            worker.finish_pass().is_none(),
+            "the burst never becomes 100 workers"
+        );
+        let replacement = queue
+            .request(context(&project, 101))
+            .expect("completed admission");
+        drop(worker);
+        assert!(
+            queue.request(context(&project, 102)).is_none(),
+            "old guard cannot release replacement"
+        );
+        drop(replacement);
+        let failed = queue
+            .request(context(&project, 103))
+            .expect("new admission");
+        drop(failed);
+        assert!(
+            queue.request(context(&project, 104)).is_some(),
+            "failure releases admission"
+        );
+        drop(independent);
+    }
+
+    #[test]
+    fn worktree_group_discovery_is_lazy_between_worktrees() {
+        let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let entries = ["first", "later"].map(|name| gwt::worktree_inventory::WorktreeEntry {
+            id: name.into(),
+            kind: gwt::worktree_inventory::WorktreeEntryKind::Workspace,
+            path: temp.path().join(name),
+            label: name.into(),
+            branch: Some(name.into()),
+            is_active: false,
+        });
+        std::fs::create_dir_all(entries[0].path.join(".gwt/work")).unwrap();
+        std::fs::write(entries[0].path.join(EVENTS_TREE_PATH), "first payload").unwrap();
+        let mut scans = worktree_group_scans(&entries);
+        // The iterator must not inspect the later worktree while retaining the first.
+        std::fs::create_dir_all(entries[1].path.join(".gwt")).unwrap();
+        std::fs::write(entries[1].path.join(".gwt/work"), "invalid managed parent").unwrap();
+        let first = scans
+            .next()
+            .expect("first group")
+            .expect("valid first worktree");
+        assert_eq!(first.sources.len(), 1);
+        drop(first);
+        assert!(scans.next().expect("later scan").is_err());
+    }
+
+    #[test]
+    fn validated_local_payloads_share_only_identical_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let first = temp.path().join("first.jsonl");
+        let second = temp.path().join("second.jsonl");
+        let bytes = format!(
+            "{}\n",
+            event_line("same-id", "work-memory", "Original", "2026-08-12T01:00:00Z")
+        );
+        std::fs::write(&first, &bytes).unwrap();
+        std::fs::write(&second, &bytes).unwrap();
+        let mut cache = HashMap::new();
+        let a = read_shared_work_event_source(&first, WorkEventsSourceKind::Legacy, &mut cache)
+            .unwrap();
+        let b = read_shared_work_event_source(&second, WorkEventsSourceKind::Legacy, &mut cache)
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "identical raw history is retained once"
+        );
+        std::fs::write(&second, bytes.replace("Original", "Changed")).unwrap();
+        let c = read_shared_work_event_source(&second, WorkEventsSourceKind::Legacy, &mut cache)
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "same event id with differing payload remains distinct"
+        );
+        assert!(
+            read_shared_work_event_source(&first, WorkEventsSourceKind::Shard, &mut cache).is_err(),
+            "sharing never bypasses each source's validation"
+        );
+    }
 
     #[test]
     fn missing_event_store_still_rejects_a_non_directory_managed_parent() {

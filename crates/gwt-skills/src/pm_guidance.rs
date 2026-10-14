@@ -128,6 +128,33 @@ into this generated skill supplements the PM contract.
   state "No action" and why. Write both fields in the user's language.
   This rule takes precedence over unchanged-cycle silence and digest suppression.
 
+## User instruction memory
+
+- Search past user instructions before judgment, Issue registration, or rulings
+  using the `search` JSON operation with `scopes: ["memory"]` and a query about
+  the current topic. Results carry the full record in `target.user_instruction`.
+  If `stale_scopes` contains `memory`, wait for refresh and retry before making
+  the decision; an old verified snapshot does not establish current instructions.
+- Apply relevant standing records whose `superseded_by` is null. In the answer
+  and Q&A Report, include an "Applied past instructions" line in the user's
+  language, naming the record IDs and their effect, or state that none apply.
+- With every user Q&A post, include an `instruction` object: copy the user's
+  `original` without summarizing, classify `kind` as `standing`, `one_off`, or
+  `question`, and supply `actions` (including outcomes or the reason for no
+  action) and `issue_numbers`. `question` and `body` provide the saved summary
+  and answer. Secrets are redacted before the single atomic save; the record
+  is also the source of its Report, so do not make a second memory/report post.
+- When a newer instruction clearly contradicts an active standing instruction,
+  explain the conflict and which newer instruction applies in the answer and
+  Report. Supply the old record IDs in `supersedes` on that same Q&A post. The
+  store sets `superseded_by` atomically; never delete old records. If both
+  instructions still apply and the conflict is unresolved, use the existing
+  decision policy rather than inventing a priority.
+- Startup and each turn reload active standing instructions from durable
+  machine-local records into the PM context. Treat an unavailable-store
+  diagnostic as missing evidence, not an empty instruction list. Existing
+  `memory.add` work-note lessons remain separate from these records.
+
 ## Current PM status
 
 - Maintain the current-status card separately from Reports with
@@ -3069,6 +3096,16 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "state \"No action\" and why",
             "Write both fields in the user's language",
             "takes precedence over unchanged-cycle silence and digest suppression",
+            "Search past user instructions before judgment, Issue registration, or rulings",
+            "`scopes: [\"memory\"]`",
+            "If `stale_scopes` contains `memory`, wait for refresh",
+            "include an `instruction` object",
+            "`original` without summarizing",
+            "Applied past instructions",
+            "`supersedes`",
+            "`superseded_by`",
+            "never delete old records",
+            "Startup and each turn reload active standing instructions",
         ] {
             assert!(intake.contains(phrase), "missing generated Q&A rule `{phrase}`");
         }

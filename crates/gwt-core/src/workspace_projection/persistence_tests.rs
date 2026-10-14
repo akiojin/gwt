@@ -6082,7 +6082,9 @@ fn legacy_external_commit_waits_for_canonical_lock_before_publication() {
     FileExt::unlock(&canonical_lock).expect("release canonical lock");
     assert_eq!(
         result_rx
-            .recv_timeout(Duration::from_secs(5))
+            // Publication includes multiple sync_all calls. This is a hang
+            // guard, not a latency assertion on a saturated Windows runner.
+            .recv_timeout(Duration::from_secs(30))
             .expect("resolver completion")
             .expect("resolve legacy transaction"),
         ExternalWorkspaceCommitResolution::Committed

@@ -1930,6 +1930,7 @@ pub struct AppRuntime {
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
+    pub(crate) work_events_ingest_queue: Arc<crate::work_events_ingest::WorkEventsIngestQueue>,
     /// Issue #3604: last full PR-title enumeration per project. Kept separate
     /// from `last_work_events_ingest` because the local part of that ingest is
     /// cheap while this one costs a repository-wide `gh pr list`.
@@ -4355,6 +4356,9 @@ impl AppRuntime {
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             )),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            work_events_ingest_queue: Arc::new(
+                crate::work_events_ingest::WorkEventsIngestQueue::default(),
+            ),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
@@ -4503,7 +4507,10 @@ impl AppRuntime {
         let Some(context) = self.project_context_for_root(&project_root) else {
             return;
         };
-        let proxy = self.proxy.for_project(context);
+        let Some(mut worker) = self.work_events_ingest_queue.request(context.clone()) else {
+            return;
+        };
+        let proxy = self.proxy.clone();
         // Resolve the home-projection paths on the calling thread: HOME is
         // process-global and parallel unit tests scope it per test
         // (ScopedEnvVar, #3022) — a late resolution inside the worker would
@@ -4512,14 +4519,29 @@ impl AppRuntime {
         let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key);
         let projection_path = gwt_core::paths::gwt_workspace_projection_path(&project_key);
         thread::spawn(move || {
-            if let Some(event) = Self::prepare_work_events_ingest(
-                project_root,
-                &work_items_path,
-                &state_path,
-                &projection_path,
-                worktree_inventory.as_deref().map(Vec::as_slice),
-            ) {
-                proxy.send(event);
+            let mut context = context;
+            let mut project_root = project_root;
+            let mut inventory = worktree_inventory;
+            loop {
+                if let Some(event) = Self::prepare_work_events_ingest(
+                    project_root.clone(),
+                    &work_items_path,
+                    &state_path,
+                    &projection_path,
+                    inventory.as_deref().map(Vec::as_slice),
+                ) {
+                    proxy.for_project(context.clone()).send(event);
+                }
+                let Some(next_context) = worker.finish_pass() else {
+                    break;
+                };
+                // Only the next pass takes a reopened project's context. Old
+                // results retain their generation and are rejected as stale.
+                project_root = next_context.project_root.clone();
+                context = next_context;
+                // A coalesced request may have followed a new launch or shard.
+                // Re-enumerate instead of reusing the first pass's inventory.
+                inventory = None;
             }
         });
     }
@@ -10541,7 +10563,7 @@ impl AppRuntime {
         context: &ProjectContext,
     ) -> Option<(gwt::IssueMonitorPrefs, gwt::IssueMonitorUpdateDrain)> {
         let project_root = &context.project_root;
-        let prefs = match gwt::load_issue_monitor_prefs(
+        let prefs = match gwt::issue_monitor::load_issue_monitor_prefs_for_running_version(
             &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
         ) {
             Ok(prefs) => prefs,

@@ -37,8 +37,8 @@ pub use urgent::{
 mod tiers;
 pub(crate) use tiers::record_work_done_tier_landing;
 pub use tiers::{
-    IssueMonitorTierFacts, IssueMonitorTierLandingStats, IssueMonitorTierRecord,
-    IssueMonitorTierSelection,
+    IssueMonitorConfirmedLaunchTier, IssueMonitorTierFacts, IssueMonitorTierLandingStats,
+    IssueMonitorTierRecord, IssueMonitorTierSelection,
 };
 mod quota;
 pub(crate) use quota::provider_quota_reset_label;
@@ -1486,6 +1486,8 @@ pub struct IssueMonitorLaunchedIssue {
 pub struct IssueMonitorLaunchConfirmation {
     pub window_id: String,
     pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<u8>,
     /// Issue #3712 AC-1: the delivery this ACK consumed. The pending delivery
     /// is gone once the GUI ACKs, but the PM still has to be able to name it:
     /// `stop_only` asks for claim, delivery, and window, and the status row
@@ -1712,6 +1714,9 @@ pub enum IssueMonitorProviderUsageLimitOutcome {
 pub struct PendingIssueMonitorLaunchDelivery {
     pub delivery_id: String,
     pub issue_number: u64,
+    /// Selected for this exact materializer/window, never inferred from history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_tier: Option<u8>,
     pub branch_name: String,
     pub linked_issue_kind: LinkedIssueKind,
     pub claim_id: String,
@@ -4191,8 +4196,7 @@ fn hold_clock_label(reset_at: &str) -> String {
 /// run unattended from one that cannot. `None` means "do not decide", never
 /// "unsupported".
 fn custom_coding_agent_definition(agent_id: &str) -> Option<gwt_agent::CustomCodingAgent> {
-    let home = dirs::home_dir()?;
-    let config_path = gwt_config::Settings::global_config_path_for_home(&home);
+    let config_path = gwt_config::Settings::global_config_path()?;
     crate::custom_agents_service::list_custom_agents(&config_path)
         .ok()?
         .into_iter()
@@ -6426,6 +6430,34 @@ fn with_issue_monitor_prefs_lock_observed<T>(
 
 pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
     load_issue_monitor_prefs_unlocked(path)
+}
+
+/// Reconcile an applied update's admission hold at runtime scan/launch boundaries.
+/// Recheck under the prefs writer lock so a concurrently staged newer drain survives.
+/// Ordinary prefs readers and the monitor's explicit hold primitive stay unchanged.
+pub fn load_issue_monitor_prefs_for_running_version(path: &Path) -> io::Result<IssueMonitorPrefs> {
+    fn applied(prefs: &IssueMonitorPrefs) -> bool {
+        prefs.update_drain.as_ref().is_some_and(|drain| {
+            semver::Version::parse(drain.version.trim().trim_start_matches('v'))
+                .ok()
+                .zip(semver::Version::parse(env!("CARGO_PKG_VERSION")).ok())
+                .is_some_and(|(drained, running)| drained <= running)
+        })
+    }
+    let prefs = load_issue_monitor_prefs(path)?;
+    if !applied(&prefs) {
+        return Ok(prefs);
+    }
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + std::time::Duration::from_secs(1),
+    );
+    try_mutate_issue_monitor_prefs(path, |latest| {
+        if applied(latest) {
+            latest.update_drain = None;
+        }
+        Ok(())
+    })
+    .map(|(prefs, ())| prefs)
 }
 
 /// Replace a complete prefs snapshot while holding the stable writer lock.
@@ -16419,6 +16451,7 @@ impl IssueMonitorState {
                 .push_back(PendingIssueMonitorLaunchDelivery {
                     delivery_id,
                     issue_number,
+                    selected_tier: None,
                     branch_name,
                     linked_issue_kind,
                     claim_id,
@@ -16445,6 +16478,7 @@ impl IssueMonitorState {
         let window_id = window_id.into();
         let mut launched_claim_id = None;
         let mut consumed_delivery_id = None;
+        let mut confirmed_tier = None;
         if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
@@ -16457,6 +16491,7 @@ impl IssueMonitorState {
                     }
                     launched_claim_id = Some(delivery.claim_id.clone());
                     consumed_delivery_id = Some(delivery.delivery_id.clone());
+                    confirmed_tier = delivery.selected_tier;
                     self.pending_launch_deliveries.remove(index);
                 }
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
@@ -16471,6 +16506,9 @@ impl IssueMonitorState {
             consumed_delivery_id,
             None,
         );
+        if let Some(confirmation) = self.launch_confirmations.get_mut(&issue_number) {
+            confirmation.tier = confirmed_tier;
+        }
         true
     }
 
@@ -16544,6 +16582,13 @@ impl IssueMonitorState {
         }) else {
             return false;
         };
+        // A pre-spawn reservation may outlive its attempt while a manual pane
+        // reuses the same ID. Only an already-materialized window proves tier.
+        if delivery.materializer_window_id.as_deref() != Some(materializer_window_id)
+            || delivery.materialized_window_id.as_deref() != Some(materializer_window_id)
+        {
+            delivery.selected_tier = None;
+        }
         if delivery.materializer_id.as_deref() == Some(materializer_id) {
             delivery.materializer_pid = Some(materializer_pid);
             if delivery.materializer_window_id.as_deref() != Some(materializer_window_id) {
@@ -16663,6 +16708,7 @@ impl IssueMonitorState {
                 IssueMonitorLaunchConfirmation {
                     window_id: window_id.clone(),
                     claim_id: claim_id.clone(),
+                    tier: None,
                     delivery_id: delivery_id.clone(),
                     confirmed_at: confirmed_at.map(str::to_string).unwrap_or_else(|| {
                         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
@@ -19197,6 +19243,47 @@ impl IssueMonitorState {
         reason: &str,
         now: &str,
     ) -> IssueMonitorRequeueOutcome {
+        // A slot is not proof that its window survived a GUI restart. Reuse
+        // the scan's freshness, launch-ordering and registration-grace checks,
+        // while retaining any live or uncertain worktree process.
+        if self.process_held_issues.contains(&issue_number) {
+            return IssueMonitorRequeueOutcome::LaunchLive;
+        }
+        if self.active_launches.contains(&issue_number)
+            || self.launched_windows.contains_key(&issue_number)
+        {
+            let missing = self
+                .classify_idle_windows(&BTreeMap::new(), now)
+                .iter()
+                .any(|idle| {
+                    idle.issue_number == Some(issue_number)
+                        && idle.idle_kind == IssueMonitorIdleKind::BindingDead
+                        && !idle.pane_present
+                });
+            let pane_present = self.fresh_window_snapshot(now).is_some_and(|snapshot| {
+                snapshot.windows.iter().any(|window| {
+                    self.launched_windows
+                        .get(&issue_number)
+                        .is_some_and(|bound| {
+                            issue_monitor_window_ids_match(bound, &window.window_id)
+                        })
+                        || (window.issue_number == Some(issue_number)
+                            && idle_window_is_alive(window.status))
+                })
+            });
+            if !missing
+                || pane_present
+                || self
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == issue_number)
+            {
+                return IssueMonitorRequeueOutcome::LaunchLive;
+            }
+            self.clear_active_tracking(issue_number);
+            self.launch_bindings
+                .retain(|_, owner| *owner != issue_number);
+        }
         self.publish_operator_release(
             issue_number,
             reason,
@@ -25510,12 +25597,23 @@ mod tests {
         let json = serde_json::to_string(&monitor.prefs()).expect("serialize prefs");
         let restored: IssueMonitorPrefs = serde_json::from_str(&json).expect("reload prefs");
         assert_eq!(restored.update_drain, monitor.prefs().update_drain);
-        let reloaded = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored);
+        let mut reloaded = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored);
         assert_eq!(reloaded.update_drain(), monitor.update_drain());
         assert_eq!(
             reloaded.active_issue_numbers(),
             monitor.active_issue_numbers()
         );
+
+        // #5351: runtime cleanup is durable and daemon rebase cannot resurrect
+        // the applied drain or alter an in-flight launch/effect ledger.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let reconciled = load_issue_monitor_prefs_for_running_version(&path).unwrap();
+        assert_eq!(reconciled, before);
+        reloaded.rebase_daemon_driver_prefs(&reconciled);
+        assert_eq!(reloaded.prefs(), before);
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), before);
 
         monitor.clear_update_drain();
         assert!(monitor.update_drain().is_none());
@@ -28438,6 +28536,96 @@ mod tests {
             IssueMonitorRequeueOutcome::LaunchLive
         );
         assert_eq!(monitor.active_count(), 1);
+    }
+
+    #[test]
+    fn issue_4383_requeue_recovers_a_missing_window_that_still_holds_a_slot() {
+        let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
+        monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.requeue_failed_issue(43, "restart recovery", IDLE_NOW),
+            IssueMonitorRequeueOutcome::LaunchLive
+        );
+
+        assert!(matches!(
+            monitor.release_stranded_launch(43, "restart recovery", IDLE_NOW),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.queued_issue_numbers().contains(&43));
+        assert!(monitor.prefs().launched_issues.is_empty());
+        assert_eq!(monitor.prefs().requeue_audit.len(), 1);
+    }
+
+    #[test]
+    fn issue_4383_requeue_keeps_a_missing_pane_with_a_live_worktree_process() {
+        let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
+        monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+        monitor.set_process_held_issues(BTreeSet::from([43]));
+        let before = monitor.prefs();
+
+        assert_eq!(
+            monitor.release_stranded_launch(43, "restart recovery", IDLE_NOW),
+            IssueMonitorRequeueOutcome::LaunchLive
+        );
+        assert_eq!(monitor.prefs(), before, "live work must not be released");
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::restored",
+                Some(43),
+                WindowState::Running,
+                false,
+            )],
+        ));
+        assert_eq!(
+            monitor.release_stranded_launch(43, "restart recovery", IDLE_NOW),
+            IssueMonitorRequeueOutcome::LaunchLive,
+            "a replacement pane for the same Issue must retain the slot"
+        );
+        assert_eq!(monitor.prefs(), before);
+    }
+
+    #[test]
+    fn issue_4383_first_restart_scan_requeues_three_windows_without_spending_attempts() {
+        let monitor = autonomous_launched_cohort(&[
+            (4373, "tab-1::agent-1"),
+            (4376, "tab-1::agent-2"),
+            (4377, "tab-1::agent-3"),
+        ]);
+        let mut restarted =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        for number in [4373, 4376, 4377] {
+            restarted.record_candidate(issue(number));
+        }
+        restarted.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+        let outcome = restarted.reconcile_idle_windows(
+            &settlements(&[
+                (4373, IssueMonitorExecutionSettlement::Interrupted),
+                (4376, IssueMonitorExecutionSettlement::Interrupted),
+                (4377, IssueMonitorExecutionSettlement::Interrupted),
+            ]),
+            IDLE_NOW,
+        );
+
+        assert_eq!(outcome.released, vec![4373, 4376, 4377]);
+        assert_eq!(outcome.requeued, vec![4373, 4376, 4377]);
+        assert_eq!(restarted.active_count(), 0);
+        for number in [4373, 4376, 4377] {
+            assert_eq!(
+                restarted.attempt_count(number),
+                monitor.attempt_count(number)
+            );
+            assert!(restarted.queued_issue_numbers().contains(&number));
+            assert!(restarted
+                .autonomous_record(number)
+                .unwrap()
+                .retry_not_before
+                .is_none());
+        }
     }
 
     /// Issue #3992 AC-6: a `launched` row with a null window and no live launch
@@ -33748,6 +33936,20 @@ mod tests {
             "tab-1::agent-42",
             Some("launch:effect-42"),
         ));
+        // The selected tier belongs to this exact pre-spawn delivery, not max history.
+        let mut wire = serde_json::to_value(monitor.prefs()).unwrap();
+        wire["pending_launch_deliveries"][0]["selected_tier"] = serde_json::json!(0);
+        wire["issue_tiers"]["42"] =
+            serde_json::json!({"floor": 2, "launch_tier": 2, "landing_tier": null});
+        monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(wire).unwrap(),
+        );
+        assert!(
+            serde_json::to_value(monitor.status_view()).unwrap()["tier_facts"]
+                .as_array()
+                .is_none_or(|rows| rows.iter().all(|row| row.get("confirmed_launch").is_none()))
+        );
         assert!(monitor.mark_launch_delivery_materialized(
             42,
             "launch:effect-42",
@@ -33783,6 +33985,49 @@ mod tests {
             "the consumed delivery claim becomes the durable window generation"
         );
         assert_eq!(acked.pending_launch_deliveries[0].issue_number, 43);
+        let confirmed = serde_json::json!({
+            "tier": 0, "window_id": "tab-1::agent-42", "delivery_id": "launch:effect-42"
+        });
+        let mut restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(serde_json::to_value(&acked).unwrap()).unwrap(),
+        );
+        let facts = serde_json::to_value(restored.status_view()).unwrap()["tier_facts"].clone();
+        assert_eq!(
+            facts
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["issue_number"] == 42)
+                .unwrap()["confirmed_launch"],
+            confirmed
+        );
+        let before = restored.prefs();
+        assert!(!restored.complete_active_launch_delivery(42, "wrong", Some("launch:effect-42")));
+        assert_eq!(
+            restored.prefs(),
+            before,
+            "stale ACK cannot change the observed tier"
+        );
+        restored
+            .launched_claims
+            .insert(42, "successor-claim".into());
+        assert!(restored
+            .tier_facts(None)
+            .iter()
+            .all(|row| serde_json::to_value(row)
+                .unwrap()
+                .get("confirmed_launch")
+                .is_none()));
+        restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), acked.clone());
+        restored.record_agent_issue_failed(42, "agent failed");
+        assert!(restored
+            .tier_facts(None)
+            .iter()
+            .all(|row| serde_json::to_value(row)
+                .unwrap()
+                .get("confirmed_launch")
+                .is_none()));
 
         assert!(monitor.complete_active_launch_delivery(43, "tab-1::legacy-43", None));
         assert!(!monitor.prefs().launched_claims.contains_key(&43));
@@ -33838,6 +34083,72 @@ mod tests {
             "tab-a::agent-1",
             |pid| pid == 101,
         ));
+        let mut wire = serde_json::to_value(monitor.prefs()).unwrap();
+        wire["pending_launch_deliveries"][0]["selected_tier"] = serde_json::json!(0);
+        monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(wire).unwrap(),
+        );
+        let mut unmaterialized =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(unmaterialized.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-1",
+            |_| false
+        ));
+        assert_eq!(
+            unmaterialized.prefs().pending_launch_deliveries[0].selected_tier,
+            None,
+            "an unmaterialized reservation cannot prove the adopted pane's tier"
+        );
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-a::agent-1"
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-1",
+            |_| false
+        ));
+        assert_eq!(
+            serde_json::to_value(monitor.prefs()).unwrap()["pending_launch_deliveries"][0]
+                ["selected_tier"],
+            0,
+            "same-window recovery preserves the selected tier"
+        );
+        let mut recovered_same_window =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(recovered_same_window.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-b",
+            202,
+            "tab-a::agent-1",
+            |_| false
+        ));
+        assert_eq!(
+            recovered_same_window.prefs().pending_launch_deliveries[0].selected_tier,
+            Some(0)
+        );
+        let mut materialized = monitor.prefs();
+        assert!(
+            !materialized.record_launch_delivery_tier(
+                42,
+                "launch:effect-42",
+                "gui-a",
+                "tab-a::agent-1",
+                2
+            ),
+            "selection cannot overwrite an already materialized profile"
+        );
         assert!(!monitor.claim_launch_delivery(
             42,
             "launch:effect-42",
@@ -33863,6 +34174,13 @@ mod tests {
         ));
         let recovered = monitor.prefs().pending_launch_deliveries.remove(0);
         assert_eq!(recovered.materializer_id.as_deref(), Some("gui-b"));
+        assert!(
+            serde_json::to_value(&recovered)
+                .unwrap()
+                .get("selected_tier")
+                .is_none(),
+            "retargeted windows cannot inherit the prior tier"
+        );
         assert_eq!(recovered.materializer_pid, Some(202));
         assert_eq!(
             recovered.materializer_window_id.as_deref(),

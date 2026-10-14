@@ -1023,13 +1023,20 @@ gwt が対処メッセージを表示）。
 PM ウィンドウの **Reports** は、明示的に投稿された Markdown の報告を種別・時刻・
 **Copy** ボタン付きで表示します。Q&A 報告では質問・指示と回答・行動結果を分けて表示し、
 **Report kind** で種類を絞り込めます。閲覧専用で、ターミナル操作には **Execution log** を
-使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存し、
-再起動後も保持します。自動失効・件数制限はなく、空でない本文は 1 件 64 KiB までです。
+使います。報告は `~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl` に保存します。
+指示を記録した Q&A は同じ machine-local project store の `project-state/user-instructions.json`
+を正本とし、1 回の原子的な保存で報告と指示を保持します。再起動後も保持し、自動失効・件数制限は
+ありません。空でない報告本文は 1 件 64 KiB までです。
 
 登録済み PM は `pm.report.post` の `kind`（`progress` / `decision` / `blocker` / `qa`）と
 `body` で投稿します。`qa` には、ユーザーの質問・指示を要約した空でない `question` が必須で、
 `body` に回答・取った行動・結果を記載します。`pm.report.list` で履歴を読み出せます。標準の gwtd JSON envelope を
-使用します。投稿成功は保存と読み戻しの確認を意味し、失敗時は明示的なエラーを返します。
+使用します。投稿成功は永続化の確認を意味し、失敗時は明示的なエラーを返します。
+
+PM の Q&A 投稿には、原文 `original`、種別 `kind`（`standing` / `one_off` / `question`）、
+`actions`、`issue_numbers` を持つ `instruction` を含めます。任意の `supersedes` に旧指示の ID を
+指定すると、旧レコードを残したまま `superseded_by` で置換先を記録します。秘密値は保存前に伏せます。
+Memory 検索で原文と結果を検索でき、取り消されていない常設指示は PM の起動時と各ターンに再読込します。
 
 **PM の現在** カードは報告履歴の上に常時表示されます。PM の説明と、稼働窓・キュー先頭・
 人への引き継ぎ件数・リリース PR・未適用の更新という自動の事実を分け、取得できない情報は

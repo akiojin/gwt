@@ -1094,15 +1094,23 @@ time, and a **Copy** button. Q&A reports separate the question or instruction fr
 the answer and action results; use **Report kind** to filter the history. It is
 read-only; use **Execution log** for terminal
 interaction. Reports survive restarts in
-`~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`, with no automatic
-expiry or count limit. Each non-empty report is limited to 64 KiB.
+`~/.gwt/projects/<project-hash>/project-state/pm-reports.jsonl`. Captured Q&A and
+user instructions share `project-state/user-instructions.json` in the same
+machine-local project store, so one atomic save preserves both. There is no
+automatic expiry or count limit. Each non-empty report is limited to 64 KiB.
 
 A registered PM can publish through `pm.report.post` with `kind` (`progress`,
 `decision`, `blocker`, or `qa`) and `body`; `qa` also requires a non-empty
 `question` summarizing the user's question or instruction. Its `body` contains
 the answer, actions taken, and their results. `pm.report.list` reads the saved history.
-These use the standard gwtd JSON envelope. A successful post confirms the report
-was saved and read back; failures return an explicit error.
+These use the standard gwtd JSON envelope. A successful post confirms durable
+storage; failures return an explicit error.
+
+PM Q&A posts include an `instruction` object with the full `original`, `kind`
+(`standing`, `one_off`, or `question`), `actions`, and `issue_numbers`. Optional
+`supersedes` IDs retain old instructions with a `superseded_by` link. Secrets are
+redacted before storage. Memory search includes the saved originals and outcomes;
+active standing instructions are reloaded at PM startup and each turn.
 
 The **PM の現在** card stays above the report history. It separates the PM's
 explanation from observed active windows, queue head, human handoffs, release PR,
