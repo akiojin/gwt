@@ -52,8 +52,9 @@ test.describe('PM reports', () => {
         if ('ok' in output) expect(output.ok).toBe(true);
         return output;
       };
-      const currentCard = pane.getByRole('region', { name: 'PM の現在', exact: true });
+      const currentCard = pane.getByRole('region', { name: 'PM status', exact: true });
       await expect(currentCard).toBeVisible();
+      await currentCard.locator('summary').click();
       // Seed only this owned isolated fixture's history to observe the real
       // backend's default fifteen-minute threshold without a wall-clock wait.
       const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
@@ -64,12 +65,12 @@ test.describe('PM reports', () => {
       };
       writeFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-status.jsonl`, `${JSON.stringify(oldStatus)}\n`);
       await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
-      await expect(currentCard).toContainText('PM の更新が 16 分止まっています');
-      await expect(currentCard).toContainText('次に動く条件: v9.117.2 の公開');
-      await expect(currentCard).toContainText('ユーザーへの依頼: なし');
-      await expect(currentCard.getByRole('region', { name: '自動の事実' })).toContainText('Release v9.117.2');
-      await expect(currentCard.getByText('リリース: #5352 Release v9.117.2', { exact: true })).toBeInViewport();
-      await expect(currentCard).toContainText('稼働中の窓: 0');
+      await expect(currentCard).toContainText('PM has not updated for 16 minutes');
+      await expect(currentCard).toContainText('Next: v9.117.2 の公開');
+      await expect(currentCard).toContainText('User action: None');
+      await expect(currentCard.getByRole('region', { name: 'Live facts' })).toContainText('Release v9.117.2');
+      await expect(currentCard.getByText('Release: #5352 Release v9.117.2', { exact: true })).toBeInViewport();
+      await expect(currentCard).toContainText('Active windows: 0');
       const staleScreenshot = info.outputPath(`pm-current-stale-${info.project.name}.png`);
       await pane.screenshot({ path: staleScreenshot });
       await info.attach('PM current stale status', { path: staleScreenshot, contentType: 'image/png' });
@@ -83,7 +84,7 @@ test.describe('PM reports', () => {
       expect(statusReadback.current_status.items[0].text).toContain('公開結果を確認');
       await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
       await expect(currentCard).toContainText(`公開結果を確認 ${info.project.name}`);
-      await expect(currentCard).not.toContainText('更新が 16 分止まっています');
+      await expect(currentCard).not.toContainText('has not updated for 16 minutes');
       await expect(currentCard).not.toContainText('リリースの公開待ち');
       await expect(reports).not.toContainText('公開結果を確認');
       const saved = pmOperation('pm.report.post', { kind: 'progress', body });

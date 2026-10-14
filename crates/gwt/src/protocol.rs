@@ -985,9 +985,10 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
-    /// Issue #5322: update the global auto-apply-updates preference shared
-    /// by every project and the Hub.
-    SetIssueMonitorAutoApplyUpdates {
+    /// Read app-wide update preference and the requesting project's drain.
+    GetUpdateSettings,
+    /// GUI-only app-wide update preference shared by projects and the Hub.
+    SetAutoApplyUpdates {
         enabled: bool,
     },
     /// Read the current project's complete saved launch profile pool.
@@ -2405,6 +2406,9 @@ pub enum BackendEvent {
         id: String,
         knowledge_kind: KnowledgeKind,
         request_id: Option<u64>,
+        /// Content revision of the enriched list, independent of selection.
+        #[serde(default)]
+        revision: String,
         entries: Vec<KnowledgeListItem>,
         selected_number: Option<u64>,
         empty_message: Option<String>,
@@ -2773,6 +2777,11 @@ pub enum BackendEvent {
         phase: String,
         message: String,
         recovery: String,
+    },
+    /// Update-domain preference and current-project drain snapshot.
+    UpdateSettings {
+        project_root: Option<String>,
+        status: crate::update_settings::Status,
     },
     /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
     /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
@@ -3500,6 +3509,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
+        "update_settings",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "system_settings",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3686,6 +3700,7 @@ impl BackendEvent {
             BackendEvent::MigrationProgress { .. } => "migration_progress",
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
+            BackendEvent::UpdateSettings { .. } => "update_settings",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
             BackendEvent::ProjectBoardConfig { .. } => "project_board_config",

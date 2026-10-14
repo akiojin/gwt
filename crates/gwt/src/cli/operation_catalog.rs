@@ -636,6 +636,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "update.settings.status",
+        aliases: &[],
+    },
+    Operation {
         name: "verify.adjudicate",
         aliases: &[],
     },

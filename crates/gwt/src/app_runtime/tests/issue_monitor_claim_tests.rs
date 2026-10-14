@@ -1856,11 +1856,15 @@ fn app_runtime_staged_update_respects_global_off_over_legacy_project_on() {
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
             autonomous_mode: true,
-            auto_apply_updates: Some(true),
             ..Default::default()
         },
     )
     .unwrap();
+    let legacy_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&legacy_path).unwrap()).unwrap();
+    legacy["auto_apply_updates"] = serde_json::json!(true);
+    fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
     let config = gwt_core::paths::gwt_config_path();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(config, "auto_apply_updates = false\n").unwrap();
@@ -1885,13 +1889,12 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let seed = |auto_apply_updates: Option<bool>| {
+    let seed = || {
         gwt::save_issue_monitor_prefs(
             &prefs_path,
             &gwt::IssueMonitorPrefs {
                 enabled: true,
                 autonomous_mode: true,
-                auto_apply_updates,
                 effect_authority_epoch: 7,
                 launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                     issue_number: 42,
@@ -1903,7 +1906,7 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
         .expect("seed prefs");
     };
 
-    seed(Some(false));
+    seed();
     gwt::update_settings::set(Some(false)).unwrap();
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -1913,7 +1916,7 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
         .update_drain
         .is_none());
 
-    seed(None);
+    seed();
     gwt::update_settings::set(Some(true)).unwrap();
     let events = runtime.update_staged_events("99.0.0");
     let status = events
@@ -2166,7 +2169,6 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
             &gwt::IssueMonitorPrefs {
                 enabled: true,
                 autonomous_mode: false,
-                auto_apply_updates: None,
                 effect_authority_epoch: 7,
                 launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                     issue_number: 42,
@@ -2307,7 +2309,6 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         &gwt::IssueMonitorPrefs {
             enabled: true,
             autonomous_mode: true,
-            auto_apply_updates: Some(false),
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
                 version: "99.0.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -2319,6 +2320,10 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         },
     )
     .expect("seed prefs");
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&prefs_path).unwrap()).unwrap();
+    legacy["auto_apply_updates"] = serde_json::json!(false);
+    fs::write(&prefs_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
     let payload = temp.path().join("manual-update");
     fs::write(&payload, "payload").unwrap();
     gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
