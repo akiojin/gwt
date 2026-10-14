@@ -1217,10 +1217,9 @@ Session は保護します。古い書き込み一時ファイルの残骸も整
 保持方針と読めない記録の扱いは
 [Issue #5025](https://github.com/akiojin/gwt/issues/5025) に記載しています。
 
-GUI と daemon は起動時と1時間ごとに `~/.gwt/sessions/runtime/` も整理します。
-Host PID が存在せず、24時間更新のない namespace だけを回収します。実行中・判定不能な
-プロセス、復元・復旧の証跡、読めない記録やリンクは保持し、Session 履歴ファイルには
-手を加えません。`runtime namespace GC` 診断に回収数・保持数・保持理由を記録します。
+GUI と daemon は、Session 履歴と復旧情報を保持しながら、放棄された runtime namespace を
+自動的に整理します。回収のタイミング・保持方針・診断については
+[Issue #5384](https://github.com/akiojin/gwt/issues/5384) を参照してください。
 
 ### macOS のファイルシステム負荷と Spotlight
 

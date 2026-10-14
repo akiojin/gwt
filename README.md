@@ -1297,12 +1297,9 @@ remain protected. Old abandoned write temporaries are also removed.
 See [Issue #5025](https://github.com/akiojin/gwt/issues/5025) for the
 retention policy and unreadable-record handling.
 
-The GUI and daemon also check `~/.gwt/sessions/runtime/` at startup and
-hourly. A PID namespace is reclaimed only when its Host is absent and it
-has had no updates for 24 hours. Live or uncertain processes, restore and
-recovery evidence, and unreadable or linked paths are retained. Session
-history files remain unchanged. The `runtime namespace GC` diagnostic
-records reclaimed and retained counts with retention reasons.
+The GUI and daemon automatically clean up abandoned runtime namespaces while
+preserving Session history and recovery data. See [Issue #5384](https://github.com/akiojin/gwt/issues/5384)
+for the collection schedule, retention policy, and diagnostics.
 
 ### macOS filesystem activity and Spotlight
 
