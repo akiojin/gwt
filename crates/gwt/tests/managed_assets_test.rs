@@ -11,7 +11,7 @@ use gwt::{
 use gwt_agent::AgentId;
 use gwt_core::process::hidden_command;
 use gwt_skills::settings_local::{hook_bin_override, ScopedHookBin};
-use gwt_skills::CodexHookDiscoveryMode;
+use gwt_skills::{CodexHookDiscoveryMode, ManagedAssetTarget};
 use serde_json::Value;
 use tempfile::tempdir;
 
@@ -893,7 +893,10 @@ fn pm_worktree_keeps_gwt_pm_guidance_after_asset_distribution() {
             .join(".claude/skills/gwt-pm/SKILL.md"),
     )
     .expect("gwt-pm skill must survive distribution");
-    assert_eq!(skill, gwt_skills::pm_guidance::render_skill_md());
+    assert_eq!(
+        skill,
+        gwt_skills::pm_guidance::render_skill_md(ManagedAssetTarget::ClaudeCode)
+    );
 }
 
 /// The resume path never pre-writes the skill, and a binary upgrade must not
@@ -910,7 +913,7 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
         .join(".claude/skills/gwt-pm/SKILL.md");
     assert_eq!(
         std::fs::read_to_string(&path).expect("guidance generated without a pre-write"),
-        gwt_skills::pm_guidance::render_skill_md()
+        gwt_skills::pm_guidance::render_skill_md(ManagedAssetTarget::ClaudeCode)
     );
     let original_contract = read_skill_contract(&path);
 
@@ -933,7 +936,7 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
     .expect("re-materialize");
     assert_eq!(
         std::fs::read_to_string(&path).expect("guidance restored"),
-        gwt_skills::pm_guidance::render_skill_md(),
+        gwt_skills::pm_guidance::render_skill_md(ManagedAssetTarget::ClaudeCode),
         "a tampered or stale contract must be rewritten from the canonical source"
     );
     assert_eq!(
@@ -950,13 +953,21 @@ fn pm_worktree_gwt_pm_guidance_is_regenerated_when_absent_or_tampered() {
 /// cycle may block.
 #[test]
 fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
-    let canonical = gwt_skills::pm_guidance::render_skill_md();
     let mut first_contract = None;
 
-    for (agent, mirror) in [
-        (AgentId::ClaudeCode, ".claude/skills/gwt-pm/SKILL.md"),
-        (AgentId::Codex, ".codex/skills/gwt-pm/SKILL.md"),
+    for (agent, target, mirror) in [
+        (
+            AgentId::ClaudeCode,
+            ManagedAssetTarget::ClaudeCode,
+            ".claude/skills/gwt-pm/SKILL.md",
+        ),
+        (
+            AgentId::Codex,
+            ManagedAssetTarget::Codex,
+            ".codex/skills/gwt-pm/SKILL.md",
+        ),
     ] {
+        let canonical = gwt_skills::pm_guidance::render_skill_md(target);
         let home = tempdir().expect("tempdir");
         let worktree = materialize_into_pm_worktree(home.path(), &agent, |_| {});
         let skill_path = worktree.parent().unwrap().join("runtime").join(mirror);

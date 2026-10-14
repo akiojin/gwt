@@ -452,6 +452,7 @@ fn materialize_pm_project_policy(
         if targets.contains(&target) {
             gwt_skills::pm_guidance::generate_pm_guidance_with_policy(
                 &runtime.join(root),
+                target,
                 &policy,
             )?;
         }
