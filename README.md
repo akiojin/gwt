@@ -1145,10 +1145,15 @@ an entry removes its copied policy on the next refresh.
 - Use `Tile` to arrange windows on a grid
 - Use `Stack` to cascade windows with overlap
 - Use `Align` to arrange windows on a grid without changing their size
-- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle Canvas Agent
-  windows by activity: running/starting first, waiting/idle next, then the
-  remaining Agents. Non-Agent surfaces are skipped, hidden Agent tabs are
-  activated when selected, and the focused Agent is recentered
+
+## Agent Navigation
+
+Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual
+Agent tabs by activity: running/starting first, waiting/idle next, then the
+remaining Agents. Agents shown inside Issues are included; PM and Shell
+windows are skipped. Cycling keeps the split view and focuses the selected
+terminal for input. Closing a tab returns to All agents without stopping the
+agent; cycling can reopen the same terminal.
 
 ## Operator Design Language (SPEC-2356)
 

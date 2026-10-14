@@ -2739,10 +2739,8 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function cycleFocus(direction) {
-        // SPEC-3263 FR-014..FR-019 / Issue #3551: cycle the Canvas Agent
-        // projection in runtime-priority order. Hidden tab members remain
-        // candidates and are activated before the existing local camera frame
-        // path notifies the backend of focus for z-order/highlight.
+        // SPEC #4777 T-10: cycle the existing Agents tabs in runtime-priority
+        // order without changing canvas geometry or saved window groups.
         const windows = activeWorkspace().windows || [];
         const nextWindowId = selectNextAgentFocusWindowId(
           windows,
@@ -2753,15 +2751,12 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (!nextWindowId) {
           return;
         }
-        const nextWindow = windows.find(
-          (windowData) => windowData.id === nextWindowId,
-        );
-        if (nextWindow?.tab_group_id && !nextWindow.tab_group_active) {
-          pendingFrameWindowId = nextWindowId;
-          send({ kind: "activate_window_tab", id: nextWindowId });
-          return;
-        }
-        frameWindow(nextWindowId);
+        splitSurfaces?.focusSurface("agents");
+        openSurface("agents");
+        if (!agentsSurface.openTab(nextWindowId)) return;
+        pendingFrameWindowId = null;
+        focusWindowRemotely(nextWindowId);
+        terminalMap.get(nextWindowId)?.terminal.focus();
       }
 
       const closeProjectController = createCloseProjectController({
