@@ -318,8 +318,11 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(
       issueSurface.locator('[data-issue-number="3095"] .knowledge-row-menu'),
     ).not.toHaveAttribute("open", "");
-    await issueSurface.locator(".knowledge-monitor-max-active input").fill("4");
-    await issueSurface.locator(".knowledge-monitor-max-active input").press("Tab");
+    for (const selector of [
+      ".knowledge-monitor-max-active", ".knowledge-monitor-labels", ".knowledge-monitor-pool",
+      '[data-action="monitor-auto-apply"]', '[data-action="monitor-auto-refill"]',
+      '[data-action="monitor-capacity-auto"]',
+    ]) await expect(issueSurface.locator(selector)).toHaveCount(0);
     await issueSurface.locator('[data-action="monitor-toggle"]').click();
     // Issue #3561: the Autonomous control is a WAI-ARIA switch that shows the
     // server state only. A click sends the request and nothing moves until an
@@ -358,13 +361,9 @@ test.describe("Issue Bridge load recovery", () => {
     // The track color animates (motion-fast transition), so poll until the
     // computed value has left the Off color instead of sampling once.
     await expect(autonomousTrack).not.toHaveCSS("background-color", offTrackColor);
-    // Issue #3906 AC-1: the auto-apply override sits next to the autonomous
-    // toggle and reports the effective value the backend sent.
-    const autoApply = issueSurface.locator('[data-action="monitor-auto-apply"]');
-    await expect(autoApply).toHaveText("Auto-apply updates: OFF");
-    await expect(autoApply).toHaveAttribute("data-enabled", "false");
-    await autoApply.click();
-    await issueSurface.locator('[data-action="monitor-settings"]').click();
+    const gear = issueSurface.getByRole("button", { name: "Issues settings", exact: true });
+    await expect(gear).toHaveText("⚙");
+    await gear.click();
     // SPEC #3885 T-033: quick register lives in the "+ New" popover.
     await issueSurface.locator('[data-action="issue-new"]').click();
     const popover = page.locator(".modal-backdrop.issue-new-popover.open .modal-shell");
@@ -388,19 +387,11 @@ test.describe("Issue Bridge load recovery", () => {
       position: 0,
     });
     expect(messages).toContainEqual({
-      kind: "set_issue_monitor_max_active_agents",
-      max_active_agents: 4,
-    });
-    expect(messages).toContainEqual({
       kind: "set_issue_monitor_enabled",
       enabled: true,
     });
     expect(messages).toContainEqual({
       kind: "set_issue_monitor_autonomous_mode",
-      enabled: true,
-    });
-    expect(messages).toContainEqual({
-      kind: "set_issue_monitor_auto_apply_updates",
       enabled: true,
     });
     // Issue #5322: the gear opens Settings instead of the profile wizard.

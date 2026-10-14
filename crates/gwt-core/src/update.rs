@@ -90,6 +90,13 @@ pub struct RestartArgsFile {
     pub args: Vec<String>,
     #[serde(default)]
     pub cwd: String,
+    /// Automatic apply forbids prompting for administrator credentials.
+    #[serde(default = "default_allow_elevation")]
+    pub allow_elevation: bool,
+}
+
+fn default_allow_elevation() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +128,15 @@ pub enum PreparedPayload {
     Installer { path: PathBuf, kind: InstallerKind },
 }
 
+/// Who staged the payload. Missing legacy values retain manual Later behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingUpdateOrigin {
+    #[default]
+    ManualLater,
+    Automatic,
+}
+
 /// SPEC-2041 Phase 19 (FR-056/059/062): on-disk manifest pointing at a
 /// download that is ready to apply but has not been committed (helper-spawn +
 /// exit) yet. Written when the user defers the apply with `Later` and read by
@@ -141,11 +157,23 @@ pub struct PendingUpdateManifest {
     pub payload: PreparedPayload,
     /// RFC3339 timestamp of when the download finished.
     pub downloaded_at: String,
+    #[serde(default)]
+    pub origin: PendingUpdateOrigin,
     /// Explicit host-wide hold on automatic apply of this staged version.
     /// The payload stays available for a manual apply. Older manifests keep
     /// their existing automatic-apply behavior.
     #[serde(default)]
     pub auto_apply_deferred: bool,
+}
+
+impl PendingUpdateManifest {
+    /// Explicit operator defer wins over either staging origin. Only automatic
+    /// payloads depend on current Auto-apply/Autonomous and elevation policy.
+    pub fn permits_startup_apply(&self, automatic_enabled: bool, requires_elevation: bool) -> bool {
+        !self.auto_apply_deferred
+            && (self.origin == PendingUpdateOrigin::ManualLater
+                || (automatic_enabled && !requires_elevation))
+    }
 }
 
 /// `~/.gwt/pending-update/`. Created on demand by
@@ -180,9 +208,27 @@ pub fn persist_pending_update_manifest_in(
         .map_err(|e| format!("Failed to lock pending-update manifest for staging: {e}"))?;
     let _lock = PendingUpdateManifestLock { file: lock };
     let mut staged = manifest.clone();
-    staged.auto_apply_deferred |= load_pending_update_manifest_in(dir)
-        .is_some_and(|current| current.version == staged.version && current.auto_apply_deferred);
+    if let Some(current) =
+        load_pending_update_manifest_in(dir).filter(|current| current.version == staged.version)
+    {
+        staged.auto_apply_deferred |= current.auto_apply_deferred;
+        if current.origin == PendingUpdateOrigin::ManualLater {
+            staged.origin = PendingUpdateOrigin::ManualLater;
+        }
+    }
     write_pending_update_manifest_in(dir, &staged)
+}
+
+/// An explicit Later action turns an automatic download into a manual pending
+/// apply. Keep the independent operator defer intact.
+pub fn mark_pending_update_manual_later() -> Result<(), String> {
+    let dir = pending_update_dir();
+    let _lock = pending_update_manifest_lock(&dir)?;
+    let mut manifest = load_pending_update_manifest_in(&dir).ok_or_else(|| {
+        "Pending update manifest is missing; download did not persist.".to_string()
+    })?;
+    manifest.origin = PendingUpdateOrigin::ManualLater;
+    write_pending_update_manifest_in(&dir, &manifest)
 }
 
 /// Releases the manifest lock at the end of its critical section, even when
@@ -211,6 +257,8 @@ pub fn pending_update_manifest_lock(dir: &Path) -> Result<PendingUpdateManifestL
 }
 
 fn open_pending_update_manifest_lock(dir: &Path) -> Result<fs::File, String> {
+    gwt_config::home::assert_test_path(&dir.join("manifest.json"));
+    gwt_config::home::assert_test_path(&dir.join("manifest.lock"));
     fs::create_dir_all(dir).map_err(|e| format!("Failed to create pending-update dir: {e}"))?;
     fs::OpenOptions::new()
         .create(true)
@@ -404,6 +452,7 @@ pub fn clear_update_resume_marker() -> Result<(), String> {
 
 /// Test-friendly variant of [`clear_update_resume_marker`].
 pub fn clear_update_resume_marker_in(dir: &Path) -> Result<(), String> {
+    gwt_config::home::assert_test_path(&dir.join("marker.json"));
     match fs::remove_file(dir.join("marker.json")) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -479,6 +528,31 @@ pub fn install_requires_elevation() -> bool {
         .is_some_and(|root| !dir_writable(&root))
 }
 
+/// Whether this payload needs administrator permissions at its actual target.
+/// Package installers always elevate. DMG updates swap the complete bundle,
+/// so both its parent and any existing bundle must be writable.
+pub fn prepared_payload_requires_elevation(payload: &PreparedPayload, target_exe: &Path) -> bool {
+    match payload {
+        PreparedPayload::Installer {
+            kind: InstallerKind::MacPkg | InstallerKind::WindowsMsi,
+            ..
+        } => true,
+        PreparedPayload::Installer {
+            kind: InstallerKind::MacDmg,
+            ..
+        } => app_bundle_from_executable(target_exe)
+            .is_none_or(|bundle| macos_bundle_requires_elevation(&bundle)),
+        PreparedPayload::PortableBinary { .. } => {
+            install_root_for(target_exe).is_none_or(|root| !dir_writable(&root))
+        }
+    }
+}
+
+fn macos_bundle_requires_elevation(bundle: &Path) -> bool {
+    bundle.parent().is_none_or(|parent| !dir_writable(parent))
+        || (bundle.exists() && !dir_writable(bundle))
+}
+
 /// The directory an update replaces: the executable's directory, or on macOS
 /// the parent of the `.app` bundle (the dmg install swaps the whole bundle).
 pub fn install_root_for(exe: &Path) -> Option<PathBuf> {
@@ -515,9 +589,11 @@ fn write_json_atomically<T: Serialize>(
     value: &T,
     what: &str,
 ) -> Result<(), String> {
-    fs::create_dir_all(dir).map_err(|e| format!("Failed to create {what} dir: {e}"))?;
     let path = dir.join(file_name);
     let tmp = dir.join(format!("{file_name}.tmp"));
+    gwt_config::home::assert_test_path(&path);
+    gwt_config::home::assert_test_path(&tmp);
+    fs::create_dir_all(dir).map_err(|e| format!("Failed to create {what} dir: {e}"))?;
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| format!("Failed to serialize {what}: {e}"))?;
     fs::write(&tmp, json).map_err(|e| format!("Failed to write {what}: {e}"))?;
@@ -1254,6 +1330,16 @@ impl UpdateManager {
     }
 
     pub fn write_restart_args_file(&self, path: &Path, args: Vec<String>) -> Result<(), String> {
+        self.write_restart_args_file_with_elevation(path, args, true)
+    }
+
+    pub fn write_restart_args_file_with_elevation(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        allow_elevation: bool,
+    ) -> Result<(), String> {
+        gwt_config::home::assert_test_path(path);
         let parent = path
             .parent()
             .ok_or_else(|| "Invalid args file path".to_string())?;
@@ -1262,15 +1348,26 @@ impl UpdateManager {
             .unwrap_or_else(|_| PathBuf::from("."))
             .to_string_lossy()
             .to_string();
-        write_json_atomic(path, &RestartArgsFile { args, cwd })
-            .map_err(|e| format!("Failed to write args file: {e}"))
+        write_json_atomic(
+            path,
+            &RestartArgsFile {
+                args,
+                cwd,
+                allow_elevation,
+            },
+        )
+        .map_err(|e| format!("Failed to write args file: {e}"))
     }
 
     pub fn read_restart_args_file(path: &Path) -> Result<Vec<String>, String> {
+        Ok(Self::read_restart_args_file_config(path)?.args)
+    }
+
+    fn read_restart_args_file_config(path: &Path) -> Result<RestartArgsFile, String> {
         let bytes = fs::read(path).map_err(|e| format!("Failed to read args file: {e}"))?;
         let parsed: RestartArgsFile = serde_json::from_slice(&bytes)
             .map_err(|e| format!("Failed to parse args file: {e}"))?;
-        Ok(parsed.args)
+        Ok(parsed)
     }
 
     pub fn spawn_internal_apply_update(
@@ -1655,12 +1752,30 @@ pub fn internal_run_installer_with_executor(
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
+        let restart = UpdateManager::read_restart_args_file_config(args_file)?;
+        if !restart.allow_elevation
+            && prepared_payload_requires_elevation(
+                &PreparedPayload::Installer {
+                    path: installer.to_path_buf(),
+                    kind: installer_kind,
+                },
+                target_exe,
+            )
+        {
+            return Err(
+                "Automatic update requires elevated permissions; apply it manually.".to_string(),
+            );
+        }
         let restart_exe = match installer_kind {
             InstallerKind::MacDmg => {
                 #[cfg(target_os = "macos")]
                 {
-                    let target_app =
-                        run_macos_dmg_installer_with_privileges(installer, target_exe, executor)?;
+                    let target_app = run_macos_dmg_installer_with_privileges(
+                        installer,
+                        target_exe,
+                        restart.allow_elevation,
+                        executor,
+                    )?;
                     app_bundle_executable_path(&target_app, target_exe)
                         .unwrap_or_else(|| target_exe.to_path_buf())
                 }
@@ -1694,11 +1809,10 @@ pub fn internal_run_installer_with_executor(
         };
 
         let restart_exe = fs::canonicalize(&restart_exe).unwrap_or(restart_exe);
-        let args = UpdateManager::read_restart_args_file(args_file)?;
         executor
             .run(
                 ProcessRequest::new(&restart_exe)
-                    .args(&args)
+                    .args(&restart.args)
                     .mode(ExecutionMode::Spawn),
             )
             .map_err(|e| format!("Failed to restart: {e}"))?;
@@ -1736,6 +1850,7 @@ fn read_cache(path: &Path) -> Result<UpdateCacheFile, String> {
 }
 
 fn write_cache(path: &Path, cache: &UpdateCacheFile) -> Result<(), String> {
+    gwt_config::home::assert_test_path(path);
     let parent = path
         .parent()
         .ok_or_else(|| "Invalid update cache path".to_string())?;
@@ -1744,6 +1859,7 @@ fn write_cache(path: &Path, cache: &UpdateCacheFile) -> Result<(), String> {
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    gwt_config::home::assert_test_path(path);
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("invalid path"))?;
@@ -1753,6 +1869,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
             .and_then(|s| s.to_str())
             .unwrap_or("update")
     ));
+    gwt_config::home::assert_test_path(&tmp);
     let bytes = serde_json::to_vec(value).map_err(|e| io::Error::other(e.to_string()))?;
     fs::write(&tmp, bytes)?;
     let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
@@ -2415,6 +2532,7 @@ fn run_macos_pkg_installer_with_privileges(
 fn run_macos_dmg_installer_with_privileges(
     installer: &Path,
     target_exe: &Path,
+    allow_elevation: bool,
     executor: &dyn ProcessExecutor,
 ) -> Result<PathBuf, String> {
     let mount_dir = std::env::temp_dir().join(format!("gwt-update-dmg-{}", std::process::id()));
@@ -2453,7 +2571,25 @@ fn run_macos_dmg_installer_with_privileges(
 
         let shell_cmd =
             build_macos_dmg_install_shell_cmd(&source_app, &target_app, &temp_app, &backup_app);
-        run_shell_with_admin_privileges(&shell_cmd, executor)?;
+        if macos_bundle_requires_elevation(&target_app) {
+            if !allow_elevation {
+                return Err(
+                    "Automatic update requires elevated permissions; apply it manually."
+                        .to_string(),
+                );
+            }
+            run_shell_with_admin_privileges(&shell_cmd, executor)?;
+        } else {
+            let output = executor
+                .run(ProcessRequest::new("/bin/sh").arg("-c").arg(shell_cmd))
+                .map_err(|e| format!("Failed to run dmg install command: {e}"))?;
+            if !output.success {
+                return Err(format!(
+                    "DMG install command exited with {}",
+                    output.status_display
+                ));
+            }
+        }
         Ok(target_app)
     })();
 
@@ -3060,6 +3196,30 @@ mod tests {
     /// the same directory.
     static DMG_MOUNT_MUTEX: Mutex<()> = Mutex::new(());
 
+    struct DmgFixtureExecutor {
+        mock: MockProcessExecutor,
+        #[cfg(unix)]
+        lock_bundle_on_attach: Option<PathBuf>,
+    }
+
+    impl ProcessExecutor for DmgFixtureExecutor {
+        fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, String> {
+            if request.program_name() == "hdiutil"
+                && request.args.first().is_some_and(|arg| arg == "attach")
+            {
+                let mount = Path::new(request.args.last().unwrap());
+                fs::create_dir_all(mount.join("GWT.app/Contents/MacOS")).unwrap();
+                fs::write(mount.join("GWT.app/Contents/MacOS/gwt"), b"new-gwt").unwrap();
+                #[cfg(unix)]
+                if let Some(bundle) = &self.lock_bundle_on_attach {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(bundle, fs::Permissions::from_mode(0o555)).unwrap();
+                }
+            }
+            self.mock.run(request)
+        }
+    }
+
     #[test]
     fn spawn_internal_apply_update_records_helper_invocation() {
         let temp = tempfile::tempdir().unwrap();
@@ -3282,6 +3442,7 @@ mod tests {
         let err = run_macos_dmg_installer_with_privileges(
             &installer,
             Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            true,
             &mock,
         )
         .unwrap_err();
@@ -3316,6 +3477,7 @@ mod tests {
         let err = run_macos_dmg_installer_with_privileges(
             &installer,
             Path::new("/usr/local/bin/gwt"),
+            true,
             &mock,
         )
         .unwrap_err();
@@ -3330,6 +3492,163 @@ mod tests {
         assert_eq!(detach_args[0], "detach");
         assert!(detach_args.contains(&"-force".to_string()));
         assert!(mock.requests_for("osascript").is_empty());
+    }
+
+    #[test]
+    fn run_macos_dmg_installer_uses_shell_for_writable_bundle() {
+        let _guard = DMG_MOUNT_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let target_app = temp.path().join("GWT.app");
+        fs::create_dir_all(target_app.join("Contents/MacOS")).unwrap();
+        let executor = DmgFixtureExecutor {
+            mock: MockProcessExecutor::new(),
+            #[cfg(unix)]
+            lock_bundle_on_attach: None,
+        };
+        executor
+            .mock
+            .set_default_response(ProcessOutput::succeeded());
+
+        let installed = run_macos_dmg_installer_with_privileges(
+            &temp.path().join("gwt.dmg"),
+            &target_app.join("Contents/MacOS/gwt"),
+            false,
+            &executor,
+        )
+        .unwrap();
+
+        assert_eq!(installed, target_app);
+        assert!(executor.mock.requests_for("osascript").is_empty());
+        let requests = executor.mock.requests_for("/bin/sh");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].args_lossy()[0], "-c");
+        assert!(requests[0].args_lossy()[1].contains("/usr/bin/ditto"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_macos_dmg_installer_elevates_for_unwritable_parent_on_manual_apply() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root bypasses directory mode bits.
+        }
+        let _guard = DMG_MOUNT_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let applications = temp.path().join("Applications");
+        let target_app = applications.join("GWT.app");
+        fs::create_dir_all(target_app.join("Contents/MacOS")).unwrap();
+        fs::set_permissions(&applications, fs::Permissions::from_mode(0o555)).unwrap();
+        let executor = DmgFixtureExecutor {
+            mock: MockProcessExecutor::new(),
+            lock_bundle_on_attach: None,
+        };
+        executor
+            .mock
+            .set_default_response(ProcessOutput::succeeded());
+
+        let result = run_macos_dmg_installer_with_privileges(
+            &temp.path().join("gwt.dmg"),
+            &target_app.join("Contents/MacOS/gwt"),
+            true,
+            &executor,
+        );
+        fs::set_permissions(&applications, fs::Permissions::from_mode(0o755)).unwrap();
+
+        result.unwrap();
+        assert_eq!(executor.mock.requests_for("osascript").len(), 1);
+        assert!(executor.mock.requests_for("/bin/sh").is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn automatic_installer_helper_rechecks_bundle_permissions_after_mount() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root bypasses directory mode bits.
+        }
+        let _guard = DMG_MOUNT_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let target_app = temp.path().join("GWT.app");
+        fs::create_dir_all(target_app.join("Contents/MacOS")).unwrap();
+        let args_file = temp.path().join("args.json");
+        UpdateManager::new()
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"))
+            .write_restart_args_file_with_elevation(&args_file, Vec::new(), false)
+            .unwrap();
+        let executor = DmgFixtureExecutor {
+            mock: MockProcessExecutor::new(),
+            lock_bundle_on_attach: Some(target_app.clone()),
+        };
+        executor
+            .mock
+            .set_default_response(ProcessOutput::succeeded());
+        executor
+            .mock
+            .push_program_response("kill", ProcessOutput::failed(1));
+
+        let result = internal_run_installer_with_executor(
+            4242,
+            &target_app.join("Contents/MacOS/gwt"),
+            &temp.path().join("gwt.dmg"),
+            InstallerKind::MacDmg,
+            &args_file,
+            &executor,
+        );
+        fs::set_permissions(&target_app, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result
+            .unwrap_err()
+            .contains("requires elevated permissions"));
+        assert!(executor.mock.requests_for("osascript").is_empty());
+        assert_eq!(
+            executor.mock.requests_for("hdiutil").len(),
+            2,
+            "attach then detach"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn automatic_installer_helper_rejects_always_privileged_packages() {
+        let temp = tempfile::tempdir().unwrap();
+        let args_file = temp.path().join("args.json");
+        fs::write(&args_file, br#"{"args":[],"allow_elevation":false}"#).unwrap();
+        let mock = MockProcessExecutor::new();
+        mock.set_default_response(ProcessOutput::failed(1));
+        let kind = if cfg!(target_os = "macos") {
+            InstallerKind::MacPkg
+        } else {
+            InstallerKind::WindowsMsi
+        };
+
+        let err = internal_run_installer_with_executor(
+            4242,
+            &temp.path().join("gwt"),
+            &temp.path().join("installer"),
+            kind,
+            &args_file,
+            &mock,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("requires elevated permissions"), "got: {err}");
+        assert_eq!(mock.request_count(), 1, "only the PID probe may run");
+    }
+
+    #[test]
+    fn restart_args_legacy_files_allow_elevation() {
+        let legacy: RestartArgsFile = serde_json::from_str(r#"{"args":[]}"#).unwrap();
+        let value = serde_json::to_value(legacy).unwrap();
+        assert_eq!(value["allow_elevation"], true);
     }
 
     #[test]
@@ -3391,6 +3710,7 @@ mod tests {
             &RestartArgsFile {
                 args: vec!["--restored".to_string()],
                 cwd: String::new(),
+                allow_elevation: true,
             },
         )
         .unwrap();
@@ -4558,6 +4878,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn issue_5343_pending_origin_roundtrip_and_legacy_manual() {
+        let legacy = serde_json::json!({
+            "version": "9.200.0",
+            "asset_url": "https://example.invalid/update",
+            "payload": {"PortableBinary": {"path": "prepared-binary"}},
+            "downloaded_at": "2026-10-13T00:00:00Z"
+        });
+        let manual: PendingUpdateManifest = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(manual).unwrap()["origin"],
+            "manual_later"
+        );
+        let mut automatic = legacy;
+        automatic["origin"] = serde_json::json!("automatic");
+        let automatic: PendingUpdateManifest = serde_json::from_value(automatic).unwrap();
+        assert_eq!(
+            serde_json::to_value(automatic).unwrap()["origin"],
+            "automatic"
+        );
+    }
+
+    #[test]
+    fn issue_5343_pending_origin_and_auto_apply_matrix() {
+        let mut manifest: PendingUpdateManifest = serde_json::from_value(serde_json::json!({
+            "version":"999.0.0", "asset_url":"https://example.invalid/update",
+            "payload":{"PortableBinary":{"path":"prepared-binary"}}, "downloaded_at":"today"
+        }))
+        .unwrap();
+        for (origin, enabled, expected) in [
+            (PendingUpdateOrigin::ManualLater, false, true),
+            (PendingUpdateOrigin::ManualLater, true, true),
+            (PendingUpdateOrigin::Automatic, false, false),
+            (PendingUpdateOrigin::Automatic, true, true),
+        ] {
+            manifest.origin = origin;
+            assert_eq!(manifest.permits_startup_apply(enabled, false), expected);
+            manifest.auto_apply_deferred = true;
+            assert!(!manifest.permits_startup_apply(enabled, false));
+            manifest.auto_apply_deferred = false;
+        }
+    }
+
     // SPEC-2041 Phase 19 (T-126): pending-update manifest round trip.
     #[test]
     fn pending_manifest_persist_load_clear_round_trip() {
@@ -4575,6 +4938,7 @@ mod tests {
                 path: payload_path.clone(),
             },
             downloaded_at: "2026-05-10T13:00:00Z".to_string(),
+            origin: PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
 
@@ -4601,6 +4965,7 @@ mod tests {
             asset_url: "https://example.invalid/update".into(),
             payload: PreparedPayload::PortableBinary { path: payload_path },
             downloaded_at: "2026-10-01T00:00:00Z".into(),
+            origin: PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         persist_pending_update_manifest_in(dir.path(), &manifest).unwrap();
@@ -4675,6 +5040,7 @@ mod tests {
                 path: payload.clone(),
             },
             downloaded_at: "2026-10-01T00:00:00Z".into(),
+            origin: PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         persist_pending_update_manifest_in(dir.path(), &stale).unwrap();
@@ -4702,6 +5068,7 @@ mod tests {
                 path: missing_payload,
             },
             downloaded_at: "2026-05-10T13:00:00Z".to_string(),
+            origin: PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
         persist_pending_update_manifest_in(dir.path(), &manifest).expect("persist");
@@ -4970,6 +5337,31 @@ mod tests {
         assert!(!pending_version_is_newer("abc", "9.25.0"));
         assert!(!pending_version_is_newer("9.26.0", "not-a-version"));
         assert!(!pending_version_is_newer("abc", "def"));
+    }
+
+    #[test]
+    fn update_json_writers_reject_traversal_before_any_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("must-not-be-created");
+        let destination = missing.join("../metadata");
+        assert!(std::panic::catch_unwind(|| {
+            let _ = write_json_atomically(&destination, "marker.json", &true, "fixture");
+        })
+        .is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let _ = write_json_atomic(&destination.join("cache.json"), &true);
+        })
+        .is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let _ = UpdateManager::new().write_restart_args_file_with_elevation(
+                &destination.join("args.json"),
+                Vec::new(),
+                false,
+            );
+        })
+        .is_err());
+        assert!(!missing.exists());
+        assert!(!dir.path().join("metadata").exists());
     }
 
     // Issue #4038 (AC-3): resume marker persist / load / clear round trip.

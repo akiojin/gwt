@@ -659,6 +659,11 @@ pub(crate) fn run_collect<E: CliEnv>(
             expected_hook_bin,
             repair,
         }) => {
+            // Browser-check must use the same default as launch/self-heal;
+            // choosing a separate bare name invalidates shared-root trust.
+            let managed_hook_bin =
+                crate::managed_assets::managed_hook_bin().map_err(io_as_api_error)?;
+            let _hook_bin = gwt_skills::settings_local::ScopedHookBin::set(&managed_hook_bin);
             let repair = if repair {
                 Some(
                     hook::health::repair_managed_hook_configs(env.repo_path())
@@ -680,6 +685,11 @@ pub(crate) fn run_collect<E: CliEnv>(
             let mut health = hook::health::read_managed_hook_health(&input);
             hook::append_codex_trust_health_for_doctor(&input, &mut health);
             let payload = serde_json::json!({
+                "managed_hook_bin": managed_hook_bin,
+                "repair_writer": repair.as_ref().map(|_| serde_json::json!({
+                    "pid": std::process::id(),
+                    "executable": std::env::current_exe().ok(),
+                })),
                 "repair": repair,
                 "repair_guarantee": "Regenerates managed hook configuration; trust registration and launch success require separate verification.",
                 "health": health,

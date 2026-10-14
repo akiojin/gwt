@@ -5837,6 +5837,77 @@ def _build_memory_records(
     return records
 
 
+def _load_user_instruction_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Read the canonical instruction corpus without masking corrupt source data."""
+    if not repo_hash:
+        return [], []
+    home = Path(os.environ.get("HOME") or os.environ.get("USERPROFILE") or Path.home())
+    source = home / ".gwt" / "projects" / repo_hash / "project-state" / "user-instructions.json"
+    try:
+        source_stat = source.stat()
+    except FileNotFoundError:
+        return [], []
+    try:
+        content = source.read_bytes()
+        instructions = json.loads(content, parse_constant=_reject_non_json_constant)
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        raise ValueError(f"invalid user instruction corpus: {source}: {error}") from error
+    if not isinstance(instructions, list):
+        raise ValueError(f"user instruction corpus must be a JSON array: {source}")
+
+    records: List[Dict[str, Any]] = []
+    seen = set()
+    for instruction in instructions:
+        if (
+            not isinstance(instruction, dict)
+            or any(not isinstance(instruction.get(field), str) for field in (
+                "id", "created_at", "original", "summary", "answer", "kind"
+            ))
+            or not instruction["id"]
+            or instruction["id"] in seen
+            or instruction["kind"] not in {"standing", "one_off", "question"}
+            or not isinstance(instruction.get("actions"), list)
+            or any(not isinstance(action, str) for action in instruction["actions"])
+            or not isinstance(instruction.get("issue_numbers"), list)
+            or any(type(number) is not int or number < 0 for number in instruction["issue_numbers"])
+            or "superseded_by" not in instruction
+            or (instruction["superseded_by"] is not None and not isinstance(instruction["superseded_by"], str))
+        ):
+            raise ValueError(f"invalid record in user instruction corpus: {source}")
+        seen.add(instruction["id"])
+        title = instruction["summary"]
+        date = instruction["created_at"][:10]
+        metadata = {field: instruction[field] for field in (
+            "created_at", "original", "summary", "answer", "kind"
+        )}
+        metadata.update({
+            "source": "user_instruction",
+            "instruction_id": instruction["id"],
+            "date": date,
+            "title": title,
+            "heading": f"## {date} — {title}",
+            "actions": json.dumps(instruction["actions"], ensure_ascii=False),
+            "issue_numbers": json.dumps(instruction["issue_numbers"]),
+            "superseded_by": instruction["superseded_by"] or "",
+            "status": "superseded" if instruction["superseded_by"] else "active",
+        })
+        records.append({
+            "id": f"user-instruction-{instruction['id']}",
+            "document": "\n".join([
+                instruction["original"], title, instruction["answer"], *instruction["actions"]
+            ]),
+            "metadata": metadata,
+        })
+    # Empty arrays contribute no documents; omitting them from the manifest
+    # keeps the existing source-count health check valid. Future additions
+    # are still discovered by reading the corpus on every indexing pass.
+    entries = [{
+        "path": str(source), "mtime": int(source_stat.st_mtime),
+        "size": len(content), "content_hash": hashlib.sha256(content).hexdigest(),
+    }] if records else []
+    return records, entries
+
+
 def action_index_memory_v2(
     project_root: str,
     repo_hash: str,
@@ -5844,16 +5915,18 @@ def action_index_memory_v2(
     mode: str = "full",
     db_root: Optional[Path] = None,
 ) -> dict:
-    """Index ``.gwt/work/memory.md`` into the repo-scoped memory Chroma store.
+    """Index work notes and saved user instructions into the memory store.
 
     `worktree_hash` is accepted for symmetry with the other v2 actions but is
-    ignored — memory is repo-scoped. Manifest diff degenerates to a single
-    entry; when the file changes (mtime or size), all chunks are re-upserted
-    after deleting prior records for the file.
+    ignored — memory is repo-scoped. When either source changes, rebuild the
+    combined records. Instruction changes also compare a content hash so
+    supersession updates cannot hide behind unchanged size/mtime.
     """
     del worktree_hash  # repo-scoped scope does not consume the worktree hash
     db_path = resolve_db_path(repo_hash, None, "memory", db_root=db_root)
     memories, new_entries = _load_memory_documents(project_root, repo_hash)
+    instruction_records, instruction_entries = _load_user_instruction_records(repo_hash)
+    new_entries.extend(instruction_entries)
 
     emit_progress(
         {
@@ -5861,7 +5934,7 @@ def action_index_memory_v2(
             "scope": "memory",
             "mode": mode,
             "done": 0,
-            "total": len(memories),
+            "total": len(memories) + len(instruction_records),
         }
     )
 
@@ -5877,6 +5950,11 @@ def action_index_memory_v2(
         try:
             old_entries = read_manifest(db_path, scope="memory")
             diff = compute_manifest_diff(old_entries, new_entries)
+            old_hashes = {entry["path"]: entry.get("content_hash") for entry in old_entries}
+            for entry in instruction_entries:
+                path = entry["path"]
+                if path in old_hashes and old_hashes[path] != entry["content_hash"] and path not in diff["changed"]:
+                    diff["changed"].append(path)
             file_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
 
             if mode != "incremental" or file_changed:
@@ -5886,7 +5964,7 @@ def action_index_memory_v2(
                         collection.delete(ids=existing["ids"])
                 except Exception:
                     pass
-                memory_records = _build_memory_records(memories)
+                memory_records = _build_memory_records(memories) + instruction_records
             else:
                 memory_records = []
 
@@ -7076,14 +7154,15 @@ def action_index_works_v2(
 def _format_memory_results(
     items: List[Dict[str, Any]], n_results: int = 10
 ) -> List[Dict[str, Any]]:
-    """Collapse chunked memory results so each (date, title) appears once."""
+    """Collapse work-note chunks while preserving individual instructions."""
     formatted: List[Dict[str, Any]] = []
     seen: set = set()
     for it in items:
         meta = it.get("metadata") or {}
         date = meta.get("date", "")
         title = meta.get("title", "")
-        key = (date, title)
+        is_instruction = meta.get("source") == "user_instruction"
+        key = ("user_instruction", meta.get("instruction_id")) if is_instruction else (date, title)
         if key in seen:
             continue
         seen.add(key)
@@ -7099,6 +7178,15 @@ def _format_memory_results(
                 it,
             )
         )
+        if is_instruction:
+            formatted[-1].update({field: meta.get(field, "") for field in (
+                "source", "instruction_id", "created_at", "original", "summary", "answer", "kind", "status"
+            )})
+            formatted[-1].update({
+                "actions": json.loads(meta.get("actions", "[]")),
+                "issue_numbers": json.loads(meta.get("issue_numbers", "[]")),
+                "superseded_by": meta.get("superseded_by") or None,
+            })
         if len(formatted) >= n_results:
             break
     return formatted
@@ -8365,6 +8453,18 @@ def _classify_scope_for_search(
         return "missing", health
     if health.get("repair_required"):
         return "corrupt", health
+    if scope == "memory":
+        # Instruction changes join the existing stale-scope rebuild queue.
+        # Validate the canonical source before serving any old active records.
+        _, instruction_entries = _load_user_instruction_records(repo_hash)
+        current_hashes = {entry["path"]: entry["content_hash"] for entry in instruction_entries}
+        db_path = resolve_db_path(repo_hash, None, "memory", db_root=db_root)
+        indexed_hashes = {
+            entry["path"]: entry["content_hash"]
+            for entry in read_manifest(db_path, scope="memory") if "content_hash" in entry
+        }
+        if current_hashes != indexed_hashes:
+            return "stale", health
     return "fresh", health
 
 

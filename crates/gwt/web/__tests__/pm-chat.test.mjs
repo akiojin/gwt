@@ -17,10 +17,58 @@ function fixture() {
   const model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
-  const update = (reports = [], error = null) => model.applyPmWindowReceiveEvent({
-    kind: 'pm_reports', id: 'pm', session_id: model.readPmWindowState().windows.pm.sessionId, reports, error });
+  const update = (reports = [], error = null, current = null) => model.applyPmWindowReceiveEvent({
+    kind: 'pm_reports', id: 'pm', session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current });
   return { root, model, view, visibility, copied, update };
 }
+
+test('current card stays above history and distinguishes PM explanation from automatic facts', () => {
+  const { root, update } = fixture();
+  const card = root.querySelector('[aria-label="PM の現在"]');
+  assert.ok(card, 'current card exists before any PM post');
+  assert.match(card.textContent, /現在状態はまだ報告されていません/);
+  const current = {
+    observed_at: '2026-10-13T09:20:00.100Z', stale_minutes: 15,
+    status: { items: [{ kind: 'waiting', text: 'v9.117.2 の公開を待っています', started_at: '2026-10-13T09:00:00Z' }],
+      next_trigger: 'v9.117.2 の公開', user_action: null, updated_at: '2026-10-13T09:05:00Z' },
+    facts: { source: 'daemon', active_windows: [{ issue_number: 5349, title: 'PM current state', last_activity_at: '2026-10-13T09:19:00Z' }],
+      queue_head: { issue_number: 5342, title: 'Instruction memory' }, needs_human_count: 2,
+      release: { number: 5352, title: 'Release v9.117.2', url: 'https://github.com/akiojin/gwt/pull/5352' },
+      release_observed_at: '2026-10-13T09:18:00Z', pending_update: '9.117.2', error: null },
+  };
+  update([report()], null, current);
+  assert.equal(root.querySelector('.pm-chat__body').firstElementChild, card);
+  assert.match(card.querySelector('[aria-label="PM の記述"]').textContent, /待ち.*v9.117.2/s);
+  assert.equal(card.querySelector('time').getAttribute('datetime'), current.status.items[0].started_at);
+  assert.match(card.textContent, /ユーザーへの依頼: なし/);
+  assert.match(card.textContent, /PM の更新が 15 分止まっています/);
+  const facts = card.querySelector('[aria-label="自動の事実"]');
+  assert.match(facts.textContent, /#5349.*PM current state/s);
+  assert.match(facts.textContent, /#5342.*Instruction memory/s);
+  assert.match(facts.textContent, /needs_human: 2/);
+  assert.match(facts.textContent, /Release v9.117.2/);
+  assert.match(facts.textContent, /未適用の更新: v9.117.2/);
+  assert.equal(root.querySelectorAll('article').length, 1, 'current state is outside chronological reports');
+  update([report()], null, { ...current, observed_at: '2026-10-13T09:20:00.100001Z', stale_minutes: null, status: { ...current.status,
+    items: [{ ...current.status.items[0], text: '公開結果を確認しています', kind: 'working' }], user_action: '配信設定を確認' } });
+  assert.doesNotMatch(card.textContent, /公開を待っています|15 分止まっています/);
+  assert.match(card.textContent, /公開結果を確認しています|配信設定を確認/);
+  update([report()], null, current);
+  assert.match(card.textContent, /公開結果を確認しています/, 'an older concurrent snapshot cannot restore the earlier status');
+  assert.doesNotMatch(card.textContent, /公開を待っています/);
+  update([], 'Reports could not be loaded');
+  assert.match(card.textContent, /公開結果を確認しています/, 'failed reads retain latest measured state');
+});
+
+test('current card marks unknown automatic data instead of claiming an empty fleet', () => {
+  const { root, update } = fixture();
+  update([], null, { status: null, facts: { source: 'unavailable', active_windows: [], queue_head: null,
+    needs_human_count: null, release: null, release_observed_at: null, pending_update: null, error: 'Monitor unavailable' } });
+  const facts = root.querySelector('[aria-label="自動の事実"]');
+  assert.match(facts.textContent, /Monitor unavailable/);
+  assert.match(facts.textContent, /needs_human: 不明/);
+  assert.match(facts.textContent, /リリース: 不明/);
+});
 
 test('Reports renders shared Markdown, metadata and copy, with no input or submit surface', async () => {
   const { root, update, copied } = fixture();

@@ -47,6 +47,10 @@ pub const PM_CYCLE_REPORTING_CLAUSE: &str =
      output only if nothing changed and no open PR is CI-RED, CONFLICTED, READY_TO_PROMOTE, or \
      escalation_due.";
 
+/// Physical wake decorations shared by producers and human-prompt classification.
+pub const PM_ESCALATION_PROMPT_PREFIX: &str = " UNRESOLVED BLOCKED ESCALATIONS (";
+pub const PM_AGENT_IDLE_WAKE_PREFIX: &str = "[gwt] Agent idle: ";
+
 /// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
 /// and subscribe-ordering reminder for the Stop-gate continuation. The
 /// generated gwt-pm guidance owns the full retry, readback, and lifecycle

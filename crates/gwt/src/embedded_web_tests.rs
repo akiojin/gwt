@@ -291,10 +291,13 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
 #[test]
 fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls() {
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
+    let settings_js = settings_surface_js();
 
     assert!(
-        surface_js.contains("set_issue_monitor_max_active_agents"),
-        "Issue Monitor must let users change max active agents"
+        surface_js.contains("settings:open")
+            && surface_js.contains(r#"section: "issues""#)
+            && settings_js.contains("set_issue_monitor_max_active_agents"),
+        "Issues must delegate monitor concurrency controls to Settings Issues"
     );
     assert!(
         surface_js.contains("issue_monitor_queue_move"),
@@ -315,7 +318,7 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls(
         surface_js.contains("Agent settings")
             && surface_js.contains("Project Agent settings")
             && surface_js.contains("issue_monitor_configure_profile"),
-        "Issue surface must expose global Agent settings plus row shortcut configuration"
+        "Issue surface must retain row Agent settings and shortcut configuration"
     );
     assert!(
         surface_js.contains("exclusion_reason") && surface_js.contains("Unknown (${state})"),
@@ -326,20 +329,21 @@ fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls(
 #[test]
 fn embedded_web_issue_monitor_allowed_labels_reuses_operator_controls() {
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
+    let settings_js = settings_surface_js();
     assert!(
-        surface_js.contains("set_issue_monitor_allowed_labels")
-            && surface_js.contains("allowed_labels")
+        settings_js.contains("set_issue_monitor_allowed_labels")
+            && settings_js.contains("allowed_labels")
             && surface_js.contains("label_excluded_count")
             && surface_js.contains("label_excluded_issues"),
-        "Issue Monitor must edit the allowed labels and display server exclusion evidence"
+        "Settings must edit allowed labels while Issues retains server exclusion evidence"
     );
     assert!(
-        surface_js
-            .contains(r#"<details class="knowledge-monitor-labels knowledge-monitor-candidate">"#)
-            && surface_js.contains("knowledge-monitor-pool-field")
-            && surface_js.contains("Empty list allows all labels")
-            && surface_js.contains("any listed label on this terminal"),
-        "allowed labels must use existing Operator controls and explain empty/any-of admission"
+        settings_js.contains(r#"field("Allowed labels", "text""#)
+            && settings_js.contains("settings-field")
+            && settings_js.contains("settings-input")
+            && !surface_js
+                .contains(r#"<details class="knowledge-monitor-labels knowledge-monitor-candidate">"#),
+        "allowed labels must use existing Operator Settings controls instead of inline Issue details"
     );
 }
 
@@ -4327,10 +4331,10 @@ fn embedded_web_retires_the_autonomous_notifications_log_region() {
 
 #[test]
 fn embedded_web_issue_monitor_candidate_pool_contract() {
-    let surface = root_js_module_source("/knowledge-kanban-surface.js");
+    let surface = settings_surface_js();
     for contract in [
-        "knowledge-monitor-pool",
-        "knowledge-monitor-candidate",
+        "settings-section",
+        "settings-field",
         "issue_monitor_profiles_set",
         "Add candidate",
         "prefer_for",
@@ -4341,15 +4345,13 @@ fn embedded_web_issue_monitor_candidate_pool_contract() {
             "missing pool contract: {contract}"
         );
     }
-    let css = static_asset_text("/styles/app.css");
-    let pool_styles = css
-        .split("/* Issue #4530 candidate pool */")
-        .nth(1)
-        .expect("pool styles");
-    assert!(pool_styles.contains("var(--color-border)"));
-    assert!(pool_styles.contains("var(--type-"));
-    assert!(!pool_styles.contains("rgba("));
-    assert!(!pool_styles.contains("rgb("));
+    let css = static_asset_text("/styles/components.css");
+    let control_styles = js_braced_block_after(css, ":root[data-theme] .settings-input")
+        .expect("Settings input styles");
+    assert!(control_styles.contains("var(--color-border)"));
+    assert!(control_styles.contains("var(--type-"));
+    assert!(!control_styles.contains("rgba("));
+    assert!(!control_styles.contains("rgb("));
 }
 
 #[test]

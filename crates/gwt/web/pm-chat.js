@@ -5,9 +5,12 @@ import { markdownContent, renderUiContent } from './ui-content.js';
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
   const model = createUiStateStore({ windows: {}, changedWindowId: null });
+  // chrono emits UTC timestamps with variable fractional precision. Keep the
+  // nanoseconds when comparing; JavaScript Date truncates them to milliseconds.
+  const snapshotTime = value => value.replace(/(?:\.(\d+))?Z$/, (_, digits = '') => `.${digits.padEnd(9, '0')}Z`);
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
-      reports: [], error: null, loaded: false };
+      reports: [], current: null, error: null, loaded: false };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -26,7 +29,10 @@ export function createPmWindowModel() {
         if (!previous || event.session_id !== previous.sessionId) return state;
         // The durable ledger only appends. Ignore older concurrent reads.
         if (!event.error && (event.reports || []).length < previous.reports.length) return state;
+        if (!event.error && event.current?.observed_at && previous.current?.observed_at
+          && snapshotTime(event.current.observed_at) < snapshotTime(previous.current.observed_at)) return state;
         next = { ...next, error: event.error || null, loaded: true,
+          current: event.error ? previous.current : (event.current || null),
           reports: event.error ? previous.reports : (event.reports || []) };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
         next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
@@ -52,6 +58,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   let disposed = false;
   let logs = false;
   let digest = '';
+  let currentDigest;
   let latestState;
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -68,6 +75,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   reportsButton.type = logButton.type = 'button';
   toolbar.append(reportsButton, logButton);
   const body = element('div', 'pm-chat__body');
+  const currentCard = element('section', 'pm-chat__current');
+  currentCard.setAttribute('aria-label', 'PM の現在');
   const filter = element('label', 'pm-chat__filter', 'Report kind');
   const kindSelect = element('select', '');
   kindSelect.setAttribute('aria-label', 'Report kind');
@@ -84,7 +93,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   const transcript = element('div', 'pm-chat__transcript');
   transcript.setAttribute('role', 'log');
   transcript.setAttribute('aria-label', 'PM reports');
-  body.append(filter, notice, transcript);
+  body.append(currentCard, filter, notice, transcript);
   root.append(toolbar, body);
 
   function showLogs(value) {
@@ -98,11 +107,71 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   const showReports = () => showLogs(false);
   const showLog = () => showLogs(true);
   const filterReports = () => update(latestState);
+  function renderCurrent(current) {
+    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
+    if (currentDigest === nextDigest) return;
+    currentDigest = nextDigest;
+    const authored = element('section', 'pm-chat__current-authored');
+    authored.setAttribute('aria-label', 'PM の記述');
+    authored.append(element('h3', '', 'PM の記述'));
+    const time = value => {
+      const node = element('time', '', value ? new Date(value).toLocaleString() : '不明');
+      if (value) node.setAttribute('datetime', value);
+      return node;
+    };
+    const status = current?.status;
+    if (status) {
+      const items = element('ul', '');
+      for (const item of status.items) {
+        const row = element('li', '', `${item.kind === 'waiting' ? '待ち' : '作業'}: ${item.text} — 開始 `);
+        row.append(time(item.started_at));
+        items.append(row);
+      }
+      authored.append(items, element('p', '', `次に動く条件: ${status.next_trigger}`),
+        element('p', '', `ユーザーへの依頼: ${status.user_action || 'なし'}`));
+      const updated = element('p', 'pm-chat__current-meta', '更新: ');
+      updated.append(time(status.updated_at));
+      authored.append(updated);
+      if (current.stale_minutes != null) {
+        const stale = element('p', 'pm-chat__current-stale', `PM の更新が ${current.stale_minutes} 分止まっています`);
+        stale.setAttribute('role', 'status');
+        authored.append(stale);
+      }
+    } else authored.append(element('p', '', '現在状態はまだ報告されていません。'));
+    const automatic = element('section', 'pm-chat__current-facts');
+    automatic.setAttribute('aria-label', '自動の事実');
+    automatic.append(element('h3', '', '自動の事実'));
+    const facts = current?.facts;
+    if (!facts) automatic.append(element('p', '', 'Monitor の事実を読み込み中…'));
+    else {
+      const issueLabel = issue => `${issue.issue_number ? `#${issue.issue_number}` : 'Issue 未割当'} ${issue.title || '題名不明'}`;
+      automatic.append(element('p', 'pm-chat__current-meta', `Monitor: ${facts.source === 'daemon' ? '接続中' : facts.source === 'degraded_cache' ? 'キャッシュ（Monitor 未接続）' : '取得不可'}`));
+      if (facts.error) automatic.append(element('p', 'pm-chat__current-stale', facts.error));
+      const windows = element('ul', '');
+      for (const item of facts.active_windows || []) {
+        const row = element('li', '', `${issueLabel(item)} — 最終活動 `);
+        row.append(time(item.last_activity_at));
+        windows.append(row);
+      }
+      automatic.append(element('p', '', `稼働中の窓: ${(facts.active_windows || []).length}${facts.inventory_incomplete ? '（観測は不完全）' : ''}`), windows,
+        element('p', '', `queue の先頭: ${facts.queue_head ? issueLabel(facts.queue_head) : facts.source === 'unavailable' ? '不明' : 'なし'}`),
+        element('p', '', `needs_human: ${facts.needs_human_count ?? '不明'}`),
+        element('p', '', `リリース: ${facts.release ? `#${facts.release.number} ${facts.release.title}` : facts.release_observed_at ? '進行中の PR なし' : '不明'}`),
+        element('p', '', `未適用の更新: ${facts.pending_update ? `v${facts.pending_update}` : facts.update_known ? 'なし' : '不明'}`));
+      if (facts.release_observed_at) {
+        const observed = element('p', 'pm-chat__current-meta', 'リリース PR 観測: ');
+        observed.append(time(facts.release_observed_at));
+        automatic.append(observed);
+      }
+    }
+    currentCard.replaceChildren(element('h2', '', 'PM の現在'), authored, automatic);
+  }
   function update(state) {
     if (disposed || !state) return;
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
+    renderCurrent(state.current);
     const reports = state.reports;
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
@@ -158,6 +227,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     transcript.replaceChildren();
     transcript.scrollTop = 0;
     digest = '';
+    currentDigest = undefined;
     showLogs(false);
   }
   function dispose() {

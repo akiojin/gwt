@@ -295,8 +295,9 @@ pub(crate) fn open_escalation_prompt_section(project_root: &Path) -> String {
         String::new()
     };
     format!(
-        " UNRESOLVED BLOCKED ESCALATIONS ({count}){overflow} — decide fresh launch / spec ruling / \
+        "{}{count}){overflow} — decide fresh launch / spec ruling / \
          tool fix for each, then post the resolution with params.resolves: {lines}",
+        pm_registry::PM_ESCALATION_PROMPT_PREFIX,
         count = open.len(),
         lines = lines.join(" || "),
     )
@@ -1248,7 +1249,7 @@ impl AppRuntime {
         let mut prompt = String::new();
         let mut idle_notifications = std::collections::BTreeMap::new();
         for (id, label) in &self.project_state(&context)?.pm_agent_idle_wakes.pending {
-            let entry = format!("[gwt] Agent idle: {label}");
+            let entry = format!("{}{label}", pm_registry::PM_AGENT_IDLE_WAKE_PREFIX);
             if prompt.len() + entry.len() > 800 {
                 break;
             }

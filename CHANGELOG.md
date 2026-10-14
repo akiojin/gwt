@@ -1,6 +1,82 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.119.0] - 2026-10-14
+
+### Features
+
+- **gui:** Compact Issues summary and open preview on demand
+
+### Testing
+
+- **gui:** Wait for a complete isolated browser URL
+- **gui:** Separate hover from keyboard explanation checks
+- **gui:** Align embedded Issue contracts with Settings
+- **gui:** Retain native logs for canonical browser checks
+
+## [9.118.0] - 2026-10-13
+
+### Bug Fixes
+
+- **settings:** Preserve project and update boundaries
+- **pm:** Box current status at event boundaries
+- **build:** 終了した Session の lifecycle を後継へ継承する
+- **issue-monitor:** 再起動で未配送の branch 修正を根拠に Issue を close させない
+- **build:** Lifecycle の判定と保存を直列化する
+- **execution:** Allow exact CI delivery and settle delivered obligations
+- **execution:** Serialize acceptance tests and preserve recovery diagnostics
+- **gui:** Preserve Issue explanation interaction
+- **gui:** Retain hovered explanations through redraws
+- **gui:** Preserve read explanations during focus restoration
+- **gui:** Keep explanation escape from changing the camera
+- **update:** Preserve staging origin and avoid automatic elevation
+- **update:** Retain elevation reason across ready redraws
+- **pm:** Bound persisted report questions
+- **verify:** 不在予約による検証枠の停滞を解消
+- **verify:** Nextest の厳密 filter を Light に分類
+
+### Features
+
+- **settings:** Consolidate Issues and agent settings (#5322)
+- **pm:** ユーザーの質問と回答をReportsへ記録
+- **pm:** Expose current status and enforce reporting contracts
+- **gui:** Explain Issue controls on hover and focus
+- **monitor:** Project tier history and selection minimums
+- **gui:** Explain tier minimums and agent failure counts
+
+### Miscellaneous Tasks
+
+- **work:** Record Settings pull request history
+- **work:** Record resumed Settings pull request
+- **work:** PM現在状態の受け入れ監査と更新待ちを記録
+- **work:** Record Q&A Reports delivery scope
+- **work:** Record fresh Q&A Reports delivery
+- **work:** Record Issue Monitor pull request delivery
+- **work:** Preserve #5082 successor assignment
+- **work:** Record #5082 fixture delivery state
+- **work:** Record #5082 successor fixture delivery
+- **work:** Record Issue explanation delivery scope
+- **work:** Record final Issue explanation delivery handoff
+- **work:** Record PM status PR delivery
+- **work:** PR #5369 の配送リンクを記録
+
+### Performance
+
+- **test:** Reduce Board history fixture I/O (#5082)
+- **test:** Streamline Workspace fixture preparation (#5082)
+
+### Testing
+
+- **settings:** Align status expectations with global updates
+- **settings:** Align Issue gear browser routing
+- **pm:** Initialize monitor fixture fields directly
+- **ci:** Stabilize post-merge test observations
+- **coordination:** Preserve overflow append preconditions (#5082)
+- **coordination:** Exercise blocker eviction during fixture overflow (#5082)
+- **gui:** Align live preview fixture with current monitor
+- **gui:** Isolate keyboard explanations from native hover
+- **gui:** Check keyboard explanations before visual capture
+
 ## [9.117.2] - 2026-10-13
 
 ### Bug Fixes

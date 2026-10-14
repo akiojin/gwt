@@ -342,13 +342,20 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
             .first()
             .map(|head| {
                 format!(
-                    "; queue head {} (resident: {}, {}, attempt: {})",
+                    "; queue head {} (resident: {}, {}, attempt: {}){}",
                     head.target.as_deref().unwrap_or("unknown target"),
                     if head.resident { "yes" } else { "no" },
                     head.job_status
                         .map(|status| format!("job {}", status.as_str()))
                         .unwrap_or_else(|| "job status unpublished".to_string()),
                     head.attempt_id.as_deref().unwrap_or("legacy"),
+                    head.bypass_reason
+                        .as_deref()
+                        .map(|reason| format!(
+                            "; {reason}; {}",
+                            verification_lease::QUEUE_BYPASS_RECOVERY
+                        ))
+                        .unwrap_or_default(),
                 )
             })
             .unwrap_or_else(|| "; queue empty".to_string());
@@ -595,36 +602,71 @@ fn admit_inner<E: CliEnv>(
     // that another run's lease belongs to this invocation.
     let guard = loop {
         check_cancellation(attempt)?;
-        match coordinator
-            .request_job(&key, JobPriority::ManualRebuild, NON_BLOCKING.min(poll))
-            .map_err(|err| unexpected(format!("verification job admission failed: {err}")))?
-        {
-            JobAdmission::Owner(guard) => break guard,
-            JobAdmission::Joined(waiter) => {
-                // A concurrent canonical run in this same worktree owns
-                // the target job until its command matrix finishes.
-                drop(waiter);
-                check_cancellation(attempt)?;
-                if Instant::now() >= deadline {
-                    return Err(deferred(
-                        started,
-                        max_wait,
-                        "another verification claimant in this worktree owns the target job; \
-                         gwtd artifact restoration: skipped (another verification owns the target job)",
-                        None,
-                    ));
+        let waiting_for_target =
+            match coordinator.request_job(&key, JobPriority::ManualRebuild, NON_BLOCKING.min(poll))
+            {
+                Ok(JobAdmission::Owner(guard)) => break guard,
+                Ok(JobAdmission::Joined(waiter)) => {
+                    // A concurrent canonical run in this same worktree owns
+                    // the target job until its command matrix finishes.
+                    drop(waiter);
+                    true
                 }
-                notice.maybe_post(
-                    env,
-                    started,
-                    max_wait,
-                    "同じ worktree の別 claimant が verification target job を保持",
-                );
-                sleep_until(deadline, poll);
-            }
+                Err(CoordinatorError::Timeout { .. }) => false,
+                Err(err) => {
+                    return Err(
+                        unexpected(format!("verification job admission failed: {err}")).into(),
+                    )
+                }
+            };
+        check_cancellation(attempt)?;
+        if Instant::now() >= deadline {
+            return Err(deferred(
+                started,
+                max_wait,
+                if waiting_for_target {
+                    "another verification claimant in this worktree owns the target job; \
+                     gwtd artifact restoration: skipped (another verification owns the target job)"
+                } else {
+                    "verification reservation is being updated; gwtd artifact restoration: skipped (target admission pending)"
+                },
+                None,
+            ));
         }
+        notice.maybe_post(
+            env,
+            started,
+            max_wait,
+            "同じ worktree の target job または予約更新を待機",
+        );
+        sleep_until(deadline, poll);
     };
     check_cancellation(attempt)?;
+    if let Some(attempt) = attempt {
+        loop {
+            check_cancellation(Some(attempt))?;
+            match guard.inherit_heavy_reservation_for_attempt(attempt) {
+                Ok(()) => break,
+                Err(CoordinatorError::Timeout { .. }) => {
+                    if Instant::now() >= deadline {
+                        return Err(deferred(
+                            started,
+                            max_wait,
+                            "verification reservation is being updated",
+                            None,
+                        ));
+                    }
+                    sleep_until(deadline, poll);
+                }
+                Err(err) => {
+                    return Err(unexpected(format!(
+                        "verification reservation inheritance failed: {err}"
+                    ))
+                    .into())
+                }
+            }
+        }
+    }
     let artifacts = if let Some(target) = &target {
         loop {
             check_cancellation(attempt)?;
@@ -635,6 +677,9 @@ fn admit_inner<E: CliEnv>(
                 None => {
                     check_cancellation(attempt)?;
                     if Instant::now() >= deadline {
+                        let _ = guard.complete(JobOutcome::Failed {
+                            message: "host admission deferred".to_string(),
+                        });
                         return Err(deferred(
                             started,
                             max_wait,
@@ -980,6 +1025,7 @@ mod tests {
                     resident: false,
                     attempt_id: Some("deferred-attempt".into()),
                     job_status: Some(gwt_core::index_coordinator::JobStatus::Failed),
+                    bypass_reason: Some("non-resident reservation grace elapsed".into()),
                 }],
                 ..HeavyLeaseStatus::default()
             },
@@ -1004,6 +1050,16 @@ mod tests {
             notice.detail
         );
         assert!(notice.detail.contains("job failed"), "{}", notice.detail);
+        assert!(
+            notice.detail.contains("FIFO position retained"),
+            "{}",
+            notice.detail
+        );
+        assert!(
+            notice.detail.contains("identical full matrix"),
+            "{}",
+            notice.detail
+        );
         assert!(!notice.detail.contains("TTL"), "{}", notice.detail);
     }
 
@@ -1531,15 +1587,79 @@ mod tests {
             |_| String::new(),
         )
         .unwrap();
-        let error = super::admit(
+        let key = verification_key_for(second.path());
+        let old_job = match lease_root
+            .coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::ZERO)
+            .unwrap()
+        {
+            JobAdmission::Owner(job) => job,
+            JobAdmission::Joined(_) => panic!("fixture target must be free"),
+        };
+        let check = || Ok(false);
+        lease_root
+            .coordinator
+            .reserve_heavy_for_attempt(
+                &key,
+                JobPriority::ManualRebuild,
+                VERIFICATION_RESERVATION_TTL,
+                None,
+                &HeavyAttempt {
+                    id: "older",
+                    check_cancelled: &check,
+                },
+            )
+            .unwrap();
+        old_job
+            .complete(JobOutcome::Failed {
+                message: "host admission deferred".into(),
+            })
+            .unwrap();
+        let reservation_path = lease_root.coordinator.heavy_reservation_path(&key);
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&reservation_path).unwrap()).unwrap();
+        let error = super::admit_for_attempt(
             &mut second_env,
             second.path(),
             Some(&command),
             Duration::ZERO,
             |_| String::new(),
+            &HeavyAttempt {
+                id: "successor",
+                check_cancelled: &check,
+            },
         )
         .unwrap_err();
         assert!(error.to_string().contains("Cargo target"), "{error}");
+        let inherited: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&reservation_path).unwrap()).unwrap();
+        assert_eq!(
+            inherited["attempt_id"], "successor",
+            "artifact waiting must not strand the old attempt"
+        );
+        assert_ne!(inherited["job_epoch"], original["job_epoch"]);
+        for field in [
+            "queued_at_ms",
+            "queue_seq",
+            "reserved_until_ms",
+            "registered_at_ms",
+        ] {
+            assert_eq!(
+                inherited[field], original[field],
+                "inheritance preserves {field}"
+            );
+        }
+        assert!(!lease_root
+            .coordinator
+            .clear_heavy_reservation_for_attempt(&key, "older")
+            .unwrap());
+        assert_eq!(
+            lease_root.coordinator.heavy_pool_status().unwrap().queue[0]
+                .attempt_id
+                .as_deref(),
+            Some("successor"),
+            "artifact deferral must preserve the inherited FIFO position"
+        );
         lease_root.assert_target_free(
             &verification_key_for(second.path()),
             "an artifact-conflict refusal must release its caller target",

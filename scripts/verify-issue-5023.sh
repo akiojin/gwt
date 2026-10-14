@@ -35,6 +35,16 @@ CHECK_REPO_HASH="$(
 # browser-check-agent-seed-begin
 CHECK_PROJECT_STATE="$CHECK_HOME/.gwt/projects/${CHECK_REPO_HASH:?Resolve project_store.hash first}/project-state"
 mkdir -p "$CHECK_PROJECT_STATE"
+# The current card reuses the shared budget/TTL PR cache. Keep this isolated
+# release observation fresh without reaching the user's remote repository.
+cat > "$CHECK_HOME/.gwt/config.toml" <<'TOML'
+[pr_inventory]
+cache_ttl_secs = 3600
+checks_refresh_secs = 3600
+TOML
+jq -n --arg observed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{fetched_at:$observed,rows:[{number:5352,title:"Release v9.117.2",url:"https://github.com/akiojin/gwt/pull/5352",headRefName:"develop",baseRefName:"main",isDraft:false,updatedAt:$observed,createdAt:$observed,mergeable:"UNKNOWN",mergeStateStatus:"UNKNOWN",statusCheckRollup:[]}]}' \
+  > "$CHECK_HOME/.gwt/projects/$CHECK_REPO_HASH/pr-inventory-cache.json"
 jq -n --arg root "$REPO_ROOT" \
   '{settings:{auto_start:false},registration:{session_id:"pm-reports-fixture",agent_id:"codex",worktree_path:$root,created_at:"2026-10-11T00:00:00Z"}}' \
   > "$CHECK_PROJECT_STATE/pm.json"
@@ -61,24 +71,40 @@ jq -n --arg project "$REPO_ROOT" --arg repo_hash "$CHECK_REPO_HASH" \
 
 # browser-check-hook-authority-begin
 CHECKOUT_LOCAL_HOOK_PATTERN='(^|[/\\])target[/\\]([^/\\]+[/\\])*(debug|release)[/\\]gwtd(\.exe)?([^[:alnum:]_.-]|$)'
+
 is_checkout_local_hook_bin() {
-  [ -n "$1" ] && printf '%s\n' "$1" | grep -qiE -- "$CHECKOUT_LOCAL_HOOK_PATTERN"
+  [ -n "$1" ] \
+    && printf '%s\n' "$1" | grep -qiE -- "$CHECKOUT_LOCAL_HOOK_PATTERN"
 }
+
 CHECK_HOOK_BIN="${GWT_HOOK_BIN:-}"
-if is_checkout_local_hook_bin "$CHECK_HOOK_BIN"; then CHECK_HOOK_BIN=""; fi
-if [ -n "$CHECK_HOOK_BIN" ] && [ "$CHECK_HOOK_BIN" != gwtd ] && [ ! -x "$CHECK_HOOK_BIN" ]; then
+if is_checkout_local_hook_bin "$CHECK_HOOK_BIN"; then
+  CHECK_HOOK_BIN=""
+fi
+if [ -n "$CHECK_HOOK_BIN" ] && [ "$CHECK_HOOK_BIN" != "gwtd" ] \
+  && [ ! -x "$CHECK_HOOK_BIN" ]; then
   CHECK_HOOK_BIN=""
 fi
 if [ -z "$CHECK_HOOK_BIN" ]; then
-  PATH_HOOK_BIN="$(command -v gwtd 2>/dev/null || true)"
-  if [ -n "$PATH_HOOK_BIN" ] && ! is_checkout_local_hook_bin "$PATH_HOOK_BIN"; then
-    CHECK_HOOK_BIN=gwtd
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "browser-check preflight failed: jq is required to parse hook.doctor evidence; install jq (for example: brew install jq) and rerun" >&2
+    exit 1
+  fi
+  if ! CHECK_HOOK_RESOLVER="$(
+    cd "$REPO_ROOT" && printf '%s\n' '{"schema_version":1,"operation":"hook.doctor","params":{}}' \
+      | env -u GWT_BIN_PATH -u GWT_HOOK_BIN "$CHECKOUT_GWTD"
+  )" || ! CHECK_HOOK_BIN="$(
+    printf '%s' "$CHECK_HOOK_RESOLVER" \
+      | jq -er 'select(.ok == true) | .output | fromjson | .managed_hook_bin | strings | select(length > 0)'
+  )"; then
+    echo "browser-check managed-hook fallback resolver failed: rebuild checkout gwt/gwtd and rerun" >&2
+    exit 1
+  fi
+  if is_checkout_local_hook_bin "$CHECK_HOOK_BIN"; then
+    echo "browser-check managed-hook fallback resolver returned a checkout-local binary" >&2
+    exit 1
   fi
 fi
-if [ -z "$CHECK_HOOK_BIN" ] && [ -x /Applications/GWT.app/Contents/MacOS/gwtd ]; then
-  CHECK_HOOK_BIN=/Applications/GWT.app/Contents/MacOS/gwtd
-fi
-CHECK_HOOK_BIN="${CHECK_HOOK_BIN:-gwtd}"
 # browser-check-hook-authority-end
 
 # Audit the managed hook fallback with the real HOME, as required by browser-check.

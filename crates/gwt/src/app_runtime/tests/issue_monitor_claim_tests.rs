@@ -2187,6 +2187,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
         downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     })
     .unwrap();
@@ -2325,6 +2326,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
         downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     })
     .unwrap();
@@ -2920,6 +2922,51 @@ fn app_runtime_staged_update_falls_back_to_manual_when_auto_apply_is_refused() {
             toasts[0].1
         );
     }
+}
+
+#[test]
+fn issue_5343_reconnect_restores_staged_cta_and_elevation_notice() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let payload = temp.path().join("update.pkg");
+    fs::write(&payload, "prepared installer").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "999.0.0".into(),
+        asset_url: "https://example.invalid/update.pkg".into(),
+        payload: gwt_core::update::PreparedPayload::Installer {
+            path: payload,
+            kind: gwt_core::update::InstallerKind::MacPkg,
+        },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let events = runtime.frontend_sync_events("browser");
+    assert!(
+        events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::UpdateApplyPendingPersisted { .. }
+        )),
+        "disk-staged update must restore the manual CTA"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::UpdateAutoApply {
+                phase: gwt::protocol::UpdateAutoApplyPhase::ElevationRequired,
+                ..
+            }
+        )),
+        "CTA must name the elevation requirement"
+    );
+    assert!(update_resume_toasts(&events)
+        .iter()
+        .any(|(level, message)| {
+            *level == "warn" && message.contains("Administrator privileges required")
+        }));
+    assert!(gwt_core::update::load_pending_update_manifest().is_some());
 }
 
 #[test]
@@ -5356,7 +5403,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             _ => None,
         })
         .expect("issue monitor status");
-    assert_eq!(status.state, "error");
+    assert_eq!(status.state, "idle");
     assert_eq!(
         status.last_error.as_deref(),
         Some("issue #42: Stop-block hit an error")

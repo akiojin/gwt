@@ -892,6 +892,11 @@ fn hook_doctor_reports_codex_trust_command_mismatch_without_registering_it() {
     let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
     let doctor: serde_json::Value =
         serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        doctor["managed_hook_bin"].as_str(),
+        Some(stable_hook_bin.to_str().unwrap()),
+        "doctor must expose the same fallback selected by ordinary materialization"
+    );
     // Join the decoded issue strings: serializing the array would JSON-escape
     // Windows `\` separators and hide the trust key from a substring match.
     let issues = doctor["health"]["issues"]
@@ -1005,6 +1010,14 @@ fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
         serde_json::from_str(stdout["output"].as_str().expect("output string"))
             .expect("parse hook doctor output");
     assert_eq!(doctor["repair"]["repaired"].as_bool(), Some(true));
+    assert_eq!(
+        doctor["repair_writer"]["pid"].as_u64(),
+        Some(u64::from(std::process::id()))
+    );
+    assert_eq!(
+        doctor["repair_writer"]["executable"].as_str(),
+        std::env::current_exe().unwrap().to_str()
+    );
     let guarantee = doctor["repair_guarantee"].as_str().unwrap_or_default();
     assert!(
         guarantee.contains("managed hook configuration")

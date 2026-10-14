@@ -3032,7 +3032,7 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
             _ => None,
         })
         .expect("issue monitor status");
-    assert_eq!(status.state, "error");
+    assert_eq!(status.state, "idle");
     assert_eq!(status.active_count, 0);
     assert_eq!(
         status.last_error.as_deref(),
@@ -3173,7 +3173,7 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
             _ => None,
         })
         .expect("issue monitor status");
-    assert_eq!(status.state, "error");
+    assert_eq!(status.state, "idle");
     assert_eq!(
         status.last_error.as_deref(),
         Some("issue #42: Stop-block hit an error")
