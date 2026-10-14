@@ -1,11 +1,6 @@
-// Issue #3297 — cache-backed knowledge load recovery contract.
-//
-// The 5s load-recovery timer must not escalate its retry into a forced
-// remote refresh (a forced refresh runs a full GitHub sync that takes
-// minutes and guarantees the "Timed out loading cache-backed data" error
-// on slow machines), and a late knowledge_entries response must still be
-// applied when the window has no data yet instead of being discarded by
-// request_id mismatch.
+// Issues #3297 / #5413 — cache-backed knowledge load recovery contract.
+// Slow reads must not become duplicate requests or premature load errors;
+// successful late responses must recover the window.
 //
 // The surface module imports "/focus-trap.js" (a browser absolute path),
 // so the tests load the module source with that import stubbed and drive
@@ -1488,53 +1483,59 @@ function withPatchedTimers(run) {
   }
 }
 
-test("load recovery retry must not escalate to a forced refresh", async () => {
+test("slow cache loads show progress without retrying or overlapping refresh (#5413 AC-1/3)", async () => {
   const mod = await importSurfaceModule();
   withPatchedTimers(({ fire }) => {
     const sent = [];
     const surface = createSurface(mod, sent);
 
     surface.requestKnowledgeBridge("win-1", "issue", false);
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0].kind, "load_knowledge_bridge");
-    assert.equal(sent[0].refresh, false);
-
     fire((timer) => timer.delay === 5000);
-
-    assert.equal(sent.length, 2, "recovery timer must retry the load once");
-    assert.equal(sent[1].kind, "load_knowledge_bridge");
-    assert.equal(
-      sent[1].refresh,
-      false,
-      "the recovery retry must stay a cache read; a forced refresh runs a full remote sync and always outlives the next 5s timer",
-    );
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    assert.equal(state.loading, true);
+    assert.equal(state.error, "");
+    assert.equal(state.loadSlow, true);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    surface.requestKnowledgeBridge("win-1", "issue", true);
+    surface.requestKnowledgeBridge("win-1", "issue", true);
+    assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 1);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: sent[0].request_id, entries: [ROW_A], refresh_enabled: true,
+    });
+    const loads = sent.filter(message => message.kind === "load_knowledge_bridge");
+    assert.equal(loads.length, 2, "one queued explicit refresh starts only after the read completes");
+    assert.equal(loads[1].refresh, true);
+    assert.equal(state.loadSlow, false);
+    surface.clearKnowledgeBridgeState("win-1");
   });
 });
 
-test("a late knowledge_entries response is applied when the window has no data", async () => {
+test("cache load deadline errors recover on the original late response (#5413 AC-1/2)", async () => {
   const mod = await importSurfaceModule();
   withPatchedTimers(({ fire }) => {
     const sent = [];
     const surface = createSurface(mod, sent);
 
     surface.requestKnowledgeBridge("win-1", "issue", false);
-    const staleRequestId = sent[0].request_id;
+    const requestId = sent[0].request_id;
     fire((timer) => timer.delay === 5000);
-    const retryRequestId = sent[1].request_id;
-    assert.notEqual(staleRequestId, retryRequestId);
-
+    fire((timer) => timer.delay === 55000);
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    assert.equal(state.error, "Timed out loading cache-backed data");
+    assert.equal(state.loading, false);
+    assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 1);
     surface.applyKnowledgeReceiveEvent({
       kind: "knowledge_entries",
       id: "win-1",
       knowledge_kind: "issue",
-      request_id: staleRequestId,
+      request_id: requestId,
       entries: [{ number: 42, title: "Issue bridge", phase: "backlog" }],
       selected_number: 42,
       empty_message: "",
       refresh_enabled: true,
     });
 
-    const state = surface.knowledgeBridgeStateMap.get("win-1");
     assert.equal(
       state.baseEntries.length,
       1,
@@ -1542,5 +1543,37 @@ test("a late knowledge_entries response is applied when the window has no data",
     );
     assert.equal(state.loading, false, "the applied response must finish the load");
     assert.equal(state.error, "");
+    assert.equal(state.loadSlow, false);
+  });
+});
+
+test("backend cache load failure ends waiting immediately (#5413 AC-1)", async () => {
+  const mod = await importSurfaceModule();
+  withPatchedTimers(({ timers, fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    fire(timer => timer.delay === 5000);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+      request_id: sent[0].request_id, message: "Cache read failed",
+    });
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    assert.equal(state.loading, false);
+    assert.equal(state.error, "Cache read failed");
+    assert.equal(state.loadSlow, false);
+    assert.ok(timers.filter(timer => !timer.fired).every(timer => timer.cleared));
+  });
+});
+
+test("closing a slow cache load cancels its deadline (#5413)", async () => {
+  const mod = await importSurfaceModule();
+  withPatchedTimers(({ timers, fire }) => {
+    const surface = createSurface(mod, []);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    fire(timer => timer.delay === 5000);
+    surface.clearKnowledgeBridgeState("win-1");
+    assert.ok(timers.filter(timer => !timer.fired).every(timer => timer.cleared));
+    assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
   });
 });
