@@ -2259,7 +2259,8 @@ mod tests {
                 .capture(false, false)
                 .forward_output(false)
                 .current_dir(directory.path()),
-            Instant::now() + Duration::from_secs(10),
+            // This tests Job release, not PowerShell cold-start speed.
+            Instant::now() + crate::deadline_budget::HANG_GUARD,
         )
         .await
         .expect("root process succeeds before deadline");
