@@ -243,6 +243,18 @@ mod tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
+    fn instruction_capture() -> Box<gwt_core::user_instruction::UserInstructionInput> {
+        Box::new(gwt_core::user_instruction::UserInstructionInput {
+            original: "状況は？".into(),
+            summary: String::new(),
+            answer: String::new(),
+            actions: vec!["状況を報告".into()],
+            issue_numbers: vec![],
+            kind: gwt_core::user_instruction::UserInstructionKind::Question,
+            supersedes: vec![],
+        })
+    }
+
     fn fixture(home: &Path) -> std::path::PathBuf {
         let repo = home.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -383,6 +395,7 @@ mod tests {
             kind,
             question: Some("状況は？".into()),
             body: body.into(),
+            instruction: (kind == gwt_core::pm_report::PmReportKind::Qa).then(instruction_capture),
         };
         handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
         assert!(crate::cli::pm::run(
@@ -581,6 +594,7 @@ mod tests {
             kind: gwt_core::pm_report::PmReportKind::Qa,
             question: Some("状況は？".into()),
             body: body.into(),
+            instruction: Some(instruction_capture()),
         };
         handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
         let old = capture_qa_turn(&repo).unwrap().unwrap();

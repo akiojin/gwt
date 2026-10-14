@@ -1420,6 +1420,14 @@ fn memory_result(item: &Value) -> Option<IndexSearchResult> {
     let heading = value_str(item.get("heading"))?;
     let title = value_str(item.get("title")).unwrap_or_else(|| heading.clone());
     let date = value_str(item.get("date")).unwrap_or_default();
+    let user_instruction = if item.get("source").and_then(Value::as_str) == Some("user_instruction")
+    {
+        let mut record = item.clone();
+        record["id"] = item.get("instruction_id")?.clone();
+        Some(Box::new(serde_json::from_value(record).ok()?))
+    } else {
+        None
+    };
     Some(IndexSearchResult {
         scope: IndexSearchScope::Memory,
         title,
@@ -1433,7 +1441,11 @@ fn memory_result(item: &Value) -> Option<IndexSearchResult> {
         match_mode: item_match_mode(item),
         matched_terms: value_string_array(item.get("matched_terms")),
         missing_terms: value_string_array(item.get("missing_terms")),
-        target: IndexSearchTarget::Memory { heading, date },
+        target: IndexSearchTarget::Memory {
+            heading,
+            date,
+            user_instruction,
+        },
     })
 }
 
@@ -3364,6 +3376,37 @@ mod tests {
         };
         let lease = RepairLease::admit(key).expect("settled queued repair must be re-admitted");
         drop(lease);
+    }
+
+    #[test]
+    fn instruction_search_preserves_original_and_supersession_in_canonical_response() {
+        let item = json!({
+            "source": "user_instruction", "instruction_id": "old",
+            "created_at": "2026-10-13T01:02:03Z", "date": "2026-10-13",
+            "heading": "## Response language", "title": "Response language",
+            "original": "報告は日本語で。\n理由も書いてください。",
+            "summary": "Response language", "answer": "日本語で報告します。",
+            "actions": ["Use Japanese"], "issue_numbers": [5342],
+            "kind": "standing", "superseded_by": "new", "status": "superseded"
+        });
+        let result = serde_json::to_value(memory_result(&item).unwrap()).unwrap();
+        let record = &result["target"]["user_instruction"];
+        assert_eq!(record["id"], "old");
+        for field in [
+            "original",
+            "created_at",
+            "summary",
+            "answer",
+            "actions",
+            "issue_numbers",
+            "kind",
+            "superseded_by",
+        ] {
+            assert_eq!(
+                record[field], item[field],
+                "{field} lost by canonical search adapter"
+            );
+        }
     }
 
     /// Issue #4455 AC-4: every scope a search can report as broken must have
