@@ -1056,8 +1056,11 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
 fn generated_coordination_requires_ai_self_naming_before_work() {
     let dir = tempfile::tempdir().expect("tempdir");
     generate_coordination_guidance(dir.path()).expect("generate guidance");
-    let canonical = render_skill_md();
-    for provider in [".claude", ".codex"] {
+    for (provider, target) in [
+        (".claude", gwt_skills::ManagedAssetTarget::ClaudeCode),
+        (".codex", gwt_skills::ManagedAssetTarget::Codex),
+    ] {
+        let canonical = render_skill_md(target);
         let path = dir
             .path()
             .join(provider)
@@ -1089,7 +1092,7 @@ fn generated_coordination_requires_ai_self_naming_before_work() {
 
 #[test]
 fn render_skill_md_embeds_frontmatter_name_and_description() {
-    let md = render_skill_md();
+    let md = render_skill_md(gwt_skills::ManagedAssetTarget::ClaudeCode);
     assert!(md.starts_with("---\n"), "must start with YAML frontmatter");
     assert!(md.contains("name: gwt-coordination"));
     assert!(md.contains("\"operation\":\"board.post\""));
