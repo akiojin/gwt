@@ -159,6 +159,13 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "exit_code": code,
                 "output": output,
             });
+            if code == 0 {
+                match operation.as_str() {
+                    "issue.view" | "issue.monitor.status" => payload["kind"] = "issue".into(),
+                    "pr.view" | "pr.list" => payload["kind"] = "pull_request".into(),
+                    _ => {}
+                }
+            }
             if let Some(data) = pr_checks_data {
                 payload["data"] = data;
             }
@@ -2649,6 +2656,35 @@ mod tests {
             "params": params,
         })
         .to_string()
+    }
+
+    #[test]
+    fn issue_4323_view_envelopes_identify_the_resource_kind() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(repo.path().to_path_buf());
+        env.client.seed(gwt_github::client::IssueSnapshot {
+            number: gwt_github::client::IssueNumber(42),
+            title: "typed resource".into(),
+            body: "".into(),
+            labels: vec![],
+            state: gwt_github::client::IssueState::Open,
+            updated_at: gwt_github::client::UpdatedAt::new("2026-10-15T00:00:00Z"),
+            comments: vec![],
+        });
+        env.seed_pr(7, gwt_git::pr_status::parse_pr_status_json(
+            r#"{"number":7,"title":"typed resource","url":"https://github.com/octo/gwt/pull/7","state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#
+        ).unwrap());
+        for (operation, number, kind, header) in [
+            ("issue.view", 42, "issue", "Issue #42"),
+            ("pr.view", 7, "pull_request", "PR #7"),
+        ] {
+            env.stdin = envelope(operation, json!({"number":number}));
+            env.stdout.clear();
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+            let response: Value = serde_json::from_slice(&env.stdout).unwrap();
+            assert_eq!(response["kind"], kind);
+            assert!(response["output"].as_str().unwrap().starts_with(header));
+        }
     }
 
     #[test]

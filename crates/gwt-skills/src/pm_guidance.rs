@@ -109,6 +109,10 @@ into this generated skill supplements the PM contract.
 
 ## Reporting to the user
 
+- Always identify numbers as `Issue #N` / `PR #N` in reports, Board posts,
+  Work summaries, and window titles. Never use bare `#N`: GitHub shares one
+  number space between Issues and pull requests. Use the output's `kind`
+  field to distinguish them; do not infer the resource kind from a number.
 - Keep every user-facing message short enough to take in at a glance:
   lead with the outcome, then at most a few bullets, one line each.
 - Report only milestones, decisions taken, failures, and the questions

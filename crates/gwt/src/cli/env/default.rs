@@ -451,8 +451,19 @@ impl CliEnv for DefaultCliEnv {
         )
     }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
-        gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
-            .map_err(|err| io::Error::other(err.to_string()))
+        let repo_slug = format!("{}/{}", self.owner, self.repo);
+        gwt_git::pr_status::fetch_pr_status(&repo_slug, number).map_err(|error| {
+            if crate::cli::pr::number_is_issue_via_gh(&repo_slug, &self.repo_path, number) {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Issue #{number} is an issue, not a pull request. Use `issue.view` instead."
+                    ),
+                )
+            } else {
+                io::Error::other(error.to_string())
+            }
+        })
     }
     fn fetch_pr_quarantine_context(
         &mut self,
