@@ -10541,7 +10541,7 @@ impl AppRuntime {
         context: &ProjectContext,
     ) -> Option<(gwt::IssueMonitorPrefs, gwt::IssueMonitorUpdateDrain)> {
         let project_root = &context.project_root;
-        let prefs = match gwt::load_issue_monitor_prefs(
+        let prefs = match gwt::issue_monitor::load_issue_monitor_prefs_for_running_version(
             &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
         ) {
             Ok(prefs) => prefs,
