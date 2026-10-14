@@ -355,7 +355,8 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             number,
             reason,
-        } => run_monitor_requeue(env, project_root.as_deref(), number, &reason, out)?,
+            force,
+        } => run_monitor_requeue(env, project_root.as_deref(), number, &reason, force, out)?,
         IssueCommand::MonitorQuotaHoldList { project_root } => {
             run_monitor_quota_hold_list(env, project_root.as_deref(), out)?
         }
@@ -676,6 +677,7 @@ pub(crate) fn merge_board_escalations_into_needs_human(
     status.needs_human.retain(|issue_number| {
         !closed_issue_numbers.contains(issue_number)
             && !status.label_excluded_issues.contains(issue_number)
+            && !status.released.contains(issue_number)
     });
     status
         .inbox
@@ -704,7 +706,7 @@ pub(crate) fn merge_board_escalations_into_needs_human(
             continue;
         }
         board_escalations.push(issue_number);
-        if !status.needs_human.contains(&issue_number) {
+        if !status.released.contains(&issue_number) && !status.needs_human.contains(&issue_number) {
             status.needs_human.push(issue_number);
         }
     }
@@ -1025,6 +1027,7 @@ fn attach_monitor_control_identity(
 ) {
     let published_active = std::mem::take(&mut status.active_launches);
     status.active_launches = authority.active_issue_numbers();
+    status.released = authority.agent_status().released;
     let mut lifecycle = authority.clone();
     let mut changed = Vec::new();
     for row in &mut status.inbox {
@@ -1039,6 +1042,8 @@ fn attach_monitor_control_identity(
             .then(|| authority.launched_window_id(row.issue_number))
             .flatten();
         if published_active.contains(&row.issue_number) != active
+            || (status.released.contains(&row.issue_number)
+                && row.state != crate::MonitorInboxState::Released)
             || (!active
                 && matches!(
                     row.state,
@@ -2384,7 +2389,12 @@ fn run_monitor_stop<E: CliEnv>(
         // Issue #3992 AC-3: read before mutating, so a refusal reports the
         // identity it disagreed with rather than one a later write changed.
         let identity = monitor.launch_identity(number);
-        let outcome = monitor.stop_only(&target, reason, &now);
+        let outcome = monitor.stop_only_with_settlement(
+            &target,
+            reason,
+            &now,
+            monitor_execution_settlement(&project_root, number),
+        );
         if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
             *prefs = monitor.prefs();
         }
@@ -2397,6 +2407,9 @@ fn run_monitor_stop<E: CliEnv>(
             ("stopped", Some(window_id.clone()))
         }
         crate::IssueMonitorStopOutcome::AlreadyStopped => ("already_stopped", None),
+        crate::IssueMonitorStopOutcome::Released { window_id } => {
+            ("released", Some(window_id.clone()))
+        }
         crate::IssueMonitorStopOutcome::Mismatch(mismatch) => {
             // Fail closed: nothing was written, nothing is torn down, and the
             // caller is told which component disagreed so it can re-read the
@@ -2439,6 +2452,34 @@ fn run_monitor_stop<E: CliEnv>(
     out.push_str(&payload.to_string());
     out.push('\n');
     Ok(0)
+}
+
+fn monitor_execution_settlement(
+    project_root: &std::path::Path,
+    number: u64,
+) -> crate::IssueMonitorExecutionSettlement {
+    use crate::cli::execution_state::{
+        load_owner_generation_ledger, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
+    };
+    use crate::IssueMonitorExecutionSettlement as Settlement;
+    // A malformed or missing ledger is never evidence of completion. This
+    // strict reader validates integrity, unlike the diagnostic status view.
+    // Owner kind is validated metadata on the same number-keyed ledger. A
+    // missing label cache must not hide a completed design-gated owner.
+    let status = [ExecutionOwnerKind::Issue, ExecutionOwnerKind::Spec]
+        .into_iter()
+        .find_map(|kind| {
+            load_owner_generation_ledger(project_root, ExecutionOwnerKey { kind, number })
+                .ok()
+                .flatten()
+        })
+        .and_then(|ledger| ledger.current_effective_status());
+    match status {
+        Some(ExecutionControlStatus::Completed) => Settlement::Completed,
+        Some(ExecutionControlStatus::Blocked) => Settlement::Blocked,
+        Some(ExecutionControlStatus::Active) => Settlement::Active,
+        None => Settlement::Unknown,
+    }
 }
 
 /// Issue #4200: release the execution generation `number` still holds, if any.
@@ -2648,6 +2689,7 @@ fn run_monitor_requeue<E: CliEnv>(
     project_root: Option<&std::path::Path>,
     number: u64,
     reason: &str,
+    force: bool,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
@@ -2676,12 +2718,23 @@ fn run_monitor_requeue<E: CliEnv>(
         out.push('\n');
         return Ok(1);
     }
-    let (prefs, (outcome, released_hold, cleared_retry)) =
+    let (prefs, (outcome, released_hold, cleared_retry, completed_stop_reason)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
                 crate::IssueMonitorConfig::default(),
                 prefs.clone(),
             );
+            let completed_stop_reason = monitor
+                .released_completed_reason(number)
+                .map(str::to_string);
+            if completed_stop_reason.is_some() && !force {
+                return Ok((
+                    crate::IssueMonitorRequeueOutcome::NotHeld,
+                    None,
+                    None,
+                    completed_stop_reason,
+                ));
+            }
             let outcome = monitor.requeue_failed_issue(number, reason, &now);
             let not_held = matches!(outcome, crate::IssueMonitorRequeueOutcome::NotHeld);
             // Issue #4918 AC-3: a retry floor holds the row without a failure
@@ -2713,9 +2766,22 @@ fn run_monitor_requeue<E: CliEnv>(
                 monitor.terminal_queue_push(&[number], "operator", &now);
                 *prefs = monitor.prefs();
             }
-            Ok((outcome, released_hold, cleared_retry))
+            Ok((outcome, released_hold, cleared_retry, completed_stop_reason))
         })
         .map_err(io_as_api_error)?;
+
+    if completed_stop_reason.is_some() && !force {
+        out.push_str(&serde_json::json!({
+            "number": number,
+            "status": "refused",
+            "refusal": "execution_completed",
+            "reason": reason,
+            "completed_stop_reason": completed_stop_reason,
+            "detail": "the canonical ECR was completed when this launch was released; requeue can relaunch completed work. Pass force:true with a reason to request a fresh attempt explicitly",
+        }).to_string());
+        out.push('\n');
+        return Ok(1);
+    }
 
     let (stale_window_id, attempts_before, attempts_after) = match outcome {
         crate::IssueMonitorRequeueOutcome::Requeued {
@@ -2749,6 +2815,8 @@ fn run_monitor_requeue<E: CliEnv>(
                         "status": "requeued",
                         "reason": reason,
                         "released_hold": released_hold,
+                        "completed_stop_reason": completed_stop_reason,
+                        "warning": completed_stop_reason.as_ref().map(|_| "forced requeue of a completed canonical execution"),
                         // Issue #4918 AC-3: name the floor and the counter that
                         // were discarded. Without them a recovery that threw
                         // away the cap-length backoff reads identically to one
@@ -7568,6 +7636,7 @@ mod tests {
                 project_root: Some(repo.clone()),
                 number: 7,
                 reason: "reopened after an absorption was reversed".to_string(),
+                force: false,
             },
             &mut out,
         )
@@ -7668,6 +7737,7 @@ mod tests {
                 project_root: Some(repo.to_path_buf()),
                 number: 7,
                 reason: "reopened after the Monitor observed the close".to_string(),
+                force: false,
             },
             &mut out,
         )
@@ -7735,6 +7805,7 @@ mod tests {
                 state: crate::issue_monitor::IssueCompletionState::Completed,
                 issue_updated_at: Some("2026-09-01T00:00:00Z".to_string()),
                 evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                released_reason: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         });
@@ -8798,6 +8869,7 @@ mod tests {
                     state: crate::issue_monitor::IssueCompletionState::Completed,
                     issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
                     evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                    released_reason: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -9404,6 +9476,7 @@ mod tests {
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
+            released: Vec::new(),
             inbox: Vec::new(),
             inbox_coverage: None,
             closure_held: Vec::new(),
@@ -9464,6 +9537,7 @@ mod tests {
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
+            released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                 launch_tier: None,
                 landing_tier: None,
@@ -9610,6 +9684,7 @@ mod tests {
                 usage_threshold_percent: 80,
                 provider_quota_holds: Vec::new(),
                 needs_human: vec![2338],
+                released: Vec::new(),
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                     launch_tier: None,
                     landing_tier: None,
@@ -9730,6 +9805,7 @@ mod tests {
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
+            released: Vec::new(),
             inbox: Vec::new(),
             inbox_coverage: None,
             closure_held: Vec::new(),
@@ -12459,6 +12535,7 @@ mod tests {
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: Vec::new(),
+            released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                 launch_tier: None,
                 landing_tier: None,
@@ -12631,6 +12708,7 @@ mod tests {
                 project_root: Some(repo.clone()),
                 number: 43,
                 reason: "operator recovery".to_string(),
+                force: false,
             },
             &mut out,
         )
@@ -12651,6 +12729,7 @@ mod tests {
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "operator recovery".to_string(),
+                force: false,
             },
             &mut out,
         )
@@ -12697,6 +12776,7 @@ mod tests {
                 project_root: Some(repo),
                 number: 42,
                 reason: "operator recovery".to_string(),
+                force: false,
             },
             &mut out,
         )
@@ -12791,6 +12871,7 @@ mod tests {
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "operator recovery".to_string(),
+                force: false,
             },
             &mut out,
         )
@@ -12837,6 +12918,133 @@ mod tests {
     }
 
     #[test]
+    fn issue_4357_requeue_completed_stop_requires_explicit_force() {
+        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+        for owner_kind in [ExecutionOwnerKind::Issue, ExecutionOwnerKind::Spec] {
+            let tmp = TempDir::new().unwrap();
+            let _home = ScopedGwtHome::set(tmp.path().join("home"));
+            let repo = tmp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+            let repo = gwt_core::paths::resolve_current_worktree_root(
+                &std::fs::canonicalize(repo).unwrap(),
+            );
+            // A settled legacy record migrated to the trusted owner ledger exercises
+            // the same integrity-checked read used for current completed generations.
+            let record = serde_json::from_value(serde_json::json!({
+                "owner_kind": owner_kind, "owner_number": 42,
+                "primary_session_id": "completed-holder", "entrypoint": "gwt-execute",
+                "status": "completed", "launched_at": "2026-10-13T00:00:00Z",
+                "settled_at": "2026-10-14T00:00:00Z"
+            }))
+            .unwrap();
+            execution_state::save(&repo, &record).unwrap();
+            execution_state::ensure_generation_ledger(
+                &repo,
+                ExecutionOwnerKey {
+                    kind: owner_kind,
+                    number: 42,
+                },
+                execution_state::LegacyActiveDisposition::Live,
+            )
+            .unwrap();
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+            crate::save_issue_monitor_prefs(
+                &prefs_path,
+                &crate::IssueMonitorPrefs {
+                    launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                        issue_number: 42,
+                        window_id: "tab-1::completed-agent".into(),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut env = crate::cli::TestEnv::new(repo.clone());
+            let mut out = String::new();
+            assert_eq!(
+                run(
+                    &mut env,
+                    IssueCommand::MonitorStop {
+                        project_root: Some(repo.clone()),
+                        number: 42,
+                        reason: "collect completed launch".into(),
+                        claim_id: None,
+                        delivery_id: None,
+                        window_id: Some("tab-1::completed-agent".into()),
+                    },
+                    &mut out
+                )
+                .unwrap(),
+                0,
+                "{out}"
+            );
+            let stopped: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+            assert_eq!(stopped["status"], "released");
+            let before = std::fs::read(&prefs_path).unwrap();
+            let authority = crate::IssueMonitorState::with_prefs(
+                Default::default(),
+                crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            );
+            let mut published = authority.agent_status();
+            published.released.clear();
+            published.needs_human = vec![42];
+            attach_monitor_control_identity(&authority, &mut published);
+            merge_board_escalations_into_needs_human(&repo, &mut published);
+            assert_eq!(published.released, vec![42]);
+            assert!(published.needs_human.is_empty());
+            out.clear();
+            assert_eq!(
+                run(
+                    &mut env,
+                    IssueCommand::MonitorRequeue {
+                        project_root: Some(repo.clone()),
+                        number: 42,
+                        reason: "operator recovery".into(),
+                        force: false,
+                    },
+                    &mut out
+                )
+                .unwrap(),
+                1,
+                "{out}"
+            );
+            let refused: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+            assert_eq!(refused["refusal"], "execution_completed");
+            assert!(refused["detail"].as_str().unwrap().contains("force"));
+            assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+
+            out.clear();
+            assert_eq!(
+                run(
+                    &mut env,
+                    IssueCommand::MonitorRequeue {
+                        project_root: Some(repo.clone()),
+                        number: 42,
+                        reason: "explicit follow-up attempt".into(),
+                        force: true,
+                    },
+                    &mut out
+                )
+                .unwrap(),
+                0,
+                "{out}"
+            );
+            let forced: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+            assert_eq!(forced["status"], "requeued");
+            assert_eq!(forced["completed_stop_reason"], "collect completed launch");
+            assert!(forced["warning"].as_str().unwrap().contains("completed"));
+            let mut recovered = crate::IssueMonitorState::with_prefs(
+                Default::default(),
+                crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            );
+            recovered.rebase_daemon_driver_prefs(&serde_json::from_slice(&before).unwrap());
+            assert!(recovered.released_completed_reason(42).is_none());
+            assert!(recovered.agent_status().released.is_empty());
+        }
+    }
+
+    #[test]
     fn monitor_requeue_releases_a_stale_completion_hold_instead_of_refusing_not_held() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -12856,6 +13064,7 @@ mod tests {
                     state: crate::issue_monitor::IssueCompletionState::Completed,
                     issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
                     evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                    released_reason: None,
                 }],
                 ..crate::IssueMonitorPrefs::default()
             },
@@ -12870,6 +13079,7 @@ mod tests {
                 project_root: Some(repo),
                 number: 42,
                 reason: "operator recovery".to_string(),
+                force: false,
             },
             &mut out,
         )
