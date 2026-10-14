@@ -4713,6 +4713,9 @@ mod tests {
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             )),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            work_events_ingest_queue: Arc::new(
+                crate::work_events_ingest::WorkEventsIngestQueue::default(),
+            ),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
