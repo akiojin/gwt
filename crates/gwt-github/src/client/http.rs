@@ -868,6 +868,22 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("graphql json: {e}")))?;
         if let Some(errs) = value.get("errors").filter(|errors| !errors.is_null()) {
+            // These numbered reads use the shared Issue/PR namespace. Only
+            // a NOT_FOUND at that exact resource path proves absence;
+            // permission, rate-limit and other GraphQL failures stay intact.
+            if matches!(query, FETCH_ISSUE_QUERY | FETCH_ISSUE_UPDATED_AT_QUERY)
+                && errs.as_array().is_some_and(|errors| {
+                    !errors.is_empty()
+                        && errors.iter().all(|error| {
+                            error["type"] == "NOT_FOUND"
+                                && error["path"] == json!(["repository", "issue"])
+                        })
+                })
+            {
+                if let Some(number) = variables["number"].as_u64() {
+                    return Err(ApiError::NotFound(IssueNumber(number)));
+                }
+            }
             // Issue #3928: GitHub answers a secondary rate limit with HTTP 200
             // and a `RATE_LIMIT` entry in the response body, so a status-only
             // check sees a healthy call. Classifying it here — the way the
@@ -1977,12 +1993,15 @@ const FETCH_ISSUE_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!,$after:String){
   rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
-    issue(number:$number){
-      number title body state updatedAt
-      labels(first:50){nodes{name}}
-      comments(first:100, after:$after){
-        nodes{databaseId body updatedAt}
-        pageInfo{ hasNextPage endCursor }
+    issue: issueOrPullRequest(number:$number){
+      __typename
+      ... on Issue {
+        number title body state updatedAt
+        labels(first:50){nodes{name}}
+        comments(first:100, after:$after){
+          nodes{databaseId body updatedAt}
+          pageInfo{ hasNextPage endCursor }
+        }
       }
     }
   }
@@ -1993,7 +2012,7 @@ const FETCH_ISSUE_UPDATED_AT_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!){
   rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
-    issue(number:$number){ updatedAt }
+    issue: issueOrPullRequest(number:$number){ __typename ... on Issue { updatedAt } }
   }
 }
 "#;
@@ -2073,6 +2092,9 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
             if issue.is_null() {
                 return Err(ApiError::NotFound(number));
             }
+            if issue["__typename"] == "PullRequest" {
+                return Err(ApiError::PullRequestInsteadOfIssue(number));
+            }
             let updated_at = issue
                 .get("updatedAt")
                 .and_then(Value::as_str)
@@ -2101,6 +2123,9 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
                 .pointer("/data/repository/issue")
                 .filter(|issue| !issue.is_null())
                 .ok_or(ApiError::NotFound(number))?;
+            if issue["__typename"] == "PullRequest" {
+                return Err(ApiError::PullRequestInsteadOfIssue(number));
+            }
             let (_, has_next, next_cursor) = page_connection(issue, &["comments"], operation)
                 .map_err(|error| remap_partial_page(error, completed_pages))?;
             let page = parse_graphql_issue(issue)?;

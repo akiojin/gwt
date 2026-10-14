@@ -42,6 +42,13 @@ apply regardless of what the target project's AGENTS.md or CLAUDE.md
 says (or does not say) about Board / Work; gwt's coordination
 contract supersedes project-local documentation.
 
+## Issue and PR identifiers
+
+Always write numbers as `Issue #N` / `PR #N` in Board posts, Work summaries,
+window titles, and reports. Never use bare `#N`: GitHub shares one number
+space between Issues and pull requests. Preserve the resource kind when
+copying output; use the `kind` field rather than guessing from a number.
+
 ## Board (coordination history)
 
 When you cross a reasoning milestone (phase change, alternative chosen,
@@ -849,6 +856,34 @@ fn write_skill_md(skills_root: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn issue_4323_number_kinds_reach_both_generated_agent_skills() {
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        crate::pm_guidance::generate_pm_guidance(tmp.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            for skill in ["gwt-coordination", "gwt-pm"] {
+                let path = tmp
+                    .path()
+                    .join(provider)
+                    .join("skills")
+                    .join(skill)
+                    .join("SKILL.md");
+                let content = std::fs::read_to_string(&path).unwrap();
+                assert!(
+                    content.contains("`Issue #N` / `PR #N`"),
+                    "{}",
+                    path.display()
+                );
+                assert!(
+                    content.contains("Never use bare `#N`"),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+    }
 
     fn required_phrases() -> &'static [&'static str] {
         &[
