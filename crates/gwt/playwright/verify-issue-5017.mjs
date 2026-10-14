@@ -182,6 +182,9 @@ if (command === 'curl') {
 if (command === 'npx' || command === 'bunx') refuse();
 if (command === 'gh') {
   log('gh-argv.jsonl', args);
+  if (args.join(' ') === 'pr list --json number,title,headRefName,state --state all --limit 999') {
+    console.log('[]'); process.exit(0);
+  }
   if (args.length === 1 && args[0] === '--version') {
     console.log('gh version 2.80.0'); process.exit(0);
   }

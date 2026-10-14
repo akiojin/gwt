@@ -72,16 +72,6 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     release = await acquireLiveGwtBackendLock(backend.url, info);
     await gotoLiveGwt(page, backend.url, { enableTestBridge: true });
     await openLiveGwtProject(page, backend.project);
-    await page.evaluate(() => document.dispatchEvent(
-      new CustomEvent("settings:open", { detail: { target: "supported-agents" } }),
-    ));
-    settings = page.locator('.workspace-window[data-preset="settings"]').last();
-    await expect(settings).toBeVisible();
-    await expect(settings.getByRole("tab", { name: "Supported Agents", exact: true }))
-      .toHaveAttribute("aria-selected", "true");
-    panel = settings.locator('[data-settings-panel="supported-agents"]');
-    await expect(panel).toBeVisible();
-    await expect(panel.locator("tbody [data-agent-id]")).toHaveCount(8);
     const migration = page.locator("#migration-modal.open");
     if (await migration.count()) {
       await migration.getByRole("button", { name: "Migrate", exact: true }).click();
@@ -91,12 +81,20 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
           entry.payload.kind === "migration_done")?.payload.branch_worktree_path,
       )).jsonValue());
       await openLiveGwtProject(page, backend.project);
-      await page.evaluate(() => document.dispatchEvent(
-        new CustomEvent("settings:open", { detail: { target: "supported-agents" } }),
-      ));
-      await expect(panel).toBeVisible();
-      await expect(panel.locator("tbody [data-agent-id]")).toHaveCount(8);
     }
+    await page.evaluate(() => document.dispatchEvent(
+      new CustomEvent("settings:open", { detail: { target: "supported-agents" } }),
+    ));
+    settings = page.locator('.workspace-window[data-preset="settings"]').last();
+    await expect(settings).toBeVisible();
+    await expect(settings.getByRole("tab", { name: "Supported Agents", exact: true }))
+      .toHaveAttribute("aria-selected", "true");
+    panel = settings.locator('[data-settings-panel="supported-agents"]');
+    await expect(panel).toBeVisible();
+    const catalogAfter = await cursor(page);
+    await sendLiveGwtEvent(page, { kind: "list_supported_agents" });
+    await catalog(page, catalogAfter);
+    await expect(panel.locator("tbody [data-agent-id]")).toHaveCount(8);
     await expect(panel.locator(".settings-help")).toContainText("At the next app startup");
     await expect(panel.locator(".settings-help")).toContainText("installed agents with a verified update route");
     await expect(panel.locator(".settings-help")).toContainText("Nothing is installed automatically");
@@ -202,7 +200,8 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     await expect(row).toContainText("Latest");
     await expect(row.getByRole("button", { name: /^Update / })).toHaveCount(0);
     expect((await lines<string[]>(join(backend.home, "gh-argv.jsonl")))
-      .every(args => args.join(" ") === "--version" || args.join(" ") === "copilot --version"),
+      .every(args => ["--version", "copilot --version",
+        "pr list --json number,title,headRefName,state --state all --limit 999"].includes(args.join(" "))),
     "GitHub Copilot detection cannot invoke metadata or an unverified updater").toBe(true);
     expect(await lines(join(backend.home, "native-update-argv.jsonl")))
       .toEqual([{ command: "agy", args: ["update"] }]);
@@ -346,8 +345,10 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     await page.evaluate(() => document.dispatchEvent(
       new CustomEvent("settings:open", { detail: { target: "supported-agents" } }),
     ));
+    const persistedAfter = await cursor(page);
+    await sendLiveGwtEvent(page, { kind: "list_supported_agents" });
+    const persisted = await catalog(page, persistedAfter);
     await expect(automatic).toBeChecked();
-    const persisted = await catalog(page);
     expect(persisted.auto_update).toBe(true);
     await screenshot(settings, info, "supported-agents-updated");
   });
