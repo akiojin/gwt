@@ -105,7 +105,10 @@ pub fn host_process_liveness(pid: u32) -> Option<bool> {
     {
         // SAFETY: kill(pid, 0) returns 0 if the process exists, -1
         // with ESRCH if it does not. We never deliver a real signal.
-        let pid = libc::pid_t::try_from(pid).ok()?;
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            // Values outside pid_t's positive range cannot name a Host.
+            return Some(false);
+        };
         let rc = unsafe { libc::kill(pid, 0) };
         if rc == 0 {
             return Some(true);
@@ -607,17 +610,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn far_unused_pid_is_not_alive() {
-        // Use `i32::MAX as u32` so the value stays positive after the
-        // `pid as libc::pid_t` cast inside `is_process_alive`. Going
-        // higher (e.g. `u32::MAX - 1`) wraps to a negative `pid_t` and
-        // `kill(-N, 0)` probes process *group* `N` instead of a far
-        // PID, which is a different semantic and can flake on
-        // runners where group 2 exists.
-        //
-        // `i32::MAX` (~2.1 billion) is far past any realistic OS
-        // pid_t allocation window today; if this ever flakes on a CI
-        // runner we'll have learned that pid recycling has reached
-        // extreme territory.
+        // Invalid positive PIDs are absent, never negative process groups or
+        // uncertain live holders (the launch recovery fixtures use these IDs).
         assert!(!is_process_alive(i32::MAX as u32));
+        assert!(!is_process_alive(u32::MAX - 7));
+        assert_eq!(super::host_process_liveness(u32::MAX - 7), Some(false));
     }
 }
