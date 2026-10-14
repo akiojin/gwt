@@ -112,12 +112,13 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
   }
   function openTab(id) {
     const tile = tiles.get(id);
-    if (!tile) return;
+    if (!tile) return false;
     if (!tabs.has(id)) {
       addTab(id, tile.querySelector("h3").textContent);
     }
     select(id);
     tabs.get(id).focus();
+    return true;
   }
   function addTab(id, label) {
     const entry = document.createElement("div");
@@ -222,7 +223,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
     if (changed) onLayout();
   }
   const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
-  return { element, sync, setPreviewHost,
+  return { element, sync, setPreviewHost, openTab,
     dispose() { unsubscribe(); setPreviewHost(null); },
     contains: (id) => tiles.has(id),
     isVisible: (id) => tiles.has(id) && !tiles.get(id).hidden,

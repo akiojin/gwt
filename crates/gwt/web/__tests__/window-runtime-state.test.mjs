@@ -111,7 +111,7 @@ test("telemetry mapping projects runtime states to status strip states", () => {
   assert.equal(mapAgentTelemetryState("future-state"), "idle");
 });
 
-test("agent focus candidates include Canvas presets or non-empty agent ids, including hidden tabs", () => {
+test("agent focus candidates match Agents view, including off-canvas and hidden tabs but excluding PM", () => {
   const windows = [
     {
       id: "idle-agent-id",
@@ -128,6 +128,7 @@ test("agent focus candidates include Canvas presets or non-empty agent ids, incl
       tab_group_active: false,
     },
     { id: "running-codex", preset: "codex", status: "running" },
+    { id: "pm", preset: "codex", status: "running", is_pm: true },
     { id: "plain-shell", preset: "shell", status: "running" },
     {
       id: "blank-agent-id",
@@ -153,7 +154,11 @@ test("agent focus candidates include Canvas presets or non-empty agent ids, incl
   );
   assert.equal(
     selectNextAgentFocusWindowId(windows, "running-codex", "forward"),
-    "idle-agent-id",
+    "kanban-agent",
+  );
+  assert.equal(
+    selectNextAgentFocusWindowId(windows, "kanban-agent", "forward"),
+    "starting-hidden-tab",
   );
 });
 
@@ -298,10 +303,10 @@ test("agent focus cycling returns null for no candidates and the same id for one
       [
         { id: "shell", preset: "shell", status: "running" },
         {
-          id: "kanban-agent",
+          id: "pm",
           preset: "agent",
           status: "running",
-          placement: { kind: "agent_kanban" },
+          is_pm: true,
         },
       ],
       "shell",

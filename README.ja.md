@@ -1072,10 +1072,15 @@ project 固有の規約を明示的に渡すには、
 - `Tile` で表示中のウィンドウをグリッド整列
 - `Stack` でタイトルバーを残したまま重ねて表示
 - `Align` でウィンドウサイズを変えずにグリッド整列
-- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で Canvas 上の Agent を
-  状態順（running/starting → waiting/idle → その他）に切り替え
-  - Agent 以外はスキップし、非表示の Agent タブは選択時に表示して、対象の
-    Agent を中央へ寄せます
+
+## Agent の巡回
+
+`Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で、個別 Agent タブを
+状態順（running/starting → waiting/idle → その他）に選択します。
+Issue 内に表示された Agent も含み、PM と Shell はスキップします。
+分割表示を維持し、選んだターミナルに入力フォーカスを移します。
+選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
+再び開けます。
 
 ## Operator デザイン言語 (SPEC-2356)
 
