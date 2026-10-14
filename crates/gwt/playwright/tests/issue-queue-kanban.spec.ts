@@ -463,6 +463,17 @@ test("T-7b.2b.2: Running tier uses exact live window and clears stale explanatio
   const popup = page.locator('.issue-control-explanation[role="tooltip"]');
   await expect(chip).toHaveText("Running tier 0");
   await expect(select.locator('[tabindex="0"]')).toHaveCount(0);
+  // Settle the existing preview's initial agent uptime projection before pressing a row.
+  await page.evaluate(() => (window as any).__queueFocusResponse());
+  await select.hover();
+  const pressedRow = await select.elementHandle();
+  await page.mouse.down();
+  await page.evaluate(() => (window as any).__queueFocusResponse());
+  expect(await pressedRow!.evaluate(node => node.isConnected), "focus response preserves the pressed row").toBe(true);
+  await page.mouse.up();
+  const detail = page.locator(".knowledge-detail-pane");
+  await expect(detail.getByText("Description for #5", {exact:true})).toBeVisible();
+  await detail.locator('[data-action="close-issue-preview"]').click();
   await page.mouse.move(1590, 1090);
   await select.focus();
   await expect(popup).toContainText("Acknowledged launch tier 0 (zero-based tiers)");
@@ -674,6 +685,11 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
         this.emit({kind:"issue_monitor_status",status});
       }; fixture.__queueAgentState=(state:string)=>{
         this.emit({kind:"terminal_status",id:"tab-queue::agent-5",status:state});
+      }; fixture.__queueFocusResponse=()=>{
+        const workspace=fixture.__queueWorkspace;
+        const issue=workspace.tabs[0].workspace.windows.find((item:any)=>item.preset==="issue");
+        issue.z_index+=1;
+        this.dispatchEvent(new MessageEvent("message",{data:JSON.stringify({kind:"workspace_state",workspace})}));
       }; fixture.__queueAgentWindow=(extra:any)=>{
         const workspace=fixture.__queueWorkspace;
         const windows=workspace.tabs[0].workspace.windows;

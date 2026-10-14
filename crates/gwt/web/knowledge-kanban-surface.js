@@ -4743,7 +4743,11 @@ export function createKnowledgeKanbanSurface({
             ];
             if (windowCatalogModel && state.kind === "issue") {
               state.monitorSubscriptions.push(windowCatalogModel.subscribe(model =>
-                JSON.stringify([model.catalog.appState, model.catalog.runtimeStates]), () => {
+                JSON.stringify(model.catalog.appState.tabs.flatMap(tab => tab.workspace?.windows || [])
+                  .map(windowData => [windowData.id, windowData.linked_issue_number,
+                    windowData.placement?.kind === "issue_preview" ? windowData.placement.issue_number : null,
+                    Object.hasOwn(model.catalog.runtimeStates, windowData.id)
+                      ? model.catalog.runtimeStates[windowData.id] : windowData.status])), () => {
                 if (mounted) renderKnowledgeBridge(windowData.id);
               }));
             }

@@ -716,7 +716,7 @@ test("T-7b.2a: tier chips show only reported minimums and agent failures with at
 test("T-7b.2b.2: Running tier follows exact confirmation and raw catalog runtime", async (t) => {
   const agent = { id: "agent-11", status: "running", linked_issue_number: 11 };
   const windowCatalogModel = createUiStateStore({ catalog: {
-    appState: { tabs: [{ workspace: { windows: [agent] } }] }, runtimeStates: {},
+    appState: { tabs: [{ workspace: { windows: [agent, { id: "win-1", z_index: 1 }] } }] }, runtimeStates: {},
   } });
   const { body, surface, state } = await makeFixture({ surface: { windowCatalogModel } });
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -729,6 +729,10 @@ test("T-7b.2b.2: Running tier follows exact confirmation and raw catalog runtime
   const selectedRow = body.querySelector(".knowledge-row-select");
   windowCatalogModel.update(model => ({ catalog: { ...model.catalog, focusedId: "win-1", version: 1 } }));
   assert.ok(body.querySelector(".knowledge-row-select") === selectedRow, "focusing the Issues window must preserve the click target");
+  windowCatalogModel.update(model => ({ catalog: { ...model.catalog,
+    appState: { tabs: [{ workspace: { windows: [agent, { id: "win-1", z_index: 2 }] } }] },
+  } }));
+  assert.ok(body.querySelector(".knowledge-row-select") === selectedRow, "the server focus response must preserve the pressed row");
   assert.ok(chip().classList.contains("knowledge-monitor-chip"));
   assert.equal(chip().hasAttribute("tabindex"), false);
   assert.match(body.querySelector(".knowledge-row-select").getAttribute("aria-description"), /acknowledged.*zero-based.*running/i);
