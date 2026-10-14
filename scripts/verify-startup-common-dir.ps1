@@ -21,10 +21,57 @@ if (-not (Test-Path -LiteralPath $cli) -or -not (Test-Path -LiteralPath $resolve
   throw "Pinned Playwright $version is missing; run scripts/run-visual-tests.sh --list once."
 }
 $node = (Get-Command node -CommandType Application).Source
+# Keep the observer outside tracked source. Both arms use this same proxy;
+# Rust preserves argv/cwd/env/stdio without shell parsing or another crate.
+$realGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+$proxyDir = Join-Path $repoRoot 'target/startup-common-dir-observer'
+$proxyBinary = Join-Path $proxyDir 'git.exe'
+if ($realGit -eq $proxyBinary) { throw 'The observer must resolve the real Git executable before changing PATH.' }
+[void](New-Item -ItemType Directory -Path $proxyDir -Force)
+$proxySource = @'
+use std::{env, fs::OpenOptions, io::{self, Write}, process::Command, time::Instant};
+use std::os::windows::process::CommandExt;
+
+fn main() {
+    let real = env::var_os("GWT_REAL_GIT").expect("Git observer requires GWT_REAL_GIT");
+    let args: Vec<_> = env::args_os().skip(1).collect();
+    let observed = args.iter().any(|arg| arg == "rev-parse")
+        && args.iter().any(|arg| arg == "--git-common-dir");
+    let started = Instant::now();
+    let status = Command::new(real).args(&args).creation_flags(0x08000000).status();
+    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    if observed {
+        let write_receipt = || -> io::Result<()> {
+            let path = env::var_os("GWT_COMMON_DIR_RECORD_FILE")
+                .ok_or_else(|| io::Error::other("Git observer requires a census file"))?;
+            let success = status.as_ref().is_ok_and(|status| status.success());
+            let receipt = format!(
+                "{{\"success\":{},\"count\":1,\"real_git_duration_ms\":{:.3}}}\n",
+                success, duration_ms);
+            // One append write keeps concurrent command receipts together.
+            let mut file = OpenOptions::new().append(true).open(path)?;
+            file.write_all(receipt.as_bytes())?;
+            file.sync_data()
+        };
+        if write_receipt().is_err() {
+            eprintln!("Git observer could not write its census receipt");
+            std::process::exit(125);
+        }
+    }
+    std::process::exit(status.ok().and_then(|status| status.code()).unwrap_or(125));
+}
+'@
+$proxySourcePath = Join-Path $proxyDir 'git-observer.rs'
+[IO.File]::WriteAllText($proxySourcePath, $proxySource)
+$rustc = (Get-Command rustc -CommandType Application).Source
+& $rustc --edition=2021 -C opt-level=1 $proxySourcePath -o $proxyBinary
+if ($LASTEXITCODE -ne 0) { throw 'Standalone Git observer compilation failed.' }
+
 $runnerEnvironment = @{
   GWT_PLAYWRIGHT_STARTUP_COMMON_DIR='1'; GWT_PLAYWRIGHT_CHECKOUT_ROOT=$repoRoot;
   GWT_COMMON_DIR_CONTROL_SHA=$ControlSha; GWT_COMMON_DIR_TREATMENT_SHA=(& git rev-parse HEAD).Trim();
   GWT_PLAYWRIGHT_NODE_MODULES=(Join-Path $deps 'node_modules');
+  GWT_COMMON_DIR_PROXY_DIR=$proxyDir; GWT_COMMON_DIR_REAL_GIT=$realGit;
   NODE_OPTIONS="--require `"$($resolver.Replace('\', '/'))`" $env:NODE_OPTIONS"
 }
 $savedEnvironment = @{}

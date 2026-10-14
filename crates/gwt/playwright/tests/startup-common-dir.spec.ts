@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
 
@@ -70,13 +70,23 @@ async function runArm(binary: string, arm: string, fixture: string, project: str
   const urlFile = join(home, "browser-url.txt");
   env.GWT_BROWSER_URL_FILE = urlFile;
   env.GWT_PROJECT_ROOT = project;
+  const recordFile = join(home, "common-dir-census.jsonl");
+  await writeFile(recordFile, "", { flag: "wx" });
+  // Observe only this GUI's Git children; fixture setup and gwtd probes keep
+  // the real PATH and never write to the arm's census.
+  const guiEnv = { ...env };
+  const originalPath = Object.entries(guiEnv).find(([key]) => key.toLowerCase() === "path")?.[1] ?? "";
+  for (const key of Object.keys(guiEnv)) if (key.toLowerCase() === "path") delete guiEnv[key];
+  guiEnv.PATH = `${process.env.GWT_COMMON_DIR_PROXY_DIR}${delimiter}${originalPath}`;
+  guiEnv.GWT_REAL_GIT = process.env.GWT_COMMON_DIR_REAL_GIT;
+  guiEnv.GWT_COMMON_DIR_RECORD_FILE = recordFile;
   const pageErrors: string[] = [];
   const consoleErrors: string[] = [];
   const pageError = (error: Error) => pageErrors.push(error.message);
   const consoleError = (message: ConsoleMessage) => { if (message.type() === "error") consoleErrors.push(message.text()); };
   page.on("pageerror", pageError);
   page.on("console", consoleError);
-  const child = spawn(binary, ["--no-tray", "--no-open"], { cwd: project, env,
+  const child = spawn(binary, ["--no-tray", "--no-open"], { cwd: project, env: guiEnv,
     windowsHide: true, stdio: ["ignore", "ignore", "ignore"] });
   const ownedPid = child.pid;
   let launchError: Error | undefined;
@@ -130,7 +140,11 @@ async function runArm(binary: string, arm: string, fixture: string, project: str
   // Freeze all completed commands from this GUI startup, including background
   // completions after restore_drain. The perf observer covers the same window.
   rows = [...await logRows(join(home, ".gwt/logs")), ...await logRows(join(home, ".gwt/projects", key, "logs"))];
-  // Query after freezing logs, so the read cannot add measured commands.
+  const actual = (await readFile(recordFile, "utf8")).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  expect(actual.every((row) => row.count === 1 && row.success === true
+    && Number.isFinite(row.real_git_duration_ms) && row.real_git_duration_ms >= 0),
+  `${arm} Git census must contain successful, valid receipts`).toBe(true);
+  // Query after freezing both logs, so the read cannot add measured commands.
   const envelope = operation("perf.startup", env, project);
   const report = (typeof envelope.output === "string" ? JSON.parse(envelope.output) : envelope.output).startup;
   expect(report.phases.some((phase: any) => phase.phase === "restore_drain")).toBe(true);
@@ -144,8 +158,11 @@ async function runArm(binary: string, arm: string, fixture: string, project: str
   const unique = [...new Map(finished.map((row) => [`${row.timestamp}:${row.fields.spawn_id}`, row])).values()];
   // Persist numeric evidence only; do not copy command labels, HOME paths,
   // credential-bearing environment variables, or raw process output.
-  return { arm, owned_pid: ownedPid, cleanup: true, git_common_dir_count: unique.length,
-    git_common_dir_ms: unique.reduce((sum, row) => sum + Number(row.fields.duration_ms), 0),
+  return { arm, owned_pid: ownedPid, cleanup: true,
+    actual_git_common_dir_count: actual.length,
+    actual_git_common_dir_ms: actual.reduce((sum, row) => sum + row.real_git_duration_ms, 0),
+    logged_git_common_dir_count: unique.length,
+    logged_git_common_dir_ms: unique.reduce((sum, row) => sum + Number(row.fields.duration_ms), 0),
     // The frozen control producer has no command-specific startup phase;
     // a new reader's empty aggregate cannot establish old-producer telemetry.
     perf_git_common_dir_count: arm === "treatment" ? report.git_common_dir_count : null,
@@ -161,6 +178,12 @@ test("startup common-dir control and treatment use one isolated fixture", async 
   test.setTimeout(300_000);
   expect(process.env.GWT_COMMON_DIR_CONTROL_SHA).toMatch(/^[0-9a-f]{40}$/);
   expect(process.env.GWT_COMMON_DIR_TREATMENT_SHA).toMatch(/^[0-9a-f]{40}$/);
+  // An opted-in measurement without its observer fails; it cannot report a
+  // false zero by skipping or reading only the logged subset.
+  expect(process.env.GWT_COMMON_DIR_PROXY_DIR, "Git observer directory").toBeTruthy();
+  expect(process.env.GWT_COMMON_DIR_REAL_GIT, "absolute real Git executable").toBeTruthy();
+  await access(join(process.env.GWT_COMMON_DIR_PROXY_DIR!, `git${suffix}`));
+  await access(process.env.GWT_COMMON_DIR_REAL_GIT!);
   for (const binary of [control, treatment, gwtd]) await access(binary);
   const theme = testInfo.project.name.includes("light") ? "light" : "dark";
   await page.addInitScript((value) => localStorage.setItem("gwt:ui:theme", value), theme);
@@ -179,12 +202,15 @@ test("startup common-dir control and treatment use one isolated fixture", async 
     expect(git("rev-parse", "HEAD").trim()).toBe(fixtureBase);
     arms.push(await runArm(treatment, "treatment", fixture, project, page, testInfo));
     expect(git("rev-parse", "HEAD").trim()).toBe(fixtureBase);
-    expect(arms[1].git_common_dir_count).toBeLessThanOrEqual(1);
-    expect(arms[1].git_common_dir_ms).toBeLessThan(500);
-    expect(arms[1].perf_git_common_dir_count).toBe(arms[1].git_common_dir_count);
-    expect(arms[1].perf_git_common_dir_ms).toBe(arms[1].git_common_dir_ms);
+    for (const arm of arms) expect(arm.logged_git_common_dir_count).toBeLessThanOrEqual(arm.actual_git_common_dir_count);
+    expect(arms[1].actual_git_common_dir_count).toBeLessThanOrEqual(1);
+    expect(arms[1].actual_git_common_dir_ms).toBeLessThan(500);
+    expect(arms[1].actual_git_common_dir_count).toBe(arms[1].logged_git_common_dir_count);
+    expect(arms[1].perf_git_common_dir_count).toBe(arms[1].logged_git_common_dir_count);
+    expect(arms[1].perf_git_common_dir_ms).toBe(arms[1].logged_git_common_dir_ms);
   } finally {
     const evidence = { schema_version: 1, theme, fixture_base: fixtureBase, worktrees: 6, sessions: 0,
+      census: "GUI-only PATH Git proxy; actual duration excludes proxy startup, logged duration includes it",
       control_source_sha: process.env.GWT_COMMON_DIR_CONTROL_SHA,
       treatment_source_sha: process.env.GWT_COMMON_DIR_TREATMENT_SHA,
       control_binary_sha256: createHash("sha256").update(await readFile(control)).digest("hex"),
