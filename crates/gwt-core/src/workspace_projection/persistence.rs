@@ -177,7 +177,7 @@ fn write_workspace_file_if_absent(canonical_path: &Path, bytes: &[u8]) -> Result
     {
         let mut file = fs::File::create(&temp_path)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        sync_file(&file, canonical_path)?;
     }
     match fs::hard_link(&temp_path, canonical_path) {
         Ok(()) => {
@@ -5522,14 +5522,14 @@ fn repair_jsonl_tail(path: &Path) -> Result<()> {
     if serde_json::from_slice::<serde_json::Value>(&bytes[tail_start..]).is_ok() {
         let mut file = fs::OpenOptions::new().append(true).open(path)?;
         file.write_all(b"\n")?;
-        file.sync_all()?;
+        sync_file(&file, path)?;
     } else {
         // Truncation needs real write access: a Windows handle opened for
         // append carries only FILE_APPEND_DATA, so `set_len` would fail with
         // ERROR_ACCESS_DENIED there.
         let file = fs::OpenOptions::new().write(true).open(path)?;
         file.set_len(tail_start as u64)?;
-        file.sync_all()?;
+        sync_file(&file, path)?;
     }
     Ok(())
 }
@@ -7487,7 +7487,7 @@ pub fn append_workspace_journal_entry_to_path(
     serde_json::to_writer(&mut file, entry)
         .map_err(|error| GwtError::Other(format!("workspace journal json: {error}")))?;
     file.write_all(b"\n")?;
-    file.sync_all()?;
+    sync_file(&file, path)?;
     if let Some(parent) = path.parent() {
         sync_directory(parent)?;
     }
@@ -8278,7 +8278,7 @@ fn write_workspace_work_event_shard_bytes(
             .write(true)
             .open(&temp_path)?;
         temp.write_all(canonical)?;
-        temp.sync_all()?;
+        sync_file(&temp, shard_path)?;
     }
 
     match fs::hard_link(&temp_path, shard_path) {
@@ -8347,7 +8347,7 @@ fn append_workspace_work_event_records_to_path(
         .append(true)
         .open(path)?;
     file.write_all(&bytes)?;
-    file.sync_all()?;
+    sync_file(&file, path)?;
     if let Some(parent) = path.parent() {
         sync_directory(parent)?;
     }
@@ -8942,7 +8942,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     {
         let mut file = fs::File::create(&tmp)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        sync_file(&file, path)?;
     }
     fs::rename(&tmp, path)?;
     if let Some(parent) = path.parent() {
@@ -8977,14 +8977,23 @@ fn create_dir_all_durable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<()> {
-    fs::File::open(path)?.sync_all()?;
+/// Production always syncs; only this module's unit tests can override it.
+fn sync_file(file: &fs::File, _path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if tests::skip_test_sync(tests::SyncCall::File(_path.to_path_buf())) {
+        return Ok(());
+    }
+    file.sync_all()?;
     Ok(())
 }
 
-#[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if tests::skip_test_sync(tests::SyncCall::Directory(_path.to_path_buf())) {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    fs::File::open(_path)?.sync_all()?;
     Ok(())
 }
 
