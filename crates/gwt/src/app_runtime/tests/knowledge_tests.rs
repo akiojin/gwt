@@ -268,7 +268,16 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
         },
     );
     assert!(immediate.is_empty());
-    wait_for_knowledge_view_dispatch(&recorded_events, &window_id);
+    let initial_events = wait_for_knowledge_view_dispatch(&recorded_events, &window_id);
+    assert_eq!(
+        initial_events.len(),
+        1,
+        "Issue list completion must send entries without generating a preview detail"
+    );
+    assert!(matches!(
+        &initial_events[0].event,
+        BackendEvent::KnowledgeEntries { .. }
+    ));
     let scans_after_full_load = runtime
         .knowledge_related_snapshot
         .lock()
@@ -650,19 +659,7 @@ fn app_runtime_manual_knowledge_refresh_replies_through_async_dispatch() {
                                 && entries.len() == 1
                                 && entries[0].number == 43
                         )
-                    }) && dispatched.iter().any(|outbound| {
-                        matches!(
-                            &outbound.event,
-                            BackendEvent::KnowledgeDetail {
-                                id,
-                                request_id,
-                                detail,
-                                ..
-                            } if id == &window_id
-                                && *request_id == Some(31)
-                                && detail.number == Some(43)
-                        )
-                    })
+                    }) && dispatched.len() == 1
             )
         })
     });

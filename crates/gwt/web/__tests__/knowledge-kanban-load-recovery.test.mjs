@@ -127,6 +127,19 @@ function seedListAndAuthoritativeA(surface, kind) {
   return surface.knowledgeBridgeStateMap.get("win-1");
 }
 
+test("Issue #5396: semantic list completion does not request an implicit preview", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    const before = sent.length;
+    surface.applyKnowledgeReceiveEvent(searchResultsEvent(requestId));
+    assert.equal(sent.slice(before).filter(message => message.kind === "select_knowledge_bridge_entry").length, 0);
+  });
+});
+
 for (const kind of ["issue", "spec"]) {
   test(`selecting row B renders the local preview synchronously (${kind} preset, AS-17.4)`, async () => {
     const mod = await importSurfaceModule();

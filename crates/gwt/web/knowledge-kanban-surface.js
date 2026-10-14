@@ -998,6 +998,7 @@ export function createKnowledgeKanbanSurface({
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
+      const issueDetailRenderKeys = new WeakMap();
 
       function issueMonitorStateText(state) {
         switch (String(state || "")) {
@@ -3670,6 +3671,33 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderIssueDetailPane(windowId, state, detailPane, { agentPreview = true } = {}) {
+        // #5396: list/status refreshes and duplicate detail replies must retain
+        // the native disclosure, scroll and focus state of an unchanged preview.
+        const number = state.detail?.number ?? state.selectedNumber;
+        const cachedEntry = issueDetailEntry(state, number);
+        const entry = cachedEntry || state.detail ? queueProjectedEntry(cachedEntry || {
+          number: Number(number), title: state.detail.title,
+          state: state.detail.state, labels: state.detail.labels || [],
+        }) : null;
+        const work = entry ? issueWorkRowForEntry(getActiveWorkProjection?.(), entry) : null;
+        const attention = work ? workAttentionFor?.(work) || null : null;
+        const faces = entry ? issueRowFaces(windowId, entry, work) : {};
+        const queue = canonicalQueuedKnowledgeEntries(state);
+        const key = JSON.stringify([
+          state.detail, state.detailLoading, state.selectedNumber, state.previewHidden,
+          state.issueDetailView, agentPreview, state.error, entry, work, attention,
+          queue.findIndex(item => item.number === entry?.number), queue.length,
+          [faces.inlineWindow, faces.canvasWindow].map(target => target ? [
+            target.id, target.status, windowDisplayTitle?.(target) || target.title,
+            windowRoleBadgeLabel?.(target) || target.agent_id,
+          ] : null),
+        ]);
+        if (issueDetailRenderKeys.get(detailPane) === key && !state.renderError) return;
+        renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview });
+        issueDetailRenderKeys.set(detailPane, key);
+      }
+
+      function renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview = true } = {}) {
         detailPane.innerHTML = "";
         detailPane.hidden = agentPreview && state.previewHidden === true;
         if (detailPane.hidden) return;
@@ -5007,7 +5035,7 @@ export function createKnowledgeKanbanSurface({
             } else if (isSilentSemanticKind(activeIntent.kind)) {
               invalidateKnowledgeSemanticRetry(state);
             }
-            if (selectionIsCurrent && state.selectedNumber) {
+            if (normalizeKnowledgeKind(state.kind) === "pr" && selectionIsCurrent && state.selectedNumber) {
               dispatchKnowledgeDetailRequest(
                 event.id,
                 activeIntent.kind,
@@ -5248,7 +5276,9 @@ export function createKnowledgeKanbanSurface({
             renderIssueDetailPane(windowId, state, element.querySelector(".knowledge-detail-pane"), { agentPreview: state.viewMode !== "split" });
             if (state.error) {
               const detail = element.querySelector(".knowledge-detail-pane");
-              detail?.prepend(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error));
+              if (!detail?.querySelector(".knowledge-notification-badge")) {
+                detail?.prepend(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error));
+              }
             }
             publishIssueControlExplanations(windowId, focus);
             if (focusPreview) element.querySelector(".knowledge-detail-pane")?.focus();

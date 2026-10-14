@@ -327,16 +327,7 @@ mod related_snapshot_cache_tests {
             selected_number: Some(number),
             empty_message: None,
             refresh_enabled: true,
-            detail: gwt::KnowledgeDetailView {
-                number: Some(number),
-                title: format!("Issue {number}"),
-                subtitle: String::new(),
-                state: "open".to_string(),
-                labels: Vec::new(),
-                sections: Vec::new(),
-                launch_issue_number: Some(number),
-                related_works: Vec::new(),
-            },
+            detail: None,
         }
     }
 
@@ -523,7 +514,7 @@ mod related_snapshot_cache_tests {
                 updated_at: "2026-08-03T00:00:00Z".to_string(),
             }]
         );
-        assert_eq!(partial_view.detail.related_works[0].id, "work-42");
+        assert!(partial_view.detail.is_none());
         let retained = snapshots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -868,29 +859,30 @@ fn knowledge_view_events(
     request_id: Option<u64>,
     view: gwt::KnowledgeBridgeView,
 ) -> Vec<OutboundEvent> {
-    vec![
-        OutboundEvent::reply(
-            client_id.clone(),
-            BackendEvent::KnowledgeEntries {
-                id: id.clone(),
-                knowledge_kind: kind,
-                request_id,
-                entries: view.entries,
-                selected_number: view.selected_number,
-                empty_message: view.empty_message,
-                refresh_enabled: view.refresh_enabled,
-            },
-        ),
-        OutboundEvent::reply(
+    let mut events = vec![OutboundEvent::reply(
+        client_id.clone(),
+        BackendEvent::KnowledgeEntries {
+            id: id.clone(),
+            knowledge_kind: kind,
+            request_id,
+            entries: view.entries,
+            selected_number: view.selected_number,
+            empty_message: view.empty_message,
+            refresh_enabled: view.refresh_enabled,
+        },
+    )];
+    if let Some(detail) = view.detail {
+        events.push(OutboundEvent::reply(
             client_id,
             BackendEvent::KnowledgeDetail {
                 id,
                 knowledge_kind: kind,
                 request_id,
-                detail: view.detail,
+                detail,
             },
-        ),
-    ]
+        ));
+    }
+    events
 }
 
 fn reserve_related_snapshot_generation(
@@ -1022,7 +1014,7 @@ fn augment_knowledge_bridge_related_works(
         .entries
         .iter()
         .map(|entry| entry.number)
-        .chain(view.detail.number)
+        .chain(view.detail.as_ref().and_then(|detail| detail.number))
         .collect::<HashSet<_>>();
     if relevant_numbers.is_empty() {
         return HashMap::new();
@@ -1115,9 +1107,12 @@ fn apply_knowledge_bridge_related_works(
                 .collect();
         }
     }
-    if let Some(number) = view.detail.number {
-        if let Some(works) = related_by_number.get(&number) {
-            view.detail.related_works = works.clone();
+    if let Some(detail) = &mut view.detail {
+        if let Some(works) = detail
+            .number
+            .and_then(|number| related_by_number.get(&number))
+        {
+            detail.related_works = works.clone();
         }
     }
 }

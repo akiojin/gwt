@@ -293,7 +293,8 @@ pub struct KnowledgeBridgeView {
     pub selected_number: Option<u64>,
     pub empty_message: Option<String>,
     pub refresh_enabled: bool,
-    pub detail: KnowledgeDetailView,
+    /// Issue/SPEC lists defer detail generation until an explicit selection.
+    pub detail: Option<KnowledgeDetailView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -908,11 +909,6 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
     let selected_number = selected_number
         .filter(|selected| list_items.iter().any(|entry| entry.number == *selected))
         .or_else(|| list_items.first().map(|entry| entry.number));
-    let detail = selected_number
-        .and_then(|selected| entries_by_number.get(&selected).copied())
-        .map(|entry| detail_for_kind(kind, entry, &linked_branches))
-        .unwrap_or_else(|| empty_detail(search_empty_title(kind), "No semantic matches found."));
-
     Ok(KnowledgeSearchOutcome {
         view: KnowledgeBridgeView {
             kind,
@@ -924,7 +920,7 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
                 None
             },
             refresh_enabled: true,
-            detail,
+            detail: None,
         },
         semantic_retry,
     })
@@ -959,12 +955,6 @@ fn build_work_item_view(
         .map(|entry| work_item_list_item(entry, &linked_branches, None))
         .collect::<Vec<_>>();
     let selected_number = resolve_selected_number(&entries, selected_number);
-    let detail = entries
-        .iter()
-        .find(|entry| Some(entry.snapshot.number.0) == selected_number)
-        .map(|entry| work_item_detail_view(entry, &linked_branches))
-        .unwrap_or_else(|| empty_detail("Issue Bridge", "No cached work items available."));
-
     KnowledgeBridgeView {
         kind,
         entries: list_items,
@@ -975,7 +965,7 @@ fn build_work_item_view(
             None
         },
         refresh_enabled: true,
-        detail,
+        detail: None,
     }
 }
 
@@ -989,50 +979,34 @@ fn disabled_pr_view() -> KnowledgeBridgeView {
                 .to_string(),
         ),
         refresh_enabled: false,
-        detail: KnowledgeDetailView {
-            number: None,
-            title: "PR Bridge".to_string(),
-            subtitle: "Unavailable".to_string(),
-            state: "unavailable".to_string(),
-            labels: Vec::new(),
-            sections: vec![knowledge_detail_section(
-                "Status",
-                "PR Bridge is waiting for cache-backed PR list support before it can render data.",
-            )],
-            launch_issue_number: None,
-            related_works: Vec::new(),
-        },
+        detail: Some(disabled_pr_detail()),
+    }
+}
+
+fn disabled_pr_detail() -> KnowledgeDetailView {
+    KnowledgeDetailView {
+        number: None,
+        title: "PR Bridge".to_string(),
+        subtitle: "Unavailable".to_string(),
+        state: "unavailable".to_string(),
+        labels: Vec::new(),
+        sections: vec![knowledge_detail_section(
+            "Status",
+            "PR Bridge is waiting for cache-backed PR list support before it can render data.",
+        )],
+        launch_issue_number: None,
+        related_works: Vec::new(),
     }
 }
 
 fn non_repo_view(kind: KnowledgeKind) -> KnowledgeBridgeView {
-    let title = match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => "Issue Bridge",
-        KnowledgeKind::Pr => "PR Bridge",
-    };
     KnowledgeBridgeView {
         kind,
         entries: Vec::new(),
         selected_number: None,
         empty_message: Some("Knowledge Bridge is available only for Git projects.".to_string()),
         refresh_enabled: false,
-        detail: empty_detail(
-            title,
-            "Knowledge Bridge is available only for Git projects.",
-        ),
-    }
-}
-
-fn empty_detail(title: &str, body: &str) -> KnowledgeDetailView {
-    KnowledgeDetailView {
-        number: None,
-        title: title.to_string(),
-        subtitle: String::new(),
-        state: "idle".to_string(),
-        labels: Vec::new(),
-        sections: vec![knowledge_detail_section("Status", body)],
-        launch_issue_number: None,
-        related_works: Vec::new(),
+        detail: None,
     }
 }
 
@@ -1153,7 +1127,7 @@ fn detail_for_kind(
 ) -> KnowledgeDetailView {
     match kind {
         KnowledgeKind::Issue | KnowledgeKind::Spec => work_item_detail_view(entry, linked_branches),
-        KnowledgeKind::Pr => disabled_pr_view().detail,
+        KnowledgeKind::Pr => disabled_pr_detail(),
     }
 }
 
@@ -1190,13 +1164,6 @@ fn is_exact_search_match(entry: &CacheEntry, query: &str) -> bool {
 
 fn distance_to_match_score(distance: f64) -> u8 {
     ((1.0 - distance) * 100.0).round().clamp(0.0, 100.0) as u8
-}
-
-fn search_empty_title(kind: KnowledgeKind) -> &'static str {
-    match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => "Work Item Search",
-        KnowledgeKind::Pr => "PR Bridge",
-    }
 }
 
 fn issue_detail_view(
@@ -1617,14 +1584,15 @@ Extra context.
             issue_view.empty_message.as_deref(),
             Some("Knowledge Bridge is available only for Git projects.")
         );
-        assert_eq!(issue_view.detail.title, "Issue Bridge");
+        assert!(issue_view.detail.is_none());
 
         let pr_view =
             load_knowledge_bridge(dir.path(), KnowledgeKind::Pr, Some(12), false).expect("pr view");
         assert_eq!(pr_view.kind, KnowledgeKind::Pr);
         assert!(!pr_view.refresh_enabled);
-        assert_eq!(pr_view.detail.title, "PR Bridge");
-        assert_eq!(pr_view.detail.state, "unavailable");
+        let pr_detail = pr_view.detail.expect("disabled PR detail");
+        assert_eq!(pr_detail.title, "PR Bridge");
+        assert_eq!(pr_detail.state, "unavailable");
     }
 
     #[test]
@@ -1685,19 +1653,19 @@ Extra context.
         assert_eq!(issue_entry.queue_position, None);
         assert_eq!(issue_entry.exclusion_reason, None);
         assert_eq!(issue_view.selected_number, Some(11));
-        assert_eq!(issue_view.detail.launch_issue_number, Some(11));
-        assert!(issue_view
-            .detail
+        assert!(issue_view.detail.is_none());
+        let issue_detail =
+            load_knowledge_bridge_detail(&repo, KnowledgeKind::Issue, 11).expect("issue detail");
+        assert_eq!(issue_detail.launch_issue_number, Some(11));
+        assert!(issue_detail
             .sections
             .iter()
             .any(|section| section.title == "Description" && section.body == "Need more tests."));
-        assert!(issue_view
-            .detail
+        assert!(issue_detail
             .sections
             .iter()
             .any(|section| section.title == "Comment 1" && section.body == "Follow-up detail"));
-        assert!(issue_view
-            .detail
+        assert!(issue_detail
             .sections
             .iter()
             .any(|section| section.title == "Linked branches"
@@ -1716,27 +1684,26 @@ Extra context.
         assert_eq!(spec_entry.exclusion_reason, None);
         assert!(spec_entry.meta.contains("Backlog"));
         assert!(!spec_entry.meta.contains("phase/in-progress"));
-        assert_eq!(spec_view.detail.launch_issue_number, Some(22));
-        assert!(spec_view.detail.subtitle.contains("Backlog"));
-        assert!(!spec_view.detail.subtitle.contains("phase/in-progress"));
-        assert!(spec_view
-            .detail
+        assert!(spec_view.detail.is_none());
+        let spec_detail =
+            load_knowledge_bridge_detail(&repo, KnowledgeKind::Spec, 22).expect("spec detail");
+        assert_eq!(spec_detail.launch_issue_number, Some(22));
+        assert!(spec_detail.subtitle.contains("Backlog"));
+        assert!(!spec_detail.subtitle.contains("phase/in-progress"));
+        assert!(spec_detail
             .sections
             .iter()
             .any(|section| section.title == "spec"
                 && section.body.contains("Raise project coverage")));
-        assert!(spec_view
-            .detail
+        assert!(spec_detail
             .sections
             .iter()
             .any(|section| section.title == "plan"));
-        assert!(spec_view
-            .detail
+        assert!(spec_detail
             .sections
             .iter()
             .any(|section| section.title == "tasks"));
-        assert!(spec_view
-            .detail
+        assert!(spec_detail
             .sections
             .iter()
             .any(|section| section.title == "notes"));
@@ -1744,9 +1711,11 @@ Extra context.
         let unified_selected = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(22), false)
             .expect("unified work item bridge");
         assert_eq!(unified_selected.selected_number, Some(22));
-        assert_eq!(unified_selected.detail.launch_issue_number, Some(22));
-        assert!(unified_selected
-            .detail
+        assert!(unified_selected.detail.is_none());
+        let unified_detail = load_knowledge_bridge_detail(&repo, KnowledgeKind::Issue, 22)
+            .expect("unified work item detail");
+        assert_eq!(unified_detail.launch_issue_number, Some(22));
+        assert!(unified_detail
             .sections
             .iter()
             .any(|section| section.title == "spec"));
@@ -1959,10 +1928,9 @@ Extra context.
             ))
             .expect("write markdown issue snapshot");
 
-        let view = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(31), false)
-            .expect("issue bridge");
-        let description = view
-            .detail
+        let detail =
+            load_knowledge_bridge_detail(&repo, KnowledgeKind::Issue, 31).expect("issue detail");
+        let description = detail
             .sections
             .iter()
             .find(|section| section.title == "Description")
@@ -2856,6 +2824,10 @@ exit 1\n",
         assert_eq!(view.entries[2].state, "open");
         assert_eq!(view.entries[2].match_score, Some(80));
         assert_eq!(view.selected_number, Some(22));
+        assert!(
+            view.detail.is_none(),
+            "search must not generate preview detail"
+        );
     }
 
     #[test]
@@ -3087,6 +3059,10 @@ exit 1\n",
         assert!(!view.entries[1].is_spec);
         assert_eq!(view.entries[1].match_score, Some(99));
         assert_eq!(view.selected_number, Some(22));
+        assert!(
+            view.detail.is_none(),
+            "search must not generate preview detail"
+        );
     }
 
     #[test]
