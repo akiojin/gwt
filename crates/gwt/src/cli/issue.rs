@@ -1352,9 +1352,14 @@ fn run_monitor_queue_list<E: CliEnv>(
         .unwrap_or(&crate::process::current_hostname())
         .to_string();
     let queue = prefs.terminal_queues.get(&key).cloned().unwrap_or_default();
-    out.push_str(
-        &serde_json::to_string(&prefs.urgent_queue.projection(&queue)).expect("queue serializes"),
-    );
+    let mut projection =
+        serde_json::to_value(prefs.urgent_queue.projection(&queue)).expect("queue serializes");
+    if let Some(rows) = projection["entries"].as_array_mut() {
+        for row in rows {
+            row["kind"] = "issue".into();
+        }
+    }
+    out.push_str(&serde_json::to_string(&projection).expect("queue serializes"));
     out.push('\n');
     Ok(0)
 }
