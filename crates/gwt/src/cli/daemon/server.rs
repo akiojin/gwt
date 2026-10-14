@@ -20255,6 +20255,8 @@ exit 1
 
         let disk_profile = sample_issue_monitor_profile();
         let newer_disk = crate::IssueMonitorPrefs {
+            // Manual settings are disk-owned; Auto retains its accepted runtime limit.
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             legacy_git_launch_failure_migration_version:
                 crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: Some(disk_profile.clone()),

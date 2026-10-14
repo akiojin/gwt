@@ -2759,7 +2759,8 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         &gwt::IssueMonitorPrefs {
             enabled: true,
             max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto,
-            max_active_agents: 9,
+            // A saved accepted zero holds admission until a fresh positive sample.
+            max_active_agents: 0,
             ..Default::default()
         },
     )
