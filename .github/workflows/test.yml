@@ -762,111 +762,6 @@ jobs:
 
   # Issue #4821: both workloads start together; the protected check still
   # requires every core matrix run and all selective regressions to succeed.
-  # Issue #5339 / PM ruling 20783569: one native base/head diagnostic pair.
-  # Remove this job after collecting evidence; the normal relink gate remains.
-  test-windows-home-driver-diagnostic:
-    name: Windows HOME driver base/head diagnostic
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-home-driver-diagnostic
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: source-sync
-    if: ${{ !cancelled() && github.event.pull_request.number == 5367 }}
-    runs-on: windows-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          filter: blob:none
-      - uses: actions/checkout@v7
-        with:
-          ref: ef3cc96c2b646bdefa6d84b67514fec887545ae2
-          path: driver-base
-      - uses: actions/checkout@v7
-        with:
-          ref: 273291b83c9520e67be8d1b7fc0805da4eafa3a9
-          path: driver-head
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
-          shared-key: windows-workspace
-        continue-on-error: true
-      - name: Compare identical driver fixtures on both source revisions
-        shell: python
-        run: |
-          import hashlib, json, os, pathlib, subprocess, time
-          root = pathlib.Path.cwd()
-          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'home-driver-5339'
-          evidence.mkdir()
-          original_home = pathlib.Path.home()
-          common = os.environ.copy()
-          common['CARGO_HOME'] = common.get('CARGO_HOME', str(original_home / '.cargo'))
-          common['RUSTUP_HOME'] = common.get('RUSTUP_HOME', str(original_home / '.rustup'))
-          common['RUST_TEST_THREADS'] = '1'
-          # Sequential builds reuse dependency artifacts, never test binaries.
-          common['CARGO_TARGET_DIR'] = str(root / 'target')
-          metadata = {'runs': {}, 'toolchain': subprocess.check_output(['rustc', '-Vv'], text=True)}
-          metadata['cargo'] = subprocess.check_output(['cargo', '-V'], text=True)
-          for label in ['base', 'head']:
-              source = root / ('driver-' + label)
-              sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
-              test = source / 'crates/gwt/tests/verification_driver_cli_test.rs'
-              text = test.read_text(encoding='utf-8')
-              assert text.count('"the artifact remained locked"') == 1
-              test.write_text(text.replace('"the artifact remained locked"',
-                  '"the artifact was not replaced; child output: {output:?}"'), encoding='utf-8')
-              environment = common.copy()
-              home = evidence / (label + '-home')
-              home.mkdir()
-              environment.update(HOME=str(home), USERPROFILE=str(home))
-              build_command = ['cargo', 'test', '-p', 'gwt', '--test', 'cli_contracts', '--no-run', '--message-format=json']
-              started = time.monotonic()
-              build = subprocess.run(build_command, cwd=source, env=environment, capture_output=True)
-              (evidence / (label + '-build.jsonl')).write_bytes(build.stdout)
-              (evidence / (label + '-build.stderr')).write_bytes(build.stderr)
-              row = {'source': sha, 'diagnostic_test_sha256': hashlib.sha256(test.read_bytes()).hexdigest(),
-                     'build_command': build_command, 'build_exit': build.returncode}
-              metadata['runs'][label] = row
-              if build.returncode == 0:
-                  messages = [json.loads(line) for line in build.stdout.splitlines()]
-                  stamps = [value for m in messages if m.get('reason') == 'build-script-executed'
-                      for key, value in m.get('env', []) if key == 'GWT_BUILD_COMMIT']
-                  row['embedded_source'] = stamps
-                  assert stamps == [sha], (sha, stamps)
-                  binaries = [m['executable'] for m in messages if m.get('reason') == 'compiler-artifact'
-                      and m.get('profile', {}).get('test') and m['target']['name'] == 'cli_contracts' and m.get('executable')]
-                  assert len(binaries) == 1, binaries
-                  binary = pathlib.Path(binaries[0])
-                  row['test_binary_sha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
-                  artifacts = [m['executable'] for m in messages if m.get('reason') == 'compiler-artifact'
-                      and not m.get('profile', {}).get('test') and m['target']['name'] == 'gwtd' and m.get('executable')]
-                  row['driver_sha256'] = [hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in artifacts]
-                  path_key = next(key for key in environment if key.lower() == 'path')
-                  environment[path_key] = os.pathsep.join([str(binary.parent), str(binary.parent.parent), environment[path_key]])
-                  command = [str(binary), 'verification_driver_cli_test::', '--test-threads=1', '--nocapture']
-                  result = subprocess.run(command, cwd=source / 'crates/gwt', env=environment, capture_output=True)
-                  (evidence / (label + '-test.stdout')).write_bytes(result.stdout)
-                  (evidence / (label + '-test.stderr')).write_bytes(result.stderr)
-                  row.update(command=command, exit_code=result.returncode)
-                  print(label, sha, 'exit', result.returncode, flush=True)
-                  print(result.stdout.decode('utf-8', errors='replace'), flush=True)
-                  print(result.stderr.decode('utf-8', errors='replace'), flush=True)
-              row['elapsed_seconds'] = time.monotonic() - started
-              (evidence / 'result.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
-          raise SystemExit(int(any(r.get('exit_code', 1) != 0 for r in metadata['runs'].values())))
-      - name: Preserve the native comparison even on failure
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: home-driver-5339
-          path: |
-            ${{ runner.temp }}/home-driver-5339/result.json
-            ${{ runner.temp }}/home-driver-5339/*.stdout
-            ${{ runner.temp }}/home-driver-5339/*.stderr
-            ${{ runner.temp }}/home-driver-5339/*.jsonl
-          if-no-files-found: error
-
   test-windows-required:
     name: Test (Rust, Windows)
     concurrency:
@@ -996,7 +891,7 @@ jobs:
         timeout-minutes: 15
 
   report-post-merge-failure:
-    needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-verify-timings, test-windows-core-stability, test-windows-rust, test-windows-home-driver-diagnostic, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
+    needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-verify-timings, test-windows-core-stability, test-windows-rust, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
     if: ${{ github.event_name == 'push' && failure() }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-report-post-merge-failure
