@@ -10027,6 +10027,8 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("max_active_agents_override");
+        assert_eq!(status["released"], serde_json::json!([]));
+        status.as_object_mut().unwrap().remove("released");
         assert_eq!(
             status,
             serde_json::json!({
