@@ -57,6 +57,39 @@ async function titleMetrics(title: Locator) {
   });
 }
 
+test("Issue #5400 unchanged entry revisions retain the list and current detail", async ({ page }) => {
+  await page.evaluate(() => (window as any).__queueEntries("entries-v1"));
+  await row(page, 2).locator(".knowledge-row-select").click();
+  await expect(page.locator(".knowledge-detail-title")).toHaveText("Second backlog issue");
+  await expect(page.locator(".knowledge-detail-pane")).toContainText("Description for #2");
+  await row(page, 1).evaluate(element => { (window as any).__revisionRow = element; });
+
+  await page.evaluate(() => (window as any).__queueEntries("entries-v1"));
+  expect(await row(page, 1).evaluate(element => element === (window as any).__revisionRow),
+    "same revision preserves the exact list node").toBe(true);
+  await expect(row(page, 2)).toHaveClass(/selected/);
+  await expect(page.locator(".knowledge-detail-title")).toHaveText("Second backlog issue");
+  await expect(page.locator("[data-action='refresh-knowledge']")).toBeEnabled();
+
+  await page.evaluate(() => (window as any).__queueEntries("entries-v2", { number: 1, title: "Changed first issue" }));
+  await expect(row(page, 1)).toContainText("Changed first issue");
+  expect(await row(page, 1).evaluate(element => element === (window as any).__revisionRow),
+    "changed revision updates the list").toBe(false);
+  const search = page.locator(".knowledge-search");
+  await search.fill("Second backlog");
+  await expect(row(page, 1)).toHaveCount(0);
+  await expect(row(page, 2)).toBeVisible();
+  await row(page, 2).evaluate(element => { (window as any).__searchRevisionRow = element; });
+  await page.evaluate(() => (window as any).__queueEntries("entries-v2"));
+  expect(await row(page, 2).evaluate(element => element === (window as any).__searchRevisionRow),
+    "same revision preserves the current search result node").toBe(true);
+  await expect(row(page, 1)).toHaveCount(0);
+  await expect(page.locator(".knowledge-detail-title")).toHaveText("Second backlog issue");
+  await search.fill("");
+  await expect(row(page, 1)).toContainText("Changed first issue");
+  await expect(page.getByText("Issue load failed", { exact: true })).toHaveCount(0);
+});
+
 test("Issue #5321 responsive summary and on-demand preview", async ({ page }, info) => {
   const before = process.env.GWT_ISSUE_5321_PHASE === "before";
   const phase = before ? "before" : "after";
@@ -705,6 +738,12 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3;
       readyState=0;
       constructor(public readonly url:string) { super();
+        fixture.__queueEntries=(revision:string, patch?:{number:number,title:string})=>{
+          const entry=entries.find(entry=>entry.number===patch?.number);
+          if (entry && patch) entry.title=patch.title;
+          this.dispatchEvent(new MessageEvent("message",{data:JSON.stringify({kind:"knowledge_entries",
+            ...fixture.__queueBaseLoad,revision,entries,selected_number:null,refresh_enabled:true})}));
+        };
         fixture.__queueLoadError=()=>this.emit({kind:"knowledge_error",...fixture.__queueLoad,
           message:"Issue cache read failed"});
         fixture.__queueKnowledgeComplete=()=>this.emit({kind:"knowledge_entries",...fixture.__queueLoad,
@@ -771,6 +810,7 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
         }
         else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) {
           fixture.__queueLoad={id:message.id,knowledge_kind:"issue",request_id:message.request_id};
+          if (message.kind==="load_knowledge_bridge") fixture.__queueBaseLoad=fixture.__queueLoad;
           if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
         }
         else if(message.kind==="select_knowledge_bridge_entry") {

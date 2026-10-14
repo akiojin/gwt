@@ -858,6 +858,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.list"
             | "issue.spec.audit"
             | "issue.monitor.status"
+            | "update.settings.status"
             | "issue.monitor.profiles"
             | "issue.monitor.tiers"
             | "pr.current"

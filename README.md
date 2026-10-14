@@ -434,6 +434,9 @@ Common windows include:
   `Issues` section. `System > Auto-apply updates` applies across all projects
   when at least one open project has Autonomous enabled. Legacy project
   values migrate once: any enabled value enables the application setting.
+  System shows the saved and effective values and pending-update blockers.
+  Change the preference in the GUI; agents can read it with
+  `update.settings.status`. It is no longer an Issue Monitor setting.
 - `PR` — pull-request workflow surface; detailed list support depends on the
   cache-backed PR source as it lands
 
@@ -1113,9 +1116,11 @@ PM Q&A posts include an `instruction` object with the full `original`, `kind`
 redacted before storage. Memory search includes the saved originals and outcomes;
 active standing instructions are reloaded at PM startup and each turn.
 
-The **PM の現在** card stays above the report history. It separates the PM's
-explanation from observed active windows, queue head, human handoffs, release PR,
-and pending update. Unavailable observations are shown as unknown. The PM updates
+The **PM status** card and report history share one scroll area. The card starts
+with a compact summary; expand it to see **PM notes** and **Live facts**, and each
+window keeps its disclosure state while polling. Live facts show active windows,
+queue head, human handoffs, release PR, and pending update. Unavailable observations
+are shown as **Unknown**. UI labels stay English; authored content keeps its language. The PM updates
 its explanation with `pm.status.set`: supply 1–3 `items` (`kind`: `working` or
 `waiting`, `text`, and RFC3339 `started_at`), `next_trigger`, and optional
 `user_action`. Set `stale_after_minutes` to change the default 15-minute warning.
@@ -1145,10 +1150,15 @@ an entry removes its copied policy on the next refresh.
 - Use `Tile` to arrange windows on a grid
 - Use `Stack` to cascade windows with overlap
 - Use `Align` to arrange windows on a grid without changing their size
-- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle Canvas Agent
-  windows by activity: running/starting first, waiting/idle next, then the
-  remaining Agents. Non-Agent surfaces are skipped, hidden Agent tabs are
-  activated when selected, and the focused Agent is recentered
+
+## Agent Navigation
+
+Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual
+Agent tabs by activity: running/starting first, waiting/idle next, then the
+remaining Agents. Agents shown inside Issues are included; PM and Shell
+windows are skipped. Cycling keeps the split view and focuses the selected
+terminal for input. Closing the selected tab returns to All agents without stopping the
+agent; cycling can reopen the same terminal.
 
 ## Operator Design Language (SPEC-2356)
 

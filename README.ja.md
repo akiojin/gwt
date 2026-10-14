@@ -412,6 +412,9 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   開けます。`System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
+  System には保存値・有効値と、更新の保留理由も表示します。変更は GUI から
+  行い、エージェントは `update.settings.status` で読み取れます。
+  この設定は Issue Monitor の設定から除外されています。
 - `PR` — pull-request workflow surface。詳細な一覧機能は cache-backed PR source の整備に依存します
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
@@ -1039,9 +1042,11 @@ PM の Q&A 投稿には、原文 `original`、種別 `kind`（`standing` / `one_
 指定すると、旧レコードを残したまま `superseded_by` で置換先を記録します。秘密値は保存前に伏せます。
 Memory 検索で原文と結果を検索でき、取り消されていない常設指示は PM の起動時と各ターンに再読込します。
 
-**PM の現在** カードは報告履歴の上に常時表示されます。PM の説明と、稼働窓・キュー先頭・
-人への引き継ぎ件数・リリース PR・未適用の更新という自動の事実を分け、取得できない情報は
-不明と表示します。PM は `pm.status.set` で説明を更新します。`items` は 1〜3 件で、
+**PM status** カードと報告履歴は同じ領域でスクロールします。カードは要約表示で始まり、
+展開すると **PM notes**（PM の説明）と **Live facts**（稼働窓・キュー先頭・人への引き継ぎ件数・
+リリース PR・未適用の更新）を表示します。展開状態は窓ごとに保持し、取得できない情報は
+**Unknown** と表示します。UI の固定文言は英語、投稿本文は書かれた言語のまま表示します。
+PM は `pm.status.set` で説明を更新します。`items` は 1〜3 件で、
 `kind`（`working` / `waiting`）、`text`、RFC3339 の `started_at` を指定します。
 `next_trigger` は必須、`user_action` は任意です。更新停止の警告は既定で 15 分後に表示し、
 `stale_after_minutes` で変更できます。`pm.status` は最新の説明・保持された状態履歴・
@@ -1069,10 +1074,15 @@ project 固有の規約を明示的に渡すには、
 - `Tile` で表示中のウィンドウをグリッド整列
 - `Stack` でタイトルバーを残したまま重ねて表示
 - `Align` でウィンドウサイズを変えずにグリッド整列
-- `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で Canvas 上の Agent を
-  状態順（running/starting → waiting/idle → その他）に切り替え
-  - Agent 以外はスキップし、非表示の Agent タブは選択時に表示して、対象の
-    Agent を中央へ寄せます
+
+## Agent の巡回
+
+`Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で、個別 Agent タブを
+状態順（running/starting → waiting/idle → その他）に選択します。
+Issue 内に表示された Agent も含み、PM と Shell はスキップします。
+分割表示を維持し、選んだターミナルに入力フォーカスを移します。
+選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
+再び開けます。
 
 ## Operator デザイン言語 (SPEC-2356)
 

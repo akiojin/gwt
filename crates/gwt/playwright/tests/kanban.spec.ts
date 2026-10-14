@@ -169,9 +169,16 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
   });
 
-  test("manual refresh recovers a stale empty loading state", async ({ page }) => {
+  test("manual refresh recovers after an empty cache load deadline", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     await installEmbeddedRoutes(page);
-    await installIssueBridgeBackend(page, { ignoreFirstLoad: true });
+    await installIssueBridgeBackend(page, {
+      ignoreFirstLoad: true,
+      theme: testInfo.project.name.includes("light") ? "light" : "dark",
+    });
+    await page.clock.install();
 
     await page.goto(APP_URL);
 
@@ -179,9 +186,16 @@ test.describe("Issue Bridge load recovery", () => {
       ".surface-knowledge [data-action='refresh-knowledge']",
     );
     await expect(refresh).toBeEnabled();
+    // Issue #5413: a pending read owns the load until the bounded deadline.
+    // Manual retry is available after that deadline, without overlapping reads.
+    await page.clock.runFor(5100);
+    await page.clock.fastForward(55_000);
+    await expect(page.getByRole("button", { name: /^Issue load failed/ })).toBeVisible();
     await refresh.click();
 
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
+    await expect(page.getByRole("button", { name: /^Issue load failed/ })).toHaveCount(0);
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 
   // Issue #4366 AC-6 / AC-6b: a provider hold never rewrites the saved Agent
