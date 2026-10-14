@@ -37,8 +37,8 @@ pub use urgent::{
 mod tiers;
 pub(crate) use tiers::record_work_done_tier_landing;
 pub use tiers::{
-    IssueMonitorTierFacts, IssueMonitorTierLandingStats, IssueMonitorTierRecord,
-    IssueMonitorTierSelection,
+    IssueMonitorConfirmedLaunchTier, IssueMonitorTierFacts, IssueMonitorTierLandingStats,
+    IssueMonitorTierRecord, IssueMonitorTierSelection,
 };
 mod quota;
 pub(crate) use quota::provider_quota_reset_label;
@@ -1486,6 +1486,8 @@ pub struct IssueMonitorLaunchedIssue {
 pub struct IssueMonitorLaunchConfirmation {
     pub window_id: String,
     pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<u8>,
     /// Issue #3712 AC-1: the delivery this ACK consumed. The pending delivery
     /// is gone once the GUI ACKs, but the PM still has to be able to name it:
     /// `stop_only` asks for claim, delivery, and window, and the status row
@@ -1712,6 +1714,9 @@ pub enum IssueMonitorProviderUsageLimitOutcome {
 pub struct PendingIssueMonitorLaunchDelivery {
     pub delivery_id: String,
     pub issue_number: u64,
+    /// Selected for this exact materializer/window, never inferred from history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_tier: Option<u8>,
     pub branch_name: String,
     pub linked_issue_kind: LinkedIssueKind,
     pub claim_id: String,
@@ -16402,6 +16407,7 @@ impl IssueMonitorState {
                 .push_back(PendingIssueMonitorLaunchDelivery {
                     delivery_id,
                     issue_number,
+                    selected_tier: None,
                     branch_name,
                     linked_issue_kind,
                     claim_id,
@@ -16428,6 +16434,7 @@ impl IssueMonitorState {
         let window_id = window_id.into();
         let mut launched_claim_id = None;
         let mut consumed_delivery_id = None;
+        let mut confirmed_tier = None;
         if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
@@ -16440,6 +16447,7 @@ impl IssueMonitorState {
                     }
                     launched_claim_id = Some(delivery.claim_id.clone());
                     consumed_delivery_id = Some(delivery.delivery_id.clone());
+                    confirmed_tier = delivery.selected_tier;
                     self.pending_launch_deliveries.remove(index);
                 }
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
@@ -16454,6 +16462,9 @@ impl IssueMonitorState {
             consumed_delivery_id,
             None,
         );
+        if let Some(confirmation) = self.launch_confirmations.get_mut(&issue_number) {
+            confirmation.tier = confirmed_tier;
+        }
         true
     }
 
@@ -16527,6 +16538,13 @@ impl IssueMonitorState {
         }) else {
             return false;
         };
+        // A pre-spawn reservation may outlive its attempt while a manual pane
+        // reuses the same ID. Only an already-materialized window proves tier.
+        if delivery.materializer_window_id.as_deref() != Some(materializer_window_id)
+            || delivery.materialized_window_id.as_deref() != Some(materializer_window_id)
+        {
+            delivery.selected_tier = None;
+        }
         if delivery.materializer_id.as_deref() == Some(materializer_id) {
             delivery.materializer_pid = Some(materializer_pid);
             if delivery.materializer_window_id.as_deref() != Some(materializer_window_id) {
@@ -16646,6 +16664,7 @@ impl IssueMonitorState {
                 IssueMonitorLaunchConfirmation {
                     window_id: window_id.clone(),
                     claim_id: claim_id.clone(),
+                    tier: None,
                     delivery_id: delivery_id.clone(),
                     confirmed_at: confirmed_at.map(str::to_string).unwrap_or_else(|| {
                         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
@@ -33716,6 +33735,20 @@ mod tests {
             "tab-1::agent-42",
             Some("launch:effect-42"),
         ));
+        // The selected tier belongs to this exact pre-spawn delivery, not max history.
+        let mut wire = serde_json::to_value(monitor.prefs()).unwrap();
+        wire["pending_launch_deliveries"][0]["selected_tier"] = serde_json::json!(0);
+        wire["issue_tiers"]["42"] =
+            serde_json::json!({"floor": 2, "launch_tier": 2, "landing_tier": null});
+        monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(wire).unwrap(),
+        );
+        assert!(
+            serde_json::to_value(monitor.status_view()).unwrap()["tier_facts"]
+                .as_array()
+                .is_none_or(|rows| rows.iter().all(|row| row.get("confirmed_launch").is_none()))
+        );
         assert!(monitor.mark_launch_delivery_materialized(
             42,
             "launch:effect-42",
@@ -33751,6 +33784,49 @@ mod tests {
             "the consumed delivery claim becomes the durable window generation"
         );
         assert_eq!(acked.pending_launch_deliveries[0].issue_number, 43);
+        let confirmed = serde_json::json!({
+            "tier": 0, "window_id": "tab-1::agent-42", "delivery_id": "launch:effect-42"
+        });
+        let mut restored = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(serde_json::to_value(&acked).unwrap()).unwrap(),
+        );
+        let facts = serde_json::to_value(restored.status_view()).unwrap()["tier_facts"].clone();
+        assert_eq!(
+            facts
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["issue_number"] == 42)
+                .unwrap()["confirmed_launch"],
+            confirmed
+        );
+        let before = restored.prefs();
+        assert!(!restored.complete_active_launch_delivery(42, "wrong", Some("launch:effect-42")));
+        assert_eq!(
+            restored.prefs(),
+            before,
+            "stale ACK cannot change the observed tier"
+        );
+        restored
+            .launched_claims
+            .insert(42, "successor-claim".into());
+        assert!(restored
+            .tier_facts(None)
+            .iter()
+            .all(|row| serde_json::to_value(row)
+                .unwrap()
+                .get("confirmed_launch")
+                .is_none()));
+        restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), acked.clone());
+        restored.record_agent_issue_failed(42, "agent failed");
+        assert!(restored
+            .tier_facts(None)
+            .iter()
+            .all(|row| serde_json::to_value(row)
+                .unwrap()
+                .get("confirmed_launch")
+                .is_none()));
 
         assert!(monitor.complete_active_launch_delivery(43, "tab-1::legacy-43", None));
         assert!(!monitor.prefs().launched_claims.contains_key(&43));
@@ -33806,6 +33882,72 @@ mod tests {
             "tab-a::agent-1",
             |pid| pid == 101,
         ));
+        let mut wire = serde_json::to_value(monitor.prefs()).unwrap();
+        wire["pending_launch_deliveries"][0]["selected_tier"] = serde_json::json!(0);
+        monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            serde_json::from_value(wire).unwrap(),
+        );
+        let mut unmaterialized =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(unmaterialized.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-1",
+            |_| false
+        ));
+        assert_eq!(
+            unmaterialized.prefs().pending_launch_deliveries[0].selected_tier,
+            None,
+            "an unmaterialized reservation cannot prove the adopted pane's tier"
+        );
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            "tab-a::agent-1"
+        ));
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-a",
+            101,
+            "tab-a::agent-1",
+            |_| false
+        ));
+        assert_eq!(
+            serde_json::to_value(monitor.prefs()).unwrap()["pending_launch_deliveries"][0]
+                ["selected_tier"],
+            0,
+            "same-window recovery preserves the selected tier"
+        );
+        let mut recovered_same_window =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(recovered_same_window.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-b",
+            202,
+            "tab-a::agent-1",
+            |_| false
+        ));
+        assert_eq!(
+            recovered_same_window.prefs().pending_launch_deliveries[0].selected_tier,
+            Some(0)
+        );
+        let mut materialized = monitor.prefs();
+        assert!(
+            !materialized.record_launch_delivery_tier(
+                42,
+                "launch:effect-42",
+                "gui-a",
+                "tab-a::agent-1",
+                2
+            ),
+            "selection cannot overwrite an already materialized profile"
+        );
         assert!(!monitor.claim_launch_delivery(
             42,
             "launch:effect-42",
@@ -33831,6 +33973,13 @@ mod tests {
         ));
         let recovered = monitor.prefs().pending_launch_deliveries.remove(0);
         assert_eq!(recovered.materializer_id.as_deref(), Some("gui-b"));
+        assert!(
+            serde_json::to_value(&recovered)
+                .unwrap()
+                .get("selected_tier")
+                .is_none(),
+            "retargeted windows cannot inherit the prior tier"
+        );
         assert_eq!(recovered.materializer_pid, Some(202));
         assert_eq!(
             recovered.materializer_window_id.as_deref(),

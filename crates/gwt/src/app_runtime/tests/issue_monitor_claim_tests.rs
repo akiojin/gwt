@@ -4344,11 +4344,14 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         "effect-3165",
         &Utc::now().to_rfc3339(),
     ));
-    gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
-        &monitor.prefs(),
-    )
-    .expect("seed delivery");
+    let mut prefs = monitor.prefs();
+    prefs.launch_auto = true;
+    prefs.launch_tiers = vec![vec![codex_issue_monitor_launch_profile()]; 3];
+    // Higher history is not the selected tier for this fresh launch.
+    prefs.record_tier_launch(3165, 2);
+    prefs.issue_tiers.get_mut(&3165).unwrap().floor = 0;
+    gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
+        .expect("seed delivery");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -4396,6 +4399,11 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     let durable_writes_before_ack = runtime.persist_dispatcher.durable_write_count();
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let pending_before_ack = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(&pending_before_ack).unwrap()["pending_launch_deliveries"][0]
+            ["selected_tier"],
+        1
+    );
     let _ = runtime.issue_monitor_launch_completed_delivery_events(
         &repo,
         3165,
@@ -4456,6 +4464,11 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         ack
     };
     runtime.handle_issue_monitor_launch_delivery_ack(*ack);
+    let acknowledged = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(&acknowledged).unwrap()["launch_confirmations"]["3165"]["tier"],
+        1
+    );
     assert!(
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
             .expect("reload prefs")
@@ -4740,7 +4753,10 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
             &now,
         ));
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-        gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed delivery");
+        let mut prefs = monitor.prefs();
+        prefs.launch_auto = true;
+        prefs.launch_tiers = vec![vec![codex_issue_monitor_launch_profile()]; 3];
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed delivery");
         let mut tab = sample_project_tab(
             "tab-1",
             "Repo",
@@ -4811,6 +4827,13 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
             .filter(|window| window.preset == WindowPreset::Agent)
             .count();
         let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        if expect_adoption {
+            assert!(
+                serde_json::to_value(&prefs).unwrap()["launch_confirmations"]["3165"]["tier"]
+                    .is_null(),
+                "adopting a pane must not attribute a newly selected profile to it"
+            );
+        }
         let reloaded =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone());
         if expect_adoption {
