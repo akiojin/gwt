@@ -563,6 +563,23 @@ fn gui_event_loop_stall_warning(label: &str, elapsed_ms: u64) -> Option<String> 
         .then(|| format!("{label} blocked the GUI event loop for {elapsed_ms}ms"))
 }
 
+/// Process creation can block even when the browser launcher detaches its wait.
+/// Keep that work off the native dispatch thread for every tray browser action.
+fn request_tray_browser_launch(runtime: &Runtime, url: &str, action: &'static str) {
+    let url = url.to_owned();
+    runtime.spawn_blocking(move || {
+        if let Err(error) = gwt::cli::tray::open_browser_for_url(&url) {
+            tracing::warn!(
+                target: "gwt_tray",
+                %error,
+                action,
+                %url,
+                "tray menu failed to launch the default browser"
+            );
+        }
+    });
+}
+
 /// Times one event-loop dispatch and warns when it stalls the GUI thread.
 ///
 /// Issue #3611: a `Drop` guard rather than a trailing measurement because
@@ -12298,16 +12315,8 @@ fn main() -> std::io::Result<()> {
                         // Best-effort browser open. Failure is logged
                         // but does not interrupt the tray loop —
                         // `gwt open` from the CLI is a fallback.
-                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&browser_url) {
-                            tracing::warn!(
-                                target: "gwt_tray",
-                                error = %error,
-                                url = browser_url.as_str(),
-                                "tray Open menu failed to launch the default browser"
-                            );
-                        } else {
-                            tracing::info!(target: "gwt_tray", "tray Open browser launch requested");
-                        }
+                        request_tray_browser_launch(&runtime, &browser_url, "Open");
+                        tracing::info!(target: "gwt_tray", "tray Open browser launch requested");
                     }
                     Some(MenuAction::CopyUrl) => {
                         if let Err(error) = gwt_clipboard::ClipboardText::set_text(&browser_url) {
@@ -12330,20 +12339,11 @@ fn main() -> std::io::Result<()> {
                     Some(MenuAction::About) => {
                         let about_url =
                             gwt::cli::tray::menu::about_url_for_browser_url(&browser_url);
-                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&about_url) {
-                            tracing::warn!(
-                                target: "gwt_tray",
-                                error = %error,
-                                url = about_url.as_str(),
-                                "tray About menu failed to launch the default browser"
-                            );
-                        }
+                        request_tray_browser_launch(&runtime, &about_url, "About");
                     }
                     None => {
                         if let Some(action) = tray_generation.resolve(event.id.as_ref()) {
-                            if let Err(error) = gwt::cli::tray::open_browser_for_url(&action.url) {
-                                tracing::warn!(target: "gwt_tray", %error, "tray Project menu failed to launch the default browser");
-                            }
+                            request_tray_browser_launch(&runtime, &action.url, "Project");
                         }
                     }
                 }
