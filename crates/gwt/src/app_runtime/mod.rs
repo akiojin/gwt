@@ -1718,6 +1718,8 @@ pub(crate) enum WindowCloseMonitorResult {
 }
 
 pub struct AppRuntime {
+    // One background collector per GUI lifetime, independent of open projects.
+    pub(crate) _runtime_namespace_gc: Option<gwt::runtime_gc::RuntimeNamespaceGcTask>,
     pub(crate) project_states: HashMap<gwt_core::repo_hash::ProjectKey, ProjectRuntimeState>,
     pub(crate) project_aggregates: HashMap<gwt_core::repo_hash::ProjectKey, ProjectAggregateState>,
     pub(crate) next_project_aggregate_revision: u64,
@@ -4265,12 +4267,19 @@ impl AppRuntime {
             initial_project_tab_incarnations(&tabs);
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let _ = gwt_agent::reset_runtime_state_dir(&sessions_dir);
+        let runtime_namespace_gc =
+            gwt::runtime_gc::RuntimeNamespaceGcTask::start(sessions_dir.clone())
+                .map_err(
+                    |error| tracing::warn!(%error, "runtime namespace GC worker could not start"),
+                )
+                .ok();
         let launch_wizard_cache = LaunchWizardMemoryCache::load(&sessions_dir);
 
         let persist_dispatcher =
             Arc::new(persist_dispatcher::PersistDispatcher::new(&blocking_tasks));
         pty_io::initialize_process_window_close_finalizer()?;
         let mut app = Self {
+            _runtime_namespace_gc: runtime_namespace_gc,
             tabs,
             #[cfg(test)]
             active_tab_id,
@@ -9695,7 +9704,11 @@ impl AppRuntime {
                 cached
             }
         };
-        capacity.set_agent_capacity(read_capacity(project_root));
+        // Auto keeps the last published limit across this projection-only rebuild.
+        if capacity.max_active_agents_override().is_none() {
+            capacity.config.max_active = status.max_active_agents;
+        }
+        capacity.set_agent_capacity_for_project(project_root, read_capacity(project_root));
         status.agent_capacity = capacity.status_view().agent_capacity;
         status.max_active_agents_override = capacity.max_active_agents_override();
         status.max_active_agents = capacity.effective_max_active_agents();

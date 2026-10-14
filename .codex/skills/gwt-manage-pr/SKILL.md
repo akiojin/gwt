@@ -168,6 +168,15 @@ Ready for review only when all of the following are true:
 - every PR body checklist item is checked or explicitly marked N/A with
   a reason
 
+Before Ready PR creation or enabling auto-merge, compare the owner Issue's
+acceptance criteria with the fresh `verify.run` evidence. Update only proven
+AC checkboxes through `issue.edit` (`issue.spec.edit` for a `gwt-spec` owner),
+then read the owner back to confirm the saved state. Leave unproven criteria
+unchecked, including delivery criteria until `origin/develop` contains the
+source. Keep the same launch active through merge and post-merge settlement;
+declare delivery complete only after confirming `origin/develop` contains the
+source.
+
 In gwt-managed execution worktrees the canonical operations enforce part of
 this mechanically (SPEC-3248 P8b): non-draft `pr.create` and `pr.ready`
 refuse when the session's Execution Control Record is terminally blocked, or

@@ -886,6 +886,10 @@ pub struct IssueCompletionRecord {
     pub issue_updated_at: Option<String>,
     #[serde(default)]
     pub evidence: IssueCompletionEvidence,
+    /// An exact launch reclaimed after its canonical execution completed.
+    /// Separate from GitHub closure or a merged delivery; old readers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_reason: Option<String>,
 }
 
 impl IssueCompletionRecord {
@@ -896,6 +900,7 @@ impl IssueCompletionRecord {
             state: IssueCompletionState::Completed,
             issue_updated_at: None,
             evidence: IssueCompletionEvidence::Legacy,
+            released_reason: None,
         }
     }
 }
@@ -2455,7 +2460,8 @@ pub enum MonitorInboxState {
     /// Current Issue generation is complete. The GitHub Issue may still be
     /// open until release, so this is distinct from `Released`.
     Merged,
-    /// The GitHub Issue was closed (e.g. at release). Final terminal state.
+    /// The Issue was closed, or a completed execution's launch was reclaimed.
+    /// Neither state needs human intervention or an automatic relaunch.
     Released,
     LaunchFailed,
     AgentFailed,
@@ -2988,6 +2994,10 @@ pub enum IssueMonitorStopOutcome {
     },
     /// This exact launch was already stopped. No second revocation.
     AlreadyStopped,
+    /// A completed execution was reclaimed without parking for a human.
+    Released {
+        window_id: String,
+    },
     Mismatch(IssueMonitorStopMismatch),
 }
 
@@ -3711,6 +3721,9 @@ pub struct IssueMonitorAgentStatus {
     /// escalation unrecoverable for an unattended reader.
     #[serde(default)]
     pub needs_human: Vec<u64>,
+    /// Completed launches explicitly reclaimed with issue.monitor.stop.
+    #[serde(default)]
+    pub released: Vec<u64>,
     /// Per-issue lifecycle rows, so a caller can tell "not launched yet" from
     /// "claimed by someone else" from "failed", and can map an issue to the
     /// pane that is working on it.
@@ -7157,7 +7170,10 @@ impl IssueMonitorState {
 
     pub fn with_prefs(mut config: IssueMonitorConfig, prefs: IssueMonitorPrefs) -> Self {
         config.enabled = prefs.enabled;
-        config.max_active = prefs.max_active_agents.max(1);
+        config.max_active = match prefs.max_active_agents_mode {
+            IssueMonitorMaxActiveMode::Manual => prefs.max_active_agents.max(1),
+            IssueMonitorMaxActiveMode::Auto => prefs.max_active_agents,
+        };
         let mut state = Self::new(config);
         state.max_active_agents_mode = prefs.max_active_agents_mode;
         state.apply_agent_capacity_limit();
@@ -7330,8 +7346,8 @@ impl IssueMonitorState {
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
             enabled: self.config.enabled,
-            // Auto's recommendation is machine state, not a saved project limit.
-            max_active_agents: self.max_active_agents_override().unwrap_or(1),
+            // Auto persists its accepted limit for incomplete measurements and restarts.
+            max_active_agents: self.effective_max_active_agents(),
             max_active_agents_mode: self.max_active_agents_mode,
             priority_order: self.priority_order.clone(),
             allowed_labels: self.allowed_labels.clone(),
@@ -8112,6 +8128,7 @@ impl IssueMonitorState {
                 state,
                 issue_updated_at,
                 evidence,
+                released_reason: None,
             },
         );
         self.issue_completion_migration_version = ISSUE_COMPLETION_MIGRATION_VERSION;
@@ -8165,7 +8182,7 @@ impl IssueMonitorState {
             .cloned()
             .collect::<Vec<_>>();
         for record in records {
-            if record.state != IssueCompletionState::Completed {
+            if record.state != IssueCompletionState::Completed || record.released_reason.is_some() {
                 continue;
             }
             let current = live.get(&record.issue_number).copied();
@@ -9780,7 +9797,7 @@ impl IssueMonitorState {
             {
                 self.agent_capacity.recommended_worker_limit
             }
-            IssueMonitorMaxActiveMode::Auto => 0,
+            IssueMonitorMaxActiveMode::Auto => self.config.max_active,
         }
     }
 
@@ -9802,11 +9819,48 @@ impl IssueMonitorState {
     }
 
     pub fn refresh_agent_capacity(&mut self, project_root: &Path) {
-        self.set_agent_capacity(crate::agent_capacity::project_capacity(
+        let capacity = crate::agent_capacity::project_capacity(
             project_root,
             &BTreeSet::new(),
             self.review_windows.len(),
-        ));
+        );
+        self.set_agent_capacity_for_project(project_root, capacity);
+    }
+
+    /// Apply a project observation and report a measured reduction once.
+    pub fn set_agent_capacity_for_project(&mut self, project_root: &Path, capacity: AgentCapacity) {
+        let previous_limit = self.config.max_active;
+        self.set_agent_capacity(capacity);
+        let effective_limit = self.config.max_active;
+        if self.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto
+            && effective_limit < previous_limit
+        {
+            use gwt_core::error_ledger::{ErrorKind, ErrorTarget};
+            let constraints = self
+                .agent_capacity
+                .constraints
+                .iter()
+                .filter(|constraint| constraint.binding)
+                .map(|constraint| format!("{}: {}", constraint.resource, constraint.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            crate::error_report::report_error_and_publish_with_context(
+                ErrorKind::DaemonFault,
+                format!(
+                    "Issue Monitor Auto capacity reduced from {previous_limit} to {effective_limit}: {constraints}; {}",
+                    self.agent_capacity.reason,
+                ),
+                ErrorTarget {
+                    project_root: Some(project_root.display().to_string()),
+                    ..ErrorTarget::default()
+                },
+                BTreeMap::from([
+                    ("previous_limit".to_string(), previous_limit.to_string()),
+                    ("effective_limit".to_string(), effective_limit.to_string()),
+                    ("limiting_constraint".to_string(), self.agent_capacity.limiting_constraint.clone()),
+                ]),
+            );
+        }
     }
 
     /// Put back the durable scan timestamp after a projection-only rebuild.
@@ -10003,13 +10057,16 @@ impl IssueMonitorState {
                 .any(|window| !window.review_dispatch && window.issue_number == Some(issue_number))
     }
 
-    /// Include untracked Launched rows whose execution may have been interrupted.
+    /// Include untracked Launched rows and open delivered owners still settling.
     pub fn execution_settlement_issue_numbers(&self) -> Vec<u64> {
         self.active_launches
             .iter()
             .copied()
             .chain(self.inbox.iter().filter_map(|item| {
-                (item.state == MonitorInboxState::Launched).then_some(item.issue.number)
+                (item.state == MonitorInboxState::Launched
+                    || (item.issue.state == IssueMonitorIssueState::Open
+                        && self.merged_deliveries.contains_key(&item.issue.number)))
+                .then_some(item.issue.number)
             }))
             .chain(self.window_snapshot.iter().flat_map(|snapshot| {
                 snapshot.windows.iter().filter_map(|window| {
@@ -10201,7 +10258,14 @@ impl IssueMonitorState {
             })
             .unwrap_or_default();
         self.config.enabled = disk.enabled;
-        self.config.max_active = disk.max_active_agents.max(1);
+        if self.max_active_agents_mode != IssueMonitorMaxActiveMode::Auto
+            || disk.max_active_agents_mode != IssueMonitorMaxActiveMode::Auto
+        {
+            self.config.max_active = match disk.max_active_agents_mode {
+                IssueMonitorMaxActiveMode::Manual => disk.max_active_agents.max(1),
+                IssueMonitorMaxActiveMode::Auto => disk.max_active_agents,
+            };
+        }
         self.max_active_agents_mode = disk.max_active_agents_mode;
         self.apply_agent_capacity_limit();
         self.set_allowed_labels(disk.allowed_labels.clone());
@@ -12431,6 +12495,9 @@ impl IssueMonitorState {
     }
 
     fn completion_anomaly(&self, item: &IssueMonitorInboxItem) -> (bool, Option<String>) {
+        if self.released_completed_reason(item.issue.number).is_some() {
+            return (false, None);
+        }
         if item.issue.state != IssueMonitorIssueState::Open {
             return (false, None);
         }
@@ -12679,6 +12746,12 @@ impl IssueMonitorState {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .filter(|number| !self.label_excluded_issues.contains(number))
+                .collect(),
+            released: self
+                .completion_records
+                .keys()
+                .copied()
+                .filter(|number| self.released_completed_reason(*number).is_some())
                 .collect(),
             inbox: self
                 .inbox
@@ -13204,6 +13277,24 @@ impl IssueMonitorState {
         delivery: &MergedIssueDelivery,
     ) -> bool {
         if self.issue_is_closed(issue_number) {
+            return false;
+        }
+        // Issue #5414: the producing launch owns acceptance readback through
+        // merge. Do not park it while it can still finish that settlement.
+        if self.auto_close_merged_issues_enabled()
+            && (self.process_held_issues.contains(&issue_number)
+                || self.has_observed_monitor_runtime(issue_number))
+            && self.inbox_item(issue_number).is_some_and(|item| {
+                !crate::issue_monitor_gate::classify_acceptance_criteria(
+                    item.issue.body.as_deref().unwrap_or(""),
+                )
+                .all_checked()
+            })
+        {
+            tracing::debug!(
+                issue_number,
+                "deferring merged acceptance settlement to live launch"
+            );
             return false;
         }
         let settled = self.merged_issue_settlements.get(&issue_number);
@@ -14911,7 +15002,11 @@ impl IssueMonitorState {
             // A validated Issue-wide completion stays terminal. Complete Live
             // reconciliation removes stale ordinary-Open projections before
             // candidate recording reaches this branch.
-            MonitorInboxState::Merged
+            if self.released_completed_reason(issue_number).is_some() {
+                MonitorInboxState::Released
+            } else {
+                MonitorInboxState::Merged
+            }
         } else if error_message.is_some() {
             existing
                 .as_ref()
@@ -15293,7 +15388,8 @@ impl IssueMonitorState {
                 self.issue_is_closed(*number)
                     || self.completion_records.get(number).is_some_and(|record| {
                         record.state == IssueCompletionState::Completed
-                            && record.evidence != IssueCompletionEvidence::Legacy
+                            && (record.evidence != IssueCompletionEvidence::Legacy
+                                || record.released_reason.is_some())
                     })
             })
             .collect::<BTreeSet<_>>();
@@ -17675,7 +17771,14 @@ impl IssueMonitorState {
         self.failed_issues.remove(&issue_number);
         self.released_failures.remove(&issue_number);
         self.merged_issues.insert(issue_number);
-        self.set_inbox_state(issue_number, MonitorInboxState::Merged);
+        self.set_inbox_state(
+            issue_number,
+            if self.released_completed_reason(issue_number).is_some() {
+                MonitorInboxState::Released
+            } else {
+                MonitorInboxState::Merged
+            },
+        );
         // SPEC #3200 T-022: completion resets the autonomous lifecycle (attempts,
         // phase, snapshot, in-flight launch id) so a future reopen starts clean.
         self.clear_autonomous_record(issue_number);
@@ -18407,7 +18510,30 @@ impl IssueMonitorState {
         reason: &str,
         now: &str,
     ) -> IssueMonitorStopOutcome {
+        self.stop_only_with_settlement(
+            target,
+            reason,
+            now,
+            IssueMonitorExecutionSettlement::Unknown,
+        )
+    }
+
+    /// Settlement is read from the trusted owner ledger by the operation handler.
+    /// Unknown and unfinished executions retain the ordinary operator hold.
+    pub fn stop_only_with_settlement(
+        &mut self,
+        target: &IssueMonitorStopTarget,
+        reason: &str,
+        now: &str,
+        settlement: IssueMonitorExecutionSettlement,
+    ) -> IssueMonitorStopOutcome {
         let issue_number = target.issue_number;
+
+        if self.released_completed_reason(issue_number).is_some() {
+            return IssueMonitorStopOutcome::Released {
+                window_id: String::new(),
+            };
+        }
 
         // An issue already stopped by this operation answers the same request
         // idempotently. Checked before liveness, because the stop already
@@ -18430,6 +18556,27 @@ impl IssueMonitorState {
         self.release_confirmed_claim_for_issue(issue_number);
         self.revoke_launch_binding(issue_number);
         self.record_autonomous_heartbeat(issue_number, now);
+        // A pending delivery has no executing Session yet: its owner's terminal
+        // ledger can still describe the predecessor, never this new launch.
+        if settlement == IssueMonitorExecutionSettlement::Completed && live_window.is_some() {
+            let updated_at = self
+                .inbox_item(issue_number)
+                .and_then(|item| item.issue.updated_at.clone());
+            self.transition_completion(
+                issue_number,
+                IssueCompletionState::Completed,
+                updated_at,
+                IssueCompletionEvidence::Legacy,
+            );
+            self.completion_records
+                .get_mut(&issue_number)
+                .unwrap()
+                .released_reason = Some(reason.into());
+            self.apply_merged_terminal_state(issue_number);
+            return IssueMonitorStopOutcome::Released {
+                window_id: live_window.unwrap_or_default(),
+            };
+        }
         // An operator stop is the operator's own decision; what happens next
         // is the operator's choice, so the row parks under that kind.
         self.escalate_to_needs_human(
@@ -18453,6 +18600,13 @@ impl IssueMonitorState {
             .get(&issue_number)
             .and_then(|message| message.strip_prefix(STOP_ONLY_REASON_PREFIX))
             .map(str::to_string)
+    }
+
+    pub fn released_completed_reason(&self, issue_number: u64) -> Option<&str> {
+        self.completion_records
+            .get(&issue_number)
+            .filter(|record| record.state == IssueCompletionState::Completed)
+            .and_then(|record| record.released_reason.as_deref())
     }
 
     /// SPEC-3431 FR-033: the claim backing the live launch for `issue_number`.
@@ -21357,14 +21511,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_capacity_new_preferences_wait_for_measurement() {
+    fn agent_capacity_new_preferences_retain_saved_limit_before_measurement() {
         let prefs = IssueMonitorPrefs::default();
         let saved = serde_json::to_value(&prefs).unwrap();
         assert_eq!(saved["max_active_agents_mode"], "auto");
         let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
-        assert_eq!(monitor.config.max_active, 0);
-        assert_eq!(monitor.status_view().max_active_agents, 0);
-        assert_eq!(monitor.agent_status().max_active, 0);
+        assert_eq!(monitor.config.max_active, 1);
+        assert_eq!(monitor.status_view().max_active_agents, 1);
+        assert_eq!(monitor.agent_status().max_active, 1);
     }
 
     #[test]
@@ -21385,7 +21539,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_capacity_unmeasured_auto_holds_implementation_and_review() {
+    fn agent_capacity_unmeasured_auto_admits_implementation_and_review() {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
@@ -21396,14 +21550,14 @@ mod tests {
         );
         monitor.set_gui_connected(true);
         scan_queued_candidates(&mut monitor, &[issue(42)], IDLE_NOW);
-        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
-        assert_eq!(monitor.claim_probe_plan(8), (0, Vec::new()));
-        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
-        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert_eq!(monitor.claim_probe_plan(8).0, 1);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.has_capacity_for_monitor_spawn(42, true));
         assert!(monitor
             .review_dispatch_hold(42, 420, None, IDLE_NOW)
-            .is_some());
+            .is_none());
         assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor.next_launch_request(IDLE_NOW).is_some());
     }
 
     #[test]
@@ -21432,7 +21586,7 @@ mod tests {
         assert_eq!(monitor.effective_max_active_agents(), 3);
         let saved = serde_json::to_value(monitor.prefs()).unwrap();
         assert_eq!(saved["max_active_agents_mode"], "auto");
-        assert_eq!(saved["max_active_agents"], 1);
+        assert_eq!(saved["max_active_agents"], 3);
         assert!(saved.get("agent_capacity").is_none());
         let status = serde_json::to_value(monitor.agent_status()).unwrap();
         assert_eq!(
@@ -21448,10 +21602,14 @@ mod tests {
             status["gui_status"]["agent_capacity"],
             status["agent_capacity"]
         );
+        monitor.set_agent_capacity(AgentCapacity::default());
+        assert_eq!(monitor.effective_max_active_agents(), 3);
+        monitor.refresh_disk_owned_prefs(&IssueMonitorPrefs::default());
+        assert_eq!(monitor.effective_max_active_agents(), 3);
         assert_eq!(
             IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs())
                 .effective_max_active_agents(),
-            0
+            3
         );
     }
 
@@ -21471,33 +21629,42 @@ mod tests {
             .review_dispatch_hold(41, 410, None, IDLE_NOW)
             .is_some());
         let saved = monitor.prefs();
+        assert_eq!(saved.max_active_agents, 0);
         monitor.refresh_disk_owned_prefs(&saved);
         assert_eq!(monitor.effective_max_active_agents(), 0);
         assert_eq!(monitor.active_count(), 1);
+        monitor.set_agent_capacity(AgentCapacity::default());
+        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert_eq!(
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), saved)
+                .effective_max_active_agents(),
+            0
+        );
     }
 
     #[test]
-    fn agent_capacity_expired_measurement_stops_new_admissions() {
+    fn agent_capacity_expired_measurement_retains_last_accepted_limit() {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs::default(),
         );
-        let mut capacity = serde_json::to_value(AgentCapacity {
+        let capacity = AgentCapacity {
             measurement_complete: true,
             machine_budget: Some(4),
             recommended_worker_limit: 3,
             ..AgentCapacity::default()
-        })
-        .unwrap();
+        };
+        monitor.set_agent_capacity(capacity.clone());
+        let mut capacity = serde_json::to_value(capacity).unwrap();
         capacity["observed_at"] = serde_json::json!(1);
         capacity["expires_at"] = serde_json::json!(2);
         monitor.set_agent_capacity(serde_json::from_value(capacity).unwrap());
-        assert_eq!(monitor.effective_max_active_agents(), 0);
-        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
-        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert_eq!(monitor.effective_max_active_agents(), 3);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.has_capacity_for_monitor_spawn(42, true));
         assert!(monitor
             .review_dispatch_hold(42, 420, None, IDLE_NOW)
-            .is_some());
+            .is_none());
     }
 
     #[test]
@@ -21506,7 +21673,10 @@ mod tests {
         monitor.set_max_active_agents(2);
         let dispatch = review_dispatch_for(41, 410);
         monitor.dispatch_review(dispatch.clone(), IDLE_NOW).unwrap();
-        monitor.set_agent_capacity(AgentCapacity::default());
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            ..AgentCapacity::default()
+        });
         monitor.set_max_active_agents_override(None);
         assert!(monitor.take_pending_review_dispatches().is_empty());
         assert!(!monitor.has_capacity_for_monitor_spawn(41, true));
@@ -21547,6 +21717,10 @@ mod tests {
         monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
         monitor.record_candidate(issue(42));
         assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            ..AgentCapacity::default()
+        });
         monitor.set_max_active_agents_override(None);
         let held = monitor.prefs();
         assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
@@ -21652,6 +21826,10 @@ mod tests {
             "gui",
             "tab-1::agent-42"
         ));
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            ..AgentCapacity::default()
+        });
         monitor.set_max_active_agents_override(None);
         assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
         assert_eq!(monitor.take_pending_launch_requests().len(), 1);
@@ -22091,6 +22269,7 @@ mod tests {
                 usage_threshold_percent: 80,
                 provider_quota_holds: Vec::new(),
                 needs_human: Vec::new(),
+                released: Vec::new(),
                 inbox: vec![IssueMonitorInboxSummary {
                     launch_tier: None,
                     landing_tier: None,
@@ -28140,6 +28319,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_4357_completed_stop_is_released_and_survives_scan() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let stale = monitor.prefs();
+        let target = stop_target(&monitor, 42);
+        let issue = monitor.inbox_item(42).unwrap().issue.clone();
+        let attempts = monitor.attempt_count(42);
+        let outcome = monitor.stop_only_with_settlement(
+            &target,
+            "collect completed launch",
+            "2026-10-14T00:00:00Z",
+            IssueMonitorExecutionSettlement::Completed,
+        );
+        assert!(matches!(outcome, IssueMonitorStopOutcome::Released { .. }));
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(monitor.attempt_count(42), attempts);
+        assert!(monitor.agent_status().needs_human.is_empty());
+        assert_eq!(monitor.agent_status().released, vec![42]);
+
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        restored.rebase_daemon_driver_prefs(&stale);
+        scan_issue_monitor_candidates(&mut restored, &[issue], "2026-10-14T00:01:00Z");
+        assert_eq!(
+            restored.inbox_item(42).unwrap().state,
+            MonitorInboxState::Released
+        );
+        assert!(restored.queued_issue_numbers().is_empty());
+        assert_eq!(restored.agent_status().released, vec![42]);
+        assert!(restored.agent_status().needs_human.is_empty());
+    }
+
+    #[test]
+    fn issue_4357_completed_stop_still_checks_exact_identity() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let before = monitor.prefs();
+        let mut target = stop_target(&monitor, 42);
+        target.delivery_id = Some("foreign-delivery".into());
+        assert_eq!(
+            monitor.stop_only_with_settlement(
+                &target,
+                "collect completed launch",
+                "2026-10-14T00:00:00Z",
+                IssueMonitorExecutionSettlement::Completed,
+            ),
+            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::DeliveryMismatch)
+        );
+        assert_eq!(monitor.prefs(), before);
+    }
+
+    #[test]
+    fn issue_4357_pending_launch_cannot_inherit_predecessor_completion() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.active_launches.push(42);
+        monitor.record_claimed(issue(42), "claim-42");
+        let target = stop_target(&monitor, 42);
+        assert!(matches!(
+            monitor.stop_only_with_settlement(
+                &target,
+                "cancel pending launch",
+                "2026-10-14T00:00:00Z",
+                IssueMonitorExecutionSettlement::Completed,
+            ),
+            IssueMonitorStopOutcome::Stopped { .. }
+        ));
+        assert!(monitor.agent_status().released.is_empty());
+        assert_eq!(monitor.agent_status().needs_human, vec![42]);
+    }
+
     /// SPEC-3431 FR-033: a stop_only request revokes exactly one launch.
     ///
     /// Unlike [`IssueMonitorState::requeue_window_at`] (FR-066), this is not a
@@ -32503,6 +32752,7 @@ mod tests {
                     state: IssueCompletionState::Completed,
                     issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
                     evidence: IssueCompletionEvidence::LinkedPr,
+                    released_reason: None,
                 },
                 IssueCompletionRecord {
                     issue_number: 43,
@@ -32510,6 +32760,7 @@ mod tests {
                     state: IssueCompletionState::Completed,
                     issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
                     evidence: IssueCompletionEvidence::LinkedPr,
+                    released_reason: None,
                 },
             ],
             ..IssueMonitorPrefs::default()
@@ -39596,6 +39847,84 @@ mod tests {
         ]));
         assert!(!delegation_recorded(["all done"]));
         assert!(!delegation_recorded(std::iter::empty::<&str>()));
+    }
+
+    #[test]
+    fn merged_issue_settlement_defers_unchecked_acceptance_for_live_launch() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor
+            .set_auto_close_merged_issues_with_effect_revocation(Some(true))
+            .unwrap();
+        let mut unmet = issue(42);
+        unmet.body = Some("## Acceptance Criteria\n- [ ] AC-1: verify delivery\n".to_string());
+        scan_queued_candidates(&mut monitor, &[unmet], "2026-09-01T00:00:00Z");
+        let delivery = merged_delivery(7, "aaa", "2026-09-01T00:01:00Z");
+        let deliveries = BTreeMap::from([("work/issue-42".to_string(), delivery.clone())]);
+        monitor.record_merged_deliveries(&deliveries);
+        monitor.record_merged(42);
+        let action = MergedIssueSettlementAction::UnmetAcceptance {
+            unmet: vec!["AC-1".to_string()],
+        };
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        assert!(monitor
+            .merged_issue_settlement_candidates(&deliveries)
+            .is_empty());
+        assert!(!monitor.propose_merged_issue_settlement(42, &delivery, action.clone()));
+        assert!(monitor.merged_issue_settlement(42).is_none());
+        assert!(
+            monitor.execution_settlement_issue_numbers().contains(&42),
+            "an open delivered owner still needs fresh process observations after its slot is freed"
+        );
+
+        // Canvas presence also protects the launch while its process census catches up.
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_window_snapshot(pane_snapshot(
+            "2026-09-01T00:02:00Z",
+            vec![live_pane_observation(
+                "tab-1::agent-42",
+                42,
+                WindowState::Running,
+            )],
+        ));
+        assert!(monitor
+            .merged_issue_settlement_candidates(&deliveries)
+            .is_empty());
+        assert!(!monitor.propose_merged_issue_settlement(42, &delivery, action.clone()));
+
+        let mut checked = monitor.clone();
+        checked.record_candidate(checked_issue(42));
+        assert_eq!(
+            checked
+                .merged_issue_settlement_candidates(&deliveries)
+                .len(),
+            1
+        );
+        assert!(checked.propose_merged_issue_settlement(
+            42,
+            &delivery,
+            MergedIssueSettlementAction::Close { delegated: false },
+        ));
+
+        // Once the launch is gone, unchecked acceptance keeps the existing escalation.
+        monitor.record_window_snapshot(pane_snapshot("2026-09-01T00:03:00Z", vec![]));
+        assert_eq!(
+            monitor
+                .merged_issue_settlement_candidates(&deliveries)
+                .len(),
+            1
+        );
+        assert!(monitor.propose_merged_issue_settlement(42, &delivery, action.clone()));
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".to_string()),
+            action,
+            "2026-09-01T00:03:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
     }
 
     #[test]

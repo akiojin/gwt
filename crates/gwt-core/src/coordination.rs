@@ -17,7 +17,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -40,6 +40,9 @@ pub const BOARD_PROJECTION_FILE_NAME: &str = "board.latest.json";
 pub const EVENTS_MANIFEST_FILE_NAME: &str = "events.manifest.json";
 pub const EVENTS_SEGMENTS_DIR_NAME: &str = "events";
 pub const HOT_PROJECTION_ENTRY_LIMIT: usize = 500;
+// Prompt injection shows at most 20 rows; retain headroom for audience/self
+// filtering without spending the deadline decoding the GUI's full hot window.
+const PROMPT_BOARD_ENTRY_LIMIT: usize = 64;
 pub const EVENT_SEGMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MIGRATION_MARKER_FILE_NAME: &str = ".migration-complete";
 const EVENT_MANIFEST_VERSION: u32 = 1;
@@ -1094,6 +1097,9 @@ pub struct PromptBoardRead {
     pub recent_entries: Vec<BoardEntry>,
     pub has_recent_own_status: bool,
     pub latest_own_status_at: Option<DateTime<Utc>>,
+    /// An append was still in flight. Keep both prompt cursors so its row is
+    /// retried even when its timestamp predates this successful partial read.
+    pub retry_from_previous_cursor: bool,
 }
 
 pub struct PromptBoardReadRequest<'a> {
@@ -1164,6 +1170,7 @@ impl PromptBoardRead {
                 })
                 .collect(),
             latest_own_status_at,
+            retry_from_previous_cursor: false,
         }
     }
 }
@@ -3548,6 +3555,11 @@ fn migrated_project_coordination_root(
     worktree_root: &Path,
     _repo_hash: Option<&str>,
 ) -> Option<PathBuf> {
+    project_coordination_root_from_local_files(worktree_root)
+        .filter(|root| coordination_migration_marker_path(root).is_file())
+}
+
+fn project_coordination_root_from_local_files(worktree_root: &Path) -> Option<PathBuf> {
     // A persisted Session hash can predate an origin change. Resolve the
     // current common repository from local files for both Board and sidecar
     // reads, without the git subprocess used by coordination_repo_root.
@@ -3564,10 +3576,7 @@ fn migrated_project_coordination_root(
     } else {
         &common_dir
     };
-    let root = gwt_project_dir_for_repo_path(repo_root).join("coordination");
-    coordination_migration_marker_path(&root)
-        .is_file()
-        .then_some(root)
+    Some(gwt_project_dir_for_repo_path(repo_root).join("coordination"))
 }
 
 fn reminders_path_for_repo_hash(
@@ -3769,6 +3778,128 @@ fn load_prompt_reminder_from_prepared(
         status_kind,
         status_since,
     ))
+}
+
+/// Prompt-only bounded view. The append log is authoritative even when a
+/// committed post failed to refresh the manifest or hot projection. Do not
+/// invoke storage initialization or repair on this deadline-bounded path.
+fn load_prompt_reminder_tail(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    request: PromptBoardReadRequest<'_>,
+) -> Result<PromptBoardRead> {
+    crate::operation_deadline::ensure_remaining("Board prompt tail")?;
+    let _ = repo_hash; // Resolve current repository identity, as sidecar reads do.
+    let root = project_coordination_root_from_local_files(worktree_root)
+        .unwrap_or_else(|| legacy_coordination_dir(worktree_root));
+    let segments_dir = coordination_events_segments_dir_from_root(&root);
+    if !segments_dir.exists() {
+        if coordination_legacy_events_path_from_root(&root).exists() {
+            return Err(GwtError::Other(
+                "Board prompt requires legacy migration; read board.show to initialize storage"
+                    .to_string(),
+            ));
+        }
+        return Ok(PromptBoardRead::default());
+    }
+    // Discover actual files, including a rollover committed before the
+    // manifest update. Only filenames are visited; historical rows are not.
+    let mut paths = std::fs::read_dir(&segments_dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.retain(|path| path.extension().is_some_and(|ext| ext == "jsonl"));
+    paths.sort_unstable();
+    let latest_segment = paths.last().cloned();
+    let mut history = Vec::new();
+    let mut retry = false;
+    #[cfg(test)]
+    PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+        counters.borrow_mut().history_materializations += 1;
+    });
+    for path in paths.into_iter().rev() {
+        let (entries, partial) = load_prompt_segment_tail(
+            &path,
+            PROMPT_BOARD_ENTRY_LIMIT.saturating_sub(history.len()),
+        )?;
+        history.extend(entries);
+        retry |= partial;
+        if history.len() >= PROMPT_BOARD_ENTRY_LIMIT {
+            break;
+        }
+    }
+    history.sort_by_key(|entry| entry.created_at);
+    crate::operation_deadline::ensure_remaining("Board prompt rollover check")?;
+    let latest_after_read = std::fs::read_dir(&segments_dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .max();
+    retry |= latest_after_read != latest_segment;
+    let mut read = PromptBoardRead::from_scoped_history(
+        history,
+        request.diff_since,
+        request.scope,
+        request.status_author,
+        request.status_kind,
+        request.status_since,
+    );
+    read.retry_from_previous_cursor = retry;
+    Ok(read)
+}
+
+fn load_prompt_segment_tail(path: &Path, limit: usize) -> Result<(Vec<BoardEntry>, bool)> {
+    const CHUNK_BYTES: usize = 64 * 1024;
+    let mut file = File::open(path)?;
+    let original_len = file.metadata()?.len();
+    let mut position = original_len;
+    let mut chunks = Vec::new();
+    let mut newlines = 0;
+    // One extra newline makes the oldest retained row complete even when the
+    // first chunk starts in the middle of UTF-8 or a JSON row.
+    while position > 0 && newlines <= limit {
+        crate::operation_deadline::ensure_remaining("Board prompt tail read")?;
+        let size = position.min(CHUNK_BYTES as u64) as usize;
+        position -= size as u64;
+        file.seek(SeekFrom::Start(position))?;
+        let mut chunk = vec![0; size];
+        file.read_exact(&mut chunk)?;
+        newlines += chunk.iter().filter(|byte| **byte == b'\n').count();
+        chunks.push(chunk);
+    }
+    chunks.reverse();
+    let bytes = chunks.concat();
+    let partial = bytes.last().is_some_and(|byte| *byte != b'\n');
+    let start = if position == 0 {
+        0
+    } else {
+        bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |i| i + 1)
+    };
+    let end = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(start, |i| i + 1);
+    let mut entries = Vec::new();
+    for line in bytes[start..end]
+        .rsplit(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .take(limit)
+    {
+        crate::operation_deadline::ensure_remaining("Board prompt tail decode")?;
+        let mut event: CoordinationEvent = serde_json::from_slice(line).map_err(json_error)?;
+        normalize_coordination_event(&mut event);
+        #[cfg(test)]
+        PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
+            counters.borrow_mut().event_decodes += 1;
+        });
+        let CoordinationEvent::MessageAppended { entry } = event;
+        entries.push(entry);
+    }
+    crate::operation_deadline::ensure_remaining("Board prompt tail decode")?;
+    Ok((entries, partial || file.metadata()?.len() != original_len))
 }
 
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
@@ -4152,15 +4283,21 @@ impl BoardProvider for LocalProvider {
         repo_hash: Option<&str>,
         request: PromptBoardReadRequest<'_>,
     ) -> Result<PromptBoardRead> {
-        load_prompt_reminder_for_repo_hash(
-            worktree_root,
-            repo_hash,
-            request.diff_since,
-            request.scope,
-            request.status_author,
-            request.status_kind,
-            request.status_since,
-        )
+        if crate::operation_deadline::current().is_some() {
+            load_prompt_reminder_tail(worktree_root, repo_hash, request)
+        } else {
+            // SessionStart/Stop keep the existing initialization and legacy
+            // migration contract. Only the deadline-bounded prompt is a tail.
+            load_prompt_reminder_for_repo_hash(
+                worktree_root,
+                repo_hash,
+                request.diff_since,
+                request.scope,
+                request.status_author,
+                request.status_kind,
+                request.status_since,
+            )
+        }
     }
 
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
@@ -6964,6 +7101,123 @@ mod tests {
         )
         .unwrap();
         stored_bytes
+    }
+
+    #[test]
+    fn prompt_board_tail_reads_rollover_without_repair_and_retries_partial_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = legacy_coordination_dir(dir.path());
+        let base = Utc.with_ymd_and_hms(2026, 10, 14, 0, 0, 0).unwrap();
+        let make_event = |index| {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                "投稿",
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{index}");
+            entry.created_at = base + chrono::Duration::seconds(index);
+            entry.updated_at = entry.created_at;
+            CoordinationEvent::MessageAppended { entry }
+        };
+        write_prompt_board_fixture(&root, &[make_event(1)]);
+        // Neither a corrupt/stale manifest nor a stale projection is a reason
+        // to repair all history or miss a committed rollover on a prompt.
+        let manifest = coordination_events_manifest_path_from_root(&root);
+        std::fs::write(&manifest, b"broken manifest").unwrap();
+        let path = coordination_events_segments_dir_from_root(&root).join(segment_file_name(2));
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&serialized_event_line(&make_event(2)).unwrap())
+            .unwrap();
+        let pending = serialized_event_line(&make_event(3)).unwrap();
+        let split = pending.len() / 2;
+        file.write_all(&pending[..split]).unwrap();
+        file.flush().unwrap();
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + Duration::from_millis(200),
+        );
+        let load = || {
+            LocalProvider.load_prompt_reminder_for_repo_hash(
+                dir.path(),
+                None,
+                PromptBoardReadRequest {
+                    diff_since: base,
+                    scope: &BoardAudienceScope::All,
+                    status_author: "Codex",
+                    status_kind: &BoardEntryKind::Status,
+                    status_since: base,
+                },
+            )
+        };
+        let partial = load().unwrap();
+        assert_eq!(partial.recent_entries.len(), 2);
+        assert_eq!(partial.recent_entries.last().unwrap().id, "entry-2");
+        assert!(partial.retry_from_previous_cursor);
+        file.write_all(&pending[split..]).unwrap();
+        file.flush().unwrap();
+        let complete = load().unwrap();
+        assert_eq!(complete.recent_entries.len(), 3);
+        assert!(!complete.retry_from_previous_cursor);
+        assert_eq!(
+            complete.latest_own_status_at,
+            Some(base + chrono::Duration::seconds(3))
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), b"broken manifest");
+    }
+
+    #[test]
+    fn prompt_board_tail_bounds_reads_with_twelve_thousand_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = legacy_coordination_dir(dir.path());
+        let base = Utc.with_ymd_and_hms(2026, 10, 14, 0, 0, 0).unwrap();
+        let events = (0..12_000)
+            .map(|index| {
+                let mut entry = BoardEntry::new(
+                    AuthorKind::Agent,
+                    "Codex",
+                    BoardEntryKind::Status,
+                    "x".repeat(1024),
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                );
+                entry.id = format!("fixture-{index}");
+                entry.created_at = base + chrono::Duration::seconds(index);
+                entry.updated_at = entry.created_at;
+                CoordinationEvent::MessageAppended { entry }
+            })
+            .collect::<Vec<_>>();
+        write_prompt_board_fixture(&root, &events);
+        reset_prompt_board_read_test_counters();
+        let started = std::time::Instant::now();
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            started + Duration::from_millis(200),
+        );
+        let read = LocalProvider
+            .load_prompt_reminder_for_repo_hash(
+                dir.path(),
+                None,
+                PromptBoardReadRequest {
+                    diff_since: base,
+                    scope: &BoardAudienceScope::All,
+                    status_author: "Codex",
+                    status_kind: &BoardEntryKind::Status,
+                    status_since: base,
+                },
+            )
+            .unwrap();
+        let elapsed = started.elapsed();
+        let decoded = prompt_board_read_test_counters().event_decodes;
+        eprintln!("12,000-entry prompt Board read: {elapsed:?}, decoded={decoded}");
+        assert_eq!(decoded, PROMPT_BOARD_ENTRY_LIMIT);
+        assert_eq!(read.recent_entries.len(), PROMPT_BOARD_ENTRY_LIMIT);
+        assert_eq!(read.recent_entries.last().unwrap().id, "fixture-11999");
+        assert!(elapsed < Duration::from_millis(200), "{elapsed:?}");
     }
 
     #[test]

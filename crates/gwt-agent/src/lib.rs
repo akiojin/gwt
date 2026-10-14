@@ -16,6 +16,7 @@ pub mod launch;
 pub mod permission_mode;
 pub mod prepare;
 pub mod presets;
+pub mod runtime_gc;
 pub mod session;
 mod session_bridge;
 pub mod session_ledger;
