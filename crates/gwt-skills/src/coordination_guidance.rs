@@ -28,12 +28,41 @@ pub const SKILL_NAME: &str = "gwt-coordination";
 /// gwt-managed worktree, independent of project documentation.
 pub const SKILL_DESCRIPTION: &str = "Use proactively at the start of every conversation in any gwt-managed worktree, regardless of project AGENTS.md / CLAUDE.md content. Establishes Board posting and Work update rules through gwtd JSON envelopes for coordinating with other agents and the user. Mandatory when posting milestones, claiming scope, or updating current focus.";
 
+// Expand the same literal into the generated skill and the hook reminder.
+macro_rules! pane_name_first_action_guidance {
+    () => {
+        r#"## Agent name — first action
+
+For every new non-PM Agent, your first action must name your own window
+before responding to the user or starting normal work.
+Invent a short one-word ASCII English proper-name candidate using your own AI reasoning.
+Keep it unrelated to the task, Issue, branch, pane id, or provider.
+Do not choose from a static name vocabulary or make a second LLM request.
+
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"pane.name","params":{"candidate":"<your candidate>"}}
+    JSON
+
+Use the exact assigned name returned by `pane.name` in reports and handoffs,
+including any collision suffix. If your window is already assigned a name,
+retrying returns that existing name without renaming it. If an invalid candidate
+is rejected, invent another candidate and retry.
+
+The PM is exempt: do not call `pane.name` from the PM window.
+"#
+    };
+}
+
+/// Canonical first-action instruction shared by managed skills and hooks.
+pub const PANE_NAME_FIRST_ACTION_GUIDANCE_EN: &str = pane_name_first_action_guidance!();
+
 /// Canonical Board / Work operational guidance body (English).
 ///
 /// This is the single source of truth referenced by both the generated
-/// SKILL.md and (eventually) the runtime hook reminder. Drift between the
+/// SKILL.md and the runtime hook reminder. Drift between the
 /// two is guarded by a phrase-presence test in `tests/`.
-pub const SKILL_BODY_EN: &str = r#"# gwt Coordination
+pub const SKILL_BODY_EN: &str = concat!(
+    r#"# gwt Coordination
 
 You are operating in a gwt-managed worktree. The Board (coordination
 history) and Work (current state) MUST be used here. These rules
@@ -41,6 +70,9 @@ apply regardless of what the target project's AGENTS.md or CLAUDE.md
 says (or does not say) about Board / Work; gwt's coordination
 contract supersedes project-local documentation.
 
+"#,
+    pane_name_first_action_guidance!(),
+    r#"
 ## Issue and PR identifiers
 
 Always write numbers as `Issue #N` / `PR #N` in Board posts, Work summaries,
@@ -215,8 +247,8 @@ envelope when the current task, summary, next action, or focus changes:
 
 `purpose` is the short task name used by Agent window tabs and Work
 summaries. Write the work purpose, not its completion state, and never
-copy the raw prompt into it. On a new Agent window, set it as your first
-action, before responding to the user. If the purpose is not settled yet,
+copy the raw prompt into it. On a new Agent window, set it immediately after
+`pane.name`, before responding to the user. If the purpose is not settled yet,
 set a plausible provisional purpose now and update the same purpose the
 moment it is confirmed.
 
@@ -463,7 +495,8 @@ technical identifiers in English.
     gwtd <<'JSON'
     {"schema_version":1,"operation":"workspace.update","params":{"purpose":"coordination guidance writer","current_focus":"SPEC-1935 Phase 2 writer"}}
     JSON
-"#;
+"#
+);
 
 /// Localized Board / Work operational guidance body (Japanese).
 ///
@@ -633,7 +666,7 @@ summary、next action、focus が変わったら JSON envelope で必ず更新�
 `purpose` は Agent window tab と Work summary 用の
 **短い作業名**です。状態や結果ではなく「何の作業か（作業の目的）」を書きます。
 入力した生プロンプトをそのまま使わないでください。新しい Agent window
-では、応答を始める前に最初のアクションとして設定します。目的がまだ
+では、`pane.name` の直後、応答を始める前に設定します。目的がまだ
 固まっていない場合は、それっぽい暫定の目的を今すぐ設定し、目的が定まった
 瞬間に同じ purpose を更新します。
 

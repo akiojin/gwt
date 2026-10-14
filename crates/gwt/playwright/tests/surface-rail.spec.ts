@@ -127,7 +127,7 @@ test.describe("Surface rail", () => {
     await installSurfaceRailBackend(page);
     await page.goto(surfaceAppUrl);
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
-    await page.getByRole("tab", { name: "agent-one", exact: true }).click();
+    await page.getByRole("tab", { name: "Aster", exact: true }).click();
     await page.locator('.agent-tile[data-agent-id="agent-one"] .xterm').evaluate(node => { (window as any).__splitAgentTerminal = node; });
     await page.getByRole("button", { name: "Split view", exact: true }).click();
     const left = page.getByRole("region", { name: "Left pane", exact: true });
@@ -147,8 +147,8 @@ test.describe("Surface rail", () => {
       Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
       (window as any).__updateSurfaceAgent("agent-one", { dynamic_title: "Updated agent" });
     });
-    await expect(right.getByRole("tab", { name: "Updated agent", exact: true })).toBeVisible();
-    await expect(left.locator('.agent-tile[data-agent-id="agent-one"] h3')).toHaveText("Updated agent", { timeout: 1000 });
+    await expect(right.getByRole("tab", { name: "Aster — Updated agent", exact: true })).toBeVisible();
+    await expect(left.locator('.agent-tile[data-agent-id="agent-one"] h3')).toHaveText("Aster — Updated agent", { timeout: 1000 });
     const expectCatalogRevision = async () => {
       await expect.poll(() => page.evaluate(() => {
         const nodes = document.querySelectorAll(".agents-surface, #split-surfaces, #fleet-minimap");
@@ -179,9 +179,9 @@ test.describe("Surface rail", () => {
     await expect(left.locator('.agent-tile[data-agent-id="agent-one"] pre')).toContainText(output);
     await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
     await page.screenshot({ path: testInfo.outputPath("same-agent-both-panes.png") });
-    await right.getByRole("button", { name: "Close Updated agent tab", exact: true }).click();
+    await right.getByRole("button", { name: "Close Aster — Updated agent tab", exact: true }).click();
     await expect(left.locator('.agent-tile[data-agent-id="agent-two"]')).toBeVisible();
-    await right.getByRole("button", { name: "Open Updated agent tab", exact: true }).click();
+    await right.getByRole("button", { name: "Open Aster — Updated agent tab", exact: true }).click();
     await page.evaluate(() => (window as any).__removeSurfaceAgent("agent-one", { id: "agent-two", status: "stopped" }));
     await expect(left.locator('.agent-tile[data-agent-id="agent-one"]')).toHaveCount(0);
     expect(await page.evaluate(() => (window as any).__gwtTerminalTestApi.metrics("agent-one").hasRuntime)).toBe(false);
@@ -239,8 +239,8 @@ test.describe("Surface rail", () => {
     await page.goto(surfaceAppUrl);
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
     const all = page.getByRole("tab", { name: "All agents", exact: true });
-    const one = page.getByRole("tab", { name: "agent-one", exact: true });
-    const two = page.getByRole("tab", { name: "agent-two", exact: true });
+    const one = page.getByRole("tab", { name: "Aster", exact: true });
+    const two = page.getByRole("tab", { name: "Birch", exact: true });
     const first = page.locator('.agent-tile[data-agent-id="agent-one"]');
     const second = page.locator('.agent-tile[data-agent-id="agent-two"]');
     await expect(all).toHaveAttribute("aria-selected", "true");
@@ -285,20 +285,20 @@ test.describe("Surface rail", () => {
     await installSurfaceRailBackend(page);
     await page.goto(surfaceAppUrl);
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
-    const one = page.getByRole("tab", { name: "agent-one", exact: true });
+    const one = page.getByRole("tab", { name: "Aster", exact: true });
     const all = page.getByRole("tab", { name: "All agents", exact: true });
     const tile = page.locator('.agent-tile[data-agent-id="agent-one"]');
     await one.click();
     await tile.locator(".xterm").evaluate(node => { (window as any).__closedTabTerminal = node; });
     await clearMessages(page);
-    await page.getByRole("button", { name: "Close agent-one tab", exact: true }).click();
+    await page.getByRole("button", { name: "Close Aster tab", exact: true }).click();
     await expect(one).toHaveCount(0);
     await expect(all).toBeFocused();
     await expect(all).toHaveAttribute("aria-selected", "true");
     await expect(page.locator(".agent-tile")).toHaveCount(2);
     await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "terminal_output", id: "agent-one", data_base64: btoa("LIVE AFTER TAB CLOSE\r\n") }));
     await expect(tile.locator(".xterm-rows")).toContainText("LIVE AFTER TAB CLOSE");
-    const reopen = page.getByRole("button", { name: "Open agent-one tab", exact: true });
+    const reopen = page.getByRole("button", { name: "Open Aster tab", exact: true });
     await expect(reopen).toHaveText("Open tab");
     await reopen.focus();
     await reopen.press("Enter");
@@ -578,6 +578,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
       canvasWindow("agent-one", {
         status: "running",
         agent_id: "agent-one",
+        agent_name: "Aster",
         session_id: "session-one",
         agent_color: "cyan",
         geometry: { x: 2400, y: 1400, width: 560, height: 340 },
@@ -586,6 +587,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
       canvasWindow("agent-two", {
         status: "waiting",
         agent_id: "agent-two",
+        agent_name: "Birch",
         session_id: "session-two",
         agent_color: "green",
         geometry: { x: 3000, y: 1400, width: 560, height: 340 },

@@ -296,6 +296,8 @@ pub enum WorkflowCommand {
 pub enum PaneCommand {
     /// `pane.list`.
     List,
+    /// Assign the authenticated producing Session's own stable Agent name.
+    Name { candidate: String },
     /// `pane.read`.
     Read { id: String, lines: usize },
     /// `pane.close` / `pane.stop`.

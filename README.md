@@ -449,6 +449,12 @@ coordination surface agents use to expose status, decisions, handoffs, and
 requests. The Work Item Knowledge Bridge uses the local Issue cache and semantic
 index rather than rendering direct GitHub API responses in the frontend.
 
+Each worker Agent chooses a short memorable name when it starts. Its badge,
+window title, Fleet, and Kanban cards use that name; duplicate choices receive
+a numeric suffix. The name stays the same through restore and in-place restart.
+Until naming finishes, the badge reads `Naming…`. The resident PM keeps its own
+fixed identity.
+
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
 shell.

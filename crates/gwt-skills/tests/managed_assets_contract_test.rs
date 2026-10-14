@@ -1053,6 +1053,44 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
 }
 
 #[test]
+fn generated_coordination_requires_ai_self_naming_before_work() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    generate_coordination_guidance(dir.path()).expect("generate guidance");
+    for (provider, target) in [
+        (".claude", gwt_skills::ManagedAssetTarget::ClaudeCode),
+        (".codex", gwt_skills::ManagedAssetTarget::Codex),
+    ] {
+        let canonical = render_skill_md(target);
+        let path = dir
+            .path()
+            .join(provider)
+            .join("skills/gwt-coordination/SKILL.md");
+        let content = fs::read_to_string(&path).expect("read materialized guidance");
+        assert_eq!(content, canonical, "{}", path.display());
+        for required in [
+            "non-PM Agent",
+            "one-word ASCII English proper-name candidate",
+            "task, Issue, branch, pane id, or provider",
+            "before responding to the user or starting normal work",
+            r#""operation":"pane.name","params":{"candidate":"<your candidate>"}"#,
+            "exact assigned name",
+            "already assigned",
+            "invalid candidate",
+            "static name vocabulary",
+            "second LLM request",
+            "PM is exempt",
+        ] {
+            assert!(content.contains(required), "missing {required:?}");
+        }
+        assert!(
+            content.find(r#""operation":"pane.name""#)
+                < content.find(r#""operation":"workspace.update""#),
+            "self-naming must precede the Work purpose instruction"
+        );
+    }
+}
+
+#[test]
 fn render_skill_md_embeds_frontmatter_name_and_description() {
     let md = render_skill_md(gwt_skills::ManagedAssetTarget::ClaudeCode);
     assert!(md.starts_with("---\n"), "must start with YAML frontmatter");

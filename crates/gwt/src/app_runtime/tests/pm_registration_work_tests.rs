@@ -2677,8 +2677,56 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         source.launch_route = gwt_agent::LaunchRoute::Autonomous;
         source.save(&runtime.sessions_dir).expect("save source");
         let source_session_id = source.id.clone();
+        let placeholder = runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .add_window(WindowPreset::Agent, canvas_bounds());
+        runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .set_session_id(&placeholder.id, Some(source_session_id.clone()));
+        runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .set_agent_name(&placeholder.id, Some("Falcon-2".into()));
+        runtime.tab_mut("tab-1").unwrap().workspace.set_status(
+            &placeholder.id,
+            if origin == super::super::startup::RestoreOrigin::UserRequested {
+                WindowProcessStatus::Error
+            } else {
+                WindowProcessStatus::Stopped
+            },
+        );
+        runtime.register_window("tab-1", &placeholder.id);
 
         runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
+        assert_eq!(
+            runtime
+                .tab("tab-1")
+                .unwrap()
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .find_map(|window| window.agent_name.as_deref()),
+            Some("Falcon-2")
+        );
+        assert_eq!(
+            runtime
+                .tab("tab-1")
+                .unwrap()
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .filter(|window| window.preset.is_agent_terminal())
+                .count(),
+            1,
+            "restart replaces its old pane"
+        );
         wait_for_recorded_event("restore launch preparation", &recorded_events, |events| {
             events.iter().any(|event| {
                 matches!(

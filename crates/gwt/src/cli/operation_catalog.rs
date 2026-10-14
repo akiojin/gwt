@@ -460,6 +460,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pane.name",
+        aliases: &[],
+    },
+    Operation {
         name: "pane.read",
         aliases: &[],
     },
