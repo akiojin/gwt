@@ -4875,7 +4875,9 @@ import { createUiStateStore } from "/ui-state-store.js";
         createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
-        isKnowledgeWindowVisible: (id) => elementHasLayoutBox(windowMap.get(id)),
+        isKnowledgeWindowVisible: (id) => elementHasLayoutBox(
+          windowMap.get(id)?.querySelector(".surface-knowledge") || windowMap.get(id),
+        ),
         getWorkspaceWindows: () =>
           allProjectWindowIds()
             .map((windowId) => workspaceWindowById(windowId))
