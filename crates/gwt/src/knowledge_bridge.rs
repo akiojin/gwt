@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use gwt_core::paths::gwt_cache_dir;
@@ -593,36 +594,97 @@ pub fn load_knowledge_bridge_detail(
     Ok(detail_for_kind(kind, &entry, &linked_branches))
 }
 
+// Cache roots identify the shared project even when requests come from different worktrees.
+// Weak entries retain a result only while that refresh still has callers.
+#[derive(Default)]
+struct KnowledgeCacheRefreshFlights {
+    active: Mutex<HashMap<PathBuf, Weak<KnowledgeCacheRefreshFlight>>>,
+}
+
+#[derive(Default)]
+struct KnowledgeCacheRefreshFlight {
+    result: OnceLock<Result<bool, String>>,
+}
+
+impl KnowledgeCacheRefreshFlights {
+    fn run(
+        &self,
+        cache_root: &Path,
+        force: bool,
+        mut refresh: impl FnMut() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        loop {
+            let flight = self.join(cache_root);
+            let result = flight.run(&mut refresh);
+            // A forced request may have joined a non-forced TTL skip. Its next
+            // flight must actually sync, while an active sync (or failure) is shared.
+            if !force || result != Ok(false) {
+                return result;
+            }
+        }
+    }
+
+    fn join(&self, cache_root: &Path) -> Arc<KnowledgeCacheRefreshFlight> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.retain(|_, flight| flight.strong_count() > 0);
+        if let Some(flight) = active
+            .get(cache_root)
+            .and_then(Weak::upgrade)
+            .filter(|flight| flight.result.get() != Some(&Ok(false)))
+        {
+            return flight;
+        }
+        let flight = Arc::new(KnowledgeCacheRefreshFlight::default());
+        active.insert(cache_root.to_path_buf(), Arc::downgrade(&flight));
+        flight
+    }
+}
+
+impl KnowledgeCacheRefreshFlight {
+    fn run(&self, refresh: impl FnOnce() -> Result<bool, String>) -> Result<bool, String> {
+        self.result.get_or_init(refresh).clone()
+    }
+}
+
 pub fn refresh_knowledge_bridge_cache(repo_path: &Path, force: bool) -> Result<bool, String> {
+    static FLIGHTS: OnceLock<KnowledgeCacheRefreshFlights> = OnceLock::new();
+
     if !repo_path.is_dir() || issue_cache_root_for_repo_path(repo_path).is_none() {
         return Ok(false);
     }
     let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
-    let outcome = if force {
-        sync_issue_cache_from_remote_with_fingerprint(repo_path, &cache_root)?
-    } else {
-        sync_issue_cache_from_remote_if_stale_with_fingerprint(
-            repo_path,
-            &cache_root,
-            ISSUE_CACHE_TTL,
-        )?
-    };
-    if outcome.source_changed
-        && crate::index_worker::detect_repo_hash(repo_path).is_some()
-        && crate::index_worker::default_rebuild_runner(
-            repo_path,
-            crate::index_worker::IndexRebuildScope::Issues,
-            None,
-        )
-        .is_err()
-    {
-        tracing::debug!(
-            target: "gwt::knowledge_bridge",
-            error_code = "INDEX_REPAIR_FAILED",
-            "issue cache refresh succeeded but issue index rebuild failed"
-        );
-    }
-    Ok(outcome.refreshed)
+    FLIGHTS
+        .get_or_init(KnowledgeCacheRefreshFlights::default)
+        .run(&cache_root, force, || {
+            let outcome = if force {
+                sync_issue_cache_from_remote_with_fingerprint(repo_path, &cache_root)?
+            } else {
+                sync_issue_cache_from_remote_if_stale_with_fingerprint(
+                    repo_path,
+                    &cache_root,
+                    ISSUE_CACHE_TTL,
+                )?
+            };
+            if outcome.source_changed
+                && crate::index_worker::detect_repo_hash(repo_path).is_some()
+                && crate::index_worker::default_rebuild_runner(
+                    repo_path,
+                    crate::index_worker::IndexRebuildScope::Issues,
+                    None,
+                )
+                .is_err()
+            {
+                tracing::debug!(
+                    target: "gwt::knowledge_bridge",
+                    error_code = "INDEX_REPAIR_FAILED",
+                    "issue cache refresh succeeded but issue index rebuild failed"
+                );
+            }
+            Ok(outcome.refreshed)
+        })
 }
 
 pub fn search_knowledge_bridge(
@@ -1405,6 +1467,126 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_runs_sync_and_rebuild_once() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Barrier,
+        };
+
+        let flights = KnowledgeCacheRefreshFlights::default();
+        let joined = Barrier::new(8);
+        let syncs = AtomicUsize::new(0);
+        let rebuilds = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let requests: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let _flight = flights.join(Path::new("project-cache"));
+                        // All requests join the active generation before it completes.
+                        joined.wait();
+                        flights.run(Path::new("project-cache"), true, || {
+                            syncs.fetch_add(1, Ordering::SeqCst);
+                            rebuilds.fetch_add(1, Ordering::SeqCst);
+                            Ok(true)
+                        })
+                    })
+                })
+                .collect();
+            for request in requests {
+                assert_eq!(request.join().expect("refresh thread"), Ok(true));
+            }
+        });
+        assert_eq!(
+            syncs.load(Ordering::SeqCst),
+            1,
+            "one remote sync for eight requests"
+        );
+        assert_eq!(
+            rebuilds.load(Ordering::SeqCst),
+            1,
+            "one index rebuild for eight requests"
+        );
+    }
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_shares_failure_and_allows_retry() {
+        let flights = KnowledgeCacheRefreshFlights::default();
+        let cache = Path::new("project-cache");
+        let leader = flights.join(cache);
+        let follower = flights.join(cache);
+        assert_eq!(
+            flights.run(cache, false, || Err("sync failed".into())),
+            Err("sync failed".into())
+        );
+        assert_eq!(
+            flights.run(cache, true, || panic!("must share the failed sync")),
+            Err("sync failed".into())
+        );
+        drop(leader);
+        drop(follower);
+        assert_eq!(flights.run(cache, true, || Ok(true)), Ok(true));
+    }
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_keeps_projects_independent() {
+        let flights = KnowledgeCacheRefreshFlights::default();
+        // Running another project from inside the first cannot deadlock on a global lock.
+        assert_eq!(
+            flights.run(Path::new("project-a"), false, || {
+                flights.run(Path::new("project-b"), false, || Ok(false))
+            }),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn knowledge_cache_refresh_single_flight_force_waits_then_syncs_after_fresh_skip() {
+        use std::{
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                mpsc, Barrier,
+            },
+            time::{Duration, Instant},
+        };
+
+        let flights = KnowledgeCacheRefreshFlights::default();
+        let cache = Path::new("project-cache");
+        let flight = flights.join(cache);
+        let release = Barrier::new(2);
+        let (entered, started) = mpsc::channel();
+        let syncs = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let ordinary = scope.spawn(|| {
+                flights.run(cache, false, || {
+                    entered.send(()).expect("signal TTL check");
+                    release.wait();
+                    Ok(false)
+                })
+            });
+            started
+                .recv_timeout(Duration::from_secs(30))
+                .expect("TTL check started");
+            let forced = scope.spawn(|| {
+                flights.run(cache, true, || {
+                    syncs.fetch_add(1, Ordering::SeqCst);
+                    Ok(true)
+                })
+            });
+            // Observe that the forced request joined before allowing the TTL skip to finish.
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Arc::strong_count(&flight) < 3 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let joined = Arc::strong_count(&flight) >= 3;
+            release.wait();
+            assert_eq!(ordinary.join().expect("ordinary refresh"), Ok(false));
+            assert_eq!(forced.join().expect("forced refresh"), Ok(true));
+            assert!(joined, "forced request must wait for the active flight");
+        });
+        assert_eq!(syncs.load(Ordering::SeqCst), 1);
+    }
 
     use gwt_core::test_support::ScopedEnvVar;
 
