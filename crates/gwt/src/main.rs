@@ -5763,7 +5763,7 @@ mod tests {
             3
         );
 
-        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
         let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
         let file_tree_raw_id = runtime
             .window_lookup
@@ -5929,12 +5929,9 @@ mod tests {
 
         for preset in [
             WindowPreset::FileTree,
-            WindowPreset::Branches,
             WindowPreset::Settings,
             WindowPreset::Profile,
             WindowPreset::Logs,
-            WindowPreset::Issue,
-            WindowPreset::Spec,
             WindowPreset::Pr,
         ] {
             assert_eq!(
@@ -5961,11 +5958,11 @@ mod tests {
             assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
 
-        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
         let branches_raw_id = runtime
             .window_lookup
             .get(&branches_id)
-            .expect("Branches lookup")
+            .expect("Settings lookup")
             .raw_id
             .clone();
         let before_z = runtime
@@ -5973,14 +5970,14 @@ mod tests {
             .expect("tab")
             .workspace
             .window(&branches_raw_id)
-            .expect("Branches window")
+            .expect("Settings window")
             .z_index;
         assert_eq!(
             runtime
                 .create_window_events(&runtime.test_context(), WindowPreset::Work, bounds.clone())
                 .len(),
             1,
-            "Work must focus the existing legacy Branches singleton",
+            "Work must focus the existing Settings surface",
         );
         let reused_work = runtime
             .tab("tab-1")

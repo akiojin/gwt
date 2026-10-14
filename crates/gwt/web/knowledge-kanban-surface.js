@@ -728,6 +728,9 @@ export function createKnowledgeKanbanSurface({
         };
         const over = event => {
           if (dragging || event.buttons) return;
+          // Hiding a dismissed tooltip exposes the control underneath it;
+          // that hit-test change is not a new pointer entry by the user.
+          if (popup.hidden && popup.contains(event.relatedTarget)) return;
           const node = target(event);
           if (!node || node.contains(event.relatedTarget)) return;
           hovered = node;
@@ -1402,9 +1405,9 @@ export function createKnowledgeKanbanSurface({
           bar
             .querySelector(`[data-action="${action}"]`)
             ?.addEventListener("click", () => {
-              if (action === "monitor-settings") {
+              if (action === "monitor-settings" && !body.closest(".settings-root")) {
                 document.dispatchEvent(new document.defaultView.CustomEvent("settings:open", { detail: { section: "issues" } }));
-              } else {
+              } else if (action === "monitor-setup") {
                 send({ kind: "issue_monitor_configure_profile" });
               }
             });
@@ -3645,6 +3648,13 @@ export function createKnowledgeKanbanSurface({
         windowMap.get(windowId)?.querySelector(`.knowledge-row[data-issue-number="${state.selectedNumber}"] .knowledge-row-select`)?.focus();
       }
 
+      function focusIssuePreview(windowId, element) {
+        const detail = element.querySelector(".knowledge-detail-pane");
+        const explanations = issueControlExplanations.get(windowId);
+        if (explanations) explanations.restoreFocus(detail, false);
+        else detail?.focus();
+      }
+
       function renderIssueDetailPane(windowId, state, detailPane, { agentPreview = true } = {}) {
         detailPane.innerHTML = "";
         detailPane.hidden = agentPreview && state.previewHidden === true;
@@ -5217,7 +5227,7 @@ export function createKnowledgeKanbanSurface({
               detail?.prepend(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error));
             }
             publishIssueControlExplanations(windowId, focus);
-            if (focusPreview) element.querySelector(".knowledge-detail-pane")?.focus();
+            if (focusPreview) focusIssuePreview(windowId, element);
           } else {
             renderIssueKnowledgeBridge(windowId, element, state);
           }

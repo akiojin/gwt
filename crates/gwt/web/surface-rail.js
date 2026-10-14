@@ -36,6 +36,7 @@ export function surfaceForWindow(windowData) {
   if (windowData?.is_pm) {
     return "pm";
   }
+  if (windowData?.preset === "settings" && windowData.settingsSection === "issues") return "issues";
   return surfaceForPreset(windowData?.preset);
 }
 

@@ -156,7 +156,7 @@ test.describe("Issue preview placement", () => {
     await page.goto(liveUrl || APP_URL);
     await openIssueOutput(page);
 
-    await expect(page.locator(".workspace-window.surface-knowledge")).toBeVisible();
+    await expect(page.locator(".workspace-window[data-preset='settings'] .surface-knowledge")).toBeVisible();
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
 
@@ -855,8 +855,8 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
 
       const issueWindow = {
         id: "tab-issue::issue-1",
-        title: "Issue",
-        preset: "issue",
+        title: "Settings",
+        preset: "settings",
         geometry: { x: 40, y: 60, width: 1400, height: issueHeight },
         z_index: 1,
         status: "running",

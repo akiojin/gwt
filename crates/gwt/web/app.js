@@ -318,6 +318,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       const renderedRuntimeStatusKeys = new Map();
       const renderedAgentKanbanBodyKeys = new Map();
       const renderedIssuePreviewBodyKeys = new Map();
+      const settingsNavigationModel = createUiStateStore({});
       const renderedIssueWindowHeaderKeys = new Map();
       // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
       // /file-tree-surface.js (exported and destructured below so the
@@ -979,6 +980,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (preset === "work" || preset === "workspace") {
           return "knowledge";
         }
+        if (preset === "settings") return "settings";
         if (preset === "console") {
           return "console";
         }
@@ -986,7 +988,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function knowledgeKindForPreset(preset) {
-        if (["issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
+        if (["settings", "issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
           return "issue";
         }
         if (preset === "pr") {
@@ -2475,7 +2477,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // model). Also applies local focus + z-order highlight (focus_window
       // stays for highlight; maximize_window is gone).
       function frameWindow(windowId, { animate = true, notifyFocus = true } = {}) {
-        const windowData = workspaceWindowById(windowId);
+        const windowData = windowWithSettingsSection(workspaceWindowById(windowId));
         if (!windowData) {
           return;
         }
@@ -3964,6 +3966,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         syncSurfaceRail();
       }
 
+      function windowWithSettingsSection(data) {
+        return data?.preset === "settings"
+          ? { ...data, settingsSection: settingsNavigationModel.read()[data.id] } : data;
+      }
+
       // The selected pane or Agents host takes precedence over canvas focus.
       function syncSurfaceRail() {
         if (splitSurfaces?.isOpen()) {
@@ -3974,11 +3981,18 @@ import { createUiStateStore } from "/ui-state-store.js";
           applySurfaceSelection(document, "agents");
           return;
         }
-        const focused = focusedId
+        const focusedWindow = focusedId
           ? (activeWorkspace().windows || []).find((windowData) => windowData.id === focusedId)
           : null;
+        const focused = windowWithSettingsSection(focusedWindow);
         applySurfaceSelection(document, surfaceForWindow(focused));
       }
+
+      document.addEventListener("settings:section-changed", event => {
+        const { windowId, section } = event.detail || {};
+        if (windowId) settingsNavigationModel.update(state => ({ ...state, [windowId]: section }));
+        syncSurfaceRail();
+      });
 
       function numericZIndex(value) {
         const numeric = Number.parseInt(value || "0", 10);
@@ -5387,7 +5401,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
             return;
           }
-          pendingIndexOpenTargetsByPreset.set(preset, { knowledgeKind, number: issueNumber });
+          pendingIndexOpenTargetsByPreset.set("settings", { knowledgeKind, number: issueNumber });
         }
       }
 
@@ -5537,6 +5551,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           "surface-board",
           "surface-logs",
           "surface-knowledge",
+          "surface-settings",
           "surface-index",
           "surface-work",
           "surface-profile",
@@ -5748,6 +5763,10 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderUsagePanel,
         indexStatusByProjectRoot,
         pmSettingsPanel,
+        mountIssues: (data, host) => {
+          mountKnowledgeWindow(data, host);
+          send({ kind: "request_remote_start_work_branches", id: data.id });
+        },
       });
 
       function ensureWindow(windowData) {
@@ -6002,7 +6021,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
-        if (surface === "knowledge") {
+        if (surface === "knowledge" || surface === "settings") {
           const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
           if (renderedIssuePreviewBodyKeys.get(windowData.id) !== nextIssuePreviewBodyKey) {
             renderedIssuePreviewBodyKeys.set(windowData.id, nextIssuePreviewBodyKey);
@@ -6171,6 +6190,11 @@ import { createUiStateStore } from "/ui-state-store.js";
                     renderedRuntimeStatusKeys.delete(windowId);
                     renderedAgentKanbanBodyKeys.delete(windowId);
                     renderedIssuePreviewBodyKeys.delete(windowId);
+                    settingsNavigationModel.update(state => {
+                      const next = { ...state };
+                      delete next[windowId];
+                      return next;
+                    });
                     renderedIssueWindowHeaderKeys.delete(windowId);
                     pendingOutputMap.delete(windowId);
                     pendingSnapshotMap.delete(windowId);
@@ -7745,7 +7769,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         onAgentsHost: setAgentsHost,
         restoreVisibility: (id, element) => { element.hidden = !visibleWindowData(workspaceWindowById(id)); },
         openSurface: (surface) => {
-          const preset = surface === "issues" ? "issue" : surface;
+          const preset = surface === "issues" ? "settings" : surface;
           send({ kind: "create_window", preset, bounds: visibleBounds() });
         },
         onChange: () => syncSurfaceRail(),
@@ -7755,7 +7779,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       });
       document.getElementById("split-view-button").addEventListener("click", () => {
         if (splitSurfaces.isOpen()) splitSurfaces.close();
-        else splitSurfaces.open(agentsHost ? "agents" : surfaceForWindow(workspaceWindowById(focusedId)));
+        else splitSurfaces.open(agentsHost ? "agents" : surfaceForWindow(windowWithSettingsSection(workspaceWindowById(focusedId))));
       });
       window.addEventListener("resize", () => {
         if (!splitSurfaces.isOpen() && !agentsHost) return;
@@ -7920,6 +7944,10 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function focusOrSpawnPreset(preset) {
         preset = normalizeSurfacePreset(preset);
+        if (preset === "issue") {
+          document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
+          return (activeWorkspace().windows || []).find(w => w.preset === "settings")?.id || null;
+        }
         const allWindows = activeWorkspace().windows || [];
         const existing = isSingletonSurfacePreset(preset)
           ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset)
