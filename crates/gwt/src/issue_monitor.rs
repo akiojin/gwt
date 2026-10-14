@@ -10043,13 +10043,16 @@ impl IssueMonitorState {
                 .any(|window| !window.review_dispatch && window.issue_number == Some(issue_number))
     }
 
-    /// Include untracked Launched rows whose execution may have been interrupted.
+    /// Include untracked Launched rows and open delivered owners still settling.
     pub fn execution_settlement_issue_numbers(&self) -> Vec<u64> {
         self.active_launches
             .iter()
             .copied()
             .chain(self.inbox.iter().filter_map(|item| {
-                (item.state == MonitorInboxState::Launched).then_some(item.issue.number)
+                (item.state == MonitorInboxState::Launched
+                    || (item.issue.state == IssueMonitorIssueState::Open
+                        && self.merged_deliveries.contains_key(&item.issue.number)))
+                .then_some(item.issue.number)
             }))
             .chain(self.window_snapshot.iter().flat_map(|snapshot| {
                 snapshot.windows.iter().filter_map(|window| {
@@ -13251,6 +13254,24 @@ impl IssueMonitorState {
         delivery: &MergedIssueDelivery,
     ) -> bool {
         if self.issue_is_closed(issue_number) {
+            return false;
+        }
+        // Issue #5414: the producing launch owns acceptance readback through
+        // merge. Do not park it while it can still finish that settlement.
+        if self.auto_close_merged_issues_enabled()
+            && (self.process_held_issues.contains(&issue_number)
+                || self.has_observed_monitor_runtime(issue_number))
+            && self.inbox_item(issue_number).is_some_and(|item| {
+                !crate::issue_monitor_gate::classify_acceptance_criteria(
+                    item.issue.body.as_deref().unwrap_or(""),
+                )
+                .all_checked()
+            })
+        {
+            tracing::debug!(
+                issue_number,
+                "deferring merged acceptance settlement to live launch"
+            );
             return false;
         }
         let settled = self.merged_issue_settlements.get(&issue_number);
@@ -39667,6 +39688,84 @@ mod tests {
         ]));
         assert!(!delegation_recorded(["all done"]));
         assert!(!delegation_recorded(std::iter::empty::<&str>()));
+    }
+
+    #[test]
+    fn merged_issue_settlement_defers_unchecked_acceptance_for_live_launch() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor
+            .set_auto_close_merged_issues_with_effect_revocation(Some(true))
+            .unwrap();
+        let mut unmet = issue(42);
+        unmet.body = Some("## Acceptance Criteria\n- [ ] AC-1: verify delivery\n".to_string());
+        scan_queued_candidates(&mut monitor, &[unmet], "2026-09-01T00:00:00Z");
+        let delivery = merged_delivery(7, "aaa", "2026-09-01T00:01:00Z");
+        let deliveries = BTreeMap::from([("work/issue-42".to_string(), delivery.clone())]);
+        monitor.record_merged_deliveries(&deliveries);
+        monitor.record_merged(42);
+        let action = MergedIssueSettlementAction::UnmetAcceptance {
+            unmet: vec!["AC-1".to_string()],
+        };
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        assert!(monitor
+            .merged_issue_settlement_candidates(&deliveries)
+            .is_empty());
+        assert!(!monitor.propose_merged_issue_settlement(42, &delivery, action.clone()));
+        assert!(monitor.merged_issue_settlement(42).is_none());
+        assert!(
+            monitor.execution_settlement_issue_numbers().contains(&42),
+            "an open delivered owner still needs fresh process observations after its slot is freed"
+        );
+
+        // Canvas presence also protects the launch while its process census catches up.
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_window_snapshot(pane_snapshot(
+            "2026-09-01T00:02:00Z",
+            vec![live_pane_observation(
+                "tab-1::agent-42",
+                42,
+                WindowState::Running,
+            )],
+        ));
+        assert!(monitor
+            .merged_issue_settlement_candidates(&deliveries)
+            .is_empty());
+        assert!(!monitor.propose_merged_issue_settlement(42, &delivery, action.clone()));
+
+        let mut checked = monitor.clone();
+        checked.record_candidate(checked_issue(42));
+        assert_eq!(
+            checked
+                .merged_issue_settlement_candidates(&deliveries)
+                .len(),
+            1
+        );
+        assert!(checked.propose_merged_issue_settlement(
+            42,
+            &delivery,
+            MergedIssueSettlementAction::Close { delegated: false },
+        ));
+
+        // Once the launch is gone, unchecked acceptance keeps the existing escalation.
+        monitor.record_window_snapshot(pane_snapshot("2026-09-01T00:03:00Z", vec![]));
+        assert_eq!(
+            monitor
+                .merged_issue_settlement_candidates(&deliveries)
+                .len(),
+            1
+        );
+        assert!(monitor.propose_merged_issue_settlement(42, &delivery, action.clone()));
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".to_string()),
+            action,
+            "2026-09-01T00:03:00Z",
+        );
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::NeedsHuman
+        );
     }
 
     #[test]
