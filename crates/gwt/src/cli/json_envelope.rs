@@ -700,6 +700,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
             // An unexplained release of a recorded failure is not auditable.
             reason: required_string(params, "reason")?,
+            force: optional_bool(params, "force")?.unwrap_or(false),
         }),
         "issue.monitor.quota_hold.list" | "issue.monitor.quota-hold.list" => {
             CliCommand::Issue(IssueCommand::MonitorQuotaHoldList {
@@ -5023,6 +5024,7 @@ mod tests {
                 project_root: None,
                 number: 3624,
                 reason: "manual recovery after the launch-fence outage".to_string(),
+                force: false,
             })
         );
         assert!(matches!(
@@ -5032,6 +5034,13 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.requeue", json!({"reason": "x"})),
             CliParseError::MissingFlag("number")
+        ));
+        assert!(matches!(
+            ok(
+                "issue.monitor.requeue",
+                json!({"number": 42, "reason": "explicit recovery", "force": true})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorRequeue { force: true, .. })
         ));
     }
 

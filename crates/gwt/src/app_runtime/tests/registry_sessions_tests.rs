@@ -1285,6 +1285,7 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
                 gwt::issue_monitor::IssueMonitorLaunchConfirmation {
                     window_id: "tab-1::agent-24".to_string(),
                     claim_id: None,
+                    tier: None,
                     delivery_id: None,
                     confirmed_at: "2026-08-17T08:55:00Z".to_string(),
                 },

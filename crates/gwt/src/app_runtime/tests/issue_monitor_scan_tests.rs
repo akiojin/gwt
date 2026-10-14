@@ -1500,6 +1500,7 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let active = temp.path().join("active");
@@ -1547,12 +1548,25 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
             reason: "real observation".into(),
             ..Default::default()
         };
+        let reduced = gwt::agent_capacity::AgentCapacity {
+            machine_budget: Some(3),
+            recommended_worker_limit: 2,
+            recommended_total_count: 3,
+            limiting_constraint: "cpu".into(),
+            constraints: vec![gwt::agent_capacity::CapacityConstraint {
+                resource: "cpu".into(),
+                capacity: Some(3),
+                binding: true,
+                reason: "P cores 8; GUI 5 cores".into(),
+            }],
+            ..fresh.clone()
+        };
         let expired = gwt::agent_capacity::AgentCapacity {
             observed_at: Some(1),
             expires_at: Some(2),
-            ..fresh.clone()
+            ..reduced.clone()
         };
-        for (observation, auto_limit) in [(fresh, 4), (expired, 0)] {
+        for (observation, auto_limit) in [(fresh, 4), (reduced, 2), (expired, 2)] {
             let events = runtime.issue_monitor_capacity_changed_events_with(&other, |root| {
                 assert_eq!(root, other);
                 observation.clone()
@@ -1574,7 +1588,30 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
             );
             assert_eq!(status.max_active_agents_override, manual);
         }
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        let reductions = rows
+            .iter()
+            .filter(|row| row.message.contains("Auto capacity reduced"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reductions.len(),
+            1,
+            "only Auto reductions are reported once"
+        );
+        assert_eq!(reductions[0].context["previous_limit"], "4");
+        assert_eq!(reductions[0].context["effective_limit"], "2");
+        assert_eq!(reductions[0].context["limiting_constraint"], "cpu");
         assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+        fs::write(&prefs_path, b"corrupt").unwrap();
+        let events = runtime.issue_monitor_capacity_changed_events_with(&other, |_| {
+            expected.agent_capacity.clone()
+        });
+        let BackendEvent::IssueMonitorStatus { status } = &events[0].event else {
+            panic!("capacity refresh must retain the cached status");
+        };
+        assert_eq!(**status, expected);
+        assert_eq!(fs::read(&prefs_path).unwrap(), b"corrupt");
+        fs::write(&prefs_path, prefs_before).unwrap();
     }
     assert!(tasks.lock().unwrap().is_empty(), "no scan, RPC or PM work");
     assert_eq!(runtime.daemon_supervisor.ensure_attempts(), 0);

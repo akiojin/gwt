@@ -262,6 +262,15 @@ records actual Chromium results for both dark and light themes. Use
 changed behavior and zero console/page errors. An autonomous UI Ready handoff
 requires those measured passing results in the same fresh verification record.
 
+Before Ready PR creation or enabling auto-merge, compare the owner Issue's
+acceptance criteria with the fresh `verify.run` evidence. Update only proven
+AC checkboxes through `issue.edit` (`issue.spec.edit` for a `gwt-spec` owner),
+then read the owner back to confirm the saved state. Leave unproven criteria
+unchecked, including delivery criteria until `origin/develop` contains the
+source. Keep the same launch active through merge and post-merge settlement;
+declare delivery complete only after confirming `origin/develop` contains the
+source.
+
 PR work goes through `gwt-manage-pr`. After automated verification and all
 other Ready PR Gate conditions pass, create a Ready PR (or call `pr.ready` for
 an existing Draft), then follow the existing CI auto-merge path until the PR is

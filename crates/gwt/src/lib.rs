@@ -69,6 +69,7 @@ pub mod provider_reset;
 pub mod pty_start_gate;
 pub mod recovery_delivery;
 pub mod runtime_daemon_events;
+pub mod runtime_gc;
 pub mod session_inventory;
 pub mod spec_tasks;
 pub mod spotlight;

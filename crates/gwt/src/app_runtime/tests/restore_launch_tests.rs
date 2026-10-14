@@ -1118,6 +1118,7 @@ fn startup_restore_honors_a_cleared_restore_flag_on_a_surviving_placeholder() {
 
 /// Issue #4143 AC-3: a restore nobody asked for that dies before PTY start
 /// records its reason and leaves no window behind.
+/// Issue #4383 AC-5: the ledger retains its linked Issue after the pane closes.
 #[test]
 fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the_reason() {
     let temp = tempdir().expect("tempdir");
@@ -1131,12 +1132,20 @@ fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime
+        .tab_mut("tab-1")
+        .expect("tab")
+        .workspace
+        .set_linked_issue_number("agent-1", Some(4383));
+    runtime
         .restore_launch_windows
         .insert(window_id.clone(), Some("session-restore".to_string()));
 
+    let detail = "Rebound continuation lost the exact Active launch handshake race";
     let _ = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
-        Err("PTY creation failed: too many open files".into()),
+        Err(super::super::launch::AgentLaunchError::active_conflict(
+            detail,
+        )),
     );
 
     assert!(
@@ -1159,7 +1168,7 @@ fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the
         gwt_core::error_ledger::ErrorKind::LaunchFailure
     );
     assert!(
-        rows[0].message.contains("too many open files"),
+        rows[0].message.contains(detail),
         "the ledger row must keep the cause after the pane is gone: {}",
         rows[0].message
     );
@@ -1167,6 +1176,7 @@ fn automatic_restore_launch_failure_before_pty_closes_the_window_and_records_the
         rows[0].target.window_id.as_deref(),
         Some(window_id.as_str())
     );
+    assert_eq!(rows[0].target.issue, Some(4383));
 }
 
 /// Issue #4143 AC-3: the operator's own launch keeps its error pane — that
