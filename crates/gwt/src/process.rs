@@ -92,21 +92,32 @@ pub fn current_username() -> String {
 /// a direct process-handle probe on Windows. Permission failures do not
 /// establish that an owner is dead.
 pub fn is_process_alive(pid: u32) -> bool {
+    host_process_liveness(pid).unwrap_or(true)
+}
+
+/// A destructive collector must distinguish an absent PID from a failed probe.
+/// Permission and other unexpected OS errors return `None` and retain evidence.
+pub fn host_process_liveness(pid: u32) -> Option<bool> {
     if pid == 0 {
-        return false;
+        return Some(false);
     }
     #[cfg(unix)]
     {
         // SAFETY: kill(pid, 0) returns 0 if the process exists, -1
         // with ESRCH if it does not. We never deliver a real signal.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let pid = libc::pid_t::try_from(pid).ok()?;
+        let rc = unsafe { libc::kill(pid, 0) };
         if rc == 0 {
-            return true;
+            return Some(true);
         }
         let err = std::io::Error::last_os_error();
         // EPERM means the process exists but we lack permission to
         // signal it — still alive from the bootstrap caller's POV.
-        matches!(err.raw_os_error(), Some(libc::EPERM))
+        match err.raw_os_error() {
+            Some(libc::ESRCH) => Some(false),
+            Some(libc::EPERM) => Some(true),
+            _ => None,
+        }
     }
     #[cfg(not(unix))]
     {
@@ -115,23 +126,6 @@ pub fn is_process_alive(pid: u32) -> bool {
         // needs a truthful liveness answer here. A permanent `false` would
         // make every consumer delete a live daemon's endpoint file on each
         // bootstrap call and let the GUI tick double-drive the scan.
-        is_host_process_alive(pid)
-    }
-}
-
-/// Probe only the requested PID. Windows daemon event publishing calls this
-/// for every output chunk; a full process snapshot here consumes a core even
-/// when `sysinfo` is asked to refresh just one PID (Issue #4799).
-pub fn is_host_process_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        is_process_alive(pid)
-    }
-    #[cfg(not(unix))]
-    {
         use windows::{
             core::HRESULT,
             Win32::{
@@ -145,7 +139,13 @@ pub fn is_host_process_alive(pid: u32) -> bool {
             Ok(handle) => handle,
             // Access denied or another uncertain failure must not authorize
             // replacing a live owner. An invalid PID is definitively absent.
-            Err(error) => return error.code() != HRESULT::from_win32(ERROR_INVALID_PARAMETER.0),
+            Err(error) => {
+                return if error.code() == HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
         };
         // SAFETY: the owned process handle stays valid through the zero-timeout
         // wait and is then closed exactly once. A signaled process has exited,
@@ -153,9 +153,15 @@ pub fn is_host_process_alive(pid: u32) -> bool {
         unsafe {
             let alive = WaitForSingleObject(handle, 0) != WAIT_OBJECT_0;
             let _ = CloseHandle(handle);
-            alive
+            Some(alive)
         }
     }
+}
+
+/// Probe only the requested PID without a full process snapshot (#4799).
+/// Uncertainty retains the owner, as required by daemon bootstrap callers.
+pub fn is_host_process_alive(pid: u32) -> bool {
+    host_process_liveness(pid).unwrap_or(true)
 }
 
 /// Issue #3906 AC-8: whether `pid` runs somewhere under `ancestor` in the
@@ -434,11 +440,14 @@ mod tests {
     fn pid_zero_is_never_alive() {
         assert!(!is_process_alive(0));
         assert!(!is_host_process_alive(0));
+        assert_eq!(super::host_process_liveness(0), Some(false));
     }
 
     #[test]
     fn current_host_process_is_alive_on_every_supported_platform() {
         assert!(is_host_process_alive(std::process::id()));
+        assert_eq!(super::host_process_liveness(std::process::id()), Some(true));
+        assert_eq!(super::host_process_liveness(i32::MAX as u32), Some(false));
     }
 
     #[cfg(unix)]

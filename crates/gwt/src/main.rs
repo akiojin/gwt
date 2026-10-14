@@ -4626,6 +4626,7 @@ mod tests {
         let (project_tab_incarnations, next_project_incarnation) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
+            _runtime_namespace_gc: None,
             issue_monitor_review_dispatch_windows: std::collections::HashSet::new(),
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
