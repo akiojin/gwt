@@ -1054,7 +1054,7 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
 
 #[test]
 fn render_skill_md_embeds_frontmatter_name_and_description() {
-    let md = render_skill_md();
+    let md = render_skill_md(gwt_skills::ManagedAssetTarget::ClaudeCode);
     assert!(md.starts_with("---\n"), "must start with YAML frontmatter");
     assert!(md.contains("name: gwt-coordination"));
     assert!(md.contains("\"operation\":\"board.post\""));
