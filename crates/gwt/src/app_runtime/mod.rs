@@ -2705,6 +2705,9 @@ mod claim_renewal_tests {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", temp.path());
+        // The success contract concerns durable state, not host filesystem latency.
+        let start = gwt_core::operation_deadline::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
         let prefs_path = temp.path().join("issue-monitor.json");
         let effect = gwt::PendingIssueMonitorEffect {
             effect_id: "renew:42:claim-42".to_string(),
@@ -2763,9 +2766,7 @@ mod claim_renewal_tests {
         prefs.claim_diagnostics.clear();
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
         let mut monitor = gwt::IssueMonitorState::with_prefs(Default::default(), prefs);
-        let start = gwt_core::operation_deadline::now();
         let deadline = start + std::time::Duration::from_secs(60);
-        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
         let mut expired_clock = None;
         let error = drive_local_issue_monitor_claim_effects_with(
