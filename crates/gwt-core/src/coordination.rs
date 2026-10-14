@@ -2145,9 +2145,9 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
 }
 
 /// Issue #4406: every coordination path helper resolves the repository root,
-/// and each resolution used to start `git rev-parse`. A worktree path keeps
-/// its repository, so a successful resolution is cached for the process; a
-/// failed one is not, so a directory that becomes a repository later is seen.
+/// and each resolution used to start `git rev-parse`. Cache successful roots
+/// for the process, validating their current Git layout without subprocesses
+/// (Issue #5397). Do not cache failures: a directory may become a repository.
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
     // Issue #3777 AC-1: counted per call, not per cache miss — the property
     // under test is that the prompt hot path asks for the root once.
@@ -2159,19 +2159,47 @@ fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
     static RESOLVED: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, PathBuf>>> =
         std::sync::OnceLock::new();
     let cache = RESOLVED.get_or_init(Default::default);
-    if let Some(repo_root) = cache
+    let mut resolved = cache
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(worktree_root)
-    {
-        return Some(repo_root.clone());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(repo_root) = resolved.get(worktree_root) {
+        if coordination_repo_root_from_files(worktree_root).as_ref() == Some(repo_root) {
+            return Some(repo_root.clone());
+        }
+        resolved.remove(worktree_root);
     }
+    drop(resolved);
     let repo_root = resolve_coordination_repo_root(worktree_root)?;
     cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(worktree_root.to_path_buf(), repo_root.clone());
     Some(repo_root)
+}
+
+fn coordination_repo_root_from_files(worktree_root: &Path) -> Option<PathBuf> {
+    // Canonicalize before walking ancestors so nested relative paths and
+    // symlinks discover the same repository as Git. Missing paths invalidate.
+    let worktree_root = dunce::canonicalize(worktree_root).ok()?;
+    if !worktree_root.is_dir() {
+        return None;
+    }
+    if let Some(repository_path) = worktree_root
+        .ancestors()
+        .find(|path| path.join(".git").exists() || is_bare_git_dir(path))
+    {
+        let common_dir = crate::repo_hash::repository_common_dir(repository_path)?;
+        let common_dir = dunce::canonicalize(common_dir)
+            .ok()
+            .filter(|path| is_bare_git_dir(path))?;
+        return if common_dir.file_name() == Some(std::ffi::OsStr::new(".git")) {
+            common_dir.parent().map(Path::to_path_buf)
+        } else {
+            Some(common_dir)
+        };
+    }
+    // Preserve configured bare-repository preference and legacy selection.
+    coordination_child_bare_repo(&worktree_root)
 }
 
 fn resolve_coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
@@ -7332,6 +7360,97 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_reminders_state(&repo, "session-1").unwrap(), updated);
+    }
+
+    #[test]
+    fn coordination_root_cache_invalidates_moved_and_deleted_worktrees() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (bare, worktree) = make_workspace_home_with_child_bare_and_worktree(workspace.path());
+        let expected = dunce::canonicalize(&bare).unwrap();
+        assert_eq!(coordination_repo_root(&worktree), Some(expected.clone()));
+        COORDINATION_GIT_SPAWNS.with(|count| count.set(0));
+        assert_eq!(coordination_repo_root(&worktree), Some(expected.clone()));
+        assert_eq!(COORDINATION_GIT_SPAWNS.with(std::cell::Cell::get), 0);
+
+        let moved = workspace.path().join("work/moved");
+        run_git(
+            &bare,
+            &[
+                "worktree",
+                "move",
+                worktree.to_str().unwrap(),
+                moved.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            coordination_repo_root(&worktree),
+            None,
+            "the old path must be invalidated"
+        );
+        assert_eq!(coordination_repo_root(&moved), Some(expected));
+        run_git(&bare, &["worktree", "remove", moved.to_str().unwrap()]);
+        assert_eq!(
+            coordination_repo_root(&moved),
+            None,
+            "a removed worktree must not retain its root"
+        );
+
+        std::fs::create_dir_all(&worktree).unwrap();
+        run_git(&worktree, &["init", "--quiet"]);
+        assert_eq!(
+            coordination_repo_root(&worktree),
+            Some(dunce::canonicalize(&worktree).unwrap()),
+            "reusing a deleted path must resolve the new repository"
+        );
+    }
+
+    #[test]
+    fn coordination_root_cache_invalidates_changed_git_link() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (bare, worktree) = make_workspace_home_with_child_bare_and_worktree(workspace.path());
+        assert_eq!(
+            coordination_repo_root(&worktree),
+            Some(dunce::canonicalize(&bare).unwrap())
+        );
+        let replacement = workspace.path().join("replacement.git");
+        std::fs::create_dir_all(&replacement).unwrap();
+        run_git(&replacement, &["init", "--bare", "--quiet"]);
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", replacement.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            coordination_repo_root(&worktree),
+            Some(dunce::canonicalize(&replacement).unwrap())
+        );
+        std::fs::rename(&replacement, workspace.path().join("moved-replacement.git")).unwrap();
+        assert_eq!(
+            coordination_repo_root(&worktree),
+            None,
+            "a missing Git target must invalidate the cache even if the worktree still exists"
+        );
+    }
+
+    #[test]
+    fn coordination_root_cache_board_mutation_git_spawn_measurement() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "--quiet"]);
+        COORDINATION_GIT_SPAWNS.with(|count| count.set(0));
+        post_entry(&repo, scoped_seed_entry("cold".into(), "workspace")).unwrap();
+        let cold = COORDINATION_GIT_SPAWNS.with(std::cell::Cell::get);
+        COORDINATION_GIT_SPAWNS.with(|count| count.set(0));
+        post_entry(&repo, scoped_seed_entry("warm".into(), "workspace")).unwrap();
+        let warm = COORDINATION_GIT_SPAWNS.with(std::cell::Cell::get);
+        println!("Board mutation Git spawns: cold={cold}, warm={warm}");
+        assert_eq!(warm, 0, "one subsequent Board mutation must not spawn Git");
     }
 
     #[test]
