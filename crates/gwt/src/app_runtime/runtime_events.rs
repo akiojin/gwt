@@ -1898,7 +1898,33 @@ impl AppRuntime {
                 ));
             }
         }
-        let Some(window_id) = self.active_window_for_runtime_event(&event) else {
+        let window_id = self.active_window_for_runtime_event(&event);
+        let source_event = match event.source_event.as_deref() {
+            Some(
+                source @ ("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse"
+                | "Stop" | "SubagentStart" | "SubagentStop" | "Notification"
+                | "PermissionRequest"),
+            ) => source,
+            None => "none",
+            _ => "other",
+        };
+        let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
+            event.occurred_at.as_str()
+        } else {
+            "invalid"
+        };
+        tracing::info!(
+            target: "gwt.hook.delivery",
+            stage = "window",
+            outcome = if window_id.is_some() { "matched" } else { "unmatched" },
+            route = if publish_to_daemon { "live" } else { "daemon" },
+            gwt_session_id = event.gwt_session_id.as_deref().unwrap_or_default(),
+            source_event,
+            occurred_at,
+            window_id = window_id.as_deref().unwrap_or_default(),
+            "runtime hook delivery"
+        );
+        let Some(window_id) = window_id else {
             return events;
         };
         let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&window_id);
@@ -1916,7 +1942,13 @@ impl AppRuntime {
         // one. Throttled inside `schedule_runtime_hook_heartbeat`.
         if let Some(project_root) = issue_monitor_project_root.clone() {
             stages.measure("issue_monitor_heartbeat", || {
-                self.schedule_runtime_hook_heartbeat(&project_root, &window_id)
+                self.schedule_runtime_hook_heartbeat(
+                    &project_root,
+                    &window_id,
+                    event.gwt_session_id.as_deref(),
+                    source_event,
+                    occurred_at,
+                )
             });
         }
         if event.source_event.as_deref() == Some("SessionStart") {

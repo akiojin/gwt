@@ -7,6 +7,8 @@ use std::{
 
 use gwt_core::{config::BareProjectConfig, GwtError, Result};
 
+pub mod git_health;
+
 /// The type of repository detected at a given path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoType {

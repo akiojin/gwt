@@ -1403,6 +1403,28 @@ async fn hook_live_handler(
             .to_string_lossy()
             .into_owned(),
     );
+    let source_event = match event.source_event.as_deref() {
+        Some(
+            source @ ("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop"
+            | "SubagentStart" | "SubagentStop" | "Notification" | "PermissionRequest"),
+        ) => source,
+        None => "none",
+        _ => "other",
+    };
+    let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
+        event.occurred_at.as_str()
+    } else {
+        "invalid"
+    };
+    tracing::info!(
+        target: "gwt.hook.delivery",
+        stage = "receipt",
+        outcome = "authenticated",
+        gwt_session_id = principal.session_id(),
+        source_event,
+        occurred_at,
+        "runtime hook delivery"
+    );
     state.send(TransportEvent::RuntimeHook(event));
     StatusCode::NO_CONTENT
 }
@@ -2811,6 +2833,7 @@ mod tests {
             error_origin: None,
         }
     }
+
     #[tokio::test]
     async fn authenticated_http_and_websocket_dispatch_without_gui() {
         let project = tempfile::tempdir().expect("project");
@@ -2834,6 +2857,13 @@ mod tests {
             }),
         );
         let app = agent_router(state, AccessLogSink::default());
+        let hook_log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(hook_log.reopen().unwrap())
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -2847,7 +2877,8 @@ mod tests {
             .bearer_auth(&grant.token)
             .json(&serde_json::json!({
                 "kind": "runtime_state", "gwt_session_id": "transport-session",
-                "occurred_at": "2026-09-28T00:00:00Z"
+                "source_event": "PostToolUse", "occurred_at": "2026-09-28T00:00:00Z",
+                "agent_session_id": "private-provider-id", "message": "private-hook-content"
             }))
             .send()
             .await
@@ -2859,6 +2890,30 @@ mod tests {
                 .unwrap(),
             Some(TransportEvent::RuntimeHook(_))
         ));
+        let text = std::fs::read_to_string(hook_log.path()).unwrap();
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let receipt = records
+            .iter()
+            .find(|record| record["target"] == "gwt.hook.delivery")
+            .expect("authenticated receipt must survive outside the access ring");
+        assert_eq!(receipt["level"], "INFO");
+        assert_eq!(receipt["fields"]["stage"], "receipt");
+        assert_eq!(receipt["fields"]["gwt_session_id"], "transport-session");
+        assert_eq!(receipt["fields"]["source_event"], "PostToolUse");
+        assert_eq!(receipt["fields"]["occurred_at"], "2026-09-28T00:00:00Z");
+        for private in [
+            grant.token.as_str(),
+            "private-provider-id",
+            "private-hook-content",
+        ] {
+            assert!(
+                !text.contains(private),
+                "receipt must contain correlation metadata only"
+            );
+        }
         let mut request = format!("ws://{addr}/internal/pane-ws")
             .into_client_request()
             .unwrap();

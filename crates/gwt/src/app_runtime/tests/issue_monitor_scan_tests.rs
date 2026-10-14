@@ -722,7 +722,7 @@ fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
     let fake_gh = write_fake_gh_issue_list(temp.path());
     let _path = prepend_fake_gh_to_path(&fake_gh);
     let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
-    let (repo, _prefs_path) = seed_scheduled_scan_claim_fixture(&temp, None);
+    let (repo, prefs_path) = seed_scheduled_scan_claim_fixture(&temp, None);
     let probed = Arc::new(Mutex::new(Vec::new()));
     let _hook = super::super::set_local_completion_probe_test_hook({
         let probed = Arc::clone(&probed);
@@ -744,6 +744,7 @@ fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
         std::time::Duration::from_secs(30),
     )
     .expect("scan");
+    super::super::wait_scan_generation_reaper(&prefs_path);
     assert!(matches!(
         outcome,
         ScheduledIssueMonitorScanOutcome::Applied(_)
@@ -802,6 +803,7 @@ fn scheduled_scan_discards_claim_proposals_when_the_completion_probe_expires() {
         std::time::Duration::from_secs(30),
     )
     .expect("an expired probe must not fail the commit");
+    super::super::wait_scan_generation_reaper(&prefs_path);
 
     let ScheduledIssueMonitorScanOutcome::Applied(state) = outcome else {
         panic!("the scan holds authority, so it must commit its own findings");
@@ -880,6 +882,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         std::time::Duration::from_secs(30),
     )
     .expect("scan");
+    super::super::wait_scan_generation_reaper(&prefs_path);
     assert!(matches!(
         outcome,
         ScheduledIssueMonitorScanOutcome::Applied(_)
@@ -947,6 +950,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
         std::time::Duration::from_secs(30),
     )
     .expect("an exhausted read phase must not fail the commit");
+    super::super::wait_scan_generation_reaper(&prefs_path);
 
     let ScheduledIssueMonitorScanOutcome::Applied(state) = outcome else {
         panic!("the scan holds authority, so it must commit its own findings");
@@ -963,12 +967,162 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
     assert_eq!(status.last_scan_at.as_deref(), Some("2026-08-12T07:00:00Z"));
 }
 
+#[test]
+fn generation_recovery_reservation_is_single_flight_and_periodic() {
+    let mut state = super::super::ScanGenerationReaperState::default();
+    let now = Instant::now();
+    let interval = Duration::from_secs(60);
+    assert!(state.try_reserve(now), "the first tick starts recovery");
+    assert!(
+        !state.try_reserve(now + interval),
+        "even a later tick cannot queue recovery while its worker is held"
+    );
+    state.running = false;
+    assert!(
+        !state.try_reserve(now + interval - Duration::from_secs(1)),
+        "completed recovery must not run again on every tick"
+    );
+    assert!(state.try_reserve(now + interval), "the next period is due");
+}
+
+#[test]
+fn generation_recovery_releases_its_reservation_when_the_worker_unwinds() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let prefs_path = temp.path().join("issue-monitor.json");
+    assert!(super::super::scan_generation_reapers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(prefs_path.clone())
+        .or_default()
+        .try_reserve(Instant::now()));
+    assert!(std::panic::catch_unwind(|| {
+        let _flight = super::super::ScanGenerationReaperFlight(prefs_path.clone());
+        panic!("recovery failed");
+    })
+    .is_err());
+    assert!(
+        !super::super::scan_generation_reapers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[&prefs_path]
+            .running,
+        "panic and a dropped spawn closure must release the in-flight reservation"
+    );
+}
+
+/// Issue #4975 AC-A3: the scan reads the committed snapshot without joining
+/// a concurrent writer's transaction.
+#[test]
+fn issue_monitor_prefs_snapshot_is_readable_while_its_writer_lock_is_held() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let prefs_path = temp.path().join("issue-monitor.json");
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed committed prefs");
+    let writer_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(prefs_path.with_extension("lock"))
+        .expect("open writer lock");
+    writer_lock.lock_exclusive().expect("hold writer lock");
+    let (read_tx, read_rx) = mpsc::channel();
+    let result = thread::scope(|scope| {
+        scope.spawn(|| {
+            read_tx
+                .send(gwt::load_issue_monitor_prefs(&prefs_path))
+                .expect("report snapshot read");
+        });
+        let result = read_rx.recv_timeout(Duration::from_secs(1));
+        FileExt::unlock(&writer_lock).expect("release writer lock");
+        result
+    });
+    assert!(
+        matches!(result, Ok(Ok(prefs)) if prefs.enabled),
+        "snapshot reads must not wait for the prefs writer"
+    );
+}
+
+/// Even the daemon-owned tick must return while local recovery is busy.
+#[test]
+fn scheduled_scan_returns_while_generation_recovery_is_running() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed enabled prefs");
+    let daemon = gwt::IssueMonitorAuthorityFence::current_process();
+    let (_, _daemon_lease) =
+        gwt::establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false)
+            .expect("live daemon authority");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let _hook = super::super::ScopedScanGenerationReaperTestHook::set(&prefs_path, move || {
+        started_tx.send(()).expect("report recovery started");
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("release recovery");
+    });
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let result = thread::scope(|scope| {
+        scope.spawn(|| {
+            let outcome = super::super::run_scheduled_issue_monitor_scan_with_budgets(
+                &repo,
+                None,
+                None,
+                None,
+                None,
+                "2026-10-14T07:00:00Z",
+                &super::super::default_issue_client_factory(),
+                Duration::from_secs(60),
+                Duration::from_secs(30),
+            );
+            completed_tx.send(outcome).expect("report scan completed");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("recovery started");
+        let result = completed_rx.recv_timeout(Duration::from_secs(1));
+        // Release before asserting so the synchronous regression fails cleanly.
+        release_tx.send(()).expect("release recovery");
+        result
+    });
+    super::super::wait_scan_generation_reaper(&prefs_path);
+    assert!(
+        matches!(
+            result,
+            Ok(Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon))
+        ),
+        "the scan waited for generation recovery: {result:?}"
+    );
+}
+
 /// Issue #3934: the generation reaper used to run once, during bootstrap. A
 /// holder that died after that kept its owner unlaunchable until someone
 /// restarted the GUI, which is why 45 Issues had to be re-registered under
-/// fresh numbers. Every scan must try the recovery.
+/// fresh numbers. Periodic background recovery must remain available.
 #[test]
-fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
+fn scheduled_scan_reclaims_a_defunct_generation_in_background() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1031,6 +1185,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
         std::time::Duration::from_secs(30),
     )
     .expect("scan runs");
+    super::super::wait_scan_generation_reaper(&prefs_path);
 
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&repo, owner)
@@ -1046,8 +1201,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_before_planning_launches() {
 /// worker answered `DeferredToLiveDaemon` before it ever reached the reaper —
 /// and the daemon has no reaper. The scan-cadence recovery therefore never ran
 /// after startup; 38 stranded generations survived every scan. The reaper is
-/// local recovery, not a scan effect, and must run on every tick regardless of
-/// who holds scan authority.
+/// local recovery, not a scan effect, and remains independent of scan authority.
 #[test]
 fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the_scan() {
     let _env_lock = env_test_lock()
@@ -1106,6 +1260,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
         std::time::Duration::from_secs(30),
     )
     .expect("scan runs");
+    super::super::wait_scan_generation_reaper(&prefs_path);
 
     assert!(
         matches!(
@@ -1120,7 +1275,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
             .expect("ledger")
             .current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
-        "the reaper must run before the scan defers to the daemon"
+        "background recovery must run even when the scan defers to the daemon"
     );
 }
 
@@ -1168,6 +1323,7 @@ fn scheduled_scan_defers_to_live_daemon_without_remote_io_or_launch() {
         .is_empty());
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
+    super::super::wait_scan_generation_reaper(&completed_prefs);
     assert!(matches!(
         &outcome,
         Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon)
@@ -1355,6 +1511,7 @@ fn scheduled_scan_discards_scanned_state_when_authority_appears_before_commit() 
     runtime.issue_monitor_scheduled_tick_events_at("2026-08-10T01:00:00Z");
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
+    super::super::wait_scan_generation_reaper(&completed_prefs);
 
     assert!(marker.exists(), "the side-effect-free scan completed first");
     assert!(matches!(
@@ -1439,6 +1596,7 @@ fn scheduled_tick_advances_autonomous_launch_without_an_external_daemon() {
     assert!(events.is_empty(), "the tick returns before the remote scan");
     let (completed_root, completed_prefs, completed_at, outcome) =
         run_scheduled_scan_to_completion(&scan_tasks, &recorded);
+    super::super::wait_scan_generation_reaper(&completed_prefs);
     let events = runtime.complete_scheduled_scan_for_test(
         &completed_root,
         &completed_prefs,
