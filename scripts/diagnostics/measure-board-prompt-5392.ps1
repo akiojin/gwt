@@ -21,7 +21,7 @@ try {
     $rustArgs = @('--edition=2021', '-C', 'linker=rust-lld',
         (Join-Path $PSScriptRoot 'measure-board-prompt-5392.rs'),
         '-L', ('dependency=' + (Join-Path $probeRoot 'target/debug/deps')), '-o', $probeExe)
-    foreach ($name in @('gwt', 'gwt_agent', 'gwt_core', 'chrono')) {
+    foreach ($name in @('gwt', 'gwt_agent', 'gwt_core', 'gwt_git', 'chrono')) {
         if (-not $libraries.ContainsKey($name)) { throw "missing library artifact: $name" }
         $rustArgs += @('--extern', ($name + '=' + $libraries[$name]))
     }

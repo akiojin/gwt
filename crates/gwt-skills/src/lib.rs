@@ -2903,6 +2903,42 @@ mod tests {
         }
     }
 
+    /// Issue #5414 AC-1: distributed delivery entrypoints persist only proven
+    /// owner acceptance before Ready and retain post-merge settlement.
+    #[test]
+    fn delivery_skills_materialize_verified_owner_ac_before_ready() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for skill in ["gwt-execute", "gwt-manage-pr"] {
+            let source = std::fs::read_to_string(
+                workspace_root.join(format!(".claude/skills/{skill}/SKILL.md")),
+            )
+            .unwrap();
+            for provider in [".claude", ".codex"] {
+                let relative = format!("{provider}/skills/{skill}/SKILL.md");
+                let checked_in = std::fs::read_to_string(workspace_root.join(&relative)).unwrap();
+                let generated =
+                    std::fs::read_to_string(materialized.path().join(&relative)).unwrap();
+                assert_eq!(checked_in, source, "provider mirror drift: {relative}");
+                assert_eq!(generated, source, "materialization drift: {relative}");
+                let prose = generated.split_whitespace().collect::<Vec<_>>().join(" ");
+                for required in [
+                    "Before Ready PR creation or enabling auto-merge",
+                    "fresh `verify.run` evidence",
+                    "only proven AC checkboxes through `issue.edit`",
+                    "`issue.spec.edit` for a `gwt-spec` owner",
+                    "read the owner back",
+                    "Leave unproven criteria unchecked",
+                    "same launch active through merge and post-merge settlement",
+                    "delivery complete only after confirming `origin/develop` contains the source",
+                ] {
+                    assert!(prose.contains(required), "{relative} missing: {required}");
+                }
+            }
+        }
+    }
+
     /// Issue #5128 AC-1/2/3: pending-only CI waits must not become human
     /// escalations, including in the materialized Fix and Deliver references.
     #[test]
