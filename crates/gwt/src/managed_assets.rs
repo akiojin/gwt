@@ -935,8 +935,8 @@ fn pm_generated_asset_paths(worktree: &Path) -> Vec<PathBuf> {
     ]);
     for root in [".claude/skills", ".codex/skills"] {
         let root = worktree.join(root);
-        paths.push(gwt_skills::coordination_guidance::skill_path(&root));
-        paths.push(gwt_skills::pm_guidance::skill_path(&root));
+        paths.extend(gwt_skills::coordination_guidance::managed_paths(&root));
+        paths.extend(gwt_skills::pm_guidance::managed_paths(&root));
     }
     paths
 }
@@ -2134,7 +2134,11 @@ mod tests {
         .unwrap();
         let canonical_worktree = dunce::canonicalize(&worktree).unwrap();
         super::refresh_managed_gwt_assets_for_pm_worktree_locked(&canonical_worktree).unwrap();
+        let policy = runtime.join(".claude/skills/gwt-pm/references/project-policy.md");
         assert!(std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("](references/project-policy.md)"));
+        assert!(std::fs::read_to_string(&policy)
             .unwrap()
             .contains("PROJECT-ONLY-SENTINEL"));
         assert!(!std::fs::symlink_metadata(&skill)
@@ -2146,6 +2150,7 @@ mod tests {
         assert!(!std::fs::read_to_string(&skill)
             .unwrap()
             .contains("PROJECT-ONLY-SENTINEL"));
+        assert!(!policy.exists(), "opt-out removes copied project rules");
         let before = std::fs::read(&skill).unwrap();
         // #4486 AC-11: an opted-in policy file the project does not carry is
         // configuration drift, not a refresh failure. This used to return an

@@ -27,7 +27,7 @@ use crate::{distribute::ManagedAssetTarget, guidance::Guidance};
 pub const SKILL_NAME: &str = "gwt-pm";
 
 /// Skill description surfaced in the auto-discovery listing.
-pub const SKILL_DESCRIPTION: &str = "Use proactively at the start of every conversation in the resident PM agent pane. Establishes the PM operating contract: sole conversational window for the user, Issue decomposition and registration, semantic priority via Issue Monitor queue operations, launch_now launch instructions, NeedsHuman routing, and the unattended subscribe/reconcile loop.";
+pub const SKILL_DESCRIPTION: &str = "Use in the resident PM agent session for project intake, fleet supervision, and user reporting.";
 
 /// Canonical PM operating contract (English; SPEC-3431 FR-004/005/006/007/
 /// 008/011/012/013).
@@ -72,6 +72,16 @@ into this generated skill supplements the PM contract.
   because the target is PM-facing. When the fleet cannot be steered
   without such a fix, put that Issue at the head of the queue, and
   escalate to the user if it still does not move.
+
+Hard limits, no exceptions:
+
+- Never run `pane.send`. Input injection is scoped to a session's own
+  pane and is not a coordination channel.
+- Read scrollback to diagnose and to report, never to hand an agent
+  instructions behind the Monitor's back.
+- Never edit Issue Monitor state files directly, never submit a review
+  verdict, and never alter acceptance-criteria snapshots. The merge gate
+  decides merges on its own and is not yours to influence.
 
 ## Decide instead of asking
 
@@ -865,16 +875,6 @@ agreement.
 - `pm.stop` does not close the pane. It ends PM authority and the loop;
   the window is left for the user to close.
 
-Hard limits, no exceptions:
-
-- Never run `pane.send`. Input injection is scoped to a session's own
-  pane and is not a coordination channel.
-- Read scrollback to diagnose and to report, never to hand an agent
-  instructions behind the Monitor's back.
-- Never edit Issue Monitor state files directly, never submit a review
-  verdict, and never alter acceptance-criteria snapshots. The merge gate
-  decides merges on its own and is not yours to influence.
-
 ## PM scratch storage
 
 - `$GWT_PM_SCRATCH_DIR` is the only storage location for PM session
@@ -1584,17 +1584,87 @@ and urgency.
   times.
 "#;
 
-/// Render the full SKILL.md (frontmatter + managed markers + body).
+/// Small discovery entrypoint; operational prose remains in the canonical body.
+const ROUTER_BODY: &str = r#"# gwt PM Agent
+
+## When to use
+
+Use in the resident PM session for intake, queue decisions, agent supervision,
+and user reporting. Read the role and authority reference before the first action.
+
+## Completion
+
+Each request has an owner and verifiable acceptance criteria, the fleet has the
+next executable action or a justified escalation, and Reports/current status
+reflect the outcome. The resident loop continues until an intentional stop;
+a quiet queue or a handed-off PR alone does not finish the PM role.
+
+## References
+
+Choose the reference for the current action; read only the relevant sections.
+
+- At startup or before an authority decision: [Role, boundaries, and user instructions](references/role-and-boundaries.md).
+- For request intake, Issue ownership, queue order, or launches: [Intake and priority](references/intake-and-priority.md).
+- For agent observation, trust prompts, steering, or recovery: [Agent supervision and input safety](references/agent-supervision.md).
+- For PM identity, checkout isolation, or scratch storage: [Runtime isolation](references/runtime-isolation.md).
+- For subscribe/reconcile cycles and Concern measurements: [Resident loop](references/resident-loop.md).
+- For PR triage, interrupted release, or verification contention: [PR inventory and delivery](references/pr-inventory.md).
+- For NeedsHuman, blocked agents, Issue proposals, reports, or stopping: [Escalation and reporting](references/escalation-and-reporting.md).
+"#;
+
+const REFERENCE_SECTIONS: &[(&str, &str)] = &[
+    ("role-and-boundaries.md", "# gwt PM Agent"),
+    ("intake-and-priority.md", "## Request intake via sub-agents"),
+    ("agent-supervision.md", "## Observing the running agents"),
+    ("runtime-isolation.md", "## A repository has exactly one PM"),
+    ("resident-loop.md", "## Resident loop (unattended)"),
+    ("pr-inventory.md", "## Open PR inventory"),
+    ("escalation-and-reporting.md", "## NeedsHuman"),
+];
+
+fn reference_sections() -> impl Iterator<Item = (&'static str, &'static str)> {
+    REFERENCE_SECTIONS
+        .iter()
+        .enumerate()
+        .map(|(index, &(name, heading))| {
+            let start = SKILL_BODY_EN
+                .find(heading)
+                .expect("canonical reference heading");
+            let end = REFERENCE_SECTIONS
+                .get(index + 1)
+                .map(|&(_, next)| SKILL_BODY_EN.find(next).expect("next reference heading"))
+                .unwrap_or(SKILL_BODY_EN.len());
+            (name, &SKILL_BODY_EN[start..end])
+        })
+}
+
+/// Every generated leaf, also used by managed-asset snapshot and rollback.
+pub fn managed_paths(skills_root: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![skill_path(skills_root)];
+    paths.extend(
+        REFERENCE_SECTIONS
+            .iter()
+            .map(|&(name, _)| skills_root.join(SKILL_NAME).join("references").join(name)),
+    );
+    paths.push(
+        skills_root
+            .join(SKILL_NAME)
+            .join("references/project-policy.md"),
+    );
+    paths
+}
+
+/// Render the discovery router; operational details are materialized alongside it.
 pub fn render_skill_md(provider: ManagedAssetTarget) -> String {
     GUIDANCE.render(provider)
 }
 
-// Provider-specific content is intentionally empty; Issue #4267 adds only
-// the selection mechanism. Keep the common contract in SKILL_BODY_EN.
+// Keep the provider-selection mechanism from Issue #4267. Common operational
+// details are materialized as references; provider sections remain empty.
 pub(crate) const GUIDANCE: Guidance<'static> = Guidance {
     name: SKILL_NAME,
     description: SKILL_DESCRIPTION,
-    body: SKILL_BODY_EN,
+    body: ROUTER_BODY,
     claude_section: "",
     codex_section: "",
 };
@@ -1609,7 +1679,7 @@ pub fn generate_pm_guidance(worktree: &Path) -> io::Result<()> {
 
 /// Materialize under `.claude/skills/` only.
 pub fn generate_pm_guidance_for_claude(worktree: &Path) -> io::Result<()> {
-    GUIDANCE.write(
+    write_skill_md(
         &worktree.join(".claude").join("skills"),
         ManagedAssetTarget::ClaudeCode,
     )
@@ -1617,7 +1687,7 @@ pub fn generate_pm_guidance_for_claude(worktree: &Path) -> io::Result<()> {
 
 /// Materialize under `.codex/skills/` only.
 pub fn generate_pm_guidance_for_codex(worktree: &Path) -> io::Result<()> {
-    GUIDANCE.write(
+    write_skill_md(
         &worktree.join(".codex").join("skills"),
         ManagedAssetTarget::Codex,
     )
@@ -1628,15 +1698,37 @@ pub fn skill_path(skills_root: &Path) -> PathBuf {
     skills_root.join(SKILL_NAME).join("SKILL.md")
 }
 
+fn write_skill_md(skills_root: &Path, provider: ManagedAssetTarget) -> io::Result<()> {
+    let leaf = skills_root.join(SKILL_NAME);
+    for (name, body) in reference_sections() {
+        write_text_atomically(
+            &leaf.join("references").join(name),
+            &format!("{}\n", body.trim_end()),
+        )?;
+    }
+    let policy_path = leaf.join("references/project-policy.md");
+    match std::fs::remove_file(&policy_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    GUIDANCE.write(skills_root, provider)
+}
+
 /// Copy an explicitly selected policy into the existing gwt-owned skill leaf.
 pub fn generate_pm_guidance_with_policy(
     skills_root: &Path,
     provider: ManagedAssetTarget,
     policy: &str,
 ) -> io::Result<()> {
+    write_skill_md(skills_root, provider)?;
+    let policy_path = skills_root
+        .join(SKILL_NAME)
+        .join("references/project-policy.md");
+    write_text_atomically(&policy_path, policy)?;
     let content = format!(
-        "{}\n## Explicitly opted-in project policy\n\nThese copied rules were explicitly selected in the gwt PM settings.\n{}",
-        render_skill_md(provider), policy
+        "{}\n- For the explicitly opted-in project policy: [Selected project rules](references/project-policy.md).\n",
+        render_skill_md(provider)
     );
     write_text_atomically(&skill_path(skills_root), &content)
 }
@@ -1645,6 +1737,95 @@ pub fn generate_pm_guidance_with_policy(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn read_contract(path: impl AsRef<Path>) -> io::Result<String> {
+        let path = path.as_ref();
+        let mut content = std::fs::read_to_string(path)?;
+        let root = content.clone();
+        for link in root.split("](references/").skip(1) {
+            let name = link.split(')').next().expect("reference target");
+            content.push_str(&std::fs::read_to_string(
+                path.parent().unwrap().join("references").join(name),
+            )?);
+        }
+        Ok(content)
+    }
+
+    fn render_contract() -> String {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        read_contract(skill_path(&dir.path().join(".claude/skills"))).unwrap()
+    }
+
+    #[test]
+    fn opted_in_policy_is_referenced_without_expanding_the_router() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".codex/skills");
+        let policy = "Explicit project rule.\n".repeat(200);
+        generate_pm_guidance_with_policy(&root, ManagedAssetTarget::Codex, &policy).unwrap();
+        let path = skill_path(&root);
+        let router = std::fs::read_to_string(&path).unwrap();
+        assert!(router.len() < 2500);
+        assert!(!router.contains("Explicit project rule."));
+        assert!(router.contains("](references/project-policy.md)"));
+        assert_eq!(
+            std::fs::read_to_string(root.join(SKILL_NAME).join("references/project-policy.md"))
+                .unwrap(),
+            policy
+        );
+        assert!(managed_paths(&root).contains(&path));
+        assert!(read_contract(&path).unwrap().contains(&policy));
+        generate_pm_guidance_for_codex(dir.path()).unwrap();
+        assert!(
+            !root
+                .join(SKILL_NAME)
+                .join("references/project-policy.md")
+                .exists(),
+            "opting out must remove previously copied project policy"
+        );
+    }
+
+    #[test]
+    fn generated_router_keeps_complete_contract_in_references() {
+        let dir = TempDir::new().expect("tempdir");
+        generate_pm_guidance(dir.path()).expect("generate");
+        for provider in [".claude", ".codex"] {
+            let leaf = dir.path().join(provider).join("skills/gwt-pm");
+            let root = std::fs::read_to_string(leaf.join("SKILL.md")).expect("router");
+            assert!(
+                root.contains("## Completion"),
+                "completion must be visible at entry"
+            );
+            assert!(
+                root.len() <= 2500,
+                "router must stay small: {} bytes",
+                root.len()
+            );
+            assert!(root.len() * 3 < SKILL_BODY_EN.len());
+            let startup =
+                std::fs::read_to_string(leaf.join("references/role-and-boundaries.md")).unwrap();
+            assert!(
+                startup.contains("Never run `pane.send`"),
+                "universal input boundary must be read at startup"
+            );
+            assert!(startup.contains("never alter acceptance-criteria snapshots"));
+            let mut contract = String::new();
+            for link in root.split("](references/").skip(1) {
+                let relative = link.split(')').next().expect("reference target");
+                if !contract.is_empty() {
+                    contract.push('\n');
+                }
+                contract.push_str(
+                    &std::fs::read_to_string(leaf.join("references").join(relative))
+                        .expect("materialized reference"),
+                );
+            }
+            assert_eq!(
+                contract, SKILL_BODY_EN,
+                "every responsibility must survive, in order"
+            );
+        }
+    }
 
     /// Collapse runs of whitespace so a phrase assertion does not depend on
     /// where the 72-column body happens to wrap. Anchoring on literal line
@@ -3086,7 +3267,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
 
     #[test]
     fn rendered_skill_md_has_frontmatter_and_required_phrases() {
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         assert!(rendered.starts_with("---\nname: gwt-pm\ndescription: "));
         assert!(rendered.contains(MANAGED_BEGIN));
         assert!(rendered.contains(MANAGED_END));
@@ -3107,12 +3288,12 @@ This paragraph says it is reported immediately and never held for a digest.\n\
     fn generate_writes_identical_claude_and_codex_mirrors() {
         let dir = TempDir::new().expect("tempdir");
         generate_pm_guidance(dir.path()).expect("generate");
-        let claude = std::fs::read_to_string(dir.path().join(".claude/skills/gwt-pm/SKILL.md"))
+        let claude = read_contract(dir.path().join(".claude/skills/gwt-pm/SKILL.md"))
             .expect("claude mirror exists");
-        let codex = std::fs::read_to_string(dir.path().join(".codex/skills/gwt-pm/SKILL.md"))
+        let codex = read_contract(dir.path().join(".codex/skills/gwt-pm/SKILL.md"))
             .expect("codex mirror exists");
         assert_eq!(claude, codex, "mirrors must be byte-identical");
-        assert_eq!(claude, render_skill_md(ManagedAssetTarget::ClaudeCode));
+        assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
             "`pm.status.set`",

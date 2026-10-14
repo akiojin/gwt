@@ -26,6 +26,18 @@ fn init_git_repo(path: &Path) {
     assert!(status.success(), "git init failed for {}", path.display());
 }
 
+// Contracts belong to the complete delivered skill, not just its lazy router.
+fn skill_contract_text(skill_root: &Path) -> String {
+    let mut files = BTreeSet::new();
+    collect_files_relative_to(skill_root, skill_root, &mut files);
+    files
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        .map(|path| fs::read_to_string(skill_root.join(path)).expect("read skill contract"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn markdown_block<'a>(source: &'a str, start: &str, end: Option<&str>) -> &'a str {
     let start_index = source
         .find(start)
@@ -54,8 +66,7 @@ fn first_inline_code(line: &str) -> &str {
 fn browser_check_shell_block(name: &str) -> String {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
-    let skill = fs::read_to_string(&skill_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", skill_path.display()));
+    let skill = skill_contract_text(skill_path.parent().unwrap());
     let begin = format!("# browser-check-{name}-begin");
     let end = format!("# browser-check-{name}-end");
     let body = skill
@@ -87,10 +98,10 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
         "gwt-fix-issue",
     ] {
         let relative = format!("skills/{skill}/SKILL.md");
-        let claude = fs::read_to_string(dir.path().join(".claude").join(&relative))
-            .expect("read materialized Claude skill");
-        let codex = fs::read_to_string(dir.path().join(".codex").join(&relative))
-            .expect("read materialized Codex skill");
+        let claude =
+            skill_contract_text(dir.path().join(".claude").join(&relative).parent().unwrap());
+        let codex =
+            skill_contract_text(dir.path().join(".codex").join(&relative).parent().unwrap());
         assert_eq!(
             claude, codex,
             "{skill} must have identical delivered contracts"
@@ -126,6 +137,124 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
 }
 
 #[test]
+fn bundled_skill_entrypoints_are_short_routers_with_delivered_references() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    distribute_to_worktree(dir.path()).expect("distribute bundle");
+
+    for provider in [".claude", ".codex"] {
+        let skills_root = dir.path().join(provider).join("skills");
+        for entry in fs::read_dir(&skills_root).expect("distributed skills") {
+            let skill_dir = entry.expect("skill entry").path();
+            if skill_dir.file_name().unwrap() == "gwt-coordination" {
+                continue; // Generated guidance has its own contract.
+            }
+            let root_path = skill_dir.join("SKILL.md");
+            let root = fs::read_to_string(&root_path).expect("skill entrypoint");
+            assert!(
+                root.len() <= 2500,
+                "{} is {} bytes",
+                root_path.display(),
+                root.len()
+            );
+            let headings: Vec<_> = root
+                .lines()
+                .filter(|line| line.starts_with("## "))
+                .collect();
+            assert_eq!(
+                headings,
+                ["## When to use", "## Completion", "## References"],
+                "{} must be a router",
+                root_path.display()
+            );
+            for (skill, original_bytes) in [
+                ("gwt-verify", 37497),
+                ("gwt-manage-pr", 28723),
+                ("gwt-discussion", 21847),
+            ] {
+                if skill_dir.file_name().unwrap() == skill {
+                    assert!(
+                        root.len() * 3 <= original_bytes,
+                        "{skill} must shrink to at most one third"
+                    );
+                }
+            }
+            let mut references = 0;
+            for suffix in root.split("](").skip(1) {
+                let target = suffix.split(')').next().expect("link target");
+                if target.starts_with("references/") {
+                    references += 1;
+                    assert!(
+                        skill_dir.join(target.split('#').next().unwrap()).is_file(),
+                        "{} links to missing {target}",
+                        root_path.display()
+                    );
+                }
+            }
+            assert!(
+                references > 0,
+                "{} must route to delivered detail",
+                root_path.display()
+            );
+            let mut assets = BTreeSet::new();
+            collect_files_relative_to(&skill_dir, &skill_dir, &mut assets);
+            for asset in assets
+                .iter()
+                .filter(|asset| asset.extension().is_some_and(|ext| ext == "md"))
+            {
+                let path = skill_dir.join(asset);
+                let content = fs::read_to_string(&path).expect("Markdown asset");
+                let mut fenced = false;
+                for line in content.lines() {
+                    if line.trim_start().starts_with("```") {
+                        fenced = !fenced;
+                    }
+                    if fenced {
+                        continue;
+                    }
+                    for suffix in line.split("](").skip(1) {
+                        let target = suffix.split(')').next().unwrap().split('#').next().unwrap();
+                        if !target.is_empty()
+                            && !target.contains("://")
+                            && !target.starts_with("mailto:")
+                        {
+                            assert!(
+                                path.parent().unwrap().join(target).is_file(),
+                                "{} links to missing {target}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(
+                skill_dir.join("references/router-audit.md").is_file(),
+                "{} must preserve its constraint audit",
+                root_path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn repository_local_release_remains_a_codex_only_router() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill_root = workspace_root.join(".codex/skills/release");
+    let root = fs::read_to_string(skill_root.join("SKILL.md")).expect("release skill");
+    assert!(root.len() <= 2500);
+    assert_eq!(
+        root.lines()
+            .filter(|line| line.starts_with("## "))
+            .collect::<Vec<_>>(),
+        ["## When to use", "## Completion", "## References"]
+    );
+    assert!(root.contains("references/workflow.md"));
+    assert!(skill_root.join("references/workflow.md").is_file());
+    assert!(skill_root.join("references/router-audit.md").is_file());
+    assert!(!workspace_root.join(".claude/skills/release").exists());
+}
+
+#[test]
 fn repo_keeps_bundled_claude_and_codex_skill_assets_in_parity() {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let claude_root = workspace_root.join(".claude/skills");
@@ -154,15 +283,15 @@ fn repo_keeps_bundled_claude_and_codex_skill_assets_in_parity() {
 #[test]
 fn browser_check_embedded_seed_disables_automatic_agents() {
     let embedded = gwt_skills::assets::CLAUDE_SKILLS
-        .get_file("browser-check/SKILL.md")
+        .get_file("browser-check/references/isolation.md")
         .expect("embedded browser-check")
         .contents_utf8()
         .expect("UTF-8 skill");
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for provider in [".claude", ".codex"] {
-        let source = fs::read_to_string(
-            workspace_root.join(format!("{provider}/skills/browser-check/SKILL.md")),
-        )
+        let source = fs::read_to_string(workspace_root.join(format!(
+            "{provider}/skills/browser-check/references/isolation.md"
+        )))
         .expect("skill mirror");
         assert_eq!(source, embedded, "{provider} must match the embedded skill");
     }
@@ -189,10 +318,8 @@ fn browser_check_authority_script_rejects_local_build_paths_at_any_depth() {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let claude_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
     let codex_path = workspace_root.join(".codex/skills/browser-check/SKILL.md");
-    let claude = fs::read_to_string(&claude_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", claude_path.display()));
-    let codex = fs::read_to_string(&codex_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", codex_path.display()));
+    let claude = skill_contract_text(claude_path.parent().unwrap());
+    let codex = skill_contract_text(codex_path.parent().unwrap());
 
     assert_eq!(
         claude, codex,
@@ -653,8 +780,7 @@ fn user_verification_handoff_is_identifiable_and_actionable() {
     ] {
         let skill_path = verify_dir.join("SKILL.md");
         let guide_path = verify_dir.join("references/user-verification-guide.md");
-        let skill = fs::read_to_string(&skill_path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", skill_path.display()));
+        let skill = skill_contract_text(&verify_dir);
         let guide = fs::read_to_string(&guide_path)
             .unwrap_or_else(|err| panic!("read {}: {err}", guide_path.display()));
 
@@ -937,7 +1063,10 @@ fn collect_gwt_skill_files(skills_root: &Path) -> BTreeSet<PathBuf> {
         // gwt-coordination is generated from coordination_guidance.rs at
         // materialization time and has its own dual-target contract below.
         // This parity check owns only source-controlled bundle assets.
-        if file_type.is_dir() && name.starts_with("gwt-") && name != "gwt-coordination" {
+        if file_type.is_dir()
+            && (name.starts_with("gwt-") || matches!(name.as_ref(), "browser-check" | "tui-design"))
+            && name != "gwt-coordination"
+        {
             collect_files_relative_to(skills_root, &entry.path(), &mut files);
         }
     }
@@ -990,8 +1119,7 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
         dir.path().join(".claude/skills/gwt-coordination/SKILL.md"),
         dir.path().join(".codex/skills/gwt-coordination/SKILL.md"),
     ] {
-        let content = fs::read_to_string(&skill_md)
-            .unwrap_or_else(|e| panic!("read {}: {e}", skill_md.display()));
+        let content = skill_contract_text(skill_md.parent().unwrap());
         assert!(content.contains("gwt-coordination"));
         for required in [
             "launch_route: autonomous",
@@ -1067,6 +1195,17 @@ fn generated_coordination_requires_ai_self_naming_before_work() {
             .join("skills/gwt-coordination/SKILL.md");
         let content = fs::read_to_string(&path).expect("read materialized guidance");
         assert_eq!(content, canonical, "{}", path.display());
+        assert!(content.contains("At session startup, before your first action"));
+        assert!(content.contains("](references/board.md)"));
+        let mut contract = content.clone();
+        for link in content.split("](references/").skip(1) {
+            let relative = link.split(')').next().expect("reference link target");
+            let reference = path.parent().unwrap().join("references").join(relative);
+            contract.push('\n');
+            contract.push_str(&fs::read_to_string(&reference).unwrap_or_else(|error| {
+                panic!("read delivered reference {}: {error}", reference.display())
+            }));
+        }
         for required in [
             "non-PM Agent",
             "one-word ASCII English proper-name candidate",
@@ -1080,11 +1219,11 @@ fn generated_coordination_requires_ai_self_naming_before_work() {
             "second LLM request",
             "PM is exempt",
         ] {
-            assert!(content.contains(required), "missing {required:?}");
+            assert!(contract.contains(required), "missing {required:?}");
         }
         assert!(
-            content.find(r#""operation":"pane.name""#)
-                < content.find(r#""operation":"workspace.update""#),
+            contract.find(r#""operation":"pane.name""#)
+                < contract.find(r#""operation":"workspace.update""#),
             "self-naming must precede the Work purpose instruction"
         );
     }
@@ -1095,7 +1234,7 @@ fn render_skill_md_embeds_frontmatter_name_and_description() {
     let md = render_skill_md(gwt_skills::ManagedAssetTarget::ClaudeCode);
     assert!(md.starts_with("---\n"), "must start with YAML frontmatter");
     assert!(md.contains("name: gwt-coordination"));
-    assert!(md.contains("\"operation\":\"board.post\""));
+    assert!(md.contains("references/board.md"));
 }
 
 #[test]
@@ -1252,7 +1391,7 @@ fn create_flow_keeps_verified_head_when_only_behind_base() {
         fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
     };
     let create_flow = read("references/create-flow.md");
-    let skill = read("SKILL.md");
+    let skill = skill_contract_text(&skill_root);
 
     let step = markdown_block(
         &create_flow,

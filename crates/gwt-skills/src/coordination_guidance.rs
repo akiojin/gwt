@@ -17,6 +17,7 @@ use std::{
 
 #[cfg(test)]
 use crate::guidance::{MANAGED_BEGIN, MANAGED_END};
+use crate::settings_local::write_text_atomically;
 use crate::{distribute::ManagedAssetTarget, guidance::Guidance};
 
 /// Skill identifier (matches the `.claude/skills/<name>/` directory
@@ -26,7 +27,7 @@ pub const SKILL_NAME: &str = "gwt-coordination";
 /// Skill description surfaced in the auto-discovery listing. Designed to
 /// trigger proactive invocation at the start of every conversation in a
 /// gwt-managed worktree, independent of project documentation.
-pub const SKILL_DESCRIPTION: &str = "Use proactively at the start of every conversation in any gwt-managed worktree, regardless of project AGENTS.md / CLAUDE.md content. Establishes Board posting and Work update rules through gwtd JSON envelopes for coordinating with other agents and the user. Mandatory when posting milestones, claiming scope, or updating current focus.";
+pub const SKILL_DESCRIPTION: &str = "Use at the start of a gwt-managed session and when coordinating Board or Work updates, regardless of project AGENTS.md / CLAUDE.md content.";
 
 // Expand the same literal into the generated skill and the hook reminder.
 macro_rules! pane_name_first_action_guidance {
@@ -830,19 +831,79 @@ English のまま。
     JSON
 "#;
 
-/// Render the full SKILL.md content (frontmatter + managed markers + body).
-/// Idempotent and pure. All session kinds retain the same common contract
-/// (SPEC #3245 FR-004); only the selected provider section can differ.
+/// Small discovery entrypoint; operational prose remains in the canonical body.
+const ROUTER_BODY: &str = r#"# gwt Coordination
+
+## When to use
+
+Use for every gwt-managed session, independent of project instructions.
+
+## Completion
+
+The current Work state is accurate, milestones and ownership decisions are on
+the Board, and delivery or a genuine escalation is settled through the canonical
+operations. A temporary wait stays active with its resume condition recorded.
+
+## References
+
+Choose the reference for the current action; read only the relevant sections.
+
+- At session startup, before your first action, or before a Board post, ownership claim, or PM escalation: [Board and authority](references/board.md).
+- When setting the title, focus, or final Work state: [Work and Git environment](references/work.md).
+- Before verification or a PR mutation: [Delivery and verification gates](references/delivery.md).
+- When merging Work history or choosing report language: [History and examples](references/history.md).
+"#;
+
+const REFERENCE_SECTIONS: &[(&str, &str)] = &[
+    ("board.md", "# gwt Coordination"),
+    ("work.md", "## Work (current state)"),
+    (
+        "delivery.md",
+        "## Delivery: Ready PRs only, always auto-merge",
+    ),
+    ("history.md", "## Persisted Work files"),
+];
+
+fn reference_sections() -> impl Iterator<Item = (&'static str, &'static str)> {
+    REFERENCE_SECTIONS
+        .iter()
+        .enumerate()
+        .map(|(index, &(name, heading))| {
+            let start = SKILL_BODY_EN
+                .find(heading)
+                .expect("canonical reference heading");
+            let end = REFERENCE_SECTIONS
+                .get(index + 1)
+                .map(|&(_, next)| SKILL_BODY_EN.find(next).expect("next reference heading"))
+                .unwrap_or(SKILL_BODY_EN.len());
+            (name, &SKILL_BODY_EN[start..end])
+        })
+}
+
+/// Every generated leaf, also used by managed-asset snapshot and rollback.
+pub fn managed_paths(skills_root: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![skill_path(skills_root)];
+    paths.extend(
+        REFERENCE_SECTIONS
+            .iter()
+            .map(|&(name, _)| skills_root.join(SKILL_NAME).join("references").join(name)),
+    );
+    paths
+}
+
+/// Render the discovery router (frontmatter + managed markers + reference links).
+/// Idempotent and pure. Since SPEC #3245 the guidance is a single body for
+/// every session (FR-004) and the lane mechanism itself is gone (FR-007).
 pub fn render_skill_md(provider: ManagedAssetTarget) -> String {
     GUIDANCE.render(provider)
 }
 
-// Provider-specific content is intentionally empty; Issue #4267 adds only
-// the selection mechanism. Keep the common contract in SKILL_BODY_EN.
+// Keep the provider-selection mechanism from Issue #4267. Common operational
+// details are materialized as references; provider sections remain empty.
 pub(crate) const GUIDANCE: Guidance<'static> = Guidance {
     name: SKILL_NAME,
     description: SKILL_DESCRIPTION,
-    body: SKILL_BODY_EN,
+    body: ROUTER_BODY,
     claude_section: "",
     codex_section: "",
 };
@@ -867,7 +928,7 @@ pub fn generate_coordination_guidance(worktree: &Path) -> io::Result<()> {
 /// Used by the orchestrator when the target set includes `ClaudeCode` but
 /// may exclude `Codex`.
 pub fn generate_coordination_guidance_for_claude(worktree: &Path) -> io::Result<()> {
-    GUIDANCE.write(
+    write_skill_md(
         &worktree.join(".claude").join("skills"),
         ManagedAssetTarget::ClaudeCode,
     )
@@ -877,7 +938,7 @@ pub fn generate_coordination_guidance_for_claude(worktree: &Path) -> io::Result<
 /// Used by the orchestrator when the target set includes `Codex` but may
 /// exclude `ClaudeCode`.
 pub fn generate_coordination_guidance_for_codex(worktree: &Path) -> io::Result<()> {
-    GUIDANCE.write(
+    write_skill_md(
         &worktree.join(".codex").join("skills"),
         ManagedAssetTarget::Codex,
     )
@@ -888,10 +949,75 @@ pub fn skill_path(skills_root: &Path) -> PathBuf {
     skills_root.join(SKILL_NAME).join("SKILL.md")
 }
 
+fn write_skill_md(skills_root: &Path, provider: ManagedAssetTarget) -> io::Result<()> {
+    let leaf = skills_root.join(SKILL_NAME);
+    for (name, body) in reference_sections() {
+        write_text_atomically(
+            &leaf.join("references").join(name),
+            &format!("{}\n", body.trim_end()),
+        )?;
+    }
+    GUIDANCE.write(skills_root, provider)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn read_contract(path: impl AsRef<Path>) -> io::Result<String> {
+        let path = path.as_ref();
+        let mut content = std::fs::read_to_string(path)?;
+        let root = content.clone();
+        for link in root.split("](references/").skip(1) {
+            let name = link.split(')').next().expect("reference target");
+            content.push_str(&std::fs::read_to_string(
+                path.parent().unwrap().join("references").join(name),
+            )?);
+        }
+        Ok(content)
+    }
+
+    fn render_contract() -> String {
+        let dir = TempDir::new().unwrap();
+        generate_coordination_guidance(dir.path()).unwrap();
+        read_contract(skill_path(&dir.path().join(".claude/skills"))).unwrap()
+    }
+
+    #[test]
+    fn generated_router_keeps_complete_contract_in_references() {
+        let dir = TempDir::new().expect("tempdir");
+        generate_coordination_guidance(dir.path()).expect("generate");
+        for provider in [".claude", ".codex"] {
+            let leaf = dir.path().join(provider).join("skills/gwt-coordination");
+            let root = std::fs::read_to_string(leaf.join("SKILL.md")).expect("router");
+            assert!(
+                root.contains("## Completion"),
+                "completion must be visible at entry"
+            );
+            assert!(
+                root.len() <= 2500,
+                "router must stay small: {} bytes",
+                root.len()
+            );
+            assert!(root.len() * 3 < SKILL_BODY_EN.len());
+            let mut contract = String::new();
+            for link in root.split("](references/").skip(1) {
+                let relative = link.split(')').next().expect("reference target");
+                if !contract.is_empty() {
+                    contract.push('\n');
+                }
+                contract.push_str(
+                    &std::fs::read_to_string(leaf.join("references").join(relative))
+                        .expect("materialized reference"),
+                );
+            }
+            assert_eq!(
+                contract, SKILL_BODY_EN,
+                "every responsibility must survive, in order"
+            );
+        }
+    }
 
     #[test]
     fn issue_4323_number_kinds_reach_both_generated_agent_skills() {
@@ -906,7 +1032,7 @@ mod tests {
                     .join("skills")
                     .join(skill)
                     .join("SKILL.md");
-                let content = std::fs::read_to_string(&path).unwrap();
+                let content = read_contract(&path).unwrap();
                 assert!(
                     content.contains("`Issue #N` / `PR #N`"),
                     "{}",
@@ -991,7 +1117,7 @@ mod tests {
                 "Japanese guidance: {phrase}"
             );
             assert!(
-                render_skill_md(ManagedAssetTarget::ClaudeCode).contains(phrase),
+                render_contract().contains(phrase),
                 "generated guidance: {phrase}"
             );
         }
@@ -1016,12 +1142,13 @@ mod tests {
             "required headed Chromium evidence",
         ];
         let tmp = TempDir::new().unwrap();
+        crate::distribute::distribute_to_worktree(tmp.path()).unwrap();
         generate_coordination_guidance(tmp.path()).unwrap();
         for relative in [
             ".claude/skills/gwt-coordination/SKILL.md",
             ".codex/skills/gwt-coordination/SKILL.md",
         ] {
-            let body = std::fs::read_to_string(tmp.path().join(relative)).unwrap();
+            let body = read_contract(tmp.path().join(relative)).unwrap();
             assert!(body.contains("Only canonical `verify.run` acquires the host-wide lease"));
             assert!(body.contains("cargo build -p gwt --bin gwtd"));
             assert!(body.contains("do not require a verification lease"));
@@ -1053,12 +1180,8 @@ mod tests {
             ));
         }
         for skill in ["gwt-execute", "gwt-verify"] {
-            let relative = format!("{skill}/SKILL.md");
-            let body = crate::assets::CLAUDE_SKILLS
-                .get_file(&relative)
-                .unwrap()
-                .contents_utf8()
-                .unwrap();
+            let body =
+                read_contract(tmp.path().join(format!(".claude/skills/{skill}/SKILL.md"))).unwrap();
             for phrase in resume_contract {
                 assert!(body.contains(phrase), "{skill}: missing `{phrase}`");
             }
@@ -1091,7 +1214,7 @@ mod tests {
                 "Japanese guidance: {phrase}"
             );
             assert!(
-                render_skill_md(ManagedAssetTarget::ClaudeCode).contains(phrase),
+                render_contract().contains(phrase),
                 "generated guidance: {phrase}"
             );
         }
@@ -1101,11 +1224,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         generate_coordination_guidance(tmp.path()).unwrap();
         let claude =
-            std::fs::read_to_string(tmp.path().join(".claude/skills/gwt-coordination/SKILL.md"))
-                .unwrap();
+            read_contract(tmp.path().join(".claude/skills/gwt-coordination/SKILL.md")).unwrap();
         let codex =
-            std::fs::read_to_string(tmp.path().join(".codex/skills/gwt-coordination/SKILL.md"))
-                .unwrap();
+            read_contract(tmp.path().join(".codex/skills/gwt-coordination/SKILL.md")).unwrap();
         assert_eq!(
             claude, codex,
             "both mirrors must carry the same bootstrap contract"
@@ -1115,7 +1236,7 @@ mod tests {
 
     #[test]
     fn guidance_states_that_the_routine_stop_notice_is_not_an_escalation() {
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         assert!(
             rendered.contains("ready for the next instruction"),
             "the guidance must name the notice agents mistook for an escalation"
@@ -1165,7 +1286,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_contains_required_canonical_phrases() {
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         for phrase in required_phrases() {
             assert!(
                 rendered.contains(phrase),
@@ -1187,7 +1308,7 @@ mod tests {
             assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
             assert!(SKILL_BODY_JA.contains(phrase), "Japanese guidance: {phrase}");
             assert!(
-                render_skill_md(ManagedAssetTarget::ClaudeCode).contains(phrase),
+                render_contract().contains(phrase),
                 "generated guidance: {phrase}"
             );
         }
@@ -1238,7 +1359,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_uses_json_envelope_for_work_identity_examples() {
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         assert!(
             rendered.contains("gwtd <<'JSON'"),
             "Work update examples must use the JSON envelope entrypoint"
@@ -1273,7 +1394,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_uses_english_canonical_body() {
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         assert!(
             rendered.contains("When you cross a reasoning milestone"),
             "generated SKILL.md must use English canonical prose"
@@ -1286,7 +1407,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_documents_broadcast_param_contract() {
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         assert!(
             rendered.contains("params.broadcast:true"),
             "generated SKILL.md must document the explicit repo-wide broadcast parameter"
@@ -1306,7 +1427,7 @@ mod tests {
     // gone (#3379 contradiction resolved by unification).
     #[test]
     fn guidance_is_a_single_body_with_work_state_instructions() {
-        let body = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let body = render_contract();
         assert!(
             body.contains("\"operation\":\"workspace.update\""),
             "the single guidance keeps the workspace.update instruction"
@@ -1319,7 +1440,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_starts_with_yaml_frontmatter() {
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         assert!(
             rendered.starts_with("---\n"),
             "SKILL.md must start with YAML frontmatter delimiter (---\\n)"
@@ -1329,8 +1450,8 @@ mod tests {
             "frontmatter must declare name: {SKILL_NAME}"
         );
         assert!(
-            rendered.contains("description: Use proactively"),
-            "frontmatter description must lead with the trigger keyword 'Use proactively'"
+            rendered.contains("description: Use at the start"),
+            "frontmatter description must lead with the session-start trigger"
         );
         assert!(
             rendered.contains("regardless of project AGENTS.md / CLAUDE.md content"),
@@ -1340,7 +1461,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_wraps_body_in_managed_markers() {
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         let begin_idx = rendered
             .find(MANAGED_BEGIN)
             .expect("managed begin marker missing");
@@ -1375,8 +1496,8 @@ mod tests {
         );
         assert!(codex.exists(), "Codex SKILL.md not generated at {codex:?}");
 
-        let claude_content = std::fs::read_to_string(&claude).unwrap();
-        let codex_content = std::fs::read_to_string(&codex).unwrap();
+        let claude_content = read_contract(&claude).unwrap();
+        let codex_content = read_contract(&codex).unwrap();
         assert_eq!(
             claude_content, codex_content,
             "Claude and Codex SKILL.md content must be byte-identical"
@@ -1437,7 +1558,7 @@ mod tests {
     fn generate_is_idempotent() {
         let tmp = TempDir::new().unwrap();
         generate_coordination_guidance(tmp.path()).unwrap();
-        let first = std::fs::read_to_string(
+        let first = read_contract(
             tmp.path()
                 .join(".claude/skills")
                 .join(SKILL_NAME)
@@ -1446,7 +1567,7 @@ mod tests {
         .unwrap();
 
         generate_coordination_guidance(tmp.path()).unwrap();
-        let second = std::fs::read_to_string(
+        let second = read_contract(
             tmp.path()
                 .join(".claude/skills")
                 .join(SKILL_NAME)
@@ -1472,7 +1593,7 @@ mod tests {
         std::fs::write(&path, "stale content from prior version\n").unwrap();
 
         generate_coordination_guidance(tmp.path()).unwrap();
-        let after = std::fs::read_to_string(&path).unwrap();
+        let after = read_contract(&path).unwrap();
 
         assert!(
             !after.contains("stale content from prior version"),
@@ -1522,7 +1643,7 @@ mod tests {
 
     #[test]
     fn rendered_skill_md_propagates_activity_rule_to_emitted_file() {
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         for phrase in [
             "PR check in progress",
             "verifying tests",
@@ -1531,7 +1652,7 @@ mod tests {
         ] {
             assert!(
                 rendered.contains(phrase),
-                "render_skill_md() must propagate activity Bad example / rule: {phrase}"
+                "render_contract() must propagate activity Bad example / rule: {phrase}"
             );
         }
     }
@@ -1552,8 +1673,8 @@ mod tests {
             .join(SKILL_NAME)
             .join("SKILL.md");
 
-        let claude_content = std::fs::read_to_string(&claude).unwrap();
-        let codex_content = std::fs::read_to_string(&codex).unwrap();
+        let claude_content = read_contract(&claude).unwrap();
+        let codex_content = read_contract(&codex).unwrap();
 
         assert_eq!(
             claude_content, codex_content,
@@ -1597,7 +1718,7 @@ mod tests {
         // name must be "Work", not "Workspace". The public gwtd argv
         // subcommand has since been replaced by JSON envelopes, so generated
         // guidance must not reintroduce the legacy CLI form.
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         assert!(
             rendered.contains("## Work (current state)"),
             "current-state section heading must use the Work concept name"
@@ -1674,11 +1795,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         generate_coordination_guidance(tmp.path()).unwrap();
         let claude =
-            std::fs::read_to_string(tmp.path().join(".claude/skills/gwt-coordination/SKILL.md"))
-                .unwrap();
+            read_contract(tmp.path().join(".claude/skills/gwt-coordination/SKILL.md")).unwrap();
         let codex =
-            std::fs::read_to_string(tmp.path().join(".codex/skills/gwt-coordination/SKILL.md"))
-                .unwrap();
+            read_contract(tmp.path().join(".codex/skills/gwt-coordination/SKILL.md")).unwrap();
         let sources = [
             ("English body", SKILL_BODY_EN),
             ("Japanese body", SKILL_BODY_JA),
@@ -1724,7 +1843,7 @@ mod tests {
             SKILL_BODY_JA.contains("bootstrap"),
             "Japanese guidance must name the context where the fallback is absent"
         );
-        let rendered = render_skill_md(ManagedAssetTarget::ClaudeCode);
+        let rendered = render_contract();
         assert!(
             rendered.contains("GWT_AUTONOMOUS_ISSUE"),
             "generated guidance must carry the omission rule"
