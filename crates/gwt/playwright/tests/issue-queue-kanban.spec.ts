@@ -79,6 +79,11 @@ test("Issue #5400 unchanged entry revisions retain the list and current detail",
   await search.fill("Second backlog");
   await expect(row(page, 1)).toHaveCount(0);
   await expect(row(page, 2)).toBeVisible();
+  await row(page, 2).evaluate(element => { (window as any).__searchRevisionRow = element; });
+  await page.evaluate(() => (window as any).__queueEntries("entries-v2"));
+  expect(await row(page, 2).evaluate(element => element === (window as any).__searchRevisionRow),
+    "same revision preserves the current search result node").toBe(true);
+  await expect(row(page, 1)).toHaveCount(0);
   await expect(page.locator(".knowledge-detail-title")).toHaveText("Second backlog issue");
   await search.fill("");
   await expect(row(page, 1)).toContainText("Changed first issue");
@@ -635,7 +640,7 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
           const entry=entries.find(entry=>entry.number===patch?.number);
           if (entry && patch) entry.title=patch.title;
           this.dispatchEvent(new MessageEvent("message",{data:JSON.stringify({kind:"knowledge_entries",
-            ...fixture.__queueLoad,revision,entries,selected_number:null,refresh_enabled:true})}));
+            ...fixture.__queueBaseLoad,revision,entries,selected_number:null,refresh_enabled:true})}));
         };
         fixture.__queueLoadError=()=>this.emit({kind:"knowledge_error",...fixture.__queueLoad,
           message:"Issue cache read failed"});
@@ -688,6 +693,7 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
         }
         else if(["load_knowledge_bridge","search_knowledge_bridge"].includes(message.kind)) {
           fixture.__queueLoad={id:message.id,knowledge_kind:"issue",request_id:message.request_id};
+          if (message.kind==="load_knowledge_bridge") fixture.__queueBaseLoad=fixture.__queueLoad;
           if (!inboxFirst) this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
         }
         else if(message.kind==="select_knowledge_bridge_entry") {

@@ -1389,15 +1389,42 @@ test("unchanged entry revisions retain rows while completing loads and preservin
       receive("rows-v2");
       state.query = "Alpha";
       surface.scheduleKnowledgeSearch("win-1", "issue");
+      const filteredRow = element.querySelector('[data-issue-number="1"]');
+      assert.ok(filteredRow);
       surface.requestKnowledgeBridge("win-1", "issue");
       receive("rows-v2");
+      assert.ok(element.querySelector('[data-issue-number="1"]') === filteredRow,
+        "same revision must retain filtered list nodes while resuming a cancelled search timer");
       assert.equal(state.query, "Alpha");
       assert.deepEqual(state.entries.map(entry => entry.number), [ROW_A.number]);
       fire(timer => timer.delay === 250);
       assert.equal(sent.at(-1).kind, "search_knowledge_bridge",
         "a list completion must still dispatch the queued query");
       assert.equal(sent.at(-1).query, "Alpha");
+      assert.ok(element.querySelector('[data-issue-number="1"]') === filteredRow,
+        "resuming and dispatching the query must preserve the filtered list nodes");
       assert.equal(state.selectedNumber, ROW_B.number);
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_search_results", id: "win-1", knowledge_kind: "issue",
+        query: "Alpha", request_id: sent.at(-1).request_id,
+        entries: [ROW_B, ROW_A], refresh_enabled: true,
+      });
+      const semanticRow = element.querySelector('[data-issue-number="2"]');
+      assert.ok(semanticRow);
+      surface.requestKnowledgeBridge("win-1", "issue");
+      receive("rows-v2");
+      assert.deepEqual(state.entries.map(entry => entry.number), [ROW_B.number, ROW_A.number],
+        "same base revision must preserve authoritative semantic results");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
+        "same revision must retain semantic result nodes");
+      receive("rows-v2");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
+        "an already reserved search must not redraw the list");
+      fire(timer => timer.delay === 250);
+      receive("rows-v2");
+      assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
+        "an in-flight search must not redraw the list");
+      assert.equal(state.queuedSearchIntent, null, "the in-flight search must not be duplicated");
       surface.clearKnowledgeBridgeState("win-1");
     });
   } finally {

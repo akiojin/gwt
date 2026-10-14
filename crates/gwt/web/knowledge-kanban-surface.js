@@ -2284,9 +2284,16 @@ export function createKnowledgeKanbanSurface({
         // baseEntries is visible immediately; the semantic completion later
         // replaces it with authoritative rows.
         applyLocalKnowledgeFilter(state, query);
+        queueKnowledgeSearch(windowId, state, intent);
+        renderKnowledgeBridge(windowId);
+      }
+
+      // Dispatch scheduling is separate from changing the visible results so
+      // an unchanged base list can resume a cancelled timer without filtering
+      // authoritative semantic results or replacing their DOM.
+      function queueKnowledgeSearch(windowId, state, intent) {
         if (state.loading && state.baseEntries.length === 0) {
           state.searching = true;
-          renderKnowledgeBridge(windowId);
           return;
         }
         if (
@@ -2296,14 +2303,12 @@ export function createKnowledgeKanbanSurface({
           !state.inFlightSearchIntent
         ) {
           state.searching = false;
-          renderKnowledgeBridge(windowId);
           return;
         }
         if (state.inFlightSearchIntent) {
           state.queuedSearchIntent = intent;
-          state.queuedSearchQuery = query;
+          state.queuedSearchQuery = intent.query;
           state.searching = true;
-          renderKnowledgeBridge(windowId);
           return;
         }
         state.searching = true;
@@ -2336,7 +2341,6 @@ export function createKnowledgeKanbanSurface({
             selectionGeneration: state.selectionGeneration,
           });
         }, 250);
-        renderKnowledgeBridge(windowId);
       }
 
       function dispatchKnowledgeDetailRequest(
@@ -4943,6 +4947,14 @@ export function createKnowledgeKanbanSurface({
               break;
             }
             if (queuedQuery) {
+              if (unchangedEntries) {
+                if (!state.inFlightSearchIntent && state.pendingSearchTimer === null) {
+                  queueKnowledgeSearch(event.id, state,
+                    updateKnowledgeSearchIntent(state, event.knowledge_kind, queuedQuery));
+                }
+                renderCompletion();
+                break;
+              }
               scheduleKnowledgeSearch(
                 event.id,
                 event.knowledge_kind,
