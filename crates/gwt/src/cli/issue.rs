@@ -927,15 +927,21 @@ pub(crate) fn load_monitor_agent_status(
 ) -> Result<(crate::IssueMonitorAgentStatus, Option<serde_json::Value>), SpecOpsError> {
     let published = crate::daemon_publisher::read_issue_monitor_status(project_root)
         .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?;
+    let published = published
+        .map(serde_json::from_value::<crate::IssueMonitorAgentStatus>)
+        .transpose()
+        .map_err(|error| io_as_api_error(io::Error::other(error)))?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
     let mut authority =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
-    authority.refresh_agent_capacity(project_root);
+    refresh_monitor_capacity(
+        &mut authority,
+        project_root,
+        published.as_ref().map(|status| status.max_active),
+    );
     let configured_max_active = authority.effective_max_active_agents();
-    if let Some(published) = published {
-        let mut status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(published)
-            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    if let Some(mut status) = published {
         // Issue #4413 AC-1: a live monitor answered. Stamped here rather than
         // trusted from the payload so a pre-#4413 publication — which only a
         // live monitor could have produced — is labelled the same way.
@@ -985,6 +991,19 @@ pub(crate) fn load_monitor_agent_status(
     attach_monitor_control_identity(&authority, &mut status);
     mark_degraded_cache_projection(&mut status);
     Ok((status, capacity))
+}
+
+fn refresh_monitor_capacity(
+    authority: &mut crate::IssueMonitorState,
+    project_root: &std::path::Path,
+    published_limit: Option<usize>,
+) {
+    if authority.max_active_agents_override().is_none() {
+        if let Some(limit) = published_limit {
+            authority.config.max_active = limit;
+        }
+    }
+    authority.refresh_agent_capacity(project_root);
 }
 
 /// Issue #4413: label a projection this process rebuilt from preferences and
@@ -9012,11 +9031,10 @@ mod tests {
             .is_some_and(|text| text.contains("does not override") && text.contains("requeue")));
     }
 
-    /// Issue #3620 / #4248 integration: the current configuration is an
-    /// effective limit, so an unmeasured Auto mode must remain zero in the
-    /// launch-capacity diagnosis as well as the status projection.
+    /// Issue #5399: unknown measurements preserve the saved Auto limit in
+    /// both the launch-capacity diagnosis and the status projection.
     #[test]
-    fn agent_capacity_auto_zero_is_the_configured_launch_capacity_limit() {
+    fn agent_capacity_unmeasured_auto_uses_saved_launch_capacity_limit() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -9033,30 +9051,60 @@ mod tests {
         .expect("save Auto prefs");
         let saved = std::fs::read(&prefs_path).expect("saved prefs");
 
-        let (status, diagnosis) = load_monitor_agent_status(&repo, 0).expect("status");
+        let (status, diagnosis) = load_monitor_agent_status(&repo, 9).expect("status");
 
-        assert_eq!(status.max_active, 0, "unknown Auto capacity fails closed");
+        assert_eq!(
+            status.max_active, 9,
+            "unknown Auto capacity retains the saved limit"
+        );
         assert_eq!(status.max_active_agents_override, None);
         assert!(!status.agent_capacity.measurement_complete);
         assert!(status
             .agent_capacity
             .reason
             .contains("snapshot_unavailable"));
-        let diagnosis = diagnosis.expect("zero capacity must be explained");
-        assert_eq!(diagnosis["configured_max_active"], 0);
-        assert_eq!(diagnosis["reported_max_active"], 0);
-        assert_eq!(diagnosis["admission_saturated"], true);
+        let diagnosis = diagnosis.expect("physical session saturation must be explained");
+        assert_eq!(diagnosis["configured_max_active"], 9);
+        assert_eq!(diagnosis["reported_max_active"], 9);
+        assert_eq!(diagnosis["reason"], "active_sessions_at_capacity");
+        assert_eq!(diagnosis["admission_saturated"], false);
         assert_eq!(diagnosis["reserved_slot_count"], 0);
-        assert_eq!(diagnosis["active_session_count"], 0);
+        assert_eq!(diagnosis["active_session_count"], 9);
         assert_eq!(diagnosis["source"], "degraded_cache");
         let gui = status.gui_status.expect("GUI projection");
-        assert_eq!(gui.max_active_agents, 0);
+        assert_eq!(gui.max_active_agents, 9);
         assert_eq!(gui.max_active_agents_override, None);
         assert_eq!(gui.agent_capacity, status.agent_capacity);
         assert_eq!(
             std::fs::read(&prefs_path).expect("prefs after status"),
             saved,
             "status must not persist an effective Auto limit"
+        );
+        let mut authority = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                max_active_agents: 9,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        refresh_monitor_capacity(&mut authority, &repo, Some(3));
+        assert_eq!(
+            authority.agent_status().max_active,
+            3,
+            "retain the live Auto limit"
+        );
+        refresh_monitor_capacity(&mut authority, &repo, Some(0));
+        assert_eq!(
+            authority.agent_status().max_active,
+            0,
+            "retain live measured zero"
+        );
+        authority.set_max_active_agents(7);
+        refresh_monitor_capacity(&mut authority, &repo, Some(3));
+        assert_eq!(
+            authority.agent_status().max_active,
+            7,
+            "saved Manual authority wins"
         );
     }
 
@@ -11184,15 +11232,15 @@ mod tests {
             crate::issue_monitor::IssueMonitorMaxActiveMode::Auto
         );
         assert_eq!(
-            prefs.max_active_agents, 1,
-            "resource observations are not project preferences"
+            prefs.max_active_agents, 7,
+            "Auto keeps the saved limit until a valid measurement is available"
         );
         let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply");
         assert_eq!(reply["max_active_mode"], "auto");
         assert!(reply["max_active_agents_override"].is_null());
         assert_eq!(
-            reply["max_active"], 0,
-            "unknown Auto measurement is visibly closed"
+            reply["max_active"], 7,
+            "unknown Auto measurement retains the saved limit"
         );
         assert!(reply["agent_capacity"]["reason"]
             .as_str()

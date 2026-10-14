@@ -4166,6 +4166,7 @@ fn commit_issue_monitor_scan_if_current(
     // A long scan owns its proposals, while the live driver owns the latest
     // machine observation. Preserve refreshed capacity even when its numeric
     // cap did not change (and therefore did not fence the scan by revision).
+    scanned.config.max_active = monitor.effective_max_active_agents();
     scanned.set_agent_capacity(monitor.status_view().agent_capacity);
     scanned.set_process_held_issues(monitor.process_held_issues().clone());
     let proposed_effects = scanned.pending_effects().to_vec();
@@ -11800,8 +11801,8 @@ exit 0
         let control = decode_issue_monitor_control(payload).expect("explicit Auto control");
         assert!(apply_issue_monitor_control(&mut monitor, control));
         assert_eq!(
-            monitor.config.max_active, 0,
-            "unknown automatic capacity blocks new work"
+            monitor.config.max_active, 7,
+            "unknown automatic capacity retains the saved limit"
         );
     }
 
@@ -11823,7 +11824,7 @@ exit 0
                 .expect("Auto config control is a complete operation");
         assert!(apply_issue_monitor_control(&mut monitor, control));
         assert_eq!(monitor.max_active_agents_override(), None);
-        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert_eq!(monitor.effective_max_active_agents(), 7);
         assert!(decode_issue_monitor_control(payload(serde_json::json!({
             "max_active_mode":"auto", "max_active_agents":7,
         })))
@@ -17536,7 +17537,10 @@ exit 1
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let initial = crate::IssueMonitorPrefs::default();
+        let initial = crate::IssueMonitorPrefs {
+            max_active_agents: 9,
+            ..crate::IssueMonitorPrefs::default()
+        };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
         let mut canonical =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
@@ -17554,7 +17558,7 @@ exit 1
         assert!(super::commit_issue_monitor_scan_if_current(
             &prefs_path,
             &mut canonical,
-            stale_scan,
+            stale_scan.clone(),
             epoch,
         ));
         assert_eq!(canonical.status_view().agent_capacity, latest);
@@ -17562,6 +17566,16 @@ exit 1
             canonical.process_held_issues(),
             &std::collections::BTreeSet::from([42])
         );
+        assert_eq!(canonical.effective_max_active_agents(), 3);
+        let incomplete = crate::agent_capacity::AgentCapacity::default();
+        canonical.set_agent_capacity(incomplete.clone());
+        assert!(super::commit_issue_monitor_scan_if_current(
+            &prefs_path,
+            &mut canonical,
+            stale_scan,
+            epoch,
+        ));
+        assert_eq!(canonical.status_view().agent_capacity, incomplete);
         assert_eq!(canonical.effective_max_active_agents(), 3);
         let persisted = std::fs::read_to_string(&prefs_path).expect("read prefs");
         assert!(!persisted.contains("latest machine measurement"));
@@ -20245,6 +20259,8 @@ exit 1
 
         let disk_profile = sample_issue_monitor_profile();
         let newer_disk = crate::IssueMonitorPrefs {
+            // Manual settings are disk-owned; Auto retains its accepted runtime limit.
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             legacy_git_launch_failure_migration_version:
                 crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: Some(disk_profile.clone()),

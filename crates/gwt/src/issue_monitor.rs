@@ -7157,7 +7157,10 @@ impl IssueMonitorState {
 
     pub fn with_prefs(mut config: IssueMonitorConfig, prefs: IssueMonitorPrefs) -> Self {
         config.enabled = prefs.enabled;
-        config.max_active = prefs.max_active_agents.max(1);
+        config.max_active = match prefs.max_active_agents_mode {
+            IssueMonitorMaxActiveMode::Manual => prefs.max_active_agents.max(1),
+            IssueMonitorMaxActiveMode::Auto => prefs.max_active_agents,
+        };
         let mut state = Self::new(config);
         state.max_active_agents_mode = prefs.max_active_agents_mode;
         state.apply_agent_capacity_limit();
@@ -7330,8 +7333,8 @@ impl IssueMonitorState {
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
             enabled: self.config.enabled,
-            // Auto's recommendation is machine state, not a saved project limit.
-            max_active_agents: self.max_active_agents_override().unwrap_or(1),
+            // Auto persists its accepted limit for incomplete measurements and restarts.
+            max_active_agents: self.effective_max_active_agents(),
             max_active_agents_mode: self.max_active_agents_mode,
             priority_order: self.priority_order.clone(),
             allowed_labels: self.allowed_labels.clone(),
@@ -9780,7 +9783,7 @@ impl IssueMonitorState {
             {
                 self.agent_capacity.recommended_worker_limit
             }
-            IssueMonitorMaxActiveMode::Auto => 0,
+            IssueMonitorMaxActiveMode::Auto => self.config.max_active,
         }
     }
 
@@ -9802,11 +9805,48 @@ impl IssueMonitorState {
     }
 
     pub fn refresh_agent_capacity(&mut self, project_root: &Path) {
-        self.set_agent_capacity(crate::agent_capacity::project_capacity(
+        let capacity = crate::agent_capacity::project_capacity(
             project_root,
             &BTreeSet::new(),
             self.review_windows.len(),
-        ));
+        );
+        self.set_agent_capacity_for_project(project_root, capacity);
+    }
+
+    /// Apply a project observation and report a measured reduction once.
+    pub fn set_agent_capacity_for_project(&mut self, project_root: &Path, capacity: AgentCapacity) {
+        let previous_limit = self.config.max_active;
+        self.set_agent_capacity(capacity);
+        let effective_limit = self.config.max_active;
+        if self.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto
+            && effective_limit < previous_limit
+        {
+            use gwt_core::error_ledger::{ErrorKind, ErrorTarget};
+            let constraints = self
+                .agent_capacity
+                .constraints
+                .iter()
+                .filter(|constraint| constraint.binding)
+                .map(|constraint| format!("{}: {}", constraint.resource, constraint.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            crate::error_report::report_error_and_publish_with_context(
+                ErrorKind::DaemonFault,
+                format!(
+                    "Issue Monitor Auto capacity reduced from {previous_limit} to {effective_limit}: {constraints}; {}",
+                    self.agent_capacity.reason,
+                ),
+                ErrorTarget {
+                    project_root: Some(project_root.display().to_string()),
+                    ..ErrorTarget::default()
+                },
+                BTreeMap::from([
+                    ("previous_limit".to_string(), previous_limit.to_string()),
+                    ("effective_limit".to_string(), effective_limit.to_string()),
+                    ("limiting_constraint".to_string(), self.agent_capacity.limiting_constraint.clone()),
+                ]),
+            );
+        }
     }
 
     /// Put back the durable scan timestamp after a projection-only rebuild.
@@ -10201,7 +10241,14 @@ impl IssueMonitorState {
             })
             .unwrap_or_default();
         self.config.enabled = disk.enabled;
-        self.config.max_active = disk.max_active_agents.max(1);
+        if self.max_active_agents_mode != IssueMonitorMaxActiveMode::Auto
+            || disk.max_active_agents_mode != IssueMonitorMaxActiveMode::Auto
+        {
+            self.config.max_active = match disk.max_active_agents_mode {
+                IssueMonitorMaxActiveMode::Manual => disk.max_active_agents.max(1),
+                IssueMonitorMaxActiveMode::Auto => disk.max_active_agents,
+            };
+        }
         self.max_active_agents_mode = disk.max_active_agents_mode;
         self.apply_agent_capacity_limit();
         self.set_allowed_labels(disk.allowed_labels.clone());
@@ -21357,14 +21404,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_capacity_new_preferences_wait_for_measurement() {
+    fn agent_capacity_new_preferences_retain_saved_limit_before_measurement() {
         let prefs = IssueMonitorPrefs::default();
         let saved = serde_json::to_value(&prefs).unwrap();
         assert_eq!(saved["max_active_agents_mode"], "auto");
         let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
-        assert_eq!(monitor.config.max_active, 0);
-        assert_eq!(monitor.status_view().max_active_agents, 0);
-        assert_eq!(monitor.agent_status().max_active, 0);
+        assert_eq!(monitor.config.max_active, 1);
+        assert_eq!(monitor.status_view().max_active_agents, 1);
+        assert_eq!(monitor.agent_status().max_active, 1);
     }
 
     #[test]
@@ -21385,7 +21432,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_capacity_unmeasured_auto_holds_implementation_and_review() {
+    fn agent_capacity_unmeasured_auto_admits_implementation_and_review() {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
@@ -21396,14 +21443,14 @@ mod tests {
         );
         monitor.set_gui_connected(true);
         scan_queued_candidates(&mut monitor, &[issue(42)], IDLE_NOW);
-        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
-        assert_eq!(monitor.claim_probe_plan(8), (0, Vec::new()));
-        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
-        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert_eq!(monitor.claim_probe_plan(8).0, 1);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.has_capacity_for_monitor_spawn(42, true));
         assert!(monitor
             .review_dispatch_hold(42, 420, None, IDLE_NOW)
-            .is_some());
+            .is_none());
         assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert!(monitor.next_launch_request(IDLE_NOW).is_some());
     }
 
     #[test]
@@ -21432,7 +21479,7 @@ mod tests {
         assert_eq!(monitor.effective_max_active_agents(), 3);
         let saved = serde_json::to_value(monitor.prefs()).unwrap();
         assert_eq!(saved["max_active_agents_mode"], "auto");
-        assert_eq!(saved["max_active_agents"], 1);
+        assert_eq!(saved["max_active_agents"], 3);
         assert!(saved.get("agent_capacity").is_none());
         let status = serde_json::to_value(monitor.agent_status()).unwrap();
         assert_eq!(
@@ -21448,10 +21495,14 @@ mod tests {
             status["gui_status"]["agent_capacity"],
             status["agent_capacity"]
         );
+        monitor.set_agent_capacity(AgentCapacity::default());
+        assert_eq!(monitor.effective_max_active_agents(), 3);
+        monitor.refresh_disk_owned_prefs(&IssueMonitorPrefs::default());
+        assert_eq!(monitor.effective_max_active_agents(), 3);
         assert_eq!(
             IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs())
                 .effective_max_active_agents(),
-            0
+            3
         );
     }
 
@@ -21471,33 +21522,42 @@ mod tests {
             .review_dispatch_hold(41, 410, None, IDLE_NOW)
             .is_some());
         let saved = monitor.prefs();
+        assert_eq!(saved.max_active_agents, 0);
         monitor.refresh_disk_owned_prefs(&saved);
         assert_eq!(monitor.effective_max_active_agents(), 0);
         assert_eq!(monitor.active_count(), 1);
+        monitor.set_agent_capacity(AgentCapacity::default());
+        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert_eq!(
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), saved)
+                .effective_max_active_agents(),
+            0
+        );
     }
 
     #[test]
-    fn agent_capacity_expired_measurement_stops_new_admissions() {
+    fn agent_capacity_expired_measurement_retains_last_accepted_limit() {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs::default(),
         );
-        let mut capacity = serde_json::to_value(AgentCapacity {
+        let capacity = AgentCapacity {
             measurement_complete: true,
             machine_budget: Some(4),
             recommended_worker_limit: 3,
             ..AgentCapacity::default()
-        })
-        .unwrap();
+        };
+        monitor.set_agent_capacity(capacity.clone());
+        let mut capacity = serde_json::to_value(capacity).unwrap();
         capacity["observed_at"] = serde_json::json!(1);
         capacity["expires_at"] = serde_json::json!(2);
         monitor.set_agent_capacity(serde_json::from_value(capacity).unwrap());
-        assert_eq!(monitor.effective_max_active_agents(), 0);
-        assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
-        assert!(!monitor.has_capacity_for_monitor_spawn(42, true));
+        assert_eq!(monitor.effective_max_active_agents(), 3);
+        assert!(monitor.has_capacity_for_monitor_spawn(42, false));
+        assert!(monitor.has_capacity_for_monitor_spawn(42, true));
         assert!(monitor
             .review_dispatch_hold(42, 420, None, IDLE_NOW)
-            .is_some());
+            .is_none());
     }
 
     #[test]
@@ -21506,7 +21566,10 @@ mod tests {
         monitor.set_max_active_agents(2);
         let dispatch = review_dispatch_for(41, 410);
         monitor.dispatch_review(dispatch.clone(), IDLE_NOW).unwrap();
-        monitor.set_agent_capacity(AgentCapacity::default());
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            ..AgentCapacity::default()
+        });
         monitor.set_max_active_agents_override(None);
         assert!(monitor.take_pending_review_dispatches().is_empty());
         assert!(!monitor.has_capacity_for_monitor_spawn(41, true));
@@ -21547,6 +21610,10 @@ mod tests {
         monitor.terminal_queue_push(&[42], "test", IDLE_NOW);
         monitor.record_candidate(issue(42));
         assert!(monitor.apply_confirmed_claim(42, "claim-42", "owner", "effect-42", IDLE_NOW));
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            ..AgentCapacity::default()
+        });
         monitor.set_max_active_agents_override(None);
         let held = monitor.prefs();
         assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
@@ -21652,6 +21719,10 @@ mod tests {
             "gui",
             "tab-1::agent-42"
         ));
+        monitor.set_agent_capacity(AgentCapacity {
+            measurement_complete: true,
+            ..AgentCapacity::default()
+        });
         monitor.set_max_active_agents_override(None);
         assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
         assert_eq!(monitor.take_pending_launch_requests().len(), 1);

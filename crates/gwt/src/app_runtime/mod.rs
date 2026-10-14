@@ -9703,7 +9703,11 @@ impl AppRuntime {
                 cached
             }
         };
-        capacity.set_agent_capacity(read_capacity(project_root));
+        // Auto keeps the last published limit across this projection-only rebuild.
+        if capacity.max_active_agents_override().is_none() {
+            capacity.config.max_active = status.max_active_agents;
+        }
+        capacity.set_agent_capacity_for_project(project_root, read_capacity(project_root));
         status.agent_capacity = capacity.status_view().agent_capacity;
         status.max_active_agents_override = capacity.max_active_agents_override();
         status.max_active_agents = capacity.effective_max_active_agents();
