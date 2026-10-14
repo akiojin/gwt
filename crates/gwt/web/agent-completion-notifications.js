@@ -1,4 +1,3 @@
-const COMPLETION_STATES = new Set(["idle"]);
 const STOP_STATES = new Set(["stopped", "exited"]);
 
 function normalizeState(value) {
@@ -61,29 +60,25 @@ function appendStatusDetail(body, detail) {
   return `${base}: ${trimmed}`;
 }
 
-function noticeForState({ state, windowData, projectTab, windowId }) {
-  const agentName = windowLabel(windowData);
-  const projectName = projectLabel(projectTab);
-  if (COMPLETION_STATES.has(state)) {
-    return {
-      kind: "turn_complete",
-      title: "Turn complete",
-      body: `${agentName} completed a turn in ${projectName}.`,
-    };
+/**
+ * Source-tagged notification inputs. Runtime states come from WindowProcessStatus;
+ * NeedsHuman comes only from the Monitor's typed transition, never Waiting/text.
+ * @typedef {{source: "runtime", state: "stopped" | "error", windowData?: object,
+ * projectTab?: object} | {source: "monitor", state: "needs_human", issueNumber: number}} NotificationTransition
+ */
+export function notificationForTransition(input) {
+  if (input?.source === "monitor") {
+    if (input.state !== "needs_human" || !Number.isSafeInteger(input.issueNumber) || input.issueNumber <= 0) return null;
+    return { kind: "needs_human", title: "Needs human", body: `Issue #${input.issueNumber} needs human attention.` };
   }
-  if (STOP_STATES.has(state)) {
-    return {
-      kind: "agent_stopped",
-      title: "Agent stopped",
-      body: `${agentName} stopped in ${projectName}.`,
-    };
+  if (input?.source !== "runtime") return null;
+  const agentName = windowLabel(input.windowData);
+  const projectName = projectLabel(input.projectTab);
+  if (input.state === "stopped") {
+    return { kind: "agent_stopped", title: "Agent stopped", body: `${agentName} stopped in ${projectName}.` };
   }
-  if (state === "error") {
-    return {
-      kind: "agent_error",
-      title: "Agent error",
-      body: `${agentName} hit an error in ${projectName}.`,
-    };
+  if (input.state === "error") {
+    return { kind: "agent_error", title: "Agent error", body: `${agentName} hit an error in ${projectName}.` };
   }
   return null;
 }
@@ -158,8 +153,9 @@ export function createAgentCompletionNotifier({
       return null;
     }
 
-    const noticeBase = noticeForState({
-      state,
+    const noticeBase = notificationForTransition({
+      source: "runtime",
+      state: STOP_STATES.has(state) ? "stopped" : state,
       windowData: windowData || previous.windowData,
       projectTab: projectTab || previous.projectTab,
       windowId,
@@ -189,6 +185,7 @@ export function createAgentCompletionNotifier({
   return {
     handleRuntimeState,
     forgetWindow,
+    reset: () => entries.clear(),
   };
 }
 
@@ -230,7 +227,7 @@ function attentionNoticeForFlavor({ flavor, windowData, windowId, statusDetail =
     case "done":
       return {
         flavor,
-        title: "Agent finished",
+        title: "Agent stopped",
         body: `${agentName} stopped.`,
         windowId,
       };

@@ -20,6 +20,30 @@ const APP_SOURCE = await import("node:fs").then(({ readFileSync }) =>
   readFileSync(new URL("../app.js", import.meta.url), "utf8")
 );
 
+function sourceBetween(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  assert.ok(start >= 0, `missing source marker: ${startMarker}`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.ok(end > start, `missing source marker after ${startMarker}: ${endMarker}`);
+  return source.slice(start, end);
+}
+
+function bracedBlockAfter(source, marker) {
+  const markerIndex = source.indexOf(marker);
+  assert.ok(markerIndex >= 0, `missing block marker: ${marker}`);
+  const open = source.indexOf("{", markerIndex + marker.length);
+  assert.ok(open >= 0, `missing opening brace after: ${marker}`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, index);
+    }
+  }
+  assert.fail(`missing closing brace after: ${marker}`);
+}
+
 function createFakeTimers() {
   const timers = new Map();
   let nextId = 1;
@@ -147,6 +171,72 @@ test("launch timeout maps to a sticky visible error toast in the app shell", () 
   );
 });
 
+test("launch pending changes immediately redraw the Knowledge surface (FR-630)", () => {
+  const launchPendingSource = sourceBetween(
+    APP_SOURCE,
+    "const launchPending = createLaunchPendingController({",
+    "const continueWorkDispatcher = createContinueWorkDispatcher({",
+  );
+  const onChangeSource = bracedBlockAfter(launchPendingSource, "onChange: () =>");
+
+  assert.match(
+    onChangeSource,
+    /(?:renderKnowledgeBridge|renderAllKnowledge\w*)\(/,
+    "pending begin, exact settlement, and timeout must redraw Related Work immediately",
+  );
+});
+
+test("workspace Resume errors settle exactly before sticky feedback and cache-first refresh (FR-629)", () => {
+  const errorCase = sourceBetween(
+    APP_SOURCE,
+    'case "workspace_resume_agent_error":',
+    'case "workspace_resume_agent_started":',
+  );
+  const pickerIndex = errorCase.indexOf("workspaceResumePicker.handleError(event)");
+  const settleMatch = errorCase.match(
+    /const\s+([A-Za-z_$][\w$]*)\s*=\s*launchPending\.settleAck\(event\)/,
+  );
+
+  assert.ok(pickerIndex >= 0, "the picker must receive its exact local error first");
+  assert.ok(settleMatch, "the shared exact-settle result must be retained");
+  assert.equal(
+    errorCase.match(/launchPending\.settleAck\(event\)/g)?.length,
+    1,
+    "the shared pending entry must settle exactly once",
+  );
+  assert.ok(
+    pickerIndex < settleMatch.index,
+    "picker error handling must run before shared settlement triggers rerender",
+  );
+
+  const settledName = settleMatch[1];
+  const settledBlock = bracedBlockAfter(errorCase, `if (${settledName})`);
+  assert.match(settledBlock, /alertsToasts\.push\(\{/);
+  assert.match(settledBlock, /level:\s*"error"/);
+  assert.match(settledBlock, /event\?\.message|event\.message/);
+  assert.match(settledBlock, /dismissible:\s*true/);
+  assert.match(
+    settledBlock,
+    /timeoutMs:\s*0/,
+    "Resume failures must remain visible until dismissed",
+  );
+  assert.match(
+    settledBlock,
+    /scheduleKnowledgeRelatedWorkRefresh\(\)/,
+    "an exact Resume failure must refresh Related Work through its cache-first scheduler",
+  );
+  assert.equal(
+    errorCase.match(/alertsToasts\.push\(\{/g)?.length,
+    1,
+    "the Resume error case must not show feedback outside the exact-settle guard",
+  );
+  assert.equal(
+    errorCase.match(/scheduleKnowledgeRelatedWorkRefresh\(\)/g)?.length,
+    1,
+    "the Resume error case must not refresh outside the exact-settle guard",
+  );
+});
+
 test("timeout duration uses the exported constant", () => {
   const recorded = [];
   const controller = createLaunchPendingController({
@@ -244,10 +334,11 @@ test("Continue work dispatcher emits only opaque Work intent and reuses its oper
   const timers = createFakeTimers();
   const pending = createLaunchPendingController(timers);
   const sent = [];
+  let operationCount = 0;
   const dispatcher = createContinueWorkDispatcher({
     launchPending: pending,
     send: (message) => sent.push(message),
-    createOperationId: () => "continue-operation-1",
+    createOperationId: () => `continue-operation-${++operationCount}`,
   });
   const bounds = { x: 10, y: 20, width: 800, height: 600 };
 
@@ -277,6 +368,27 @@ test("Continue work dispatcher emits only opaque Work intent and reuses its oper
     "continue-operation-1",
     "a timeout retry preserves the idempotency key",
   );
+  dispatcher.handleOutcome({
+    kind: "continue_work_outcome",
+    operation_id: "continue-operation-1",
+    work_id: "work-opaque-1",
+    outcome: "failed",
+    error_code: "continuation_reconciliation_required",
+    retryable: true,
+  });
+  assert.equal(pending.isPending("continue:work-opaque-1"), false);
+  assert.equal(dispatcher.dispatch("work-opaque-1", bounds), true);
+  assert.equal(sent[2].operation_id, "continue-operation-1");
+  dispatcher.handleOutcome({
+    kind: "continue_work_outcome",
+    operation_id: "continue-operation-1",
+    work_id: "work-opaque-1",
+    outcome: "failed",
+    error_code: "candidate_launch_failed",
+    retryable: true,
+  });
+  assert.equal(dispatcher.dispatch("work-opaque-1", bounds), true);
+  assert.equal(sent[3].operation_id, "continue-operation-2");
 });
 
 test("Continue work dispatcher ignores stale outcomes and settles only strong exact correlation", () => {

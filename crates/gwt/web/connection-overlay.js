@@ -12,9 +12,17 @@ export function createConnectionOverlay({
   document: documentRef,
   setTimeoutFn = (callback, ms) => setTimeout(callback, ms),
   clearTimeoutFn = (timer) => clearTimeout(timer),
+  onInputDropped = () => {},
 } = {}) {
   let graceTimer = null;
   let overlayEl = null;
+  let inputDropped = false;
+
+  function reportInputDropped() {
+    inputDropped = true;
+    // Input feedback must not wait for the overlay's reconnect grace period.
+    onInputDropped(false);
+  }
 
   function show() {
     graceTimer = null;
@@ -60,11 +68,15 @@ export function createConnectionOverlay({
   function setConnected(connected) {
     if (connected) {
       hide();
+      if (inputDropped) {
+        inputDropped = false;
+        onInputDropped(true);
+      }
       return;
     }
     if (overlayEl || graceTimer !== null) return;
     graceTimer = setTimeoutFn(show, CONNECTION_OVERLAY_GRACE_MS);
   }
 
-  return { setConnected };
+  return { setConnected, reportInputDropped };
 }

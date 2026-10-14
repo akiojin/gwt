@@ -33,7 +33,9 @@ libc.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+filetime = "0.2"
 gwt-core = { workspace = true, features = ["test-support"] }
+gwt-docker = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 serde_yaml.workspace = true
 tracing-subscriber.workspace = true

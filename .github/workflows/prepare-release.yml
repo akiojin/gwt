@@ -3,8 +3,9 @@ name: Prepare Release
 # Branch-agnostic release preparation. Trigger from the GitHub Actions
 # "Run workflow" button (workflow_dispatch) from anywhere — no local develop
 # checkout, no raw gh from an agent. The job always operates on develop and
-# opens a develop -> main Release PR, preserving the develop->main gate
-# enforced by pr-source-check.yml. The heavy build/tag/release pipeline lives
+# freezes the bumped develop commit as release/vX.Y.Z and opens its main PR,
+# preserving the develop source gate enforced by pr-source-check.yml.
+# The heavy build/tag/release pipeline lives
 # in release.yml and is intentionally left untouched.
 #
 # History note (SPEC-1932): an older prepare-release.yml was removed in #712
@@ -13,12 +14,23 @@ name: Prepare Release
 # main->develop sync. This workflow avoids all three: relative-tag version
 # calc via scripts/compute_release_version.py, structured edits via
 # cargo set-version + cargo update + git-cliff, and no main->develop sync.
+#
+# Issue #4373: a breaking marker in a commit (`type!:` / `BREAKING CHANGE:`)
+# never decides the version. `bump=auto` caps at minor; the markers are
+# logged below and listed in the Release PR body so the information is not
+# lost. A major release happens only when the person triggering this
+# workflow chooses `bump=major` explicitly.
 
 on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump level"
+        # Issue #4373 AC-3: the default stays `auto`. `auto` can no longer
+        # return major, so it is safe by construction, and it keeps the
+        # commit-derived patch/minor distinction that a fixed `minor`
+        # default would lose (fix-only ranges become patch releases).
+        # `major` is reachable only by choosing it here.
+        description: "Version bump level (auto never returns major; choose major explicitly)"
         type: choice
         options:
           - auto
@@ -89,12 +101,44 @@ jobs:
           echo "Previous tag: ${PREV_TAG:-<none>}"
           echo "Next version: ${NEW_VERSION} (bump=${BUMP})"
 
+          # Issue #4373 AC-2: breaking markers no longer raise the version,
+          # but their detection must not be lost. Log every marked commit
+          # and hand the list to the Release PR body step.
+          BREAKING_FILE="${RUNNER_TEMP}/breaking-commits.txt"
+          python3 scripts/compute_release_version.py --list-breaking > "$BREAKING_FILE"
+          echo "breaking_file=${BREAKING_FILE}" >> "$GITHUB_OUTPUT"
+          if [ -s "$BREAKING_FILE" ]; then
+            echo "::warning::Breaking markers found in ${PREV_TAG:-<none>}..HEAD but NOT applied to the version (bump=${BUMP} -> ${NEW_VERSION}). A major release requires bump=major explicitly (Issue #4373)."
+            while IFS= read -r line; do
+              echo "::warning::breaking marker: ${line}"
+            done < "$BREAKING_FILE"
+            {
+              echo "## Breaking markers (not applied to the version)"
+              echo ""
+              sed 's/^/- /' "$BREAKING_FILE"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No breaking markers in range."
+          fi
+
       - name: Guard against existing tag
         run: |
           set -euo pipefail
           TAG_NAME="${{ steps.version.outputs.tag_name }}"
           if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
             echo "::error::Tag ${TAG_NAME} already exists; nothing to release." >&2
+            exit 1
+          fi
+
+      - name: Guard against existing release snapshot
+        env:
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          EXISTING=$(git ls-remote --heads origin "refs/heads/release/${TAG_NAME}")
+          if [ -n "$EXISTING" ]; then
+            echo "::error::Snapshot release/${TAG_NAME} already exists. Recover its Release PR with release.status instead of repeating the version bump." >&2
             exit 1
           fi
 
@@ -145,14 +189,33 @@ jobs:
           git pull --rebase origin develop
           git push origin develop
 
-      - name: Collect closing issues
-        id: issues
+      - name: Freeze release snapshot
+        id: snapshot
+        env:
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          RELEASE_BRANCH="release/${TAG_NAME}"
+          # An empty expected ref makes this an atomic create-only push.
+          # Never advance a previous snapshot when develop keeps receiving PRs.
+          if ! git push --force-with-lease="refs/heads/${RELEASE_BRANCH}:" origin "HEAD:refs/heads/${RELEASE_BRANCH}"; then
+            echo "::error::Could not create ${RELEASE_BRANCH}. If its snapshot already exists, finish its Release PR instead of overwriting it." >&2
+            exit 1
+          fi
+          echo "branch=${RELEASE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "Frozen release: ${RELEASE_BRANCH} at $(git rev-parse HEAD)"
+
+      - name: Render Release PR body
+        id: body
         env:
           # scripts/release_issue_refs.py shells out to `gh` to classify each
           # ref as PR or Issue. `gh` refuses to run in Actions without a token
           # and the script propagates that failure, so the step needs one.
           # Reads only — the default token is enough here.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUMP: ${{ inputs.bump }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          BREAKING_FILE: ${{ steps.version.outputs.breaking_file }}
         run: |
           set -euo pipefail
           PREV_TAG="${{ steps.version.outputs.prev_tag }}"
@@ -161,60 +224,36 @@ jobs:
           else
             RANGE="HEAD"
           fi
-          ISSUE_JSON=$(python3 scripts/release_issue_refs.py --range "$RANGE" --format json)
-          {
-            echo "auto_close<<EOF"
-            printf '%s\n' "$ISSUE_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(f"Closes #{n}") for n in d.get("auto_close_issues", [])]'
-            echo "EOF"
-            echo "related<<EOF"
-            printf '%s\n' "$ISSUE_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(f"#{n}") for n in d.get("reference_only_issues", [])]'
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          # Issue #3545: the Release PR targets `main` (default branch), so a
+          # closing keyword followed by an Issue reference in its body closes
+          # that Issue on merge even when acceptance criteria are still open.
+          # The body is reference-only;
+          # `pr-body` neutralizes every closing keyword and fails closed if
+          # one survives. Issues are settled by the Issue Monitor when their
+          # work merges into develop (Issue #3917).
+          BODY_FILE="${RUNNER_TEMP}/release-pr-body.md"
+          # Issue #4373 AC-2: `--breaking-file` renders `## Breaking Changes`
+          # (informational; the version was not raised for them).
+          python3 scripts/release_issue_refs.py --range "$RANGE" --format pr-body \
+            --version "$TAG_NAME" --bump "$BUMP" --breaking-file "$BREAKING_FILE" > "$BODY_FILE"
+          rm -f "$BREAKING_FILE"
+          echo "file=${BODY_FILE}" >> "$GITHUB_OUTPUT"
 
       - name: Create or update Release PR
         env:
           GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          BUMP: ${{ inputs.bump }}
-          NEW_VERSION: ${{ steps.version.outputs.new_version }}
           TAG_NAME: ${{ steps.version.outputs.tag_name }}
-          CLOSING: ${{ steps.issues.outputs.auto_close }}
-          RELATED: ${{ steps.issues.outputs.related }}
+          BODY_FILE: ${{ steps.body.outputs.file }}
+          RELEASE_BRANCH: ${{ steps.snapshot.outputs.branch }}
         run: |
           set -euo pipefail
 
-          BODY_FILE="$(mktemp)"
-          {
-            echo "## Summary"
-            echo ""
-            echo "Release ${TAG_NAME}. Version bump and CHANGELOG generated by the Prepare Release workflow."
-            echo ""
-            echo "## Version"
-            echo ""
-            echo "- ${TAG_NAME} (bump: ${BUMP})"
-            echo ""
-            echo "## Closing Issues"
-            echo ""
-            if [ -n "${CLOSING//[$'\n\r\t ']/}" ]; then
-              printf '%s\n' "$CLOSING"
-            else
-              echo "None"
-            fi
-            echo ""
-            echo "## Related Issues / Links"
-            echo ""
-            if [ -n "${RELATED//[$'\n\r\t ']/}" ]; then
-              printf '%s\n' "$RELATED"
-            else
-              echo "None"
-            fi
-          } > "$BODY_FILE"
-
-          EXISTING=$(gh pr list --base main --head develop --state open --json number -q '.[0].number // empty')
+          EXISTING=$(gh pr list --base main --head "$RELEASE_BRANCH" --state open --json number -q '.[0].number // empty')
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --title "chore(release): ${TAG_NAME}" --add-label release --body-file "$BODY_FILE"
             PR_URL=$(gh pr view "$EXISTING" --json url -q '.url')
           else
-            PR_URL=$(gh pr create --base main --head develop --title "chore(release): ${TAG_NAME}" --label release --body-file "$BODY_FILE")
+            PR_URL=$(gh pr create --base main --head "$RELEASE_BRANCH" --title "chore(release): ${TAG_NAME}" --label release --body-file "$BODY_FILE")
           fi
           rm -f "$BODY_FILE"
 
@@ -223,6 +262,7 @@ jobs:
             echo "## Prepare Release"
             echo ""
             echo "- Version: ${TAG_NAME}"
+            echo "- Frozen head: ${RELEASE_BRANCH}"
             echo "- Release PR: ${PR_URL}"
             echo ""
             echo "Review the PR (version, CHANGELOG, diff) and merge to main to trigger the build/release pipeline."

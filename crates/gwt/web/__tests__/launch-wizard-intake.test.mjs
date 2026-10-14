@@ -1,5 +1,5 @@
 // SPEC-2359 US-80 — the Launch Wizard exposes an optional, always-skippable
-// Start Work intake prompt that drives a non-blocking duplicate-work advisory.
+// work-registration prompt that drives a non-blocking duplicate-work advisory.
 // These source-assertions lock in the wiring contract between the wizard
 // surface and the app shell.
 
@@ -23,7 +23,7 @@ test("wizard surface dispatches set_initial_prompt and request_work_advisory", (
   assert.match(surface, /requestWorkAdvisory\(\{/);
 });
 
-test("intake panel is gated on the Start Work launch and is skippable copy", () => {
+test("work-registration panel is gated on Plan Agent launch and is skippable copy", () => {
   assert.match(surface, /isStartWorkLaunch/);
   assert.match(surface, /Register an Issue/);
   assert.match(surface, /Plan Agent/);
@@ -38,7 +38,7 @@ test("advisory ignores stale responses and stays quiet when empty", () => {
 });
 
 test("clearing the prompt invalidates an in-flight advisory request", () => {
-  // SPEC-2359 US-80: clearing the intake prompt must advance the latest
+  // SPEC-2359 US-80: clearing the work-registration prompt must advance the latest
   // request id so a late response for deleted text cannot repopulate the
   // cleared panel. The empty-query branch advances the seq before returning.
   const emptyBranch = surface.slice(

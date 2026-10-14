@@ -13,7 +13,7 @@
 //! [`HttpIssueClient`] composes a transport with repo coordinates (owner,
 //! name) and an authentication token to implement every method of
 //! [`IssueClient`]. Fetches and list queries go through the GraphQL endpoint
-//! so one network round-trip covers "issue body + every comment"; mutations
+//! with paginated comments to cover "issue body + every comment"; mutations
 //! go through the REST endpoints.
 
 use std::{
@@ -28,10 +28,11 @@ use sha2::{Digest, Sha256};
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CommitComparisonStatus, CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient,
-    IssueNumber, IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError,
-    OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation,
-    RepositoryComment, RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
-    ResolutionDeadline, SpecListFilter, SpecSummary, UpdatedAt,
+    IssueCloseReason, IssueFieldsPatch, IssueNumber, IssueSnapshot, IssueState, LabelAssignment,
+    MergedPullRequest, OwnerMutationError, OwnerMutationResult, OwnerRepositoryClient,
+    RepositoryActorType, RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity,
+    RepositoryIssue, RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter,
+    SpecSummary, UpdatedAt,
 };
 
 /// HTTP method.
@@ -349,6 +350,15 @@ fn execute_reqwest(
 // HttpIssueClient
 // ---------------------------------------------------------------------------
 
+/// One page of top-level comments from a GitHub Discussion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscussionCommentsPage {
+    pub discussion_id: String,
+    pub bodies: Vec<String>,
+    pub cursor: Option<String>,
+    pub has_next_page: bool,
+}
+
 /// Real [`IssueClient`] that talks to GitHub via an [`HttpTransport`].
 pub struct HttpIssueClient<T: HttpTransport = ReqwestTransport> {
     transport: T,
@@ -357,15 +367,52 @@ pub struct HttpIssueClient<T: HttpTransport = ReqwestTransport> {
     repo: String,
     rest_base: String,
     graphql_url: String,
+    /// SPEC #4093 FR-004: the budget ledger this client's calls are charged
+    /// to and refused from, plus the in-process refusal memory. Production
+    /// constructors attach the machine-wide pair shared with every `gh`
+    /// spawn; a bare [`Self::with_transport`] client is unbudgeted so test
+    /// fixtures never write into the real ledger.
+    budget: Option<(
+        gwt_core::github_budget::BudgetLedger,
+        &'static gwt_core::github_quota::QuotaGate,
+    )>,
 }
 
+/// The argv shape the budget classifies this client's GraphQL calls as.
+const GRAPHQL_BUDGET_ARGS: [&str; 2] = ["api", "graphql"];
+/// The argv shape the budget classifies this client's REST mutations as.
+const REST_BUDGET_ARGS: [&str; 2] = ["api", "repos"];
+
 impl HttpIssueClient<ReqwestTransport> {
+    const OWNER_ENV_KEYS: [&'static str; 4] = [
+        "GWT_OWNER_GITHUB_TEST_MODE",
+        "GWT_OWNER_GITHUB_REST_BASE",
+        "GWT_OWNER_GITHUB_GRAPHQL_URL",
+        "GWT_OWNER_GITHUB_TOKEN",
+    ];
+
+    /// Keep ordinary authentication unchanged while allowing the existing
+    /// explicit debug-only loopback contract on runtime launch surfaces.
+    pub fn from_runtime_environment(owner: &str, repo: &str) -> Result<Self, ApiError> {
+        if Self::OWNER_ENV_KEYS
+            .iter()
+            .all(|key| std::env::var(key).is_err())
+        {
+            return Self::from_gh_auth(owner, repo);
+        }
+        Self::from_owner_environment_with_deadline(
+            owner,
+            repo,
+            &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+        )
+    }
+
     /// Construct an [`HttpIssueClient`] using `gh auth token` for credentials
     /// and the default [`ReqwestTransport`].
     pub fn from_gh_auth(owner: &str, repo: &str) -> Result<Self, ApiError> {
         let token = resolve_gh_token()?;
         let transport = ReqwestTransport::new().map_err(|e| ApiError::Network(e.to_string()))?;
-        Ok(Self::with_transport(transport, token, owner, repo))
+        Ok(Self::with_transport(transport, token, owner, repo).with_global_budget())
     }
 
     pub fn from_gh_auth_with_deadline(
@@ -378,7 +425,7 @@ impl HttpIssueClient<ReqwestTransport> {
         let transport =
             ReqwestTransport::new().map_err(|error| ApiError::Network(error.to_string()))?;
         deadline.remaining("owner client construction")?;
-        Ok(Self::with_transport(transport, token, owner, repo))
+        Ok(Self::with_transport(transport, token, owner, repo).with_global_budget())
     }
 
     pub fn from_owner_environment_with_deadline(
@@ -387,11 +434,7 @@ impl HttpIssueClient<ReqwestTransport> {
         deadline: &ResolutionDeadline,
     ) -> Result<Self, ApiError> {
         deadline.remaining("owner client construction")?;
-        const MODE: &str = "GWT_OWNER_GITHUB_TEST_MODE";
-        const REST: &str = "GWT_OWNER_GITHUB_REST_BASE";
-        const GRAPHQL: &str = "GWT_OWNER_GITHUB_GRAPHQL_URL";
-        const TOKEN: &str = "GWT_OWNER_GITHUB_TOKEN";
-        let values = [MODE, REST, GRAPHQL, TOKEN].map(std::env::var);
+        let values = Self::OWNER_ENV_KEYS.map(std::env::var);
         if values.iter().all(Result::is_err) {
             return Self::from_gh_auth_with_deadline(owner, repo, deadline);
         }
@@ -432,7 +475,77 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             repo: repo.to_string(),
             rest_base: "https://api.github.com".to_string(),
             graphql_url: "https://api.github.com/graphql".to_string(),
+            budget: None,
         }
+    }
+
+    /// Charge this client's calls to the machine-wide budget ledger and the
+    /// process-global refusal gate (SPEC #4093 FR-004) — what every
+    /// production constructor does.
+    pub fn with_global_budget(self) -> Self {
+        self.with_budget(
+            gwt_core::github_budget::BudgetLedger::global(),
+            gwt_core::github_quota::global(),
+        )
+    }
+
+    /// Charge this client's calls to an explicit ledger and gate (tests).
+    pub fn with_budget(
+        mut self,
+        budget: gwt_core::github_budget::BudgetLedger,
+        gate: &'static gwt_core::github_quota::QuotaGate,
+    ) -> Self {
+        self.budget = Some((budget, gate));
+        self
+    }
+
+    /// SPEC #4093 FR-004 / AC-5: refuse a call inside an open refusal window
+    /// — the in-process gate's or the one another process persisted — before
+    /// it is sent, and otherwise count it on the ledger.
+    fn admit(&self, args: &[&str]) -> Result<(), ApiError> {
+        let Some((budget, gate)) = &self.budget else {
+            return Ok(());
+        };
+        let now = chrono::Utc::now();
+        if gwt_core::github_budget::suppressed_spawn_detail(gate, budget, args, now).is_some() {
+            let quota = gwt_core::github_quota::classify_gh_args(args);
+            let retry_after = budget
+                .active_block(quota, now)
+                .or_else(|| gate.active_block(quota, now))
+                .map(|block| u64::try_from(block.retry_after_secs(now)).unwrap_or(0));
+            return Err(ApiError::RateLimited { retry_after });
+        }
+        budget.record_spawn_from(
+            gwt_core::github_quota::classify_gh_args(args),
+            &gwt_core::github_budget::http_source(args),
+            now,
+        );
+        Ok(())
+    }
+
+    /// Settle a call's outcome on the shared budget: a refusal opens the
+    /// persisted window every process honours; a success closes it.
+    fn settle<V>(&self, args: &[&str], result: Result<V, ApiError>) -> Result<V, ApiError> {
+        let Some((budget, gate)) = &self.budget else {
+            return result;
+        };
+        let quota = gwt_core::github_quota::classify_gh_args(args);
+        let now = chrono::Utc::now();
+        match &result {
+            Ok(_) => {
+                gate.record_success(quota);
+                budget.clear_block(quota);
+            }
+            Err(ApiError::RateLimited { .. }) => {
+                let block = budget.record_block(
+                    &gwt_core::github_quota::block_from_probe(quota, None, now),
+                    now,
+                );
+                gate.record_exhaustion(block);
+            }
+            Err(_) => {}
+        }
+        result
     }
 
     /// Point an explicitly test-mode debug client at loopback endpoints.
@@ -461,6 +574,187 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         &self.transport
     }
 
+    /// Resolve a workflow ID or filename to its repository-relative path.
+    pub fn workflow_path(&self, workflow: &str) -> Result<String, ApiError> {
+        let workflow = encode_path_segment(workflow);
+        let body = self.workflow_get(
+            format!(
+                "{}/repos/{}/{}/actions/workflows/{workflow}",
+                self.rest_base, self.owner, self.repo
+            ),
+            "application/vnd.github+json",
+        )?;
+        let metadata: Value = serde_json::from_str(&body)
+            .map_err(|_| ApiError::Unexpected("GitHub workflow metadata is invalid".into()))?;
+        metadata
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ApiError::Unexpected("GitHub workflow path is missing".into()))
+    }
+
+    /// Read the raw workflow YAML at the exact ref selected for dispatch.
+    pub fn workflow_definition(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+    ) -> Result<String, ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/contents/.github/workflows/{workflow_filename}",
+            self.rest_base, self.owner, self.repo
+        ))
+        .map_err(|_| ApiError::Unexpected("GitHub workflow contents URL is invalid".into()))?;
+        url.query_pairs_mut().append_pair("ref", git_ref);
+        self.workflow_get(url.to_string(), "application/vnd.github.raw+json")
+    }
+
+    /// Dispatch a validated workflow without retrying the mutation.
+    pub fn dispatch_workflow(
+        &self,
+        workflow_filename: &str,
+        git_ref: &str,
+        inputs: &serde_json::Map<String, Value>,
+    ) -> Result<(), ApiError> {
+        let workflow_filename = encode_path_segment(workflow_filename);
+        self.rest_post(
+            &format!(
+                "/repos/{}/{}/actions/workflows/{workflow_filename}/dispatches",
+                self.owner, self.repo
+            ),
+            json!({ "ref": git_ref, "inputs": inputs }),
+        )
+        .map(|_| ())
+        .map_err(sanitize_workflow_error)
+    }
+
+    fn workflow_get(&self, url: String, accept: &str) -> Result<String, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let mut headers = self.auth_headers();
+                for (name, value) in &mut headers {
+                    if name == "Accept" {
+                        *value = accept.to_string();
+                    }
+                }
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Get,
+                        url,
+                        headers,
+                        body: None,
+                    })
+                    .map_err(|_| ApiError::Network("GitHub workflow request failed".into()))?;
+                check_status(&response).map_err(sanitize_workflow_error)?;
+                Ok(response.body)
+            })(),
+        )
+    }
+
+    /// Read top-level Discussion comments through the shared GraphQL budget.
+    pub fn discussion_comments(
+        &self,
+        number: u64,
+        after: Option<&str>,
+    ) -> Result<DiscussionCommentsPage, ApiError> {
+        let operation = "discussion comments";
+        let invalid = |message: &str| ApiError::Parse {
+            operation: operation.to_string(),
+            message: message.to_string(),
+        };
+        let value = self.graphql(
+            r#"query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+                repository(owner: $owner, name: $repo) {
+                    discussion(number: $number) {
+                        id
+                        comments(first: 100, after: $after) {
+                            nodes { body authorAssociation }
+                            pageInfo { endCursor hasNextPage }
+                        }
+                    }
+                }
+                rateLimit { cost remaining resetAt }
+            }"#,
+            json!({"owner": self.owner, "repo": self.repo, "number": number, "after": after}),
+        )?;
+        let discussion = value
+            .pointer("/data/repository/discussion")
+            .filter(|discussion| discussion.is_object())
+            .ok_or_else(|| invalid("discussion missing or invalid"))?;
+        let discussion_id = required_string(discussion, "id", operation)?;
+        if discussion_id.is_empty() {
+            return Err(invalid("discussion.id is empty"));
+        }
+        let comments = discussion
+            .get("comments")
+            .filter(|comments| comments.is_object())
+            .ok_or_else(|| invalid("discussion.comments missing or invalid"))?;
+        let nodes = comments
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid("discussion.comments.nodes missing or invalid"))?;
+        let bodies = nodes
+            .iter()
+            // Payload metadata is not proof of authority: importing a blocked
+            // or resolving post mutates local escalations and PM wake input.
+            .filter(|node| {
+                matches!(
+                    node.get("authorAssociation").and_then(Value::as_str),
+                    Some("OWNER" | "MEMBER" | "COLLABORATOR")
+                )
+            })
+            .map(|node| required_string(node, "body", operation))
+            .collect::<Result<Vec<_>, _>>()?;
+        let page_info = comments
+            .get("pageInfo")
+            .ok_or_else(|| invalid("discussion.comments.pageInfo missing"))?;
+        let has_next_page = page_info
+            .get("hasNextPage")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                invalid("discussion.comments.pageInfo.hasNextPage missing or invalid")
+            })?;
+        let cursor = match page_info.get("endCursor") {
+            Some(Value::String(cursor)) if !cursor.is_empty() => Some(cursor.clone()),
+            Some(Value::Null) if !has_next_page => None,
+            _ => {
+                return Err(invalid(
+                    "discussion.comments.pageInfo.endCursor missing or invalid",
+                ))
+            }
+        };
+        Ok(DiscussionCommentsPage {
+            discussion_id,
+            bodies,
+            cursor,
+            has_next_page,
+        })
+    }
+
+    /// Add a top-level Discussion comment through the shared GraphQL budget.
+    pub fn add_discussion_comment(&self, discussion_id: &str, body: &str) -> Result<(), ApiError> {
+        let value = self.graphql(
+            r#"mutation($discussionId: ID!, $body: String!) {
+                addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
+                    comment { id }
+                }
+            }"#,
+            json!({"discussionId": discussion_id, "body": body}),
+        )?;
+        value
+            .pointer("/data/addDiscussionComment/comment/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| ApiError::Parse {
+                operation: "add discussion comment".to_string(),
+                message: "created comment.id missing or invalid".to_string(),
+            })?;
+        Ok(())
+    }
+
     fn auth_headers(&self) -> Vec<(String, String)> {
         vec![
             (
@@ -477,6 +771,11 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     }
 
     fn rest_patch(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(&REST_BUDGET_ARGS, self.rest_patch_unbudgeted(path, body))
+    }
+
+    fn rest_patch_unbudgeted(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
         let mut headers = self.auth_headers();
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
         let resp = self
@@ -493,6 +792,11 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     }
 
     fn rest_post(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(&REST_BUDGET_ARGS, self.rest_post_unbudgeted(path, body))
+    }
+
+    fn rest_post_unbudgeted(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
         let mut headers = self.auth_headers();
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
         let resp = self
@@ -509,6 +813,11 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     }
 
     fn rest_delete(&self, path: &str) -> Result<HttpResponse, ApiError> {
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(&REST_BUDGET_ARGS, self.rest_delete_unbudgeted(path))
+    }
+
+    fn rest_delete_unbudgeted(&self, path: &str) -> Result<HttpResponse, ApiError> {
         let resp = self
             .transport
             .execute(HttpRequest {
@@ -523,6 +832,23 @@ impl<T: HttpTransport> HttpIssueClient<T> {
     }
 
     fn graphql(&self, query: &str, variables: Value) -> Result<Value, ApiError> {
+        self.admit(&GRAPHQL_BUDGET_ARGS)?;
+        let result = self.graphql_unbudgeted(query, variables);
+        if let (Ok(value), Some((budget, _))) = (&result, &self.budget) {
+            // SPEC #4093 FR-001: settle the points the query cost and refresh
+            // the window from the same response.
+            if let Some(rate_limit) = gwt_core::github_budget::parse_graphql_rate_limit(value) {
+                budget.record_graphql_response(
+                    &gwt_core::github_budget::http_source(&GRAPHQL_BUDGET_ARGS),
+                    &rate_limit,
+                    chrono::Utc::now(),
+                );
+            }
+        }
+        self.settle(&GRAPHQL_BUDGET_ARGS, result)
+    }
+
+    fn graphql_unbudgeted(&self, query: &str, variables: Value) -> Result<Value, ApiError> {
         let mut headers = self.auth_headers();
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
         let payload = json!({
@@ -541,8 +867,31 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         check_status(&resp)?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("graphql json: {e}")))?;
-        if let Some(errs) = value.get("errors") {
-            return Err(ApiError::Unexpected(format!("graphql errors: {errs}")));
+        if let Some(errs) = value.get("errors").filter(|errors| !errors.is_null()) {
+            // These numbered reads use the shared Issue/PR namespace. Only
+            // a NOT_FOUND at that exact resource path proves absence;
+            // permission, rate-limit and other GraphQL failures stay intact.
+            if matches!(query, FETCH_ISSUE_QUERY | FETCH_ISSUE_UPDATED_AT_QUERY)
+                && errs.as_array().is_some_and(|errors| {
+                    !errors.is_empty()
+                        && errors.iter().all(|error| {
+                            error["type"] == "NOT_FOUND"
+                                && error["path"] == json!(["repository", "issue"])
+                        })
+                })
+            {
+                if let Some(number) = variables["number"].as_u64() {
+                    return Err(ApiError::NotFound(IssueNumber(number)));
+                }
+            }
+            // Issue #3928: GitHub answers a secondary rate limit with HTTP 200
+            // and a `RATE_LIMIT` entry in the response body, so a status-only
+            // check sees a healthy call. Classifying it here — the way the
+            // owner-request path above already does — is what turns it into
+            // `RateLimited` instead of an opaque `Unexpected`, which is what a
+            // caller needs to back off instead of retrying straight into the
+            // same limit.
+            return Err(classify_graphql_errors(errs, "graphql query"));
         }
         Ok(value)
     }
@@ -599,6 +948,35 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             return Err(classify_graphql_errors(errors, operation));
         }
         Ok(value)
+    }
+
+    fn label_rest_mutation(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        body: Value,
+        operation: &str,
+    ) -> OwnerMutationResult<()> {
+        self.admit(&REST_BUDGET_ARGS)
+            .map_err(OwnerMutationError::PreSubmit)?;
+        let result = self.owner_rest_mutation(
+            method,
+            path,
+            body,
+            &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+            operation,
+        );
+        match result {
+            Ok(_) => self
+                .settle(&REST_BUDGET_ARGS, Ok(()))
+                .map_err(OwnerMutationError::PreSubmit),
+            Err(OwnerMutationError::PreSubmit(error)) => self
+                .settle(&REST_BUDGET_ARGS, Err(error))
+                .map_err(OwnerMutationError::PreSubmit),
+            Err(OwnerMutationError::RemoteOutcomeUnknown(error)) => self
+                .settle(&REST_BUDGET_ARGS, Err(error))
+                .map_err(OwnerMutationError::RemoteOutcomeUnknown),
+        }
     }
 
     fn owner_rest_mutation(
@@ -683,6 +1061,18 @@ impl<T: HttpTransport> HttpIssueClient<T> {
 // ---------------------------------------------------------------------------
 // Status / parsing helpers
 // ---------------------------------------------------------------------------
+
+fn sanitize_workflow_error(error: ApiError) -> ApiError {
+    match error {
+        error
+        @ (ApiError::RateLimited { .. } | ApiError::Unauthorized | ApiError::BodyTooLarge) => error,
+        ApiError::PermissionDenied { .. } => ApiError::PermissionDenied {
+            message: "GitHub workflow access is forbidden".into(),
+        },
+        ApiError::Network(_) => ApiError::Network("GitHub workflow request failed".into()),
+        _ => ApiError::Unexpected("GitHub workflow request was rejected".into()),
+    }
+}
 
 fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {
     let lowercase_body = resp.body.to_ascii_lowercase();
@@ -1600,19 +1990,36 @@ fn encode_path_segment(value: &str) -> String {
 // ---------------------------------------------------------------------------
 
 const FETCH_ISSUE_QUERY: &str = r#"
-query($owner:String!,$repo:String!,$number:Int!){
+query($owner:String!,$repo:String!,$number:Int!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
-    issue(number:$number){
-      number title body state updatedAt
-      labels(first:50){nodes{name}}
-      comments(first:100){nodes{databaseId body updatedAt}}
+    issue: issueOrPullRequest(number:$number){
+      __typename
+      ... on Issue {
+        number title body state updatedAt
+        labels(first:50){nodes{name}}
+        comments(first:100, after:$after){
+          nodes{databaseId body updatedAt}
+          pageInfo{ hasNextPage endCursor }
+        }
+      }
     }
+  }
+}
+"#;
+
+const FETCH_ISSUE_UPDATED_AT_QUERY: &str = r#"
+query($owner:String!,$repo:String!,$number:Int!){
+  rateLimit{cost remaining resetAt nodeCount}
+  repository(owner:$owner, name:$repo){
+    issue: issueOrPullRequest(number:$number){ __typename ... on Issue { updatedAt } }
   }
 }
 "#;
 
 const LIST_SPEC_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issues(labels:["gwt-spec"], first:100, after:$after, orderBy:{field:UPDATED_AT,direction:DESC}){
       nodes{ number title state updatedAt labels(first:20){nodes{name}} }
@@ -1624,6 +2031,7 @@ query($owner:String!,$repo:String!,$after:String){
 
 const LIST_OWNER_ISSUES_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issues(states:[OPEN,CLOSED], first:100, after:$after, orderBy:{field:CREATED_AT,direction:ASC}){
       nodes{ number title body state updatedAt labels(first:100){totalCount nodes{name}} }
@@ -1635,6 +2043,7 @@ query($owner:String!,$repo:String!,$after:String){
 
 const LIST_OWNER_COMMENTS_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!,$after:String){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issue(number:$number){
       comments(first:100, after:$after){
@@ -1651,6 +2060,7 @@ query($owner:String!,$repo:String!,$number:Int!,$after:String){
 
 const FETCH_OWNER_ISSUE_QUERY: &str = r#"
 query($owner:String!,$repo:String!,$number:Int!){
+  rateLimit{cost remaining resetAt nodeCount}
   repository(owner:$owner, name:$repo){
     issue(number:$number){
       number title body state updatedAt labels(first:100){totalCount nodes{name}}
@@ -1665,29 +2075,195 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         number: IssueNumber,
         since: Option<&UpdatedAt>,
     ) -> Result<FetchResult, ApiError> {
-        let value = self.graphql(
-            FETCH_ISSUE_QUERY,
-            json!({
-                "owner": self.owner,
-                "repo": self.repo,
-                "number": number.0,
-            }),
-        )?;
-        let issue = value
-            .get("data")
-            .and_then(|d| d.get("repository"))
-            .and_then(|r| r.get("issue"))
-            .ok_or(ApiError::NotFound(number))?;
-        if issue.is_null() {
-            return Err(ApiError::NotFound(number));
-        }
-        let snapshot = parse_graphql_issue(issue)?;
-        if let Some(prev) = since {
-            if *prev == snapshot.updated_at {
+        if let Some(previous) = since {
+            let value = self.graphql(
+                FETCH_ISSUE_UPDATED_AT_QUERY,
+                json!({
+                    "owner": self.owner,
+                    "repo": self.repo,
+                    "number": number.0,
+                }),
+            )?;
+            let issue = value
+                .get("data")
+                .and_then(|data| data.get("repository"))
+                .and_then(|repository| repository.get("issue"))
+                .ok_or(ApiError::NotFound(number))?;
+            if issue.is_null() {
+                return Err(ApiError::NotFound(number));
+            }
+            if issue["__typename"] == "PullRequest" {
+                return Err(ApiError::PullRequestInsteadOfIssue(number));
+            }
+            let updated_at = issue
+                .get("updatedAt")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::Unexpected("issue.updatedAt missing".to_string()))?;
+            if *previous == UpdatedAt::new(updated_at) {
                 return Ok(FetchResult::NotModified);
             }
         }
-        Ok(FetchResult::Updated(snapshot))
+
+        let operation = "fetch issue comments";
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+        let mut completed_pages = 0;
+        let mut snapshot: Option<IssueSnapshot> = None;
+        loop {
+            let value = self.graphql(
+                FETCH_ISSUE_QUERY,
+                json!({
+                    "owner": self.owner,
+                    "repo": self.repo,
+                    "number": number.0,
+                    "after": cursor,
+                }),
+            )?;
+            let issue = value
+                .pointer("/data/repository/issue")
+                .filter(|issue| !issue.is_null())
+                .ok_or(ApiError::NotFound(number))?;
+            if issue["__typename"] == "PullRequest" {
+                return Err(ApiError::PullRequestInsteadOfIssue(number));
+            }
+            let (_, has_next, next_cursor) = page_connection(issue, &["comments"], operation)
+                .map_err(|error| remap_partial_page(error, completed_pages))?;
+            let page = parse_graphql_issue(issue)?;
+            if let Some(snapshot) = &mut snapshot {
+                snapshot.comments.extend(page.comments);
+            } else {
+                snapshot = Some(page);
+            }
+            completed_pages += 1;
+            if !has_next {
+                return Ok(FetchResult::Updated(snapshot.expect("first page parsed")));
+            }
+            let next_cursor = next_cursor
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| ApiError::PartialPage {
+                    operation: operation.to_string(),
+                    completed_pages,
+                })?;
+            if !seen_cursors.insert(next_cursor.to_string()) {
+                return Err(ApiError::PartialPage {
+                    operation: operation.to_string(),
+                    completed_pages,
+                });
+            }
+            cursor = Some(next_cursor.to_string());
+        }
+    }
+
+    fn fetch_label_assignment(
+        &self,
+        number: IssueNumber,
+        label: &str,
+    ) -> Result<Option<LabelAssignment>, ApiError> {
+        let operation = "fetch issue label assignment";
+        let endpoint = format!(
+            "{}/repos/{}/{}/issues/{}/events?",
+            self.rest_base, self.owner, self.repo, number.0
+        );
+        let mut url = format!("{endpoint}per_page=100&page=1");
+        let mut seen_urls = HashSet::new();
+        let mut completed_pages = 0;
+        let mut latest = None;
+        loop {
+            // Never forward authorization to a different endpoint, or accept a
+            // cycling Link header as a complete history.
+            if !url.starts_with(&endpoint) || !seen_urls.insert(url.clone()) {
+                return Err(ApiError::PartialPage {
+                    operation: operation.to_string(),
+                    completed_pages,
+                });
+            }
+            self.admit(&REST_BUDGET_ARGS)?;
+            let response = self.settle(
+                &REST_BUDGET_ARGS,
+                (|| {
+                    let response = self
+                        .transport
+                        .execute(HttpRequest {
+                            method: HttpMethod::Get,
+                            url: url.clone(),
+                            headers: self.auth_headers(),
+                            body: None,
+                        })
+                        .map_err(|error| ApiError::Network(error.to_string()))?;
+                    check_status(&response)?;
+                    Ok(response)
+                })(),
+            )?;
+            let events: Vec<Value> =
+                serde_json::from_str(&response.body).map_err(|error| ApiError::Parse {
+                    operation: operation.to_string(),
+                    message: error.to_string(),
+                })?;
+            for event in events {
+                if !event
+                    .pointer("/label/name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.eq_ignore_ascii_case(label))
+                {
+                    continue;
+                }
+                let kind = event.get("event").and_then(Value::as_str);
+                if !matches!(kind, Some("labeled" | "unlabeled")) {
+                    continue;
+                }
+                let malformed = || ApiError::Parse {
+                    operation: operation.to_string(),
+                    message: "label event id or created_at is missing or invalid".to_string(),
+                };
+                let id = event
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(malformed)?;
+                let created_at = event
+                    .get("created_at")
+                    .and_then(Value::as_str)
+                    .ok_or_else(malformed)?;
+                let at =
+                    chrono::DateTime::parse_from_rfc3339(created_at).map_err(|_| malformed())?;
+                let key = (at, id);
+                if latest
+                    .as_ref()
+                    .is_some_and(|(previous, _)| previous >= &key)
+                {
+                    continue;
+                }
+                let assignment = (kind == Some("labeled")).then(|| LabelAssignment {
+                    actor: event
+                        .pointer("/actor/login")
+                        .and_then(Value::as_str)
+                        .filter(|login| !login.is_empty())
+                        .map(str::to_string),
+                    created_at: created_at.to_string(),
+                });
+                latest = Some((key, assignment));
+            }
+            completed_pages += 1;
+            let next = response_header(&response, "link").and_then(|header| {
+                header.split(',').find_map(|part| {
+                    let mut fields = part.split(';');
+                    let target = fields.next()?.trim();
+                    fields
+                        .any(|field| field.trim() == "rel=\"next\"")
+                        .then_some(target)
+                })
+            });
+            let Some(next) = next else {
+                return Ok(latest.and_then(|(_, assignment)| assignment));
+            };
+            url = next
+                .strip_prefix('<')
+                .and_then(|value| value.strip_suffix('>'))
+                .ok_or_else(|| ApiError::PartialPage {
+                    operation: operation.to_string(),
+                    completed_pages,
+                })?
+                .to_string();
+        }
     }
 
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError> {
@@ -1703,6 +2279,28 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let resp = self.rest_patch(&path, json!({ "title": new_title }))?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("patch_title json: {e}")))?;
+        parse_rest_issue(&value)
+    }
+
+    fn patch_issue_fields(
+        &self,
+        number: IssueNumber,
+        fields: &IssueFieldsPatch,
+    ) -> Result<IssueSnapshot, ApiError> {
+        let mut payload = serde_json::Map::new();
+        if let Some(title) = &fields.title {
+            payload.insert("title".to_string(), json!(title));
+        }
+        if let Some(body) = &fields.body {
+            payload.insert("body".to_string(), json!(body));
+        }
+        if let Some(labels) = &fields.labels {
+            payload.insert("labels".to_string(), json!(labels));
+        }
+        let path = format!("/repos/{}/{}/issues/{}", self.owner, self.repo, number.0);
+        let resp = self.rest_patch(&path, Value::Object(payload))?;
+        let value: Value = serde_json::from_str(&resp.body)
+            .map_err(|e| ApiError::Unexpected(format!("patch_issue_fields json: {e}")))?;
         parse_rest_issue(&value)
     }
 
@@ -1815,6 +2413,37 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         parse_rest_issue(&value)
     }
 
+    fn add_labels_mutation(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> OwnerMutationResult<()> {
+        self.label_rest_mutation(
+            HttpMethod::Post,
+            &format!(
+                "/repos/{}/{}/issues/{}/labels",
+                self.owner, self.repo, number.0
+            ),
+            json!({ "labels": labels }),
+            "add issue labels",
+        )
+    }
+
+    fn remove_label_mutation(&self, number: IssueNumber, label: &str) -> OwnerMutationResult<()> {
+        self.label_rest_mutation(
+            HttpMethod::Delete,
+            &format!(
+                "/repos/{}/{}/issues/{}/labels/{}",
+                self.owner,
+                self.repo,
+                number.0,
+                encode_path_segment(label)
+            ),
+            Value::Null,
+            "remove issue label",
+        )
+    }
+
     fn set_labels(
         &self,
         number: IssueNumber,
@@ -1827,13 +2456,26 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         parse_rest_issue(&value)
     }
 
-    fn set_state(&self, number: IssueNumber, state: IssueState) -> Result<IssueSnapshot, ApiError> {
+    fn set_state(
+        &self,
+        number: IssueNumber,
+        state: IssueState,
+        reason: Option<IssueCloseReason>,
+    ) -> Result<IssueSnapshot, ApiError> {
         let path = format!("/repos/{}/{}/issues/{}", self.owner, self.repo, number.0);
         let state_str = match state {
             IssueState::Open => "open",
             IssueState::Closed => "closed",
         };
-        let resp = self.rest_patch(&path, json!({ "state": state_str }))?;
+        let mut payload = json!({ "state": state_str });
+        // GitHub only honours `state_reason` on a close; reopening resets it
+        // server-side, so sending one there would be noise.
+        if state == IssueState::Closed {
+            if let Some(reason) = reason {
+                payload["state_reason"] = json!(reason.as_str());
+            }
+        }
+        let resp = self.rest_patch(&path, payload)?;
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("set_state json: {e}")))?;
         parse_rest_issue(&value)
@@ -2394,8 +3036,13 @@ fn required_u64(value: &Value, field: &str, operation: &str) -> Result<u64, ApiE
 
 #[cfg(test)]
 mod check_status_tests {
-    use super::{check_status, classify_graphql_errors, HttpResponse};
-    use crate::client::ApiError;
+    use serde_json::json;
+
+    use super::{
+        check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
+        HttpResponse, HttpTransport, ResolutionDeadline,
+    };
+    use crate::client::{ApiError, IssueClient, SpecListFilter};
 
     /// SPEC-3214 T-016 / FR-011: a non-rate-limit 403 must surface the
     /// GitHub-provided reason (e.g. personal repo restrictions) instead of
@@ -2450,6 +3097,260 @@ mod check_status_tests {
         ));
     }
 
+    /// Issue #3928: the plain GraphQL path must classify a rate-limit body the
+    /// same way the owner-request path does. GitHub answers a secondary limit
+    /// with HTTP 200 and a `RATE_LIMIT` entry in the body, so this path used to
+    /// report it as an opaque `Unexpected` and its callers — the Issue cache
+    /// reads a PM surface runs on — retried straight back into the limit
+    /// instead of backing off.
+    #[test]
+    fn a_rate_limited_graphql_body_is_typed_even_on_the_plain_query_path() {
+        struct RateLimitedBody;
+        impl RateLimitedBody {
+            fn response() -> HttpResponse {
+                HttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: r#"{"errors":[{"type":"RATE_LIMIT","message":"API rate limit already exceeded for user ID 965624."}]}"#
+                        .to_string(),
+                }
+            }
+        }
+        impl HttpTransport for RateLimitedBody {
+            fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
+            }
+
+            fn execute_with_deadline(
+                &self,
+                _request: HttpRequest,
+                _deadline: &ResolutionDeadline,
+            ) -> Result<HttpResponse, HttpError> {
+                Ok(Self::response())
+            }
+        }
+
+        let client =
+            HttpIssueClient::with_transport(RateLimitedBody, "token".to_string(), "octo", "gwt");
+        let error = client
+            .list_spec_issues(&SpecListFilter::default())
+            .expect_err("a rate-limited body must not read as success");
+        assert!(
+            matches!(error, ApiError::RateLimited { .. }),
+            "expected RateLimited, got {error:?}"
+        );
+    }
+
+    /// SPEC #4093 AC-5: the reqwest path honours the window another process
+    /// persisted — the read is refused before any request is sent — and a
+    /// refusal GitHub answers is written back to that shared window.
+    #[test]
+    fn the_http_client_is_gated_and_settled_on_the_shared_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate: &'static gwt_core::github_quota::QuotaGate =
+            Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let now = chrono::Utc::now();
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: now + chrono::Duration::seconds(300),
+            },
+            now,
+        );
+        let transport = crate::client::http::FakeTransport::new();
+        let client = HttpIssueClient::with_transport(transport, "token".to_string(), "octo", "gwt")
+            .with_budget(ledger.clone(), gate);
+
+        let error = client
+            .fetch(crate::IssueNumber(7), None)
+            .expect_err("an open window refuses the read");
+        match error {
+            ApiError::RateLimited { retry_after } => {
+                assert!(retry_after.is_some_and(|secs| secs > 0), "{retry_after:?}")
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        assert!(
+            client.transport().recorded().is_empty(),
+            "nothing is sent inside the window"
+        );
+        ledger.clear_block(gwt_core::github_quota::GitHubQuota::GraphQl);
+
+        client.transport().enqueue(HttpResponse {
+            status: 429,
+            headers: Vec::new(),
+            body: String::new(),
+        });
+        let error = client
+            .fetch(crate::IssueNumber(7), None)
+            .expect_err("GitHub refused the read");
+        assert!(matches!(error, ApiError::RateLimited { .. }), "{error:?}");
+        assert!(
+            ledger
+                .active_block(
+                    gwt_core::github_quota::GitHubQuota::GraphQl,
+                    chrono::Utc::now()
+                )
+                .is_some(),
+            "the refusal opens the persisted window"
+        );
+        let snapshot = ledger.snapshot(chrono::Utc::now());
+        assert_eq!(
+            snapshot.local["graphql"].calls_last_hour, 1,
+            "the sent call was counted: {:?}",
+            snapshot.local
+        );
+    }
+
+    #[test]
+    fn discussion_sync_reads_and_posts_through_the_shared_graphql_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        )
+        .with_budget(ledger.clone(), gate);
+        client.transport().enqueue(HttpResponse {
+            status: 200, headers: vec![],
+            body: r#"{"data":{"repository":{"discussion":{"id":"D_1","comments":{"nodes":[{"body":"message","authorAssociation":"OWNER"}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor"}}}},"rateLimit":{"cost":3,"remaining":4997,"resetAt":"2099-01-01T00:00:00Z"}}}"#.into(),
+        });
+        let page = client.discussion_comments(42, Some("previous")).unwrap();
+        assert_eq!(page.discussion_id, "D_1");
+        assert_eq!(page.bodies, ["message"]);
+        assert_eq!(page.cursor.as_deref(), Some("cursor"));
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
+            3
+        );
+        client.transport().enqueue(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: r#"{"data":{"addDiscussionComment":{"comment":{"id":"C_1"}}}}"#.into(),
+        });
+        client
+            .add_discussion_comment(&page.discussion_id, "message")
+            .unwrap();
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["graphql"].calls_last_hour,
+            2
+        );
+        let requests = client.transport().recorded();
+        let read: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(read["variables"]["after"], "previous");
+        assert!(read["query"]
+            .as_str()
+            .unwrap()
+            .contains("rateLimit { cost remaining resetAt }"));
+        let posted: serde_json::Value =
+            serde_json::from_str(requests[1].body.as_ref().unwrap()).unwrap();
+        assert_eq!(posted["variables"]["body"], "message");
+        assert!(!posted["query"].as_str().unwrap().contains("replyToId"));
+        assert!(!posted["query"].as_str().unwrap().contains("rateLimit"));
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".into(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+            },
+            chrono::Utc::now(),
+        );
+        assert!(matches!(
+            client.discussion_comments(42, None),
+            Err(ApiError::RateLimited { .. })
+        ));
+        assert_eq!(client.transport().recorded().len(), 2);
+    }
+
+    #[test]
+    fn discussion_sync_only_imports_repository_trusted_authors_without_losing_cursor() {
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        );
+        let mut nodes = [
+            "OWNER",
+            "MEMBER",
+            "COLLABORATOR",
+            "CONTRIBUTOR",
+            "FIRST_TIMER",
+            "FIRST_TIME_CONTRIBUTOR",
+            "MANNEQUIN",
+            "NONE",
+            "UNKNOWN",
+        ]
+        .into_iter()
+        .map(|association| json!({"body": association, "authorAssociation": association}))
+        .collect::<Vec<_>>();
+        nodes.push(json!({"body": "untrusted metadata: author_kind=human author=owner"}));
+        client.transport().enqueue(HttpResponse {
+            status: 200, headers: vec![],
+            body: json!({"data": {"repository": {"discussion": {"id": "D_1", "comments": {
+                "nodes": nodes, "pageInfo": {"hasNextPage": true, "endCursor": "all-comments-cursor"}
+            }}}}}).to_string(),
+        });
+        let page = client.discussion_comments(42, None).unwrap();
+        assert_eq!(page.bodies, ["OWNER", "MEMBER", "COLLABORATOR"]);
+        assert_eq!(page.cursor.as_deref(), Some("all-comments-cursor"));
+        assert!(page.has_next_page);
+        let requests = client.transport().recorded();
+        let request: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert!(request["query"]
+            .as_str()
+            .unwrap()
+            .contains("authorAssociation"));
+    }
+
+    #[test]
+    fn discussion_sync_rejects_incomplete_remote_responses() {
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        );
+        for discussion in [
+            json!(null),
+            json!({"id": "D_1", "comments": null}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [{"authorAssociation": "OWNER"}], "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [], "pageInfo": {"hasNextPage": true, "endCursor": null}
+            }}),
+        ] {
+            client.transport().enqueue(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: json!({"data": {"repository": {"discussion": discussion}}}).to_string(),
+            });
+            assert!(matches!(
+                client.discussion_comments(42, None),
+                Err(ApiError::Parse { .. })
+            ));
+        }
+        client.transport().enqueue(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: json!({"data": {"addDiscussionComment": {"comment": null}}}).to_string(),
+        });
+        assert!(matches!(
+            client.add_discussion_comment("D_1", "message"),
+            Err(ApiError::Parse { .. })
+        ));
+    }
+
     #[test]
     fn graphql_rate_limit_variants_map_to_typed_failure() {
         let variants = [
@@ -2483,5 +3384,81 @@ mod check_status_tests {
             }
             other => panic!("404 must map to Unexpected with message, got: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod label_assignment_tests {
+    use super::*;
+
+    fn event(id: u64, event: &str, label: &str, actor: &str) -> Value {
+        json!({"id":id,"event":event,"label":{"name":label},
+            "actor":{"login":actor},"created_at":"2026-10-03T00:00:00Z"})
+    }
+
+    fn response(events: Vec<Value>, next: bool) -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            headers: if next {
+                vec![("Link".into(),
+                "<https://api.github.com/repos/o/r/issues/7/events?per_page=100&page=2>; rel=\"next\"".into())]
+            } else {
+                vec![]
+            },
+            body: json!(events).to_string(),
+        }
+    }
+
+    #[test]
+    fn label_assignment_follows_pages_and_returns_latest_reassignment() {
+        let transport = FakeTransport::new();
+        transport.enqueue(response(
+            vec![
+                event(1, "labeled", "urgent", "first"),
+                event(2, "unlabeled", "urgent", "first"),
+            ],
+            true,
+        ));
+        transport.enqueue(response(
+            vec![
+                event(3, "labeled", "URGENT", "second"),
+                event(4, "labeled", "bug", "third"),
+            ],
+            false,
+        ));
+        let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+        let assignment = client
+            .fetch_label_assignment(IssueNumber(7), "urgent")
+            .expect("events")
+            .expect("latest assignment");
+        assert_eq!(assignment.actor.as_deref(), Some("second"));
+        assert_eq!(assignment.created_at, "2026-10-03T00:00:00Z");
+        let requests = client.transport().recorded();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].url,
+            "https://api.github.com/repos/o/r/issues/7/events?per_page=100&page=2"
+        );
+        assert!(requests.iter().all(|r| r.method == HttpMethod::Get
+            && r.headers
+                .contains(&("Authorization".into(), "Bearer token".into()))));
+    }
+
+    #[test]
+    fn label_assignment_removal_on_later_page_clears_assignment() {
+        let transport = FakeTransport::new();
+        transport.enqueue(response(vec![event(1, "labeled", "urgent", "first")], true));
+        transport.enqueue(response(
+            vec![event(2, "unlabeled", "urgent", "second")],
+            false,
+        ));
+        let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+        assert_eq!(
+            client
+                .fetch_label_assignment(IssueNumber(7), "urgent")
+                .unwrap(),
+            None
+        );
+        assert_eq!(client.transport().recorded().len(), 2);
     }
 }

@@ -13,9 +13,11 @@ develop ブランチでバージョン更新・CHANGELOG更新を行い、main �
 GitHub Actions の `Prepare Release` ワークフローを使う。** GitHub の
 Actions → `Prepare Release` → `Run workflow` を押すだけで、CI が develop 上で
 バージョン更新（`scripts/compute_release_version.py` の最新タグ相対計算、`cargo set-version`、
-`cargo update -w`、git-cliff）・`chore(release): vX.Y.Z` コミット・develop→main の
-Release PR 作成までを実行する。`bump` 入力は `auto`（既定。breaking 検出時は失敗するので
-major は明示）/ `patch` / `minor` / `major`。
+`cargo update -w`、git-cliff）・`chore(release): vX.Y.Z` コミットを develop に push した後、
+その commit を固定した `release/vX.Y.Z` から main への Release PR を作成する。
+develop への後続マージで release head / CI は動かない。`bump` 入力は `auto`（既定。breaking marker を検出しても
+minor 止まりで、marker はログと Release PR 本文に列挙されるだけ。Issue #4373）/ `patch` /
+`minor` / `major`。**メジャーはユーザーが `major` を明示した場合のみ。**
 
 承認は **生成された Release PR をレビューして merge** で行う（実 diff・CHANGELOG を確認）。
 merge 後は `release.yml` がタグ・GitHub Release・5プラットフォームビルドを自動実行する。
@@ -26,9 +28,12 @@ merge 後は `release.yml` がタグ・GitHub Release・5プラットフォー�
 
 ワークフローは push と PR 作成が別ステップのため、push 成功後に PR 作成が失敗すると
 develop に bump コミットだけが残ることがある（GitHub Actions が失敗を可視化する）。その場合は
-**同じワークフローを再実行**すればよい（`git pull --rebase` は no-op、既存 PR は更新される）。
+固定 snapshot が未作成なら同じワークフローを再実行する。`release/vX.Y.Z` が既に存在する場合は、
+その branch の PR を復旧する。既存 snapshot は上書きせず、develop を head とする PR も再作成しない。
 
-以下の手動手順は、develop 上で対話的に実行したい場合の **fallback** として残す。
+新規リリースは必ず上の workflow を使い、ローカルで release branch を作成しない。
+以下の旧手動手順は中断したリリースの調査・復旧用に限る。固定 snapshot が存在する場合は
+バージョン更新をやり直さず、ステップ 10 の専用 `release.status` 経路で PR を復旧する。
 
 ## フロー概要
 
@@ -154,7 +159,7 @@ HAS_FIX=$(git log ${PREV_TAG}..HEAD --pretty=format:"%s" --no-merges | grep -cE 
 #### 4.3 バージョン算出
 
 ```text
-- HAS_BREAKING > 0 → MAJOR + 1, MINOR = 0, PATCH = 0（※ 自動適用しない。ステップ5で必ずユーザー承認）
+- HAS_BREAKING > 0 → MINOR + 1, PATCH = 0（※ メジャーにはしない。該当コミットを一覧としてユーザーに提示するだけ。Issue #4373）
 - HAS_FEAT > 0     → MINOR + 1, PATCH = 0
 - HAS_FIX > 0      → PATCH + 1
 - いずれもない場合  → PATCH + 1（docs/chore のみでも patch bump）
@@ -162,7 +167,7 @@ HAS_FIX=$(git log ${PREV_TAG}..HEAD --pretty=format:"%s" --no-merges | grep -cE 
 
 算出結果を `NEW_VERSION`（`v` なし、例: `8.4.0`）として記録。
 
-**メジャーバージョン更新の場合**: 自動でメジャーバージョンを確定しない。ステップ5でユーザーが明示的に承認するまで仮バージョンとして扱う。
+**メジャーバージョン更新**: コミット内容から自動で導かない。ユーザーがステップ5で「メジャーで出す」と明示的に指示した場合のみ MAJOR + 1 に置き換える（Issue #4373）。
 
 #### 4.4 重複チェック
 
@@ -205,9 +210,9 @@ git log --oneline --no-merges
 - **変更内容**: git-cliff が生成した変更ログ（Features, Bug Fixes 等のカテゴリ別）
 - **コミット一覧**: 上記で取得したコミットログ
 
-**メジャーバージョン更新の場合（MAJOR bump）**:
+**breaking marker を検出した場合**:
 
-メジャーバージョン更新は破壊的変更を伴うため、通常より慎重な確認が必要。以下を追加で提示する：
+marker はメジャーの根拠にならない（Issue #4373）。ユーザーが明示的にメジャーを指示した場合に限り MAJOR bump として扱い、以下を追加で提示する：
 
 - 破壊的変更の該当コミット一覧（`!` 付きまたは `BREAKING CHANGE` を含むコミット）
 - 「このリリースはメジャーバージョン更新（破壊的変更）です。本当にメジャーバージョンを上げますか？」と明示的に警告
@@ -310,76 +315,65 @@ git push origin develop
 **失敗時**: 最大3回リトライ。それでも失敗した場合：
 > 「エラー: pushに失敗しました。ネットワーク接続を確認してください。」
 
-### 9. Closing Issue の収集
+### 9. Delivered Issue の収集（reference-only）
 
-`develop` 向けPRに書かれた `Closes #...` は自動クローズされないため、release PR（`develop -> main`）本文に再掲します。
+> 🚨 **Release PR（`develop -> main`）の本文に closing keyword（`Closes` / `Fixes` /
+> `Resolves` + `#N`）を書いてはならない（Issue #3545）。** `main` は default branch なので、
+> 本文の closing keyword は merge 時に受け入れ条件が未消化の Issue まで閉じてしまう。
+> Issue の決着は work ブランチが `develop` に merge された時点で Issue Monitor が
+> 受け入れ基準を確認して行う（Issue #3917）。Release PR は Issue を **参照するだけ**。
 
-まず、今回のリリース範囲を決定：
+固定 snapshot の内容を調べる場合は、その SHA を対象にリリース範囲を決定：
 
 ```bash
+git fetch --no-tags origin "refs/heads/release/v{NEW_VERSION}"
+RELEASE_SHA=$(git rev-parse FETCH_HEAD)
 if [ -n "$PREV_TAG" ]; then
-  RANGE="${PREV_TAG}..HEAD"
+  RANGE="${PREV_TAG}..${RELEASE_SHA}"
 else
-  RANGE="HEAD"
+  RANGE="${RELEASE_SHA}"
 fi
 ```
 
-#### 9.1 リリース範囲内の参照番号を収集
+#### 9.1 リリース範囲内の参照番号を収集し分類する
 
-コミットメッセージ末尾の `(#N)` から参照番号を抽出する。
-
-**注意**: `(#N)` は PR 番号の場合も Issue 番号の場合もある（GitHub のスカッシュマージは PR 番号を付与するが、手動で Issue 番号を付けるケースもある）。そのため、PR / Issue の両方として処理する。
-
-```bash
-# squash マージ: コミットメッセージ末尾の (#N) から番号を抽出
-SQUASH_REFS=$(git log --pretty=%s "$RANGE" --no-merges \
-  | grep -Eo '\(#[0-9]+\)$' \
-  | grep -Eo '[0-9]+' \
-  | sort -u)
-
-# マージコミット: "Merge pull request #N" から PR 番号を抽出
-MERGE_PRS=$(git log --merges --pretty=%s "$RANGE" \
-  | sed -n 's/^Merge pull request #\([0-9]\+\).*$/\1/p' \
-  | sort -u)
-
-# 結合・重複排除
-ALL_REFS=$(printf '%s\n%s\n' "$SQUASH_REFS" "$MERGE_PRS" | awk 'NF' | sort -nu)
-```
-
-#### 9.2 各番号を分類し、Closing Issue を収集
-
-各番号について GitHub API で PR か Issue かを判定し、それぞれ適切に処理する。  
-**必ず** 以下のヘルパースクリプトを使って収集結果を JSON で取得すること：
+コミットメッセージ末尾の `(#N)` と `Merge pull request #N` から番号を抽出し、
+GitHub API で PR / Issue を判定する。**必ず** 以下のヘルパースクリプトを使うこと：
 
 ```bash
 ISSUE_REF_JSON=$(python3 scripts/release_issue_refs.py --range "$RANGE" --format json)
 
-ISSUE_NUMBERS=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.auto_close_issues[]?')
+DELIVERED_ISSUES=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.delivered_issues[]?')
 REFERENCE_ONLY_ISSUES=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.reference_only_issues[]?')
 ISSUE_WARNINGS=$(printf '%s\n' "$ISSUE_REF_JSON" | jq -r '.warnings[]?')
 ```
 
-`ISSUE_NUMBERS` が空でなければ、PR 本文の `## Closing Issues` セクションに **1行ずつ** 以下を追加：
+- `DELIVERED_ISSUES`: feature PR が `Closing Issues` に宣言していた Issue。本文の
+  `## Delivered Issues` に `- #N` で列挙する（keyword なし）
+- `REFERENCE_ONLY_ISSUES`: 参照のみの Issue（`gwt-spec` Issue を含む）。`## Related Issues / Links` に `- #N` で列挙する
+- `ISSUE_WARNINGS`: ステップ 5 の承認時にそのまま表示する
 
-```text
-Closes #123
-Closes #456
+#### 9.2 本文の生成
+
+本文は LLM が手書きせず、`--format pr-body` で生成する。`## Changes` に載せたい
+変更概要（LLM 作成のリスト等）がある場合は一時ファイルに書き `--notes-file` で渡す。
+スクリプトが本文全体の closing keyword を機械的に無害化し（`fixes #N` →
+``fixes `#N` ``）、無害化できなければ失敗する：
+
+```bash
+NOTES_FILE="$(mktemp)"
+# ここに `## Changes` の内容（任意）を書く。空なら渡さなくてよい。
+BODY_FILE="$(mktemp)"
+python3 scripts/release_issue_refs.py --range "$RANGE" --format pr-body \
+  --version "v{NEW_VERSION}" --bump "{BUMP}" --notes-file "$NOTES_FILE" > "$BODY_FILE"
 ```
-
-#### 9.3 warning の扱い
-
-`REFERENCE_ONLY_ISSUES` または `ISSUE_WARNINGS` がある場合、それらは **自動クローズ対象ではない**。  
-この場合、ステップ5の承認時とステップ10の PR 本文生成時に必ず可視化すること。
-
-- `REFERENCE_ONLY_ISSUES`: `## Related Issues / Links` に残す
-- `ISSUE_WARNINGS`: ユーザー承認時にそのまま表示する
-- `ISSUE_NUMBERS` が空でも `REFERENCE_ONLY_ISSUES` がある場合:
-  - 「関連Issueは見つかったが、自動クローズ対象は 0 件」と明示する
-  - 対象 Issue を本当に閉じたいなら `Closing Issues` 側へ移す必要があると説明する
 
 ### 10. PR作成/更新
 
-まず現在の develop 向け PR を確認：
+固定 snapshot の復旧では現在の branch の `pr.current` を使用しない。
+次の読み取りで対象 head を明示し、その PR 番号だけを操作する。
+通常の `gwt-manage-pr` は現在 branch を対象とするため、固定 snapshot の復旧には
+専用 `release.status` を使う。branch の作成・切り替え・更新は行わない。
 
 ```bash
 resolve_gwt_bin() {
@@ -401,60 +395,42 @@ resolve_gwt_bin() {
 }
 
 GWT_BIN="$(resolve_gwt_bin)" || exit $?
-"$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.current","params":{}}
-JSON
+PR_NUMBER=$(gh pr list --repo akiojin/gwt --base main --head "release/v{NEW_VERSION}" \
+  --state open --json number -q '.[0].number // empty')
 ```
 
-#### 既存PRがある場合
+#### 固定 snapshot の専用復旧
 
-`pr.current` の JSON envelope 出力に PR 番号が含まれている場合、以下を実行してタイトル・ラベル・本文を更新（`## Closing Issues` を反映）：
-本文は `params.body` に入れること。
+`release_branch` を明示して既存 snapshot だけを照合する。既に PR がある場合は
+何も変更しない。PR が無く、未リリースの bump がある場合だけ PR を作成する：
 
 ```bash
 "$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.edit","params":{"number":123,"title":"chore(release): v{NEW_VERSION}","body":"<PR body>","add_labels":["release"]}}
+{"schema_version":1,"operation":"release.status","params":{"release_branch":"release/v{NEW_VERSION}","base_branch":"main","ensure_release_pr":true}}
 JSON
 ```
 
-> 「既存のRelease PR（#{PR番号}）を更新しました。」
-> 「URL: {PR URL}」
+応答の `release_pr` / `release_pr_url` を確認する。snapshot が無い場合はエラーを報告し、
+Prepare Release で準備する。現在の worktree と snapshot が異なるため、汎用
+`"operation":"pr.create"` / `"operation":"pr.edit"` は verified HEAD gate に拒否され得る。
+この復旧では使用しない。本文は専用経路が version に対応する CHANGELOG section を使い、
+closing keyword を無害化する。
 
-#### 既存PRがない場合
+**重要**: 本文を手で編集して `Closes #<番号>` 等の closing keyword を追加しない。
+**重要**: Issue の close は Release PR の役割ではない。未 close の Issue が残っていれば、
+develop merge 時の Issue Monitor settlement コメント（`merge 済み・未達 AC あり` 等）を確認する。
 
-PRを作成：
+### 11. Delivered Issue へのコメント追記
 
-```bash
-"$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.create","params":{"base":"main","head":"develop","title":"chore(release): v{NEW_VERSION}","body":"<PR body>","labels":["release"],"draft":false}}
-JSON
-```
+`DELIVERED_ISSUES` が空でない場合、各 Issue に対してリリースに含まれる旨のコメントを追加する（close はしない）。
 
-**PR_BODY の内容**（LLMが生成）：
-
-PR bodyには以下を含めてください：
-- `## Summary` - このリリースの概要（変更内容を要約）
-- `## Changes` - 主な変更点をリスト形式で
-- `## Version` - バージョン番号
-- `## Closing Issues` - main マージ時にクローズしたい Issue を `Closes #<番号>` の生テキストで列挙（`ISSUE_NUMBERS` が空の場合は `None` と記載）
-- `## Related Issues / Links` - `REFERENCE_ONLY_ISSUES` を `#<番号>` で列挙（空の場合は `None`）
-
-**重要**: `Closes #<番号>` はコードブロックに入れず、通常の本文として記載すること。
-**重要**: `#<番号>` を `## Related Issues / Links` にだけ書いても auto-close されない。
-
-### 11. Closing Issue へのコメント追記
-
-`ISSUE_NUMBERS` が空でない場合、各 Issue に対してリリースに含まれる旨のコメントを追加する。
-
-まず、ステップ10の直後に JSON operation `pr.current` を再実行し、出力から PR 番号を取得する：
+ステップ 10 で確定した snapshot PR 番号を使う。新規作成の場合は `release.status` の
+応答から番号を取り、次の対象 head を明示した読み取りで照合する。
 
 ```bash
 GWT_BIN="$(resolve_gwt_bin)" || exit $?
-PR_CURRENT=$("$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.current","params":{}}
-JSON
-)
-PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head -1)
+PR_NUMBER=$(gh pr list --repo akiojin/gwt --base main --head "release/v{NEW_VERSION}" \
+  --state open --json number -q '.[0].number // empty')
 ```
 
 各 Issue にコメントを追記：
@@ -462,7 +438,7 @@ PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head
 ```bash
 GWT_BIN="$(resolve_gwt_bin)" || exit $?
 
-for NUM in $ISSUE_NUMBERS; do
+for NUM in $DELIVERED_ISSUES; do
   python3 - "$NUM" "{NEW_VERSION}" "$PR_NUMBER" <<'PY' | "$GWT_BIN" || true
 import json
 import sys
@@ -482,7 +458,7 @@ PY
 done
 ```
 
-- `ISSUE_NUMBERS` が空の場合はこのステップ全体をスキップ
+- `DELIVERED_ISSUES` が空の場合はこのステップ全体をスキップ
 - コメント本文にはバージョン番号（`v{NEW_VERSION}`）と Release PR 番号を含める
 - `|| true` により、個別の Issue へのコメント失敗（既にクローズ済み等）でもリリースフロー全体を中断しない
 
@@ -594,9 +570,11 @@ JSON
 
 PRがmainにマージされると、`.github/workflows/release.yml` が以下を自動実行：
 
-1. Git タグを作成 (`v{NEW_VERSION}`)
-2. GitHub Release を作成（最初は draft）
-3. クロスコンパイル済みバイナリをアップロードし、Release を公開（draft 解除）
+1. Release PR の merge で閉じられた Issue を検出して reopen する
+   （`scripts/release_close_guard.py`、Issue #3545。API 経由で閉じられた Issue は対象外）
+2. Git タグを作成 (`v{NEW_VERSION}`)
+3. GitHub Release を作成（最初は draft）
+4. クロスコンパイル済みバイナリをアップロードし、Release を公開（draft 解除）
 
 > この自動処理は **失敗しうる**（特にビルド時の crates.io download の transient 失敗）。
 > エージェントはステップ 13 でこの run を必ず監視し、transient 失敗は再実行で復旧、

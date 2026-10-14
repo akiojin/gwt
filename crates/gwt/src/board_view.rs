@@ -108,6 +108,7 @@ mod tests {
             dynamic_title: None,
             dynamic_title_detail: None,
             agent_id: None,
+            agent_name: None,
             agent_color: None,
             worktree_form: gwt::WindowWorktreeForm::Unknown,
             tab_group_id: None,
@@ -119,7 +120,7 @@ mod tests {
     #[test]
     fn resolve_window_agent_color_prefers_explicit_agent_id() {
         let mut window = sample_window(WindowPreset::Agent, WindowProcessStatus::Running);
-        window.agent_id = Some("gemini".into());
+        window.agent_id = Some("hermes".into());
         assert_eq!(
             resolve_window_agent_color(&window),
             Some(gwt_agent::AgentColor::Magenta),

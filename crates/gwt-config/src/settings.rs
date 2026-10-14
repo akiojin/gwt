@@ -1,7 +1,7 @@
 //! Top-level application settings backed by `~/.gwt/config.toml`.
 
 use std::{
-    ffi::OsString,
+    collections::BTreeMap,
     num::NonZeroU16,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -9,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize};
 use toml_edit::{value, DocumentMut, Item, Table};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     agent_config::AgentConfig,
@@ -17,6 +17,7 @@ use crate::{
     atomic::write_atomic,
     board_config::BoardConfig,
     error::{ConfigError, Result},
+    home::{assert_test_path, user_home},
     profile::ProfilesConfig,
     usage_config::UsageConfig,
     voice_config::VoiceConfig,
@@ -43,15 +44,57 @@ pub struct ServerConfig {
     pub embedded_port: Option<NonZeroU16>,
 }
 
-fn resolve_config_home_dir(
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-    fallback: Option<PathBuf>,
-) -> Option<PathBuf> {
-    home.filter(|value| !value.is_empty())
-        .or_else(|| userprofile.filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-        .or(fallback)
+/// Host-wide canonical verification capacity (`[verification]`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VerificationConfig {
+    /// None derives capacity from host CPU and memory. Zero is invalid.
+    pub slots: Option<NonZeroU16>,
+    /// Per-run disk growth budget in bytes, measured from a full matrix.
+    pub disk_budget_bytes: Option<u64>,
+}
+
+/// Optional overrides for the built-in performance budgets.
+///
+/// `None` keeps the normative default owned by the performance domain. This
+/// keeps configuration backward compatible while avoiding a second copy of
+/// the default budget values in the settings crate.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerfBudgetOverrides {
+    /// Maximum UI interaction response time in milliseconds.
+    pub ui_response_ms: Option<f64>,
+    /// Maximum rendered-frame duration in milliseconds.
+    pub frame_ms: Option<f64>,
+    /// Maximum p95 duration for read-only gwtd operations in milliseconds.
+    pub gwtd_read_p95_ms: Option<f64>,
+    /// Maximum p95 duration for mutating gwtd operations in milliseconds.
+    pub gwtd_mutation_p95_ms: Option<f64>,
+}
+
+/// Always-on performance collection settings persisted under `[perf]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerfConfig {
+    /// Global kill switch for performance collection.
+    pub enabled: bool,
+    /// Number of UTC daily log files retained. Zero disables cleanup.
+    pub retention_days: u32,
+    /// Maximum CPU percentage attributable to collection before sampling is reduced.
+    pub self_budget_cpu_percent: f64,
+    /// Optional overrides for the built-in normative budgets.
+    pub budgets: PerfBudgetOverrides,
+}
+
+impl Default for PerfConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_days: 30,
+            self_budget_cpu_percent: 1.0,
+            budgets: PerfBudgetOverrides::default(),
+        }
+    }
 }
 
 fn resolve_existing_settings_target(path: &Path) -> Result<PathBuf> {
@@ -75,10 +118,30 @@ fn resolve_existing_settings_target(path: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Refresh intervals for the shared PR inventory snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrInventoryConfig {
+    pub cache_ttl_secs: u64,
+    pub checks_refresh_secs: u64,
+}
+
+impl Default for PrInventoryConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl_secs: 300,
+            checks_refresh_secs: 600,
+        }
+    }
+}
+
 /// Top-level application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// App-wide automatic gwt update preference. None is an unmigrated
+    /// installation; an explicit false must never import legacy project ON.
+    pub auto_apply_updates: Option<bool>,
     /// Branches that cannot be deleted.
     pub protected_branches: Vec<String>,
     /// Default base branch for new worktrees.
@@ -89,6 +152,8 @@ pub struct Settings {
     pub debug: bool,
     /// Enable performance profiling.
     pub profiling: bool,
+    /// Always-on performance collection and budget settings.
+    pub perf: PerfConfig,
     /// Profile management.
     pub profiles: ProfilesConfig,
     /// Voice input configuration.
@@ -106,11 +171,23 @@ pub struct Settings {
     pub usage: UsageConfig,
     /// Embedded browser server configuration (SPEC-3287).
     pub server: ServerConfig,
+    /// GitHub API budget throttle knobs (SPEC #4093 FR-007).
+    pub github_budget: crate::GitHubBudgetConfig,
+    /// Workflow filenames allowed for `actions.dispatch`, keyed by `owner/repository`.
+    /// An empty map denies every workflow (SPEC #4249 FR-006).
+    pub allowed_workflows: BTreeMap<String, Vec<String>>,
+    /// Snapshot and running-check refresh intervals for `pr.list`.
+    pub pr_inventory: PrInventoryConfig,
+    /// Automatic build-artifact reclaim on low disk (Issue #4391).
+    pub build_artifact_gc: crate::BuildArtifactGcConfig,
+    /// Canonical verification capacity and disk reservation override.
+    pub verification: VerificationConfig,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            auto_apply_updates: None,
             protected_branches: vec![
                 "main".to_string(),
                 "master".to_string(),
@@ -120,6 +197,7 @@ impl Default for Settings {
             worktree_root: None,
             debug: false,
             profiling: false,
+            perf: PerfConfig::default(),
             profiles: ProfilesConfig::default(),
             voice: VoiceConfig::default(),
             agent: AgentConfig::default(),
@@ -127,6 +205,11 @@ impl Default for Settings {
             board: BoardConfig::default(),
             usage: UsageConfig::default(),
             server: ServerConfig::default(),
+            github_budget: crate::GitHubBudgetConfig::default(),
+            allowed_workflows: BTreeMap::new(),
+            pr_inventory: PrInventoryConfig::default(),
+            build_artifact_gc: crate::BuildArtifactGcConfig::default(),
+            verification: VerificationConfig::default(),
         }
     }
 }
@@ -134,17 +217,14 @@ impl Default for Settings {
 impl Settings {
     /// Build the global config file path for a known home directory.
     pub fn global_config_path_for_home(home: &Path) -> PathBuf {
-        home.join(".gwt").join("config.toml")
+        let path = home.join(".gwt").join("config.toml");
+        assert_test_path(&path);
+        path
     }
 
     /// Return the global config file path: `~/.gwt/config.toml`.
     pub fn global_config_path() -> Option<PathBuf> {
-        resolve_config_home_dir(
-            std::env::var_os("HOME"),
-            std::env::var_os("USERPROFILE"),
-            dirs::home_dir(),
-        )
-        .map(|home| Self::global_config_path_for_home(&home))
+        user_home().map(|home| Self::global_config_path_for_home(&home))
     }
 
     /// Load settings from `~/.gwt/config.toml`, falling back to defaults.
@@ -162,6 +242,7 @@ impl Settings {
 
     /// Load settings from an explicit path.
     pub fn load_from_path(path: &Path) -> Result<Self> {
+        assert_test_path(path);
         let content = std::fs::read_to_string(path).map_err(|e| {
             error!(path = %path.display(), error = %e, "Failed to read config");
             ConfigError::ParseError {
@@ -169,12 +250,22 @@ impl Settings {
             }
         })?;
 
-        toml::from_str(&content).map_err(|e| {
+        let settings: Self = toml::from_str(&content).map_err(|e| {
             error!(path = %path.display(), error = %e, "Failed to parse config");
             ConfigError::ParseError {
                 reason: e.to_string(),
             }
-        })
+        })?;
+        // Legacy agent fields have no runtime consumer. Report the retired
+        // built-in without discarding unrelated settings or touching custom
+        // agent definitions, which live in their own configuration file.
+        if settings.agent.default_agent.as_deref() == Some("gemini") {
+            warn!(path = %path.display(), "agent.default_agent: unknown built-in agent 'gemini'; setting ignored");
+        }
+        if settings.agent.agent_paths.contains_key("gemini") {
+            warn!(path = %path.display(), "agent.agent_paths.gemini: unknown built-in agent 'gemini'; setting ignored");
+        }
+        Ok(settings)
     }
 
     /// Save settings to the given path using atomic write.
@@ -195,6 +286,7 @@ impl Settings {
     /// future keys, and the file's minimal shape. The typed parse still runs
     /// first so malformed or incompatible settings remain fatal.
     pub fn persist_embedded_port(path: &Path, port: NonZeroU16) -> Result<()> {
+        assert_test_path(path);
         let _guard = UPDATE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -252,13 +344,67 @@ impl Settings {
     where
         F: FnOnce(&mut Self) -> Result<()>,
     {
+        let path = Self::global_config_path().ok_or(ConfigError::NoConfigPath)?;
+        Self::update_at_path(&path, mutate)
+    }
+
+    /// Update an explicit settings file under the same process lock as the
+    /// global writer. Used by the Settings service and its isolated tests.
+    pub fn update_at_path<F, T>(path: &Path, mutate: F) -> Result<T>
+    where
+        F: FnOnce(&mut Self) -> Result<T>,
+    {
+        crate::home::assert_test_path(path);
         let _guard = UPDATE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let mut settings = Self::load()?;
-        mutate(&mut settings)?;
-        settings.save_global()
+        let mut settings = if path.exists() {
+            Self::load_from_path(path)?
+        } else {
+            Self::default()
+        };
+        let result = mutate(&mut settings)?;
+        settings.save(path)?;
+        Ok(result)
+    }
+
+    /// Merge only the app-wide update preference, retaining comments and
+    /// unknown keys. Decide migration while holding the settings writer lock.
+    pub fn persist_auto_apply_updates<F>(path: &Path, decide: F) -> Result<bool>
+    where
+        F: FnOnce(Option<bool>) -> Result<bool>,
+    {
+        crate::home::assert_test_path(path);
+        let _guard = UPDATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let target = resolve_existing_settings_target(path)?;
+        let content = match std::fs::read_to_string(&target) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ConfigError::ParseError {
+                    reason: error.to_string(),
+                })
+            }
+        };
+        let settings: Self = toml::from_str(&content).map_err(|error| ConfigError::ParseError {
+            reason: error.to_string(),
+        })?;
+        let enabled = decide(settings.auto_apply_updates)?;
+        if settings.auto_apply_updates == Some(enabled) {
+            return Ok(enabled);
+        }
+        let mut document =
+            content
+                .parse::<DocumentMut>()
+                .map_err(|error| ConfigError::ParseError {
+                    reason: error.to_string(),
+                })?;
+        document["auto_apply_updates"] = value(enabled);
+        write_atomic(&target, &document.to_string())?;
+        Ok(enabled)
     }
 }
 
@@ -267,12 +413,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn verification_slots_roundtrip_and_reject_zero() {
+        let settings: Settings = toml::from_str("[verification]\nslots = 2\n").unwrap();
+        let encoded: toml::Value = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            encoded
+                .get("verification")
+                .and_then(|table| table.get("slots"))
+                .and_then(toml::Value::as_integer),
+            Some(2)
+        );
+        assert!(toml::from_str::<Settings>("[verification]\nslots = 0\n").is_err());
+        let defaults: toml::Value =
+            toml::from_str(&toml::to_string(&Settings::default()).unwrap()).unwrap();
+        assert!(defaults
+            .get("verification")
+            .and_then(|table| table.get("slots"))
+            .is_none());
+    }
+
+    #[test]
     fn default_settings_are_sane() {
         let s = Settings::default();
         assert_eq!(s.default_base_branch, "main");
         assert!(s.protected_branches.contains(&"main".to_string()));
         assert!(!s.debug);
         assert!(!s.profiling);
+        assert!(s.perf.enabled);
+        assert_eq!(s.perf.retention_days, 30);
+        assert_eq!(s.perf.self_budget_cpu_percent, 1.0);
+        assert_eq!(s.perf.budgets, PerfBudgetOverrides::default());
+    }
+
+    #[test]
+    fn legacy_config_without_perf_section_defaults() {
+        let settings: Settings =
+            toml::from_str("default_base_branch = \"develop\"\ndebug = true\n").unwrap();
+
+        assert!(settings.perf.enabled);
+        assert_eq!(settings.perf.retention_days, 30);
+        assert_eq!(settings.perf.self_budget_cpu_percent, 1.0);
+        assert_eq!(settings.perf.budgets, PerfBudgetOverrides::default());
+    }
+
+    #[test]
+    fn perf_config_can_override_collection_and_budgets() {
+        let settings: Settings = toml::from_str(
+            r#"
+[perf]
+enabled = false
+retention_days = 14
+self_budget_cpu_percent = 0.5
+
+[perf.budgets]
+ui_response_ms = 80.0
+frame_ms = 12.0
+gwtd_read_p95_ms = 75.0
+gwtd_mutation_p95_ms = 350.0
+"#,
+        )
+        .unwrap();
+
+        assert!(!settings.perf.enabled);
+        assert_eq!(settings.perf.retention_days, 14);
+        assert_eq!(settings.perf.self_budget_cpu_percent, 0.5);
+        assert_eq!(settings.perf.budgets.ui_response_ms, Some(80.0));
+        assert_eq!(settings.perf.budgets.frame_ms, Some(12.0));
+        assert_eq!(settings.perf.budgets.gwtd_read_p95_ms, Some(75.0));
+        assert_eq!(settings.perf.budgets.gwtd_mutation_p95_ms, Some(350.0));
     }
 
     #[test]
@@ -288,16 +496,49 @@ mod tests {
 
     #[test]
     fn global_config_path_for_home_uses_canonical_layout() {
-        let home = PathBuf::from("home-dir");
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path();
 
         assert_eq!(
-            Settings::global_config_path_for_home(&home),
+            Settings::global_config_path_for_home(home),
             home.join(".gwt").join("config.toml")
         );
     }
 
     #[test]
+    fn global_config_path_is_isolated_without_a_scoped_override() {
+        let path = Settings::global_config_path().expect("test config path");
+        crate::home::assert_test_path(&path);
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn explicit_global_config_path_rejects_an_unisolated_home() {
+        // Pure path construction: RED never attempts a real-home write.
+        Settings::global_config_path_for_home(Path::new("/__gwt_protected_test_home__"));
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn settings_update_rejects_unisolated_path_before_mutation() {
+        let _: Result<()> = Settings::update_at_path(
+            Path::new("/__gwt_protected_test_home__/.gwt/config.toml"),
+            |_| panic!("mutation ran before the HOME guard"),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "test HOME isolation")]
+    fn auto_apply_updates_rejects_unisolated_path_before_decision() {
+        let _ = Settings::persist_auto_apply_updates(
+            Path::new("/__gwt_protected_test_home__/.gwt/config.toml"),
+            |_| panic!("decision ran before the HOME guard"),
+        );
+    }
+
+    #[test]
     fn config_home_resolution_prefers_env_over_dirs_fallback() {
+        use crate::home::resolve_config_home_dir;
         assert_eq!(
             resolve_config_home_dir(
                 Some("home-env".into()),
@@ -356,8 +597,42 @@ mod tests {
     }
 
     #[test]
+    fn retired_gemini_settings_warn_without_discarding_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let content = "debug = true\ndefault_base_branch = \"develop\"\n\
+            [agent]\ndefault_agent = \"gemini\"\n\
+            [agent.agent_paths]\ngemini = \"/usr/bin/gemini\"\ncodex = \"/usr/bin/codex\"\n";
+        std::fs::write(&path, content).unwrap();
+        let log_path = dir.path().join("warnings.log");
+        let log = std::fs::File::create(&log_path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || log.try_clone().unwrap())
+            .finish();
+        let loaded = tracing::subscriber::with_default(subscriber, || {
+            Settings::load_from_path(&path).unwrap()
+        });
+        assert!(loaded.debug);
+        assert_eq!(loaded.default_base_branch, "develop");
+        // These legacy fields have no runtime consumer. Keep their data intact;
+        // warn instead of substituting another agent or rewriting the file.
+        assert_eq!(loaded.agent.default_agent.as_deref(), Some("gemini"));
+        assert_eq!(loaded.agent.agent_paths.len(), 2);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        let warnings = std::fs::read_to_string(log_path).unwrap();
+        assert!(warnings.contains("WARN"), "{warnings}");
+        assert!(warnings.contains("agent.default_agent"), "{warnings}");
+        assert!(warnings.contains("agent.agent_paths.gemini"), "{warnings}");
+        assert!(warnings.contains("gemini"), "{warnings}");
+        assert!(warnings.contains("ignored"), "{warnings}");
+    }
+
+    #[test]
     fn load_from_missing_file_returns_error() {
-        let result = Settings::load_from_path(Path::new("/nonexistent/config.toml"));
+        let directory = tempfile::tempdir().unwrap();
+        let result = Settings::load_from_path(&directory.path().join("missing/config.toml"));
         assert!(result.is_err());
     }
 
@@ -457,6 +732,19 @@ debug = true
         assert!(loaded.debug);
         assert_eq!(loaded.default_base_branch, "main");
         assert!(loaded.protected_branches.contains(&"main".to_string()));
+    }
+
+    #[test]
+    fn pr_inventory_intervals_have_defaults_and_roundtrip_overrides() {
+        let defaults = Settings::default().pr_inventory;
+        assert_eq!(defaults.cache_ttl_secs, 300);
+        assert_eq!(defaults.checks_refresh_secs, 600);
+        let settings: Settings =
+            toml::from_str("[pr_inventory]\ncache_ttl_secs = 1200\nchecks_refresh_secs = 1800\n")
+                .unwrap();
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.pr_inventory.cache_ttl_secs, 1200);
+        assert_eq!(restored.pr_inventory.checks_refresh_secs, 1800);
     }
 
     #[test]

@@ -4,9 +4,9 @@
 // dismiss / newest-on-top / bounded cap) behind every floating toast region.
 // Callers supply the region's class + CSS and map their notice onto push();
 // firing, dedup and gating stay in the callers (the primitive is a pure DOM
-// sink). Phase 0 powers the autonomous `log` region; later phases reuse it for
-// the bottom-right `alerts` region (completion / attention / board-mention),
-// replacing their hand-coded offsets and z-index tiers with one managed stack.
+// sink). It powers the bottom-right `alerts` region (completion / attention /
+// board-mention, one managed stack instead of hand-coded offsets) and, in v2,
+// the notification-center history list mounted inside the drawer.
 
 const DEFAULT_LEVELS = ["info", "success", "warn", "error", "done", "neutral"];
 
@@ -24,7 +24,7 @@ function makeLevelNormalizer(levels, fallback) {
  *
  * @param {object} opts
  * @param {Document} opts.document
- * @param {string} opts.className BEM root, e.g. "autonomous-notifications";
+ * @param {string} opts.className BEM root, e.g. "toast-alerts";
  *   items derive `${className}__item|__title|__message|__dismiss|__list`.
  * @param {string} [opts.styleText] CSS injected once into <head>.
  * @param {string} [opts.styleMarker] attribute used to dedupe the <style>.
@@ -35,6 +35,9 @@ function makeLevelNormalizer(levels, fallback) {
  * @param {boolean} [opts.newestOnTop] prepend new items (default true).
  * @param {string[]} [opts.levels] allowed level keywords.
  * @param {string} [opts.defaultLevel] fallback level for unknown input.
+ * @param {boolean} [opts.dismissOnActivate] remove an item after its
+ *   onActivate ran (default true = transient alerts). The notification-center
+ *   history passes false so a jump-to stays reusable (SPEC #3206 v2).
  */
 export function createToastStack({
   document,
@@ -50,6 +53,7 @@ export function createToastStack({
   defaultLevel = "info",
   animateDismiss = false,
   dismissMs = 320,
+  dismissOnActivate = true,
 } = {}) {
   if (!document) {
     throw new Error("createToastStack requires a document");
@@ -161,13 +165,15 @@ export function createToastStack({
 
     // Whole-card activation (jump-to-window / jump-to-project / jump-to-entry):
     // the item becomes a keyboard-operable button that runs the handler then
-    // dismisses itself.
+    // dismisses itself — unless the region opted out (history keeps its rows).
     if (typeof notice?.onActivate === "function") {
       item.setAttribute("role", "button");
       item.setAttribute("tabindex", "0");
       const activate = () => {
         notice.onActivate();
-        removeItem(item);
+        if (dismissOnActivate) {
+          removeItem(item);
+        }
       };
       item.addEventListener("click", activate);
       item.addEventListener("keydown", (event) => {

@@ -16,6 +16,8 @@ static INDEX_PATH_POLICY: OnceLock<IndexPathPolicy> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndexPathPolicy {
+    // Keep this required u32 in the deserialization contract even though path
+    // matching does not inspect it; removing it would accept missing or non-u32 values.
     #[allow(dead_code)]
     pub schema_version: u32,
     pub max_file_size: u64,

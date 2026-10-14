@@ -1,5 +1,11 @@
 import { expect, test } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { APP_URL, APP_PROJECT_KEY, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+
+const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+const appUrl = liveBase
+  ? new URL(liveBase).pathname === "/" ? liveGwtProjectUrl(liveBase, APP_PROJECT_KEY) : liveBase
+  : APP_URL;
 
 // Issue #3364 — window drag & drop geometry sync.
 //
@@ -31,9 +37,9 @@ test.describe("Window drag → geometry sync + Fleet Minimap", () => {
   test("a drop survives stale broadcasts and reaches the minimap immediately", async ({
     page,
   }) => {
-    await installEmbeddedRoutes(page);
+    if (!liveBase) await installEmbeddedRoutes(page);
     await installDragFixtureBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(appUrl);
 
     const windowFrame = page.locator(".workspace-window[data-id='agent-1']");
     const titlebar = windowFrame.locator(".titlebar");
@@ -93,7 +99,7 @@ test.describe("Window drag → geometry sync + Fleet Minimap", () => {
         title: "Agent (stale)",
       });
     });
-    await expect(titleText).toHaveText("Agent (stale)");
+    await expect(titleText).toHaveText("Aster — Agent (stale)");
     expect(
       await windowFrame.evaluate((element) => ({
         left: element.style.left,
@@ -113,7 +119,7 @@ test.describe("Window drag → geometry sync + Fleet Minimap", () => {
         title: "Agent (echo)",
       });
     });
-    await expect(titleText).toHaveText("Agent (echo)");
+    await expect(titleText).toHaveText("Aster — Agent (echo)");
     expect(
       await windowFrame.evaluate((element) => ({
         left: element.style.left,
@@ -128,9 +134,9 @@ test.describe("Window drag → geometry sync + Fleet Minimap", () => {
   test("a server-driven window move reaches the minimap cell (echo path)", async ({
     page,
   }) => {
-    await installEmbeddedRoutes(page);
+    if (!liveBase) await installEmbeddedRoutes(page);
     await installDragFixtureBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(appUrl);
 
     const minimap = page.locator("#fleet-minimap");
     await expect(minimap).toBeVisible({ timeout: 10_000 });
@@ -232,9 +238,10 @@ async function installDragFixtureBackend(page) {
                     status: "running",
                     persist: true,
                     purpose_title: null,
-                    dynamic_title: null,
+                    dynamic_title: title || null,
                     dynamic_title_detail: null,
                     agent_id: "agent-1",
+                    agent_name: "Aster",
                     agent_color: "cyan",
                     tab_group_id: null,
                     tab_group_active: false,

@@ -2,10 +2,6 @@
 param(
   [ValidateSet("all", "codex", "claude")]
   [string]$Provider = "all",
-  [ValidateSet("all", "latest", "exact")]
-  [string]$Selector = "all",
-  [string]$CodexExactVersion = "",
-  [string]$ClaudeExactVersion = "",
   [string]$OutputDirectory = "",
   [ValidateRange(30, 1800)]
   [int]$TurnTimeoutSeconds = 600,
@@ -119,8 +115,17 @@ function Invoke-CapturedProcess {
   $startInfo.RedirectStandardInput = $true
   $startInfo.RedirectStandardOutput = $true
   $startInfo.RedirectStandardError = $true
-  foreach ($argument in $Arguments) {
-    [void]$startInfo.ArgumentList.Add($argument)
+  if ([IO.Path]::GetExtension($startInfo.FileName) -in @(".cmd", ".bat")) {
+    # CreateProcess requires cmd.exe for installed npm command shims.
+    # Quoted tokens preserve whitespace, empty arguments, and embedded quotes.
+    $tokens = @($startInfo.FileName) + $Arguments
+    $commandLine = ($tokens | ForEach-Object { '"' + $_.Replace('"', '""') + '"' }) -join ' '
+    $startInfo.FileName = Resolve-ExecutablePath -FilePath "cmd.exe"
+    $startInfo.Arguments = '/d /v:off /s /c "' + $commandLine + '"'
+  } else {
+    foreach ($argument in $Arguments) {
+      [void]$startInfo.ArgumentList.Add($argument)
+    }
   }
   foreach ($name in $EnvironmentOverrides.Keys) {
     $startInfo.Environment[$name] = $EnvironmentOverrides[$name]
@@ -161,25 +166,6 @@ function Test-SemanticVersion {
   param([Parameter(Mandatory = $true)][string]$Version)
 
   return $Version -match '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$'
-}
-
-function Resolve-LatestExactVersion {
-  param(
-    [Parameter(Mandatory = $true)][string]$Package,
-    [Parameter(Mandatory = $true)][string]$WorkingDirectory
-  )
-
-  $result = Invoke-CapturedProcess `
-    -FilePath "npm.cmd" `
-    -Arguments @("view", "$Package@latest", "version", "--json") `
-    -WorkingDirectory $WorkingDirectory `
-    -TimeoutSeconds 15 `
-    -Purpose "npm metadata lookup"
-  $value = $result.Stdout | ConvertFrom-Json
-  if ($value -isnot [string] -or -not (Test-SemanticVersion -Version $value)) {
-    throw "npm metadata did not resolve $Package@latest to exactly one semantic version."
-  }
-  return $value
 }
 
 function Get-Sha256 {
@@ -420,24 +406,17 @@ function Invoke-OfficialCase {
     -Purpose "$($Case.Name) git init"
   $null = $gitResult
 
-  $resolvedVersion = if (-not [string]::IsNullOrWhiteSpace($Case.ExactVersion)) {
-    if (-not (Test-SemanticVersion -Version $Case.ExactVersion)) {
-      throw "$($Case.Name) exact version is not semantic."
-    }
-    $Case.ExactVersion
-  } else {
-    Resolve-LatestExactVersion -Package $Case.Package -WorkingDirectory $CaseRoot
-  }
-  $requestedSelector = if ($Case.Selector -eq "latest") { "latest" } else { $resolvedVersion }
-
+  $runnerExecutable = Resolve-ExecutablePath -FilePath $Case.Command
   $probe = Invoke-CapturedProcess `
-    -FilePath "npx.cmd" `
-    -Arguments @("--yes", "$($Case.Package)@$resolvedVersion", "--version") `
+    -FilePath $runnerExecutable `
+    -Arguments @("--version") `
     -WorkingDirectory $CaseRoot `
-    -TimeoutSeconds 120 `
-    -Purpose "$($Case.Name) exact package probe"
-  if (-not $probe.Stdout.Contains($resolvedVersion, [StringComparison]::Ordinal)) {
-    throw "$($Case.Name) exact package probe did not report $resolvedVersion."
+    -TimeoutSeconds 30 `
+    -Purpose "$($Case.Name) installed version probe"
+  $versionMatch = [regex]::Match($probe.Stdout, '(?<![0-9A-Za-z])v?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)')
+  $observedVersion = $versionMatch.Groups[1].Value
+  if (-not (Test-SemanticVersion -Version $observedVersion)) {
+    throw "$($Case.Name) installed runner did not report a semantic version."
   }
 
   $receiptPath = Join-Path $CaseRoot "session-start-receipts.jsonl"
@@ -458,7 +437,6 @@ function Invoke-OfficialCase {
   $resumeMarker = "GWT_SMOKE_RESUME_OK"
   $freshPrompt = "Reply with exactly $freshMarker. Do not call or use tools."
   $resumePrompt = "Reply with exactly $resumeMarker. Do not call or use tools."
-  $prefix = @("--yes", "$($Case.Package)@$resolvedVersion")
 
   if ($Case.Provider -eq "codex") {
     # A fresh project is intentionally untrusted. Current Codex versions do
@@ -484,12 +462,12 @@ function Invoke-OfficialCase {
     $codexEnvironment = @{ CODEX_HOME = $codexHome }
 
     $fresh = Invoke-CapturedProcess `
-      -FilePath "npx.cmd" `
-      -Arguments ($prefix + @(
+      -FilePath $runnerExecutable `
+      -Arguments @(
           "exec", "--enable", "hooks", "--skip-git-repo-check", "--sandbox", "read-only",
           "--ignore-rules", "--dangerously-bypass-hook-trust",
           "--json", $freshPrompt
-        )) `
+        ) `
       -WorkingDirectory $CaseRoot `
       -TimeoutSeconds $TimeoutSeconds `
       -EnvironmentOverrides $codexEnvironment `
@@ -498,12 +476,12 @@ function Invoke-OfficialCase {
     $sessionId = Assert-CodexTurn -Events $freshEvents -ExpectedMarker $freshMarker
 
     $resume = Invoke-CapturedProcess `
-      -FilePath "npx.cmd" `
-      -Arguments ($prefix + @(
+      -FilePath $runnerExecutable `
+      -Arguments @(
           "exec", "--enable", "hooks", "resume", "--skip-git-repo-check", "--ignore-rules",
           "--dangerously-bypass-hook-trust", "--json",
           $sessionId, $resumePrompt
-        )) `
+        ) `
       -WorkingDirectory $CaseRoot `
       -TimeoutSeconds $TimeoutSeconds `
       -EnvironmentOverrides $codexEnvironment `
@@ -526,8 +504,8 @@ function Invoke-OfficialCase {
     )
 
     $fresh = Invoke-CapturedProcess `
-      -FilePath "npx.cmd" `
-      -Arguments ($prefix + $claudeBase + @($freshPrompt)) `
+      -FilePath $runnerExecutable `
+      -Arguments ($claudeBase + @($freshPrompt)) `
       -WorkingDirectory $CaseRoot `
       -TimeoutSeconds $TimeoutSeconds `
       -Purpose "$($Case.Name) fresh turn"
@@ -535,8 +513,8 @@ function Invoke-OfficialCase {
     $sessionId = Assert-ClaudeTurn -Events $freshEvents -ExpectedMarker $freshMarker
 
     $resume = Invoke-CapturedProcess `
-      -FilePath "npx.cmd" `
-      -Arguments ($prefix + $claudeBase + @("--resume", $sessionId, $resumePrompt)) `
+      -FilePath $runnerExecutable `
+      -Arguments ($claudeBase + @("--resume", $sessionId, $resumePrompt)) `
       -WorkingDirectory $CaseRoot `
       -TimeoutSeconds $TimeoutSeconds `
       -Purpose "$($Case.Name) resume turn"
@@ -564,10 +542,8 @@ function Invoke-OfficialCase {
     schema_version = 1
     case = $Case.Name
     provider = $Case.Provider
-    official_package = $Case.Package
-    requested_selector = $requestedSelector
-    resolved_exact_version = $resolvedVersion
-    runner_kind = "npx"
+    observed_version = $observedVersion
+    runner_kind = "installed"
     authenticated_provider_identity = $true
     authenticated_session_start = $true
     session_start_receipt_count = $matchingReceipts.Count
@@ -586,7 +562,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
   $OutputDirectory = Join-Path $repoRoot "target/verification/windows-agent-launch-smoke"
 }
 
-foreach ($requiredCommand in @("cargo", "git.exe", "npm.cmd", "npx.cmd", "powershell.exe", "pwsh")) {
+foreach ($requiredCommand in @("cargo", "git.exe", "powershell.exe", "pwsh")) {
   if ($null -eq (Get-Command $requiredCommand -ErrorAction SilentlyContinue)) {
     throw "Required command is unavailable: $requiredCommand"
   }
@@ -609,25 +585,14 @@ foreach ($checkoutBinary in @($checkoutGwt, $checkoutGwtd)) {
 
 $caseMatrix = @(
   [pscustomobject]@{
-    Name = "codex/latest"; Provider = "codex"; Selector = "latest"
-    Package = "@openai/codex"; ExactVersion = ""
+    Name = "codex/installed"; Provider = "codex"; Command = "codex"
   },
   [pscustomobject]@{
-    Name = "codex/exact"; Provider = "codex"; Selector = "exact"
-    Package = "@openai/codex"; ExactVersion = $CodexExactVersion
-  },
-  [pscustomobject]@{
-    Name = "claude/latest"; Provider = "claude"; Selector = "latest"
-    Package = "@anthropic-ai/claude-code"; ExactVersion = ""
-  },
-  [pscustomobject]@{
-    Name = "claude/exact"; Provider = "claude"; Selector = "exact"
-    Package = "@anthropic-ai/claude-code"; ExactVersion = $ClaudeExactVersion
+    Name = "claude/installed"; Provider = "claude"; Command = "claude"
   }
 )
 $selectedCases = @($caseMatrix | Where-Object {
-    ($Provider -eq "all" -or $_.Provider -eq $Provider) -and
-    ($Selector -eq "all" -or $_.Selector -eq $Selector)
+    $Provider -eq "all" -or $_.Provider -eq $Provider
   })
 if ($selectedCases.Count -eq 0) {
   throw "No official-provider smoke cases were selected."

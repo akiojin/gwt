@@ -7,7 +7,8 @@
 //!
 //! The watcher does NOT trigger ChromaDB writes itself; consumers
 //! drain `WatcherHandle::recv_batch()` and dispatch the appropriate
-//! `runner index-* --mode incremental` job per batch.
+//! index job per batch. The consumer selects incremental reuse only when the
+//! current store and manifest support it; otherwise the runner rebuilds in full.
 
 use std::{
     path::{Path, PathBuf},
@@ -15,8 +16,22 @@ use std::{
 };
 
 use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
+use notify_debouncer_mini::{
+    new_debouncer_opt, Config as DebouncerConfig, DebounceEventResult, Debouncer,
+};
 use tokio::sync::mpsc;
+
+#[cfg(target_os = "macos")]
+#[path = "watcher_macos.rs"]
+mod macos;
+#[cfg(target_os = "macos")]
+type NativeWatcher = macos::WorktreeWatcher;
+#[cfg(not(target_os = "macos"))]
+type NativeWatcher = notify::RecommendedWatcher;
+
+#[cfg(feature = "test-support")]
+#[path = "watcher_fixture.rs"]
+pub mod fixture;
 
 use crate::{
     error::{GwtError, Result},
@@ -51,9 +66,20 @@ pub struct WatcherBatch {
 /// Handle returned from `start_watcher`. Drop or call `shutdown()` to stop.
 pub struct WatcherHandle {
     rx: mpsc::Receiver<WatcherBatch>,
-    _debouncer: Debouncer<notify::RecommendedWatcher>,
+    _debouncer: WatcherGuard,
     _shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     forwarder: Option<tokio::task::JoinHandle<()>>,
+}
+
+// Keep the backend's concrete type private and retain its Drop lifetime.
+enum WatcherGuard {
+    Native {
+        _debouncer: Debouncer<NativeWatcher>,
+    },
+    #[cfg(feature = "test-support")]
+    Fixture {
+        _debouncer: Debouncer<fixture::FixtureWatcher>,
+    },
 }
 
 impl WatcherHandle {
@@ -78,6 +104,16 @@ impl WatcherHandle {
 /// Start a per-Worktree watcher rooted at `worktree_path`. Returns a handle
 /// the caller can poll for batches.
 pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<WatcherHandle> {
+    start_watcher_with::<NativeWatcher>(worktree_path, cfg, |debouncer| WatcherGuard::Native {
+        _debouncer: debouncer,
+    })
+}
+
+fn start_watcher_with<W: notify::Watcher>(
+    worktree_path: &Path,
+    cfg: WatcherConfig,
+    guard: impl FnOnce(Debouncer<W>) -> WatcherGuard,
+) -> Result<WatcherHandle> {
     if !worktree_path.is_dir() {
         return Err(GwtError::Other(format!(
             "worktree path is not a directory: {}",
@@ -97,16 +133,18 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
 
     // Bridge sync notify callback → tokio mpsc.
     let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
-    let mut debouncer: Debouncer<notify::RecommendedWatcher> =
-        new_debouncer(cfg.debounce, move |res: DebounceEventResult| {
+    let mut debouncer: Debouncer<W> = new_debouncer_opt(
+        DebouncerConfig::default().with_timeout(cfg.debounce),
+        move |res: DebounceEventResult| {
             if let Ok(events) = res {
                 let paths: Vec<PathBuf> = events.into_iter().map(|e| e.path).collect();
                 if !paths.is_empty() {
                     let _ = raw_tx.send(paths);
                 }
             }
-        })
-        .map_err(|e| GwtError::Other(format!("debouncer init: {e}")))?;
+        },
+    )
+    .map_err(|e| GwtError::Other(format!("debouncer init: {e}")))?;
 
     debouncer
         .watcher()
@@ -145,10 +183,7 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
             }
 
             // Split into ≤batch_limit chunks and emit each as its own batch.
-            for chunk in filtered.chunks(batch_limit) {
-                let batch = WatcherBatch {
-                    changed_paths: chunk.to_vec(),
-                };
+            for batch in split_batches(&filtered, batch_limit) {
                 if tx.send(batch).await.is_err() {
                     return;
                 }
@@ -158,9 +193,15 @@ pub fn start_watcher(worktree_path: &Path, cfg: WatcherConfig) -> Result<Watcher
 
     Ok(WatcherHandle {
         rx,
-        _debouncer: debouncer,
+        _debouncer: guard(debouncer),
         _shutdown_tx: Some(shutdown_tx),
         forwarder: Some(forwarder),
+    })
+}
+
+fn split_batches(paths: &[PathBuf], batch_limit: usize) -> impl Iterator<Item = WatcherBatch> + '_ {
+    paths.chunks(batch_limit).map(|chunk| WatcherBatch {
+        changed_paths: chunk.to_vec(),
     })
 }
 
@@ -185,6 +226,52 @@ fn is_ignored(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn target_descendants_are_excluded_before_path_filtering() {
+        use notify::Watcher;
+
+        for target_exists in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = dunce::canonicalize(temp.path()).unwrap();
+            let target = root.join("target");
+            if target_exists {
+                std::fs::create_dir(&target).unwrap();
+            }
+            let mut watcher = NativeWatcher::new(|_| {}, notify::Config::default()).unwrap();
+            watcher.watch(&root, RecursiveMode::Recursive).unwrap();
+            // Observe the actual native subscription, not a fake that implements
+            // exclusion itself. Successful registration before Start excludes
+            // descendants before any debounce callback or path-policy filter.
+            assert_eq!(
+                watcher.startup_trace(),
+                vec![
+                    macos::StartupStep::Excluded(vec![target]),
+                    macos::StartupStep::Started
+                ],
+                "native exclusion must precede delivery (pre-existing={target_exists})"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_size_limit_splits_burst() {
+        let paths: Vec<_> = (0..200)
+            .map(|n| PathBuf::from(format!("f{n}.rs")))
+            .collect();
+        let batches: Vec<_> = split_batches(&paths, 100).collect();
+        assert_eq!(batches.len(), 2);
+        assert!(batches.iter().all(|batch| batch.changed_paths.len() <= 100));
+        assert_eq!(
+            batches
+                .into_iter()
+                .flat_map(|batch| batch.changed_paths)
+                .collect::<Vec<_>>(),
+            paths,
+            "batch splitting must retain every path in order"
+        );
+    }
 
     #[test]
     fn config_defaults() {

@@ -228,8 +228,8 @@ test("surface aliases are normalized before singleton lookup", () => {
   const normalizeBody = extractFunctionBody(appSource, "normalizeSurfacePreset");
   assert.match(
     normalizeBody,
-    /preset\s*===\s*"branches"[\s\S]*preset\s*===\s*"workspace"[\s\S]*return\s+"work"/,
-    "branches and legacy workspace presets must normalize to work",
+    /preset\s*===\s*"branches"[\s\S]*preset\s*===\s*"workspace"[\s\S]*return\s+"issue"/,
+    "branches and legacy workspace presets must normalize to issue",
   );
   assert.match(
     normalizeBody,

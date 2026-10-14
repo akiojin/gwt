@@ -2,19 +2,16 @@
 //
 // Renders the bundled CHANGELOG payload returned by the backend as a
 // floating window: left sidebar lists every released version, right pane
-// renders the selected version's notes. Markdown rendering is a tiny
-// hand-rolled subset (### heading, - list, **bold**) matching exactly what
-// the gwt-core parser emits.
-//
-// All DOM is constructed with createElement / textContent. innerHTML is
-// not used so untrusted strings inside the bundled changelog (e.g. agent
-// commit messages) cannot produce HTML injection even though they cannot
-// reach this surface from network input today.
+// renders the selected version's notes through the shared content renderer.
+// Section body_html is Markdown rendered and sanitized by the backend; old
+// payloads without it retain a plain text list.
 //
 // Wired into app.js: `#app-version` click and the `#update-modal` "View
 // release notes" link both send `open_release_notes` over WebSocket. The
 // backend replies with `release_notes_payload` (or `release_notes_error`)
 // and `app.js` forwards it here.
+
+import { markdownContent, renderUiContent } from "./ui-content.js";
 
 const CHANGELOG_URL =
   "https://github.com/akiojin/gwt/blob/main/CHANGELOG.md";
@@ -118,27 +115,6 @@ export function createReleaseNotesWindow({
     }
   }
 
-  function appendInlineMarkdown(target, text) {
-    // Splits on **bold** markers and appends alternating text / <strong>
-    // children. The bundled subset uses no other inline syntax.
-    const pattern = /\*\*([^*]+)\*\*/g;
-    let lastIndex = 0;
-    for (const match of text.matchAll(pattern)) {
-      if (match.index > lastIndex) {
-        target.appendChild(
-          document.createTextNode(text.slice(lastIndex, match.index)),
-        );
-      }
-      const strong = document.createElement("strong");
-      strong.textContent = match[1];
-      target.appendChild(strong);
-      lastIndex = match.index + match[0].length;
-    }
-    if (lastIndex < text.length) {
-      target.appendChild(document.createTextNode(text.slice(lastIndex)));
-    }
-  }
-
   function buildEntryNode(entry) {
     const fragment = document.createDocumentFragment();
     if (!entry) {
@@ -178,11 +154,13 @@ export function createReleaseNotesWindow({
         h3.textContent = section.heading;
         sectionEl.appendChild(h3);
       }
-      if (section.items && section.items.length > 0) {
+      if (typeof section.body_html === "string" && section.body_html.trim()) {
+        sectionEl.appendChild(renderUiContent(document, markdownContent(section)));
+      } else if (section.items && section.items.length > 0) {
         const ul = document.createElement("ul");
         for (const item of section.items) {
           const li = document.createElement("li");
-          appendInlineMarkdown(li, item);
+          li.textContent = item;
           ul.appendChild(li);
         }
         sectionEl.appendChild(ul);

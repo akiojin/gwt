@@ -30,10 +30,11 @@ const CODEX_REASONING = [
   { value: "xhigh", label: "Extra high", description: "Maximum reasoning depth" },
 ];
 
-// SPEC-1921 US-20 / FR-122 — Codex reasoning ladders scale per model. The
-// backend sends 6 stops for gpt-5.6-sol / gpt-5.6-terra (low..ultra), 5 stops
-// for gpt-5.6-luna (low..max), and the existing 4 stops for gpt-5.5 / gpt-5.4 /
-// gpt-5.4-mini / gpt-5.3-codex-spark (low..xhigh). There is NO Auto row for
+// SPEC-1921 US-20 / FR-122 (+ Issue #4677 — 2026-09-23 snapshot) — Codex
+// reasoning ladders scale per model. The backend sends 6 stops for
+// gpt-6-astra / gpt-6-sol / gpt-5.6-sol / gpt-5.6-terra (low..ultra),
+// 5 stops for gpt-6-luna / gpt-5.6-luna (low..max), and the existing
+// 4 stops for gpt-5.5 (low..xhigh). There is NO Auto row for
 // Codex — the whole ladder is ordinal, so no stop is lifted out of the slider.
 const CODEX_REASONING_6 = [
   { value: "low", label: "Low", description: "Fast responses with lighter reasoning" },
@@ -70,14 +71,14 @@ const AGENT_OPTIONS_FEW = [
   { value: "claude", label: "Claude Code" },
   { value: "codex", label: "Codex" },
   { value: "agy", label: "Antigravity CLI" },
-  { value: "gemini", label: "Gemini CLI (legacy)" },
+  { value: "hermes", label: "Hermes Agent" },
 ];
 
 const AGENT_OPTIONS_MANY = [
   { value: "claude", label: "Claude Code" },
   { value: "codex", label: "Codex" },
   { value: "agy", label: "Antigravity CLI" },
-  { value: "gemini", label: "Gemini CLI (legacy)" },
+  { value: "hermes", label: "Hermes Agent" },
   { value: "copilot", label: "GitHub Copilot" },
   { value: "custom-a", label: "My Custom Agent" },
 ];
@@ -140,8 +141,8 @@ test("chooseLaunchControlKind picks segmented for few short options", () => {
   assert.equal(chooseLaunchControlKind(TARGET_OPTIONS), "segmented");
 });
 
-test("chooseLaunchControlKind falls back to select for current built-in agent labels", () => {
-  assert.equal(chooseLaunchControlKind(AGENT_OPTIONS_FEW), "select");
+test("chooseLaunchControlKind uses segmented for four short built-in agent labels", () => {
+  assert.equal(chooseLaunchControlKind(AGENT_OPTIONS_FEW), "segmented");
 });
 
 test("chooseLaunchControlKind falls back to select past the count threshold", () => {
@@ -194,9 +195,9 @@ test("reasoningSliderModel marks Auto selection and parks slider at a sane fallb
 });
 
 test("reasoningSliderModel maps the 6-stop Codex ladder low->ultra with no Auto lift-out", () => {
-  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.6-sol / gpt-5.6-terra send six
-  // ordinal Codex stops (low..ultra) and no Auto row, so the whole ladder stays
-  // on the ordinal scale and ultra is the top stop.
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-6-astra / gpt-5.6-sol /
+  // gpt-5.6-terra send six ordinal Codex stops (low..ultra) and no Auto row, so
+  // the whole ladder stays on the ordinal scale and ultra is the top stop.
   const model = reasoningSliderModel(CODEX_REASONING_6, "ultra");
   assert.equal(model.hasAuto, false, "Codex has no Auto row");
   assert.equal(model.stops.length, 6);
@@ -358,8 +359,8 @@ test("buildReasoningField renders the 5-stop Codex ladder and commits 'max' at t
 });
 
 test("buildReasoningField commits 'xhigh' at the top of the 4-stop Codex ladder", () => {
-  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.5 / gpt-5.4 / gpt-5.4-mini /
-  // gpt-5.3-codex-spark keep the four-stop ladder that tops out at Extra high /
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.5
+  // keeps the four-stop ladder that tops out at Extra high /
   // stored value 'xhigh'.
   const doc = bootDom();
   const sent = [];

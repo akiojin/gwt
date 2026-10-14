@@ -74,12 +74,19 @@ test("Knowledge windows install periodic cache-first refresh for external phase 
   );
   assert.match(
     appSource,
-    /setInterval[\s\S]{0,900}?requestKnowledgeBridge\(\s*windowId,\s*knowledgeKind,\s*false\s*\)/,
-    "expected auto-refresh to stay cache-first instead of forcing remote sync",
+    /setInterval[\s\S]{0,900}?refreshVisibleKnowledgeWindows\(\)/,
+    "expected auto-refresh to publish a visibility-gated revision check",
   );
+  const refreshFlush = knowledgeSurfaceSource.slice(
+    knowledgeSurfaceSource.indexOf("function flushVisibleKnowledgeWindows("),
+    knowledgeSurfaceSource.indexOf("function readKanbanHideDonePreference("),
+  );
+  assert.match(refreshFlush, /kind: "check_knowledge_revision"/);
+  assert.match(refreshFlush, /requestKnowledgeBridge\(windowId, state\.kind, false\)/,
+    "changed revisions must stay cache-first");
   assert.doesNotMatch(
-    appSource,
-    /setInterval[\s\S]{0,900}?requestKnowledgeBridge\(\s*windowId,\s*knowledgeKind,\s*true\s*\)/,
+    refreshFlush,
+    /requestKnowledgeBridge\([^)]*,\s*true\s*\)/,
     "auto-refresh must not surface GitHub auth failures while cached entries are visible",
   );
   assert.match(
@@ -464,8 +471,8 @@ test("Knowledge detail pane renders section bodies through sanitized Markdown he
   );
   assert.match(
     appSource,
-    /section\.body_html/,
-    "expected renderer to prefer sanitized backend-generated section.body_html",
+    /renderUiContent\(document, markdownContent\(section\), className\)/,
+    "expected detail helper to delegate to the shared typed Markdown renderer",
   );
   assert.match(
     appSource,
@@ -563,6 +570,22 @@ test("Knowledge detail surfaces related Work and Session traces with Focus or Re
     /scheduleKnowledgeRelatedWorkRefresh/,
     "Knowledge windows should expose a cache-first refresh hook for Work/Session changes",
   );
+  const relatedRefreshStart = knowledgeSurfaceSource.indexOf(
+    "function scheduleKnowledgeRelatedWorkRefresh",
+  );
+  const relatedRefreshEnd = knowledgeSurfaceSource.indexOf(
+    "function applyLocalKnowledgeFilter",
+    relatedRefreshStart,
+  );
+  assert.ok(
+    relatedRefreshStart >= 0 && relatedRefreshEnd > relatedRefreshStart,
+    "expected a bounded Related Work refresh scheduler",
+  );
+  assert.match(
+    knowledgeSurfaceSource.slice(relatedRefreshStart, relatedRefreshEnd),
+    /requestKnowledgeBridge\(windowId,\s*knowledgeKind,\s*false\)/,
+    "Related Work outcome refreshes must remain cache-first",
+  );
   assert.match(
     appSource,
     /case "active_work_projection":[\s\S]{0,1200}?scheduleKnowledgeRelatedWorkRefresh\(\)/,
@@ -607,5 +630,34 @@ test("Knowledge detail surfaces related Work and Session traces with Focus or Re
     componentsCss,
     /\.knowledge-related-works\b/,
     "expected CSS hook for related Work detail rows",
+  );
+});
+
+test("Issue Related Work Resume shares one canonical operation identity with pending and payload (FR-628)", () => {
+  const resumeStart = knowledgeSurfaceSource.indexOf(
+    "function resumeKnowledgeRelatedSession",
+  );
+  assert.ok(resumeStart >= 0, "expected the Issue Related Work Resume producer");
+  const resumeEnd = knowledgeSurfaceSource.indexOf(
+    "function renderKnowledgeRelatedSessionAction",
+    resumeStart,
+  );
+  assert.ok(resumeEnd > resumeStart, "expected a bounded Related Work Resume producer");
+  const resumeSource = knowledgeSurfaceSource.slice(resumeStart, resumeEnd);
+
+  assert.match(
+    resumeSource,
+    /const operationId = createLaunchOperationId\("resume"\);/,
+    "the producer must create one canonical Resume operation identity",
+  );
+  assert.match(
+    resumeSource,
+    /launchPending\.begin\(\s*knowledgeRelatedWorkPendingKey\(sessionId\),\s*"Resume",\s*operationId,?\s*\)/,
+    "the pending entry must retain that exact operation identity",
+  );
+  assert.match(
+    resumeSource,
+    /send\(\{[\s\S]*?kind:\s*"resume_workspace_agent",[\s\S]*?operation_id:\s*operationId,[\s\S]*?session_id:\s*sessionId,/,
+    "the outbound Resume request must carry the same operation identity",
   );
 });

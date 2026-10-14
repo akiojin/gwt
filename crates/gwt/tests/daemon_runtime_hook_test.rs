@@ -1,9 +1,4 @@
-use std::{
-    ffi::OsString,
-    fs,
-    sync::{mpsc, Mutex, OnceLock},
-    time::Duration,
-};
+use std::{ffi::OsString, fs, sync::mpsc, time::Duration};
 
 use axum::{
     extract::State,
@@ -12,18 +7,17 @@ use axum::{
     Json, Router,
 };
 use chrono::TimeZone;
-use gwt::daemon_runtime::{handle_coordination_event, handle_forward, handle_runtime_state};
+use gwt::daemon_runtime::{
+    handle_coordination_event, handle_forward, handle_runtime_state, HOOK_LIVE_ATTEMPT_BUDGET,
+};
 use gwt_agent::{runtime_state_path, AgentId, Session};
-use gwt_core::paths::gwt_cache_dir;
+use gwt_core::{deadline_budget::ScopedDeadlineBudget, paths::gwt_cache_dir};
 use gwt_github::{CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
 use serde_json::Value;
 use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
 
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
+fn env_lock() -> gwt_core::test_support::EnvLockGuard {
+    gwt_core::test_support::env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -69,6 +63,11 @@ struct CaptureState {
 }
 
 struct CaptureServer {
+    // SPEC #4740: every test that starts a capture server asserts delivery.
+    // Hook-live is fail-open, so an attempt that outlives its production
+    // 100 ms budget on a loaded host drops the event silently. Pinning the
+    // hang guard makes the verdict independent of how slow the host is.
+    _attempt_budget: ScopedDeadlineBudget,
     runtime: Runtime,
     shutdown_tx: Option<oneshot::Sender<()>>,
     rx: mpsc::Receiver<(String, Value)>,
@@ -96,6 +95,7 @@ impl CaptureServer {
         });
 
         Self {
+            _attempt_budget: ScopedDeadlineBudget::hang_guard(&HOOK_LIVE_ATTEMPT_BUDGET),
             runtime,
             shutdown_tx: Some(shutdown_tx),
             rx,
@@ -103,10 +103,14 @@ impl CaptureServer {
         }
     }
 
+    /// The delivered event. Emission is synchronous and the capture handler
+    /// queues the event before it answers 2xx, so by the time the hook
+    /// handler returns a delivered event is already queued: no wall-clock
+    /// wait is involved. An empty queue means the fail-open emission failed.
     fn recv(&self) -> (String, Value) {
         self.rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("expected hook live event")
+            .try_recv()
+            .expect("expected hook live event to be delivered before the handler returned")
     }
 }
 
@@ -381,4 +385,83 @@ fn forward_owner_is_fail_open_when_live_target_is_unreachable() {
     .to_string();
 
     handle_forward(&input).expect("unreachable live target must fail open");
+}
+
+/// Issue #3541 AC-6: live forwarding stays fail-open, but the transport
+/// failure must still leave a sanitized ledger row that names the event.
+#[test]
+fn live_forward_failure_is_fail_open_and_recorded_in_the_error_ledger() {
+    use gwt::daemon_runtime::handle_forward_for_event;
+    use gwt_core::error_ledger::ErrorKind;
+
+    let _lock = env_lock();
+    let mut env = EnvGuard::new();
+    let home = tempfile::tempdir().expect("isolated home");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path().join(".gwt"));
+    let worktree = home.path().join("repo");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve loopback port");
+    let port = listener.local_addr().expect("listener addr").port();
+    drop(listener);
+
+    const TOKEN_SENTINEL: &str = "LIVE_FORWARD_TOKEN_MUST_NOT_PERSIST_3541";
+    const PAYLOAD_SENTINEL: &str = "LIVE_FORWARD_PAYLOAD_MUST_NOT_PERSIST_3541";
+    const SESSION_ID: &str = "session-3541-live-forward";
+    env.set("GWT_SESSION_ID", SESSION_ID);
+    env.set(
+        "GWT_HOOK_FORWARD_URL",
+        format!("http://127.0.0.1:{port}/internal/hook-live"),
+    );
+    env.set("GWT_HOOK_FORWARD_TOKEN", TOKEN_SENTINEL);
+    env.unset("GWT_SESSION_RUNTIME_PATH");
+    env.unset("GWT_HOOK_PROFILE_PATH");
+    env.unset("CODEX_THREAD_ID");
+
+    let input = serde_json::json!({
+        "session_id": "provider-session-sensitive",
+        "cwd": worktree.display().to_string(),
+        "prompt": PAYLOAD_SENTINEL,
+        "tool_name": "Bash",
+        "tool_input": { "command": format!("echo {PAYLOAD_SENTINEL}") }
+    })
+    .to_string();
+
+    handle_forward_for_event("PreToolUse", &input)
+        .expect("live forwarding transport failure must remain fail-open");
+
+    let rows = gwt_core::error_ledger::list_since(None).expect("error ledger");
+    let row = rows
+        .iter()
+        .find(|row| {
+            row.kind == ErrorKind::HookFailure
+                && row.context.get("fail_open").map(String::as_str) == Some("true")
+        })
+        .unwrap_or_else(|| panic!("fail-open transport failure must be recorded: {rows:?}"));
+    assert_eq!(
+        row.context.get("event").map(String::as_str),
+        Some("PreToolUse")
+    );
+    assert!(
+        row.context
+            .get("handler")
+            .is_some_and(|handler| handler.contains("forward")),
+        "failure must identify the forwarding handler: {row:?}"
+    );
+    assert_eq!(
+        row.context.get("exit_status").map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(row.target.session_id.as_deref(), Some(SESSION_ID));
+
+    let ledger_text = serde_json::to_string(&rows).expect("ledger json");
+    for sentinel in [
+        TOKEN_SENTINEL,
+        PAYLOAD_SENTINEL,
+        "provider-session-sensitive",
+    ] {
+        assert!(
+            !ledger_text.contains(sentinel),
+            "sensitive input leaked into the ledger: {ledger_text}"
+        );
+    }
 }

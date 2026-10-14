@@ -1,22 +1,35 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 // SPEC-2008 camera-focus / FR-094 (2026-07-03 再改訂) — Fleet Minimap
 // (zoom-synced centered radar).
 //
-// The always-on minimap (`#fleet-minimap`) mirrors the canvas frame of
-// reference: the camera viewport is FIXED at the minimap centre and the world
-// (window cells, inside `.fleet-minimap__world`) MOVES under it as the camera
-// pans — like `#canvas-stage`. The radar scale is DERIVED from the live
-// viewport, so it tracks the canvas zoom: the cyan `.fleet-minimap__camera`
-// frame keeps a CONSTANT px size (a fixed fraction of the minimap) and is
-// always visible, while the cells rescale with the canvas zoom. The radar
+// The collapsible, default-on minimap (`#fleet-minimap`) mirrors the canvas
+// frame of reference: the camera viewport is FIXED at the minimap centre and
+// the world (window cells, inside `.fleet-minimap__world`) MOVES under it as
+// the camera pans — like `#canvas-stage`. The radar scale is DERIVED from the
+// live viewport, so it tracks the canvas zoom: the cyan
+// `.fleet-minimap__camera` frame keeps a CONSTANT px size (a fixed fraction of
+// the minimap) while the cells rescale with the canvas zoom. The radar
 // zoom buttons (`.fleet-minimap__zoom-button`) adjust that fraction (frame
 // and cells scale together). Clicking a cell flies the LOCAL camera to that
 // window (frameWindow), translating the world layer and marking the cell
 // `.is-focused`. The fixture centres the camera on the fleet so both windows
 // are visible in the radar.
 test.describe("Fleet Minimap centered radar", () => {
+  const browserErrors = new WeakMap<Page, string[]>();
+  test.beforeEach(async ({ page }) => {
+    const errors: string[] = [];
+    browserErrors.set(page, errors);
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+  });
+  test.afterEach(async ({ page }) => {
+    expect(browserErrors.get(page)).toEqual([]);
+  });
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1440, height: 900 },
@@ -25,9 +38,7 @@ test.describe("Fleet Minimap centered radar", () => {
   test("minimap shows one cell per window inside the world layer; clicking frames", async ({
     page,
   }) => {
-    await installEmbeddedRoutes(page);
-    await installMinimapBackend(page);
-    await page.goto(APP_URL);
+    await openMinimapFixture(page);
 
     const minimap = page.locator("#fleet-minimap");
     await expect(minimap).toBeVisible({ timeout: 10_000 });
@@ -58,9 +69,7 @@ test.describe("Fleet Minimap centered radar", () => {
   test("panning translates the world layer while the camera frame stays centred", async ({
     page,
   }) => {
-    await installEmbeddedRoutes(page);
-    await installMinimapBackend(page);
-    await page.goto(APP_URL);
+    await openMinimapFixture(page);
 
     const minimap = page.locator("#fleet-minimap");
     await expect(minimap).toBeVisible({ timeout: 10_000 });
@@ -97,9 +106,7 @@ test.describe("Fleet Minimap centered radar", () => {
   test("canvas zoom rescales the cells while the camera frame keeps its size", async ({
     page,
   }) => {
-    await installEmbeddedRoutes(page);
-    await installMinimapBackend(page);
-    await page.goto(APP_URL);
+    await openMinimapFixture(page);
 
     const minimap = page.locator("#fleet-minimap");
     await expect(minimap).toBeVisible({ timeout: 10_000 });
@@ -138,9 +145,7 @@ test.describe("Fleet Minimap centered radar", () => {
   });
 
   test("radar zoom controls rescale the cells", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-    await installMinimapBackend(page);
-    await page.goto(APP_URL);
+    await openMinimapFixture(page);
 
     const minimap = page.locator("#fleet-minimap");
     await expect(minimap).toBeVisible({ timeout: 10_000 });
@@ -154,7 +159,55 @@ test.describe("Fleet Minimap centered radar", () => {
       .poll(() => cell.evaluate((el) => parseFloat(el.style.width)))
       .toBeGreaterThan(widthBefore);
   });
+
+  test("visibility toggle hides and restores the radar and persists across reload", async ({
+    page,
+  }) => {
+    await openMinimapFixture(page);
+
+    const minimap = page.locator("#fleet-minimap");
+    const cell = minimap.locator('.fleet-minimap__cell[data-window-id="agent-1"]');
+    const hide = minimap.getByRole("button", { name: "Hide minimap" });
+    await expect(hide).toBeVisible({ timeout: 10_000 });
+    await expect(cell).toBeVisible();
+    await expect(minimap).toHaveAttribute("data-collapsed", "false");
+    const expandedCellWidth = await cell.evaluate(
+      (element) => element.getBoundingClientRect().width,
+    );
+
+    await hide.click();
+
+    await expect(minimap).toHaveAttribute("data-collapsed", "true");
+    await expect(minimap.getByRole("button", { name: "Show minimap" })).toBeVisible();
+    await expect(minimap.locator(".fleet-minimap__world")).toBeHidden();
+    await expect(minimap.locator(".fleet-minimap__camera")).toBeHidden();
+    await expect(minimap.locator(".fleet-minimap__zoom")).toBeHidden();
+
+    await page.reload();
+
+    await expect(minimap).toHaveAttribute("data-collapsed", "true");
+    const show = minimap.getByRole("button", { name: "Show minimap" });
+    await expect(show).toBeVisible();
+    await expect(cell).toBeHidden();
+
+    await show.click();
+
+    await expect(minimap).toHaveAttribute("data-collapsed", "false");
+    await expect(minimap.getByRole("button", { name: "Hide minimap" })).toBeVisible();
+    await expect(cell).toBeVisible();
+    await expect
+      .poll(() => cell.evaluate((element) => element.getBoundingClientRect().width))
+      .toBeCloseTo(expandedCellWidth, 3);
+  });
 });
+
+async function openMinimapFixture(page: Page) {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  if (!base) await installEmbeddedRoutes(page);
+  await installMinimapBackend(page);
+  if (base) await gotoLiveGwt(page, base);
+  else await page.goto(APP_URL);
+}
 
 async function installMinimapBackend(page) {
   await page.addInitScript(() => {

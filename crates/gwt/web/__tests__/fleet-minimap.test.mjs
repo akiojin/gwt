@@ -8,10 +8,12 @@
 // updateCameraFrame DOM output and the cell-click → frameWindow contract.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { parseHTML } from "linkedom";
 
 import { createFleetMinimap } from "../fleet-minimap.js";
+import { createUiStateStore } from "../ui-state-store.js";
 
 // createFleetMinimap reaches for the global `document` (document.createElement)
 // for the camera-frame and cell nodes, so each test installs a fresh linkedom
@@ -51,6 +53,86 @@ function makeMinimap(container, windows, overrides = {}) {
   return { minimap, calls };
 }
 
+function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+}
+
+test("Window List and Minimap subscribe to one committed catalog; the list gate stays local", async (t) => {
+  const { document, container } = setupDom();
+  document.body.insertAdjacentHTML("beforeend", '<button id="window-list-button"></button><div id="window-list-panel"></div>');
+  const source = readFileSync(new URL("../project-shell-surface.js", import.meta.url), "utf8")
+    .replace(/from "\/([^"]+)"/g, (_, path) => `from "${new URL(`../${path}`, import.meta.url).href}"`);
+  const { createProjectShellSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  const initial = { active_tab_id: "a", tabs: [{ id: "a", title: "Alpha", workspace: {
+    windows: [windowAt("a::one", 0, 0, 100, 80, { title: "Before" }), windowAt("a::two", 100, 0)],
+  } }] };
+  const model = createUiStateStore({ catalog: { appState: initial, focusedId: null, runtimeStates: {} },
+    listEntries: [], bounds: { x: 0, y: 0, width: 200, height: 120 } });
+  const getWindows = () => model.read().catalog.appState.tabs[0].workspace.windows;
+  const shell = createProjectShellSurface({
+    windowCatalogModel: model, getAppState: () => initial, activeProjectTab: () => initial.tabs[0],
+    send() {}, appendRenderKeyPart: (parts, value) => parts.push(String(value)),
+    runtimeStateForWindow: () => "running", windowDisplayTitle: w => w.title || w.id,
+    windowTitleTooltip: w => w.title || w.id, windowGeometryLabel: w => String(w.geometry.x),
+    windowRoleBadgeLabel: () => "", shouldShowRuntimeStatus: () => false,
+    addButton: document.createElement("button"), tileButton: document.createElement("button"),
+    stackButton: document.createElement("button"),
+  });
+  const { minimap } = makeMinimap(container, [], { windowCatalogModel: model, getWindows,
+    windowDisplayTitle: w => w.title || w.id });
+  t.after(() => { shell.dispose?.(); minimap.dispose?.(); model.dispose(); });
+  shell.updateActionAvailability(null);
+  shell.updateActionAvailability(initial.tabs[0]);
+  shell.toggleWindowList();
+  minimap.renderCells();
+  const panel = document.getElementById("window-list-panel");
+  assert.match(panel.textContent, /Before/);
+  model.update(state => ({ ...state, catalog: { ...state.catalog, appState: {
+    ...initial, tabs: [{ ...initial.tabs[0], workspace: { windows: getWindows().map(w => ({
+      ...w, title: w.id === "a::one" ? "After" : w.title,
+    })) } }],
+  } } }));
+  assert.match(panel.textContent, /After/, "List reads the committed catalog, not its old app getter");
+  assert.equal(container.querySelector('[data-window-id="a::one"]').title, "After");
+  model.update(state => ({ ...state, listEntries: [{ id: "a::one" }] }));
+  assert.equal(panel.querySelectorAll(".window-list-row").length, 1);
+  assert.equal(container.querySelectorAll(".fleet-minimap__cell").length, 2, "list snapshot gate never filters Minimap");
+  shell.dispose();
+  minimap.dispose();
+  model.update(state => ({ ...state, catalog: { ...state.catalog, appState: { ...initial, tabs: [] } } }));
+  assert.equal(panel.querySelectorAll(".window-list-row").length, 1, "disposed List releases its subscription");
+  assert.equal(container.querySelectorAll(".fleet-minimap__cell").length, 2, "disposed Minimap releases its subscription");
+});
+
+test("camera-only workspace echoes preserve the committed catalog reference", () => {
+  const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const publishSource = source.slice(source.indexOf("      function publishWindowCatalog()"),
+    source.indexOf("      // Existing shell callers"));
+  const publish = new Function("windowCatalogModel", "appState", "windowRuntimeStateMap", "focusedId",
+    "reconcilingWindowCatalog = false",
+    `${publishSource}\nreturn publishWindowCatalog();`);
+  const appState = { active_tab_id: "a", tabs: [{ id: "a", title: "Alpha", workspace: {
+    windows: [windowAt("a::one", 0, 0)], viewport: { x: 0, y: 0, zoom: 1 },
+  } }] };
+  const model = createUiStateStore({ catalog: { appState: {}, runtimeStates: {}, focusedId: null, version: 0 } });
+  publish(model, appState, new Map(), null);
+  const committed = model.read().catalog;
+  appState.tabs[0].workspace.viewport.x = 200;
+  publish(model, appState, new Map(), null);
+  assert.equal(model.read().catalog, committed, "camera echo must not notify catalog subscribers");
+  appState.tabs[0].workspace.windows[0].title = "Changed";
+  publish(model, appState, new Map(), null, true);
+  assert.equal(model.read().catalog, committed, "reconciliation must finish before notifying views");
+  publish(model, appState, new Map(), null);
+  assert.notEqual(model.read().catalog, committed, "window changes still notify both views");
+  assert.equal(model.read().catalog.version, committed.version + 1);
+});
+
 test("createFleetMinimap returns a no-op surface when there is no container", () => {
   const minimap = createFleetMinimap({ container: null });
   assert.equal(typeof minimap.renderCells, "function");
@@ -61,6 +143,69 @@ test("createFleetMinimap returns a no-op surface when there is no container", ()
   minimap.renderCells();
   minimap.update();
   minimap.setZoom(1.25);
+});
+
+test("visibility toggle collapses the radar, persists the preference, and keeps cell state live", () => {
+  const { container } = setupDom();
+  const storage = memoryStorage();
+  const windows = [
+    windowAt("w-agent", 0, 0, 100, 80, {
+      agent_color: "violet",
+      telemetry: "running",
+    }),
+  ];
+  const { minimap } = makeMinimap(container, windows, { storage });
+
+  minimap.renderCells();
+
+  const toggle = container.querySelector(".fleet-minimap__visibility-toggle");
+  assert.ok(toggle, "the minimap exposes its visibility toggle");
+  assert.equal(container.dataset.collapsed, "false");
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(toggle.getAttribute("aria-label"), "Hide minimap");
+
+  toggle.dispatchEvent(new container.ownerDocument.defaultView.Event("click"));
+
+  assert.equal(container.dataset.collapsed, "true");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(toggle.getAttribute("aria-label"), "Show minimap");
+  assert.equal(storage.getItem("gwt:ui:fleet-minimap-collapsed"), "1");
+  windows[0].telemetry = "waiting";
+  minimap.renderCells();
+  assert.equal(
+    container.querySelector('[data-window-id="w-agent"]').dataset.telemetry,
+    "waiting",
+    "collapsed presentation keeps receiving telemetry updates",
+  );
+
+  toggle.dispatchEvent(new container.ownerDocument.defaultView.Event("click"));
+
+  assert.equal(container.dataset.collapsed, "false");
+  assert.equal(storage.getItem("gwt:ui:fleet-minimap-collapsed"), null);
+});
+
+test("stored collapsed preference is restored when the minimap is created", () => {
+  const { container } = setupDom();
+  const storage = memoryStorage({ "gwt:ui:fleet-minimap-collapsed": "1" });
+  makeMinimap(container, [windowAt("w-1", 0, 0)], { storage });
+
+  const toggle = container.querySelector(".fleet-minimap__visibility-toggle");
+  assert.equal(container.dataset.collapsed, "true");
+  assert.equal(toggle?.getAttribute("aria-expanded"), "false");
+  assert.equal(toggle?.getAttribute("aria-label"), "Show minimap");
+});
+
+test("collapsed minimap CSS leaves only the token-styled visibility toggle", () => {
+  const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
+  assert.match(css, /\.fleet-minimap\[data-collapsed="true"\]/);
+  assert.match(
+    css,
+    /\.fleet-minimap\[data-collapsed="true"\]\s*>\s*:not\(\.fleet-minimap__visibility-toggle\)/,
+  );
+  const toggleRule = /\.fleet-minimap__visibility-toggle\s*\{[^}]+\}/.exec(css)?.[0] ?? "";
+  assert.match(toggleRule, /var\(--color-border\)/);
+  assert.match(toggleRule, /var\(--color-surface-elevated\)/);
+  assert.doesNotMatch(toggleRule, /#[0-9a-f]{3,8}\b|rgba?\(/i);
 });
 
 test("renderCells creates one cell per window keyed by window id", () => {
@@ -623,4 +768,48 @@ test("renderCells repositions an existing cell after its window geometry changes
     parseFloat(cell.style.top) > topBefore,
     "the moved window's cell must shift down with its new world y",
   );
+});
+
+// Issue #3884 AC-1: an `issue_preview` placement (SPEC-3671) is not drawn on the
+// canvas, so it must not be drawn on the minimap either — a radar rectangle with
+// no window behind it reads as "the window vanished". Windowize moves the
+// placement back to `canvas`, and only then does the cell appear.
+test("Issue #3884 AC-1: off-canvas placements are not drawn as minimap cells", () => {
+  const { container } = setupDom();
+  const issueWindow = windowAt("issue-1", 0, 0, 1400, 860, { preset: "issue" });
+  const inlineAgent = windowAt("agent-1", 120, 120, 1280, 800, {
+    preset: "agent",
+    placement: { kind: "issue_preview", issue_window_id: "issue-1", issue_number: 3884 },
+  });
+  const kanbanAgent = windowAt("agent-2", 200, 200, 1280, 800, {
+    preset: "agent",
+    placement: { kind: "agent_kanban", board_id: "kanban-1", lane_id: "active", order: 0 },
+  });
+  const windows = [issueWindow, inlineAgent, kanbanAgent];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+
+  const ids = [...container.querySelectorAll(".fleet-minimap__cell")].map(
+    (cell) => cell.dataset.windowId,
+  );
+  assert.deepEqual(ids, ["issue-1"], "only canvas-placed windows get a radar cell");
+  assert.equal(container.dataset.empty, "false");
+
+  // Windowize: the placement returns to the canvas and the cell appears.
+  inlineAgent.placement = { kind: "canvas" };
+  minimap.renderCells();
+  const afterWindowize = [...container.querySelectorAll(".fleet-minimap__cell")]
+    .map((cell) => cell.dataset.windowId)
+    .sort();
+  assert.deepEqual(afterWindowize, ["agent-1", "issue-1"]);
+
+  // A workspace whose only windows are inline agents is an empty radar.
+  windows.splice(0, windows.length, windowAt("agent-3", 0, 0, 100, 80, {
+    preset: "agent",
+    placement: { kind: "issue_preview", issue_window_id: "issue-1", issue_number: 3884 },
+  }));
+  minimap.renderCells();
+  assert.equal(container.querySelectorAll(".fleet-minimap__cell").length, 0);
+  assert.equal(container.dataset.empty, "true");
 });

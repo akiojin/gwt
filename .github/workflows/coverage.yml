@@ -1,9 +1,17 @@
 name: Coverage Report
 
 on:
+  workflow_call:
   schedule:
     - cron: '0 0 * * *'
   workflow_dispatch:
+
+# Issue #4119: a manual dispatch supersedes a still-running scheduled report.
+concurrency:
+  # Called workflows inherit github.workflow from the caller. A distinct
+  # prefix prevents coverage from cancelling its own Lint workflow.
+  group: coverage-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'report' || github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: true
 
 jobs:
   rust-coverage:
@@ -12,12 +20,32 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: develop
-      - name: Install tray + GTK dependencies (Linux)
-        run: |
-          sudo bash scripts/ci-apt.sh update
-          sudo bash scripts/ci-apt.sh install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev
+          ref: ${{ github.event.pull_request.head.sha || (github.event_name == 'schedule' && 'develop') || github.sha }}
+      # Issue #4191 AC-2: keyed on scripts/ci-apt.sh, which owns the package
+      # list, so a changed set is never served the previous archive.
+      - name: Cache Linux GTK dependency packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/gwt-apt-archives
+          key: gwt-apt-gtk-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
+          # Issue #4268: without a prefix fallback the key only ever hits on an
+          # unchanged scripts/ci-apt.sh, so editing the script guarantees one
+          # cold run that fetches all 59.2 MB from a mirror -- which is the run
+          # a stalled mirror kills. The fallback restores the previous archives
+          # and lets apt fetch only the delta. Correctness does not depend on
+          # it: apt uses an archive only when the filename and version match
+          # what it resolved, and the exact key above still decides what is
+          # saved.
+          restore-keys: |
+            gwt-apt-gtk-${{ runner.os }}-
         timeout-minutes: 5
+      # Issue #4191: scripts/ci-apt.sh owns the deadline (900s) and retries
+      # inside it; this cap is only the outer net and must stay above it, so
+      # the script and not GitHub reports a dependency-install failure. The
+      # measured step distribution behind the numbers is recorded in test.yml.
+      - name: Install tray + GTK dependencies (Linux)
+        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        timeout-minutes: 18
       - uses: actions/setup-node@v7
         with:
           node-version: 20
@@ -25,6 +53,8 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         continue-on-error: true
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -34,17 +64,29 @@ jobs:
       # check-coverage-threshold.mjs). The remaining domain crates are
       # gated by an 80% floor as a ratchet (measured ~83% on 2026-06-10);
       # raise the floor toward 90% as their test suites grow.
+      # coverage-summary.mjs runs the tests, then reads every raw profile
+      # before aggregating, so a truncated profile is reported apart from a
+      # test failure and re-aggregated once, on record (Issue #4628).
       - name: Generate workspace summary
-        run: cargo llvm-cov --workspace --all-features --json --summary-only --output-path target/coverage-summary.json
+        run: node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features
         timeout-minutes: 20
       - name: Enforce coverage threshold (gwt-core + gwt @ 90%)
         run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"
       - name: Enforce coverage floor (domain crates @ 80%)
         run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude "crates/(gwt-core|gwt)/"
+      # Follow the summary's recorded recovery: the strict merge would refuse
+      # the same truncated profile the summary already left out.
       - name: Generate lcov
-        run: cargo llvm-cov report --lcov --output-path lcov.info
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          failure_mode=()
+          if [ -f target/coverage-summary.json.profiles.json ]; then
+            failure_mode=(--failure-mode all)
+          fi
+          cargo llvm-cov report "${failure_mode[@]}" --lcov --output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: codecov/codecov-action@v7
         with:
           files: lcov.info

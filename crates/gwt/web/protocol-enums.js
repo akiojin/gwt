@@ -13,6 +13,7 @@ export const WINDOW_RUNTIME_STATES = Object.freeze([
   "waiting",
   "stopped",
   "error",
+  "interrupted",
 ]);
 
 export const WORKSPACE_STATUS_CATEGORIES = Object.freeze([

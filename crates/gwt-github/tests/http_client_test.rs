@@ -95,6 +95,18 @@ fn ok_body(body: &str) -> HttpResponse {
     }
 }
 
+fn graphql_mentions_field(query: &str, field: &str) -> bool {
+    query
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token == field)
+}
+
+fn assert_issue_variables(payload: &serde_json::Value, number: u64) {
+    assert_eq!(payload["variables"]["owner"], "octo");
+    assert_eq!(payload["variables"]["repo"], "gwt");
+    assert_eq!(payload["variables"]["number"], number);
+}
+
 fn created(body: &str) -> HttpResponse {
     HttpResponse {
         status: 201,
@@ -113,7 +125,7 @@ fn red_50_fetch_posts_graphql_with_auth() {
         r#"{"data":{"repository":{"issue":{
             "number":2001,"title":"T","body":"B","state":"OPEN","updatedAt":"2026-04-08T00:00:00Z",
             "labels":{"nodes":[{"name":"gwt-spec"},{"name":"phase/review"}]},
-            "comments":{"nodes":[]}
+            "comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}
         }}}}"#,
     ));
     let client = client_with(transport);
@@ -136,6 +148,10 @@ fn red_50_fetch_posts_graphql_with_auth() {
     let body = req.body.as_deref().unwrap_or("");
     let payload: serde_json::Value = serde_json::from_str(body).unwrap();
     assert!(payload.get("query").is_some());
+    assert!(payload["query"]
+        .as_str()
+        .unwrap()
+        .contains("issueOrPullRequest"));
     assert_eq!(payload["variables"]["owner"], "octo");
     assert_eq!(payload["variables"]["repo"], "gwt");
     assert_eq!(payload["variables"]["number"], 2001);
@@ -152,6 +168,51 @@ fn red_50_fetch_posts_graphql_with_auth() {
     }
 }
 
+#[test]
+fn fetch_collects_comments_beyond_first_hundred() {
+    let transport = FakeTransport::new();
+    for (start, end, has_next, cursor) in [(1, 100, true, "page-1"), (101, 101, false, "page-2")] {
+        let comments: Vec<_> = (start..=end)
+            .map(|id| serde_json::json!({"databaseId":id,"body":format!("comment {id}"),"updatedAt":"T1"}))
+            .collect();
+        transport.enqueue(ok_body(
+            &serde_json::json!({"data":{"repository":{"issue":{
+                "number":4613,"title":"Spec","body":"index","state":"OPEN","updatedAt":"T1",
+                "comments":{"nodes":comments,"pageInfo":{"hasNextPage":has_next,"endCursor":cursor}}
+            }}}})
+            .to_string(),
+        ));
+    }
+    let client = client_with(transport);
+    let FetchResult::Updated(snapshot) = client.fetch(IssueNumber(4613), None).unwrap() else {
+        panic!("expected full snapshot");
+    };
+    assert_eq!(snapshot.comments.len(), 101);
+    assert_eq!(snapshot.comments[100].id, CommentId(101));
+    assert_eq!(snapshot.comments[100].body, "comment 101");
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    let second: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(second["variables"]["after"], "page-1");
+    assert!(second["query"].as_str().unwrap().contains("after:$after"));
+}
+
+#[test]
+fn fetch_rejects_incomplete_comment_pagination() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":{
+        "number":4613,"comments":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":null}}
+    }}}}"#,
+    ));
+    let client = client_with(transport);
+    assert!(matches!(
+        client.fetch(IssueNumber(4613), None),
+        Err(ApiError::PartialPage { .. })
+    ));
+}
+
 // -----------------------------------------------------------------------
 // RED-51: fetch returns NotModified when updatedAt matches
 // -----------------------------------------------------------------------
@@ -159,17 +220,63 @@ fn red_50_fetch_posts_graphql_with_auth() {
 fn red_51_fetch_returns_not_modified_on_match() {
     let transport = FakeTransport::new();
     transport.enqueue(ok_body(
-        r#"{"data":{"repository":{"issue":{
-            "number":1,"title":"t","body":"b","state":"OPEN","updatedAt":"T1",
-            "labels":{"nodes":[]},
-            "comments":{"nodes":[]}
-        }}}}"#,
+        r#"{"data":{"repository":{"issue":{"updatedAt":"T1"}}}}"#,
     ));
     let client = client_with(transport);
     let res = client
         .fetch(IssueNumber(1), Some(&UpdatedAt::new("T1")))
         .unwrap();
     assert!(matches!(res, FetchResult::NotModified));
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 1);
+    let payload: serde_json::Value =
+        serde_json::from_str(requests[0].body.as_deref().expect("probe body")).unwrap();
+    let query = payload["query"].as_str().expect("probe query");
+    assert!(graphql_mentions_field(query, "updatedAt"));
+    assert!(!graphql_mentions_field(query, "body"));
+    assert!(!graphql_mentions_field(query, "comments"));
+    assert_issue_variables(&payload, 1);
+}
+
+#[test]
+fn conditional_fetch_runs_full_query_only_after_changed_probe() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":{"updatedAt":"T2"}}}}"#,
+    ));
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":{
+            "number":1,"title":"changed","body":"fresh body","state":"CLOSED","updatedAt":"T2",
+            "labels":{"nodes":[{"name":"bug"}]},
+            "comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}
+        }}}}"#,
+    ));
+    let client = client_with(transport);
+
+    let result = client
+        .fetch(IssueNumber(1), Some(&UpdatedAt::new("T1")))
+        .expect("changed conditional fetch");
+
+    let FetchResult::Updated(snapshot) = result else {
+        panic!("changed probe must return the full snapshot");
+    };
+    assert_eq!(snapshot.title, "changed");
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    let probe: serde_json::Value =
+        serde_json::from_str(requests[0].body.as_deref().expect("probe body")).unwrap();
+    let full: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().expect("full body")).unwrap();
+    let probe_query = probe["query"].as_str().expect("probe query");
+    let full_query = full["query"].as_str().expect("full query");
+    assert!(graphql_mentions_field(probe_query, "updatedAt"));
+    assert!(!graphql_mentions_field(probe_query, "body"));
+    assert!(!graphql_mentions_field(probe_query, "comments"));
+    assert!(graphql_mentions_field(full_query, "body"));
+    assert!(graphql_mentions_field(full_query, "comments"));
+    assert_issue_variables(&probe, 1);
+    assert_issue_variables(&full, 1);
 }
 
 // -----------------------------------------------------------------------
@@ -182,6 +289,40 @@ fn red_52_fetch_returns_not_found() {
     let client = client_with(transport);
     let err = client.fetch(IssueNumber(9999), None).unwrap_err();
     assert!(matches!(err, ApiError::NotFound(IssueNumber(9999))));
+}
+
+#[test]
+fn fetch_distinguishes_a_pull_request_from_an_issue() {
+    for since in [None, Some(UpdatedAt::new("2026-04-08T00:00:00Z"))] {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(
+            r#"{"data":{"repository":{"issue":{"__typename":"PullRequest","number":4122}}}}"#,
+        ));
+        let error = client_with(transport)
+            .fetch(IssueNumber(4122), since.as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("PR #4122"), "{error}");
+        assert!(error.contains("not an issue"), "{error}");
+        assert!(error.contains("pr.view"), "{error}");
+        assert!(!error.contains("GraphQL"), "{error}");
+    }
+}
+
+#[test]
+fn fetch_maps_graphql_missing_number_to_not_found() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"data":{"repository":{"issue":null}},"errors":[{"type":"NOT_FOUND","path":["repository","issue"],"message":"Could not resolve to an Issue or PullRequest"}]}"#,
+    ));
+    let error = client_with(transport)
+        .fetch(IssueNumber(9999), None)
+        .unwrap_err();
+    assert!(
+        matches!(error, ApiError::NotFound(IssueNumber(9999))),
+        "{error}"
+    );
+    assert!(!error.to_string().contains("pr.view"));
 }
 
 // -----------------------------------------------------------------------
@@ -304,14 +445,32 @@ fn red_58_set_state_closed_sends_state_field() {
     ));
     let client = client_with(transport);
     let snap = client
-        .set_state(IssueNumber(5), IssueState::Closed)
+        .set_state(
+            IssueNumber(5),
+            IssueState::Closed,
+            Some(gwt_github::IssueCloseReason::NotPlanned),
+        )
         .unwrap();
 
     let reqs = client.transport().recorded();
     let payload: serde_json::Value =
         serde_json::from_str(reqs[0].body.as_deref().unwrap()).unwrap();
     assert_eq!(payload["state"], "closed");
+    assert_eq!(payload["state_reason"], "not_planned");
     assert_eq!(snap.state, IssueState::Closed);
+
+    client.transport().enqueue(ok_body(
+        r#"{"number":5,"title":"T","body":"B","state":"open","updated_at":"t","labels":[]}"#,
+    ));
+    let reopened = client
+        .set_state(IssueNumber(5), IssueState::Open, None)
+        .unwrap();
+    let requests = client.transport().recorded();
+    let payload: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["state"], "open");
+    assert!(payload.get("state_reason").is_none());
+    assert_eq!(reopened.state, IssueState::Open);
 }
 
 // -----------------------------------------------------------------------
@@ -1015,6 +1174,10 @@ fn owner_mutation_classifies_connection_refusal_as_pre_submit_network_failure() 
     )
     .expect("loopback endpoints");
 
+    // Windows can take about two seconds to report a refused connection.
+    // Let that error arrive within the total budget instead of racing the
+    // shared helper's one-second connect timeout.
+    let deadline = ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(5));
     let error = client
         .create_owner_issue(
             &RepositoryIdentity::gwt_upstream(),
@@ -1023,16 +1186,37 @@ fn owner_mutation_classifies_connection_refusal_as_pre_submit_network_failure() 
                 body: "Body".to_string(),
                 labels: Vec::new(),
             },
-            &owner_deadline(),
+            &deadline,
         )
         .expect_err("connection refusal must be pre-submit");
 
-    assert!(matches!(
-        error,
-        OwnerMutationError::PreSubmit(ApiError::Network(_))
-    ));
+    assert!(
+        matches!(error, OwnerMutationError::PreSubmit(ApiError::Network(_))),
+        "{error:?}"
+    );
 }
 
+/// Blocks until the caller's deadline has provably expired.
+///
+/// SPEC #4551 T-030, mechanism (A). The predicate is the deadline's own
+/// absolute expiry, not a wall-clock constant chosen to be larger than
+/// another wall-clock constant, so a saturated runner can stall this thread
+/// for any length of time and the ordering the caller asserts still holds.
+/// [`ResolutionDeadline::remaining`] treats a zero remainder as expired, so
+/// waiting until `checked_duration_since` yields `None` leaves the deadline
+/// strictly past.
+fn wait_until_the_deadline_has_expired(deadline: &ResolutionDeadline) {
+    let expires_at = deadline.expires_at();
+    while let Some(remaining) = expires_at.checked_duration_since(Instant::now()) {
+        std::thread::sleep(remaining);
+    }
+}
+
+/// Answers successfully, but only once the caller's deadline is already past.
+///
+/// Prefer this shape over "sleep a little and hope the deadline was shorter"
+/// whenever a test needs a response that arrives too late: it makes the
+/// lateness an observed fact instead of a race between two constants.
 struct LateResponseTransport;
 
 impl HttpTransport for LateResponseTransport {
@@ -1043,11 +1227,17 @@ impl HttpTransport for LateResponseTransport {
     fn execute_with_deadline(
         &self,
         _request: HttpRequest,
-        _deadline: &ResolutionDeadline,
+        deadline: &ResolutionDeadline,
     ) -> Result<HttpResponse, HttpError> {
-        std::thread::sleep(Duration::from_millis(25));
+        wait_until_the_deadline_has_expired(deadline);
         Ok(owner_page(Vec::new(), false, None))
     }
+}
+
+/// The deadline the [`LateResponseTransport`] tests hand the client. Its value
+/// only bounds how long they take; the transport waits it out either way.
+fn late_response_deadline() -> ResolutionDeadline {
+    ResolutionDeadline::new(Duration::from_millis(100), Duration::from_millis(100))
 }
 
 #[test]
@@ -1058,10 +1248,12 @@ fn owner_read_rejects_a_response_returned_after_the_absolute_deadline() {
         "akiojin",
         "gwt",
     );
-    let deadline = ResolutionDeadline::new(Duration::from_millis(1), Duration::from_millis(5));
 
     let error = client
-        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
+        .list_issues(
+            &RepositoryIdentity::gwt_upstream(),
+            &late_response_deadline(),
+        )
         .expect_err("late owner response");
 
     assert!(matches!(error, ApiError::Timeout { .. }));
@@ -1108,7 +1300,6 @@ fn owner_mutation_marks_a_response_returned_after_the_deadline_as_remote_unknown
         "akiojin",
         "gwt",
     );
-    let deadline = ResolutionDeadline::new(Duration::from_millis(1), Duration::from_millis(5));
 
     let error = client
         .create_owner_issue(
@@ -1118,7 +1309,7 @@ fn owner_mutation_marks_a_response_returned_after_the_deadline_as_remote_unknown
                 body: "Body".to_string(),
                 labels: Vec::new(),
             },
-            &deadline,
+            &late_response_deadline(),
         )
         .expect_err("late mutation response");
 
@@ -1628,4 +1819,352 @@ fn owner_environment_override_rejects_an_expired_deadline_before_client_construc
         };
 
     assert!(matches!(error, ApiError::Timeout { .. }));
+}
+
+#[test]
+fn issue_labels_use_directional_single_requests() {
+    let transport = FakeTransport::new();
+    transport.enqueue(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: "[]".into(),
+    });
+    transport.enqueue(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: "[]".into(),
+    });
+    let client = client_with(transport);
+    client
+        .add_labels_mutation(IssueNumber(42), &["new".into()])
+        .unwrap();
+    client
+        .remove_label_mutation(IssueNumber(42), "phase/review #1")
+        .unwrap();
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, HttpMethod::Post);
+    assert!(requests[0].url.ends_with("/issues/42/labels"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[0].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({"labels": ["new"]})
+    );
+    assert_eq!(requests[1].method, HttpMethod::Delete);
+    assert!(requests[1]
+        .url
+        .ends_with("/issues/42/labels/phase%2Freview%20%231"));
+}
+
+#[test]
+fn issue_label_failure_certainty_does_not_retry() {
+    for (status, unknown) in [(422, false), (503, true)] {
+        for remove in [false, true] {
+            let transport = FakeTransport::new();
+            transport.enqueue(HttpResponse {
+                status,
+                headers: vec![],
+                body: "{}".into(),
+            });
+            let client = client_with(transport);
+            let error = if remove {
+                client.remove_label_mutation(IssueNumber(42), "x")
+            } else {
+                client.add_labels_mutation(IssueNumber(42), &["x".into()])
+            }
+            .unwrap_err();
+            assert_eq!(
+                matches!(error, OwnerMutationError::RemoteOutcomeUnknown(_)),
+                unknown
+            );
+            assert_eq!(client.transport().recorded().len(), 1);
+        }
+    }
+}
+
+#[test]
+fn issue_labels_honor_and_settle_rest_budget() {
+    for remove in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let transport = FakeTransport::new();
+        transport.enqueue(HttpResponse {
+            status: 429,
+            headers: vec![],
+            body: String::new(),
+        });
+        let client = client_with(transport).with_budget(ledger.clone(), gate);
+        let mutate = || {
+            if remove {
+                client.remove_label_mutation(IssueNumber(42), "x")
+            } else {
+                client.add_labels_mutation(IssueNumber(42), &["x".into()])
+            }
+        };
+        assert!(matches!(
+            mutate(),
+            Err(OwnerMutationError::PreSubmit(ApiError::RateLimited { .. }))
+        ));
+        assert!(ledger
+            .active_block(
+                gwt_core::github_quota::GitHubQuota::Rest,
+                chrono::Utc::now()
+            )
+            .is_some());
+        assert!(matches!(
+            mutate(),
+            Err(OwnerMutationError::PreSubmit(ApiError::RateLimited { .. }))
+        ));
+        assert_eq!(client.transport().recorded().len(), 1);
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["core"].calls_last_hour,
+            1
+        );
+    }
+}
+
+#[test]
+fn workflow_reads_metadata_and_raw_yaml_at_the_specified_ref() {
+    let transport = FakeTransport::new();
+    let filename = "日本語 Release#?%.yml";
+    let workflow_path = format!(".github/workflows/{filename}");
+    let metadata = serde_json::json!({"path": workflow_path}).to_string();
+    transport.enqueue(ok_body(&metadata));
+    transport.enqueue(ok_body(&metadata));
+    let yaml = "name: Release\non: workflow_dispatch\n";
+    transport.enqueue(ok_body(yaml));
+    transport.enqueue(HttpResponse {
+        status: 204,
+        headers: vec![],
+        body: String::new(),
+    });
+    let client = client_with(transport);
+
+    assert_eq!(client.workflow_path("1234").unwrap(), workflow_path);
+    assert_eq!(client.workflow_path(filename).unwrap(), workflow_path);
+    let git_ref = "feature/release &input=value#fragment";
+    assert_eq!(client.workflow_definition(filename, git_ref).unwrap(), yaml);
+    client
+        .dispatch_workflow(filename, git_ref, &serde_json::Map::new())
+        .unwrap();
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/octo/gwt/actions/workflows/1234"
+    );
+    let encoded_filename = "%E6%97%A5%E6%9C%AC%E8%AA%9E%20Release%23%3F%25.yml";
+    assert_eq!(
+        requests[1].url,
+        format!("https://api.github.com/repos/octo/gwt/actions/workflows/{encoded_filename}")
+    );
+    assert_eq!(
+        requests[2].url,
+        format!("https://api.github.com/repos/octo/gwt/contents/.github/workflows/{encoded_filename}?ref=feature%2Frelease+%26input%3Dvalue%23fragment")
+    );
+    assert_eq!(
+        requests[3].url,
+        format!(
+            "https://api.github.com/repos/octo/gwt/actions/workflows/{encoded_filename}/dispatches"
+        )
+    );
+    assert_eq!(requests[3].method, HttpMethod::Post);
+    let contents_url = reqwest::Url::parse(&requests[2].url).unwrap();
+    assert_eq!(
+        contents_url.path(),
+        format!("/repos/octo/gwt/contents/.github/workflows/{encoded_filename}")
+    );
+    assert_eq!(
+        contents_url.query_pairs().collect::<Vec<_>>(),
+        vec![("ref".into(), git_ref.into())]
+    );
+    assert!(contents_url.fragment().is_none());
+    for request in requests.iter().take(3) {
+        assert_eq!(request.method, HttpMethod::Get);
+        assert!(request.body.is_none());
+        assert!(request
+            .headers
+            .contains(&("Authorization".into(), "Bearer test-token".into())));
+        assert!(request
+            .headers
+            .contains(&("X-GitHub-Api-Version".into(), "2022-11-28".into())));
+    }
+    assert!(requests[0]
+        .headers
+        .contains(&("Accept".into(), "application/vnd.github+json".into())));
+    assert!(requests[2]
+        .headers
+        .contains(&("Accept".into(), "application/vnd.github.raw+json".into())));
+}
+
+#[test]
+fn workflow_dispatch_posts_inputs_and_accepts_no_content() {
+    let transport = FakeTransport::new();
+    transport.enqueue(HttpResponse {
+        status: 204,
+        headers: vec![],
+        body: String::new(),
+    });
+    let client = client_with(transport);
+    let inputs = serde_json::json!({"environment": "staging", "enabled": true})
+        .as_object()
+        .unwrap()
+        .clone();
+
+    client
+        .dispatch_workflow("release.yml", "feature/release", &inputs)
+        .unwrap();
+
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, HttpMethod::Post);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/octo/gwt/actions/workflows/release.yml/dispatches"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[0].body.as_deref().unwrap()).unwrap(),
+        serde_json::json!({"ref": "feature/release", "inputs": inputs})
+    );
+    assert!(requests[0]
+        .headers
+        .contains(&("Authorization".into(), "Bearer test-token".into())));
+    assert!(requests[0]
+        .headers
+        .contains(&("Content-Type".into(), "application/json".into())));
+}
+
+#[test]
+fn workflow_errors_do_not_expose_remote_response_bodies_or_inputs() {
+    let transport = FakeTransport::new();
+    for status in [403, 404, 422] {
+        transport.enqueue(HttpResponse {
+            status,
+            headers: vec![],
+            body: r#"{"message":"secret-input-value"}"#.into(),
+        });
+    }
+    let client = client_with(transport);
+    let inputs = serde_json::json!({"token": "secret-input-value"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let errors = [
+        client.workflow_path("1234").unwrap_err(),
+        client
+            .workflow_definition("release.yml", "main")
+            .unwrap_err(),
+        client
+            .dispatch_workflow("release.yml", "main", &inputs)
+            .unwrap_err(),
+    ];
+    assert!(matches!(errors[0], ApiError::PermissionDenied { .. }));
+    for error in errors {
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    }
+    assert_eq!(
+        client.transport().recorded().len(),
+        3,
+        "failures are not retried"
+    );
+}
+
+#[test]
+fn workflow_path_rejects_malformed_metadata_without_exposing_the_body() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body("secret-input-value"));
+    transport.enqueue(ok_body(r#"{"message":"secret-input-value"}"#));
+    let client = client_with(transport);
+    for _ in 0..2 {
+        let error = client.workflow_path("1234").unwrap_err();
+        assert!(matches!(error, ApiError::Unexpected(_)));
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    }
+}
+
+struct SecretWorkflowFailureTransport;
+
+impl HttpTransport for SecretWorkflowFailureTransport {
+    fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        Err(HttpError::Transport("secret-input-value".into()))
+    }
+
+    fn execute_with_deadline(
+        &self,
+        request: HttpRequest,
+        _deadline: &ResolutionDeadline,
+    ) -> Result<HttpResponse, HttpError> {
+        self.execute(request)
+    }
+}
+
+#[test]
+fn workflow_errors_do_not_expose_transport_messages() {
+    let client = HttpIssueClient::with_transport(
+        SecretWorkflowFailureTransport,
+        "test-token".into(),
+        "octo",
+        "gwt",
+    );
+    let errors = [
+        client.workflow_path("1234").unwrap_err(),
+        client
+            .workflow_definition("release.yml", "main")
+            .unwrap_err(),
+        client
+            .dispatch_workflow("release.yml", "main", &serde_json::Map::new())
+            .unwrap_err(),
+    ];
+    for error in errors {
+        assert!(matches!(error, ApiError::Network(_)));
+        assert!(!format!("{error:?} {error}").contains("secret-input-value"));
+    }
+}
+
+#[test]
+fn workflow_requests_honor_and_settle_the_shared_rest_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+    let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(r#"{"path":".github/workflows/release.yml"}"#));
+    transport.enqueue(ok_body("on: workflow_dispatch\n"));
+    transport.enqueue(HttpResponse {
+        status: 429,
+        headers: vec![("Retry-After".into(), "60".into())],
+        body: "secret-input-value".into(),
+    });
+    let client = client_with(transport).with_budget(ledger.clone(), gate);
+    client.workflow_path("1234").unwrap();
+    client.workflow_definition("release.yml", "main").unwrap();
+    assert!(matches!(
+        client.dispatch_workflow("release.yml", "main", &serde_json::Map::new()),
+        Err(ApiError::RateLimited {
+            retry_after: Some(60)
+        })
+    ));
+    assert!(ledger
+        .active_block(
+            gwt_core::github_quota::GitHubQuota::Rest,
+            chrono::Utc::now()
+        )
+        .is_some());
+    assert!(matches!(
+        client.workflow_path("1234"),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.workflow_definition("release.yml", "main"),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert!(matches!(
+        client.dispatch_workflow("release.yml", "main", &serde_json::Map::new()),
+        Err(ApiError::RateLimited { .. })
+    ));
+    assert_eq!(client.transport().recorded().len(), 3);
+    assert_eq!(
+        ledger.snapshot(chrono::Utc::now()).local["core"].calls_last_hour,
+        3
+    );
 }

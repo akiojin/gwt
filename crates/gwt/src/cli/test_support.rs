@@ -29,7 +29,7 @@ pub fn fake_gh_test_lock() -> &'static std::sync::Mutex<()> {
 
 pub fn compile_fake_gh(bin_dir: &Path) {
     let source = r###"
-use std::{env, fs, process::ExitCode};
+use std::{env, fs, io::Write, process::ExitCode};
 
 fn pr_json(number: &str, title: &str) -> String {
     format!(
@@ -56,10 +56,107 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let mode = env::var("GWT_FAKE_GH_MODE").unwrap_or_else(|_| "success".to_string());
     let state_file = env::var("GWT_FAKE_GH_STATE_FILE").ok();
+    if let Ok(path) = env::var("GWT_FAKE_GH_ARGV_FILE") {
+        let mut log = fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(log, "{args:?}").unwrap();
+    }
+
+    if mode == "issue-4323" {
+        match args.as_slice() {
+            [pr, view, number, ..] if pr == "pr" && view == "view" && number != "12" => {
+                eprintln!("Could not resolve to a PullRequest with the number of {number}");
+                return ExitCode::FAILURE;
+            }
+            [api, endpoint] if api == "api" && endpoint.starts_with("repos/akiojin/gwt/issues/") => {
+                match endpoint.rsplit('/').next().unwrap() {
+                    "4323" => println!(r#"{{"number":4323}}"#),
+                    "4122" => println!(r#"{{"number":4122,"pull_request":{{"url":"https://api.github.com/repos/akiojin/gwt/pulls/4122"}}}}"#),
+                    "404" | "403" | "502" => {
+                        eprintln!("GitHub request failed (HTTP {})", endpoint.rsplit('/').next().unwrap());
+                        return ExitCode::FAILURE;
+                    }
+                    "17" => println!("invalid JSON"),
+                    "18" => println!(r#"{{"number":4323}}"#),
+                    _ => println!("{{}}"),
+                }
+                return ExitCode::SUCCESS;
+            }
+            _ => {}
+        }
+    }
+
+    if mode == "actions-4188" {
+        use std::io::Write;
+        let state = std::path::Path::new(state_file.as_deref().expect("Actions fixture state"));
+        let request = args.join(" ");
+        writeln!(fs::OpenOptions::new().create(true).append(true).open(state.with_extension("calls")).unwrap(), "{request}").unwrap();
+        match request.as_str() {
+            "api /repos/fixture/repo/actions/runs/101" => {
+                let status = if state.exists() { "completed" } else { "in_progress" };
+                println!("{{\"status\":\"{status}\",\"repository\":{{\"full_name\":\"fixture/repo\"}}}}");
+            }
+            "api /repos/fixture/repo/actions/runs/202" =>
+                println!(r#"{{"status":"queued","repository":{{"full_name":"other/repo"}}}}"#),
+            "api /repos/fixture/repo/actions/runs/303" =>
+                println!(r#"{{"status":"completed","conclusion":"cancelled","repository":{{"full_name":"fixture/repo"}}}}"#),
+            "api /repos/fixture/repo/actions/runs/404" => {
+                eprintln!("gh: Not Found (HTTP 404)");
+                return ExitCode::FAILURE;
+            }
+            "api /repos/fixture/repo/actions/runs/505" =>
+                println!(r#"{{"status":"queued","repository":{{"full_name":"fixture/repo"}}}}"#),
+            "api --method POST /repos/fixture/repo/actions/runs/101/cancel" => {
+                fs::write(state, "cancelled").unwrap();
+            }
+            "api --method POST /repos/fixture/repo/actions/runs/505/cancel" => {}
+            "api --method POST /repos/fixture/repo/actions/runs/101/rerun-failed-jobs" => {
+                if !state.exists() {
+                    eprintln!("gh: This workflow is already running (HTTP 403)");
+                    return ExitCode::FAILURE;
+                }
+            }
+            "api --paginate --slurp /repos/fixture/repo/actions/runs?status=queued&per_page=100" =>
+                println!(r#"[{{"workflow_runs":[{{"id":505,"status":"queued","name":"Test","head_branch":"work/old","created_at":"2020-01-01T00:00:00Z","repository":{{"full_name":"fixture/repo"}}}},{{"id":606,"status":"queued","name":"Build","head_branch":"work/live","created_at":"2020-01-01T00:00:00Z","repository":{{"full_name":"fixture/repo"}}}}]}},{{"workflow_runs":[{{"id":707,"status":"queued","name":"Lint","head_branch":"develop","created_at":"2020-01-02T00:00:00Z","repository":{{"full_name":"fixture/repo"}}}}]}}]"#),
+            "api /repos/fixture/repo/actions/runs/505/jobs?per_page=1" |
+            "api /repos/fixture/repo/actions/runs/707/jobs?per_page=1" =>
+                println!(r#"{{"total_count":0,"jobs":[]}}"#),
+            "api /repos/fixture/repo/actions/runs/606/jobs?per_page=1" =>
+                println!(r#"{{"total_count":1,"jobs":[{{"id":1}}]}}"#),
+            _ => {
+                eprintln!("unexpected Actions fixture request: {request}");
+                return ExitCode::FAILURE;
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
 
     match args.as_slice() {
+        [repo, view, json, field, jq, selector]
+            if mode == "pre-pr-writer-probe"
+                && repo == "repo" && view == "view" && json == "--json"
+                && field == "nameWithOwner" && jq == "--jq" && selector == ".nameWithOwner" => {
+            println!("akiojin/gwt");
+            return ExitCode::SUCCESS;
+        }
+        [api, endpoint, jq, selector]
+            if mode == "pre-pr-writer-probe"
+                && api == "api" && endpoint == "repos/akiojin/gwt/branches/develop/protection"
+                && jq == "--jq" && selector == ".required_status_checks.contexts" => {
+            let lease_path = fs::read_to_string(state_file.as_deref().expect("probe state path")).unwrap();
+            let path = std::path::Path::new(&lease_path);
+            let lease = fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+            if let Err(error) = lease.try_lock() {
+                eprintln!("trusted writer unavailable during required-context read: {error}");
+                return ExitCode::FAILURE;
+            }
+            fs::write(path.with_file_name("pre-pr-writer-probe.json"), "written").unwrap();
+            println!(r#"["Test (Rust)","Clippy & Rustfmt","coverage / Rust Coverage"]"#);
+            return ExitCode::SUCCESS;
+        }
         [pr, list, ..] if pr == "pr" && list == "list" => {
-            if mode == "multi-pr-current" {
+            if mode == "foreign-fork-fallback" {
+                println!("[]");
+            } else if mode == "multi-pr-current" {
                 println!("{}", r#"[
 {"number":2537,"title":"Older PR","state":"CLOSED","url":"https://github.com/akiojin/gwt/pull/2537","createdAt":"2026-05-07T08:05:00Z","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"UNKNOWN","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}},
 {"number":2538,"title":"Newer PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/2538","createdAt":"2026-05-07T08:20:00Z","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}}
@@ -75,21 +172,37 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
+            if mode == "foreign-fork-fallback" {
+                let mut pr = pr_json("12", "Foreign fork PR");
+                pr.pop();
+                pr.push_str(r#", "headRefName":"work/20260507-0808", "headRepositoryOwner":{"login":"other-user"}, "headRepository":{"name":"gwt"}}"#);
+                println!("{pr}");
+                return ExitCode::SUCCESS;
+            }
             if mode == "no-current-pr" {
                 eprintln!("no pull requests found for branch");
                 return ExitCode::from(1);
             }
-            if mode == "behind" {
-                println!("{}", behind_pr_json("12", "Current PR"));
+            let mut pr = if mode == "behind" {
+                behind_pr_json("12", "Current PR")
             } else {
-                println!("{}", pr_json("12", "Current PR"));
-            }
+                pr_json("12", "Current PR")
+            };
+            pr.pop();
+            pr.push_str(r#", "headRefName":"work/20260507-0808", "headRepositoryOwner":{"login":"akiojin"}, "headRepository":{"name":"gwt"}}"#);
+            println!("{pr}");
             return ExitCode::SUCCESS;
         }
         [pr, view, number, repo_flag, _, json_flag, ..]
             if pr == "pr" && view == "view" && repo_flag == "--repo" && json_flag == "--json" =>
         {
-            if mode == "behind" {
+            if mode.starts_with("issue-3693")
+                && state_file.as_deref().and_then(|path| fs::read_to_string(path).ok()).as_deref() == Some("closed") {
+                println!("{}", pr_json(number, "Fetched PR").replace("\"OPEN\"", "\"CLOSED\""));
+            } else if mode.starts_with("checks-pending") || mode.starts_with("checks-merge-") {
+                let merge_state = mode.strip_prefix("checks-merge-").unwrap_or("BLOCKED");
+                println!("{}", pr_json(number, "Fetched PR").replace("\"CLEAN\"", &format!("\"{merge_state}\"")));
+            } else if mode == "behind" {
                 println!("{}", behind_pr_json(number, "Fetched PR"));
             } else {
                 println!("{}", pr_json(number, "Fetched PR"));
@@ -104,12 +217,33 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [pr, comment, ..] if pr == "pr" && comment == "comment" => {
+            if mode == "issue-3693-comment-failure" {
+                eprintln!("closure comment failed");
+                return ExitCode::FAILURE;
+            }
             return ExitCode::SUCCESS;
         }
         [pr, checks, _, json_flag, fields] if pr == "pr" && checks == "checks" && json_flag == "--json" => {
-            if mode == "checks-fallback" && !fields.contains("bucket") {
+            if (mode == "checks-fallback" || mode == "checks-pending-fallback") && !fields.contains("bucket") {
                 eprintln!("unknown JSON field\nAvailable fields:\n  name\n  state\n  bucket\n  link\n  startedAt\n  completedAt\n  workflow");
                 return ExitCode::from(1);
+            }
+            if mode == "checks-pending-partial-required" {
+                println!("{}", r#"[{"name":"passed","state":"SUCCESS","bucket":"pass","isRequired":false},{"name":"Build","state":"QUEUED","bucket":"pending"}]"#);
+                return ExitCode::SUCCESS;
+            }
+            if mode.starts_with("checks-pending") {
+                println!("{}", r#"[
+                    {"name":"passed","state":"SUCCESS","bucket":"pass"},
+                    {"name":"skipped","state":"SKIPPED","bucket":"skipping"},
+                    {"name":"failed","state":"FAILURE","bucket":"fail"},
+                    {"name":"Build","state":"QUEUED","conclusion":"SUCCESS","bucket":"pending","isRequired":true},
+                    {"name":"Test","state":"IN_PROGRESS","bucket":"pending","isRequired":false},
+                    {"name":"Check Windows","state":"PENDING","bucket":"pending","isRequired":true},
+                    {"name":"Review","state":"WAITING","bucket":"pending","isRequired":false},
+                    {"name":"Check macOS","state":"REQUESTED","bucket":"pending","isRequired":true}
+                ]"#);
+                return if mode == "checks-pending-fallback" { ExitCode::from(8) } else { ExitCode::SUCCESS };
             }
             if fields.contains("bucket") {
                 println!("[{{\"name\":\"CI\",\"state\":\"COMPLETED\",\"bucket\":\"pass\",\"link\":\"https://example.test/checks/12\",\"startedAt\":\"2026-04-20T00:00:00Z\",\"completedAt\":\"2026-04-20T00:01:00Z\",\"workflow\":\"coverage\"}}]");
@@ -147,6 +281,20 @@ fn main() -> ExitCode {
                 && endpoint.contains("/pulls/") =>
         {
             // pr.edit title/body via REST PATCH (replaces `gh pr edit`).
+            if mode == "issue-3693-edit-failure" && args.iter().any(|arg| arg == "base=develop") {
+                eprintln!("base update failed");
+                return ExitCode::FAILURE;
+            }
+            if mode.starts_with("issue-3693") && args.iter().any(|arg| arg == "base=develop") {
+                fs::write(state_file.as_deref().expect("PR state file"), "develop").unwrap();
+            }
+            if mode.starts_with("issue-3693") && args.iter().any(|arg| arg == "state=closed") {
+                if mode == "issue-3693-close-failure" {
+                    eprintln!("PR close failed");
+                    return ExitCode::FAILURE;
+                }
+                fs::write(state_file.as_deref().expect("PR state file"), "closed").unwrap();
+            }
             println!("{{\"number\":12}}");
             return ExitCode::SUCCESS;
         }
@@ -160,7 +308,14 @@ fn main() -> ExitCode {
             println!("[]");
             return ExitCode::SUCCESS;
         }
-        [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" => {
+        // Issue #4849 AC-1: the job log endpoint is read with
+        // `--allow-escape-sequences`; without it current `gh` refuses a response
+        // that carries colour codes, which every cargo test job does.
+        [api, allow, endpoint]
+            if api == "api"
+                && allow == "--allow-escape-sequences"
+                && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" =>
+        {
             if mode == "job-log-zip" {
                 print!("PKZIP");
             } else {
@@ -348,6 +503,8 @@ pub fn sample_issue_snapshot() -> IssueSnapshot {
 
 pub fn sample_pr_status() -> gwt_git::PrStatus {
     gwt_git::PrStatus {
+        head_ref_name: String::new(),
+        check_counts: None,
         number: 128,
         title: "Enforce coverage".to_string(),
         state: gwt_git::pr_status::PrState::Open,
@@ -373,4 +530,24 @@ pub fn commands_for_event<'a>(value: &'a serde_json::Value, event: &str) -> Vec<
         .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
         .filter_map(|hook| hook["command"].as_str())
         .collect()
+}
+
+/// Declare that this test accepts its runner's own scheduling priority for
+/// verification children (Issue #4409).
+///
+/// `verify.run` refuses to launch verification from a process running at a
+/// degraded nice value when no daemon can launch it instead, because spawning
+/// in place would hand the workload the agent launch policy's priority. A test
+/// runner inherits whatever priority its parent had and cannot change it, so a
+/// test that drives the real operation would pass or fail on where it happened
+/// to be started from — green in CI and in a terminal, red inside an agent.
+///
+/// These tests are about the record, the settlement rules, and the PR
+/// lifecycle, not about where verification is hosted; the placement decision
+/// has its own tests in `gwt_core::verification_priority` and
+/// `cli::daemon::verification_host`. Hold [`gwt_core::test_support::env_lock`]
+/// before calling this, like any other environment override.
+#[must_use]
+pub fn declare_inherited_spawn_host() -> ScopedEnvVar {
+    ScopedEnvVar::set("GWT_VERIFY_SPAWN_HOST", "inherit")
 }

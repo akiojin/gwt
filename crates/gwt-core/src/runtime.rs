@@ -273,18 +273,12 @@ pub fn invalidate_project_index_probe_cache() {
     let _ = std::fs::remove_file(cache);
 }
 
-fn acquire_probe_lock(runtime_dir: &Path) -> Result<std::fs::File> {
+fn acquire_probe_lock(runtime_dir: &Path) -> Result<crate::operation_deadline::NamedFileLock> {
     let lock_path = runtime_dir.join(PROBE_LOCK_FILE);
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|err| GwtError::Other(format!("open probe lock: {err}")))?;
-    crate::operation_deadline::lock_exclusive(&lock)
-        .map_err(|err| GwtError::Other(format!("acquire probe lock: {err}")))?;
-    Ok(lock)
+    // Issue #4686 AC-5: the runtime probe runs on hook and launch paths that
+    // fail closed, so name the holder rather than reporting a bare deadline.
+    crate::operation_deadline::NamedFileLock::acquire(&lock_path, "runtime_probe")
+        .map_err(|err| GwtError::Other(format!("acquire probe lock: {err}")))
 }
 
 fn venv_python_identity(venv_python: &Path) -> String {
@@ -451,10 +445,6 @@ fn base_python_candidates() -> Vec<PythonCandidate> {
                 prefix_args: &[],
             },
             PythonCandidate {
-                executable: "python3.9".into(),
-                prefix_args: &[],
-            },
-            PythonCandidate {
                 executable: "python3".into(),
                 prefix_args: &[],
             },
@@ -486,10 +476,6 @@ fn base_python_candidates() -> Vec<PythonCandidate> {
             },
             PythonCandidate {
                 executable: "python3.10".into(),
-                prefix_args: &[],
-            },
-            PythonCandidate {
-                executable: "python3.9".into(),
                 prefix_args: &[],
             },
             PythonCandidate {
@@ -589,7 +575,7 @@ fn parse_python_version(version_str: &str) -> std::result::Result<(u32, u32), St
 }
 
 fn supported_project_index_python_version(major: u32, minor: u32) -> bool {
-    major == 3 && minor >= 9
+    major == 3 && minor >= 10
 }
 
 fn is_windows_store_python_alias(path: &Path) -> bool {
@@ -637,7 +623,7 @@ fn python_version(
 }
 
 fn project_index_python_install_guidance() -> String {
-    "Project index runtime requires Python 3.9+ on PATH. Install Python and ensure `python` or `py -3` works before reopening gwt.".into()
+    "Project index runtime requires Python 3.10+ on PATH. Install Python and ensure `python` or `py -3` works before reopening gwt.".into()
 }
 
 fn find_bootstrap_python() -> std::result::Result<BootstrapPython, String> {
@@ -684,7 +670,7 @@ where
             });
         }
         last_issue = Some(format!(
-            "{} reported Python {version}; project index requires Python 3.9+",
+            "{} reported Python {version}; project index requires Python 3.10+",
             path.display()
         ));
     }
@@ -697,7 +683,7 @@ where
     }
 
     let detail = format!(
-        "No supported Python 3.9+ bootstrap candidate was usable. {}",
+        "No supported Python 3.10+ bootstrap candidate was usable. {}",
         last_issue.unwrap_or_else(project_index_python_install_guidance)
     );
     Err(tag_project_index_runtime_error(
@@ -1143,9 +1129,9 @@ mod tests {
     }
 
     #[test]
-    fn find_bootstrap_python_with_falls_back_from_python_38_to_python_39() {
-        let unsupported_python = PathBuf::from("/tmp/python3.8");
-        let supported_python = PathBuf::from("/tmp/python3.9");
+    fn find_bootstrap_python_with_falls_back_from_python_39_to_python_310() {
+        let unsupported_python = PathBuf::from("/tmp/python3.9");
+        let supported_python = PathBuf::from("/tmp/python3.10");
 
         let selected = find_bootstrap_python_with(
             |name| match name {
@@ -1155,9 +1141,9 @@ mod tests {
             },
             |path, _| {
                 if path == unsupported_python.as_path() {
-                    Ok((3, 8, "3.8".into()))
-                } else {
                     Ok((3, 9, "3.9".into()))
+                } else {
+                    Ok((3, 10, "3.10".into()))
                 }
             },
         )
@@ -1177,7 +1163,7 @@ mod tests {
             Some(ProjectIndexRuntimeErrorKind::PythonInstallRequired)
         );
         let detail = project_index_runtime_error_detail(&error);
-        assert!(detail.contains("Python 3.9+"));
+        assert!(detail.contains("Python 3.10+"));
         assert!(detail.contains("py -3"));
         assert!(detail.contains("python"));
     }
@@ -1263,7 +1249,7 @@ mod tests {
             Some(ProjectIndexRuntimeErrorKind::PythonInstallRequired)
         );
         let detail = project_index_runtime_error_detail(&wrapped);
-        assert!(detail.contains("Python 3.9+"));
+        assert!(detail.contains("Python 3.10+"));
     }
 
     #[test]
@@ -1280,37 +1266,37 @@ mod tests {
 
     #[test]
     fn find_bootstrap_python_with_reports_supported_boundary_version() {
-        let python39 = PathBuf::from("/tmp/python3.9");
+        let python310 = PathBuf::from("/tmp/python3.10");
         let selected = find_bootstrap_python_with(
+            |name| match name {
+                "python3.13" => Some(python310.clone()),
+                _ => None,
+            },
+            |_path, _| Ok((3, 10, "3.10".into())),
+        )
+        .expect("python 3.10 should be accepted");
+
+        assert_eq!(selected.program, python310);
+    }
+
+    #[test]
+    fn find_bootstrap_python_with_returns_runtime_unavailable_for_too_old_python_only() {
+        let python39 = PathBuf::from("/tmp/python3.9");
+        let error = find_bootstrap_python_with(
             |name| match name {
                 "python3.13" => Some(python39.clone()),
                 _ => None,
             },
             |_path, _| Ok((3, 9, "3.9".into())),
         )
-        .expect("python 3.9 should be accepted");
-
-        assert_eq!(selected.program, python39);
-    }
-
-    #[test]
-    fn find_bootstrap_python_with_returns_runtime_unavailable_for_too_old_python_only() {
-        let python38 = PathBuf::from("/tmp/python3.8");
-        let error = find_bootstrap_python_with(
-            |name| match name {
-                "python3.13" => Some(python38.clone()),
-                _ => None,
-            },
-            |_path, _| Ok((3, 8, "3.8".into())),
-        )
-        .expect_err("python 3.8 should be rejected");
+        .expect_err("python 3.9 should be rejected");
 
         assert_eq!(
             project_index_runtime_error_kind(&error),
             Some(ProjectIndexRuntimeErrorKind::RuntimeUnavailable)
         );
         let detail = project_index_runtime_error_detail(&error);
-        assert!(detail.contains("3.8"));
+        assert!(detail.contains("3.9"));
     }
 
     #[test]
@@ -1335,8 +1321,8 @@ mod tests {
 
         assert_eq!(parse_python_version("3.12.7").unwrap(), (3, 12));
         assert!(parse_python_version("3").is_err());
-        assert!(supported_project_index_python_version(3, 9));
-        assert!(!supported_project_index_python_version(3, 8));
+        assert!(supported_project_index_python_version(3, 10));
+        assert!(!supported_project_index_python_version(3, 9));
 
         assert!(is_windows_store_python_alias(Path::new(
             "/Users/example/AppData/Local/Microsoft/WindowsApps/python.exe"
@@ -1402,30 +1388,34 @@ mod tests {
 
     #[test]
     fn runtime_command_obeys_ambient_operation_deadline() {
+        use crate::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+
         let (program, args) = if cfg!(windows) {
             (
                 OsString::from("cmd"),
-                vec![
-                    OsString::from("/C"),
-                    OsString::from("ping -n 4 127.0.0.1 >NUL"),
-                ],
+                vec![OsString::from("/C"), OsString::from("exit 0")],
             )
         } else {
             (
                 OsString::from("sh"),
-                vec![OsString::from("-c"), OsString::from("sleep 3")],
+                vec![OsString::from("-c"), OsString::from("exit 0")],
             )
         };
-        let started = std::time::Instant::now();
-        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
-            started + std::time::Duration::from_millis(150),
-        );
+        // Keep the deadline ahead of host time: only the test-local clock
+        // advancing to expiry may reject this otherwise successful command.
+        let start = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        let expiry = start + std::time::Duration::from_millis(150);
+        let _clock = ScopedOperationClock::set(start);
+        let _deadline = ScopedOperationDeadline::enter(expiry);
+        assert!(run_silent(&program, &args, "runtime deadline fixture")
+            .expect("runtime helper may run before logical expiry")
+            .success());
 
+        let _expired = ScopedOperationClock::set(expiry);
         let error = run_silent(program, &args, "runtime deadline fixture")
-            .expect_err("runtime helper must stop at the ambient deadline");
+            .expect_err("runtime helper must reject at the ambient deadline");
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < std::time::Duration::from_millis(1_500));
     }
 
     #[test]

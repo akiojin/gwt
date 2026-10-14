@@ -21,11 +21,16 @@ from typing import Callable, Sequence
 
 CommandRunner = Callable[[Sequence[str]], str]
 
-# A commit is breaking when the subject carries a `!` before the colon
-# (e.g. `feat!:`, `fix(x)!:`) or a body line is a `BREAKING CHANGE:` /
+# A commit carries a breaking marker when the subject has a `!` before the
+# colon (e.g. `feat!:`, `fix(x)!:`) or a body line is a `BREAKING CHANGE:` /
 # `BREAKING-CHANGE:` footer. The footer alternative is anchored to the line
 # start (re.MULTILINE) and requires a trailing space/colon so that prose like
-# "see the BREAKING CHANGE section" does not trigger a major bump.
+# "see the BREAKING CHANGE section" is not reported as breaking.
+#
+# Issue #4373: the marker is *reported* (`breaking_commits`) but never decides
+# the version. Agents kept writing the footer and the major version climbed
+# to v9 without a human decision, so a major release is reachable only through
+# an explicit `--bump major` from the person who triggers the release.
 BREAKING_RE = re.compile(r"(^[a-z]+(\(.+\))?!:|^BREAKING[ -]CHANGE[ :])", re.MULTILINE)
 FEAT_RE = re.compile(r"^feat(\(.+\))?[!:]")
 FIX_RE = re.compile(r"^fix(\(.+\))?[!:]")
@@ -44,6 +49,10 @@ def _default_runner(cmd: Sequence[str]) -> str:
         check=True,
         capture_output=True,
         text=True,
+        # git emits UTF-8 regardless of the host locale; decoding with the
+        # locale (cp932 on Windows) crashes on non-ASCII commit subjects.
+        encoding="utf-8",
+        errors="replace",
     ).stdout
 
 
@@ -65,12 +74,14 @@ def parse_tag(tag: str | None) -> tuple[int, int, int] | None:
 def classify_bump(subjects: Sequence[str], combined_body: str) -> str:
     """Classify the release level from commit subjects and the combined body.
 
-    Returns one of ``major`` / ``minor`` / ``patch``. A breaking marker wins,
-    then a ``feat`` (minor), then everything else (patch) — docs/chore-only
-    ranges still bump patch so the release is never a no-op version.
+    Returns ``minor`` or ``patch`` — never ``major``. A breaking marker or a
+    ``feat`` yields minor, everything else patch (docs/chore-only ranges still
+    bump patch so the release is never a no-op version). The major level is
+    only reachable through an explicit ``bump=major`` (Issue #4373); breaking
+    markers are surfaced separately by ``breaking_commits``.
     """
     if BREAKING_RE.search(combined_body):
-        return "major"
+        return "minor"
     if any(FEAT_RE.match(subject) for subject in subjects):
         return "minor"
     if any(FIX_RE.match(subject) for subject in subjects):
@@ -98,22 +109,14 @@ def resolve_version(
 ) -> str:
     """Resolve the next version string from inputs.
 
-    ``bump=auto`` classifies from commits but refuses to silently emit a major
-    bump: a breaking change must be confirmed with an explicit ``--bump major``
-    so a major release is always a deliberate decision (the human still reviews
-    the resulting Release PR before merge).
+    ``bump=auto`` classifies from commits and never emits a major bump: a
+    breaking marker caps at minor. A major release requires the person who
+    triggers the release to pass ``--bump major`` explicitly (Issue #4373).
     """
     if bump not in VALID_BUMPS:
         raise ReleaseVersionError(f"invalid bump: {bump} (expected one of {', '.join(VALID_BUMPS)})")
     prev = parse_tag(prev_tag) or (0, 0, 0)
-    if bump == "auto":
-        level = classify_bump(subjects, combined_body)
-        if level == "major":
-            raise ReleaseVersionError(
-                "breaking changes detected in range; re-run with --bump major to confirm a major release"
-            )
-    else:
-        level = bump
+    level = classify_bump(subjects, combined_body) if bump == "auto" else bump
     return next_version(prev, level)
 
 
@@ -147,6 +150,59 @@ def gather_commits(commit_range: str, runner: CommandRunner) -> tuple[list[str],
     return subjects, body_out
 
 
+# One record per commit: abbreviated sha, subject, body — fields separated by
+# US (0x1f) and records by RS (0x1e) so multi-line bodies parse unambiguously.
+BREAKING_LOG_FORMAT = "%h%x1f%s%x1f%b%x1e"
+
+
+def parse_breaking_commits(log_output: str) -> list[str]:
+    """Return ``"<sha> <subject>"`` for every record carrying a breaking marker."""
+    found: list[str] = []
+    for record in log_output.split("\x1e"):
+        parts = record.lstrip("\r\n").split("\x1f", 2)
+        if len(parts) < 2 or not parts[0].strip():
+            continue
+        sha, subject = parts[0].strip(), parts[1].strip()
+        body = parts[2] if len(parts) == 3 else ""
+        if BREAKING_RE.search(f"{subject}\n{body}"):
+            found.append(f"{sha} {subject}")
+    return found
+
+
+def breaking_commits(commit_range: str, runner: CommandRunner) -> list[str]:
+    """List non-merge commits in the range that carry a breaking marker.
+
+    The result is informational (Issue #4373 AC-2): the workflow logs it and
+    the Release PR body lists it, but it never raises the bump level.
+    """
+    out = runner(["git", "log", commit_range, f"--pretty={BREAKING_LOG_FORMAT}", "--no-merges"])
+    return parse_breaking_commits(out)
+
+
+def resolve_range(
+    commit_range: str | None,
+    prev_tag: str | None,
+    runner: CommandRunner,
+) -> tuple[str | None, str]:
+    """Fill in the latest tag and the ``<tag>..HEAD`` range when not given."""
+    if prev_tag is None:
+        prev_tag = latest_version_tag(runner)
+    if commit_range is None:
+        commit_range = f"{prev_tag}..HEAD" if prev_tag else "HEAD"
+    return prev_tag, commit_range
+
+
+def list_breaking(
+    commit_range: str | None = None,
+    prev_tag: str | None = None,
+    runner: CommandRunner | None = None,
+) -> list[str]:
+    """End-to-end: resolve the range from git and list its breaking commits."""
+    runner = runner or _default_runner
+    _, commit_range = resolve_range(commit_range, prev_tag, runner)
+    return breaking_commits(commit_range, runner)
+
+
 def compute(
     bump: str,
     commit_range: str | None = None,
@@ -155,10 +211,7 @@ def compute(
 ) -> str:
     """End-to-end: resolve the latest tag + range from git and compute the version."""
     runner = runner or _default_runner
-    if prev_tag is None:
-        prev_tag = latest_version_tag(runner)
-    if commit_range is None:
-        commit_range = f"{prev_tag}..HEAD" if prev_tag else "HEAD"
+    prev_tag, commit_range = resolve_range(commit_range, prev_tag, runner)
     # Refuse an empty release: a range with zero commits would still bump the
     # version (classify_bump defaults to patch), producing a tag with no content.
     if count_commits(commit_range, runner) == 0:
@@ -174,7 +227,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bump", choices=VALID_BUMPS, default="auto")
     parser.add_argument("--range", dest="commit_range", default=None, help="git revision range, e.g. v9.54.0..HEAD")
     parser.add_argument("--prev-tag", dest="prev_tag", default=None, help="override the latest tag")
+    parser.add_argument(
+        "--list-breaking",
+        action="store_true",
+        help="print the breaking-marker commits in the range (one `<sha> <subject>` per line) instead of a version",
+    )
     args = parser.parse_args(argv)
+    if args.list_breaking:
+        for line in list_breaking(commit_range=args.commit_range, prev_tag=args.prev_tag):
+            print(line)
+        return 0
     try:
         version = compute(args.bump, commit_range=args.commit_range, prev_tag=args.prev_tag)
     except ReleaseVersionError as err:

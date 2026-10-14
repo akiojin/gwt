@@ -22,6 +22,7 @@
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn for Board origin jumps.
 // - activeWorkspace() / activeProjectTab(): workspace accessors.
+// - projectWindowContextById(windowId): owning project for per-window Logs.
 // - visibleBounds(): canvas bounds payload helper.
 // - getActiveWorkProjection(): read accessor for the active Work
 //   projection (app.js owns the let).
@@ -51,6 +52,7 @@ export function createBoardLogsSurface({
   focusOrSpawnPreset,
   activeWorkspace,
   activeProjectTab,
+  projectWindowContextById,
   visibleBounds,
   getActiveWorkProjection,
 }) {
@@ -92,7 +94,10 @@ export function createBoardLogsSurface({
           logStateMap.set(windowId, {
             entries: [],
             loading: false,
+            pendingScope: null,
             error: "",
+            scope: "project",
+            projectScope: projectWindowContextById(windowId)?.tab.project_scope || "",
             severity: "debug",
             query: "",
             // SPEC-2019 Amendment 2026-05-20 (Process facet) — AND-filter
@@ -502,15 +507,37 @@ export function createBoardLogsSurface({
 
       function requestLogs(windowId) {
         const state = ensureLogState(windowId);
+        if (state.scope === "project") {
+          state.projectScope = projectWindowContextById(windowId)?.tab.project_scope || "";
+        }
         if (state.loading) {
           return;
         }
         state.loading = true;
+        state.pendingScope = { scope: state.scope, projectScope: state.projectScope };
         state.error = "";
         send({
           kind: "load_logs",
           id: windowId,
+          scope: state.scope,
         });
+      }
+
+      function finishLogRequest(windowId) {
+        const state = ensureLogState(windowId);
+        const pending = state.pendingScope;
+        state.loading = false;
+        state.pendingScope = null;
+        // Scope changes coalesce behind the one in-flight request. Resolve
+        // the owner again because another project can now be the active tab.
+        const projectScope = projectWindowContextById(windowId)?.tab.project_scope || "";
+        if (pending && (pending.scope !== state.scope ||
+          (state.scope === "project" && pending.projectScope !== projectScope))) {
+          requestLogs(windowId);
+          renderLogs(windowId);
+          return false;
+        }
+        return true;
       }
 
 
@@ -575,12 +602,21 @@ export function createBoardLogsSurface({
         return (state.entries || [])
           .filter(
             (entry) =>
+              logMatchesScope(entry, state) &&
               logSeverityRank(entry.severity) >= minimumRank &&
               logMatchesQuery(entry, query) &&
               logMatchesProcessKind(entry, processKind),
           )
           .slice()
           .reverse();
+      }
+
+      function logMatchesScope(entry, state) {
+        const entryScope = String(entry?.project_scope || "");
+        if (state.scope === "global") {
+          return !entryScope;
+        }
+        return Boolean(state.projectScope) && entryScope === state.projectScope;
       }
 
       // SPEC-2019 Amendment 2026-05-20 — AND-combine the Process kind chip
@@ -598,6 +634,9 @@ export function createBoardLogsSurface({
 
       function appendLiveLogEntry(entry) {
         for (const [windowId, state] of logStateMap.entries()) {
+          if (!logMatchesScope(entry, state)) {
+            continue;
+          }
           state.entries.push(entry);
           if (state.entries.length > 1000) {
             state.entries = state.entries.slice(-1000);
@@ -638,6 +677,7 @@ export function createBoardLogsSurface({
         const state = ensureLogState(windowId);
         const status = body.querySelector(".logs-status");
         const unreadButton = body.querySelector(".logs-unread-button");
+        const scopeSelect = body.querySelector(".logs-scope-select");
         const severitySelect = body.querySelector(".logs-severity-select");
         const processKindSelect = body.querySelector(".logs-process-kind-select");
         const searchInput = body.querySelector(".logs-search-input");
@@ -646,6 +686,7 @@ export function createBoardLogsSurface({
         if (
           !status ||
           !unreadButton ||
+          !scopeSelect ||
           !severitySelect ||
           !processKindSelect ||
           !searchInput ||
@@ -683,6 +724,7 @@ export function createBoardLogsSurface({
           state.unreadAlerts === 1
             ? "1 unread alert"
             : `${state.unreadAlerts} unread alerts`;
+        scopeSelect.value = state.scope;
         severitySelect.value = state.severity;
         processKindSelect.value = state.processKind || "";
         searchInput.value = state.query;
@@ -1473,6 +1515,13 @@ export function createBoardLogsSurface({
               </div>
               <div class="logs-filter-bar">
                 <label class="logs-filter-field">
+                  <span>Scope</span>
+                  <select class="logs-scope-select">
+                    <option value="project">Project</option>
+                    <option value="global">Global</option>
+                  </select>
+                </label>
+                <label class="logs-filter-field">
                   <span>Severity</span>
                   <select class="logs-severity-select">
                     <option value="debug">Debug+</option>
@@ -1521,6 +1570,18 @@ export function createBoardLogsSurface({
             .addEventListener("click", (event) => {
               event.stopPropagation();
               jumpToUnread(windowData.id);
+            });
+          body
+            .querySelector(".logs-scope-select")
+            .addEventListener("change", (event) => {
+              state.scope = event.target.value;
+              state.entries = [];
+              state.selectedEntryId = null;
+              state.unreadAlerts = 0;
+              state.unreadEntryId = null;
+              state.error = "";
+              requestLogs(windowData.id);
+              renderLogs(windowData.id);
             });
           body
             .querySelector(".logs-severity-select")
@@ -1641,6 +1702,7 @@ export function createBoardLogsSurface({
             break;
           }
           case "log_entries": {
+            if (!finishLogRequest(event.id)) break;
             const state = ensureLogState(event.id);
             state.entries = event.entries || [];
             state.loading = false;
@@ -1668,6 +1730,7 @@ export function createBoardLogsSurface({
             break;
           }
           case "log_error": {
+            if (!finishLogRequest(event.id)) break;
             const state = ensureLogState(event.id);
             state.loading = false;
             state.error = event.message;

@@ -1,0 +1,2059 @@
+{
+  "scope": "Auxiliary real WebSocket shell input-to-echo measurement; not a replacement for PM/agent live verification.",
+  "measurement": "Browser performance.now from terminal_input dispatch to an exact echo output line in xterm buffer; requestAnimationFrame polling.",
+  "started_at": "2026-09-09T13:49:16.031Z",
+  "finished_at": "2026-09-09T13:50:03.382Z",
+  "status": "measured",
+  "binary": "target/debug/gwt.exe",
+  "source_base": "ebd29f32d62605063746c03922b69c9cd50ae8a2",
+  "source_note": "Source base plus the instrumentation and no-comparison Git guard in this commit",
+  "baseline_window_count": 0,
+  "samples": [
+    {
+      "theme": "dark",
+      "shellCount": 1,
+      "trial": 1,
+      "windowId": "check-4172::shell-1",
+      "elapsedMs": 126.60000000149012
+    },
+    {
+      "theme": "dark",
+      "shellCount": 1,
+      "trial": 2,
+      "windowId": "check-4172::shell-1",
+      "elapsedMs": 122.5
+    },
+    {
+      "theme": "dark",
+      "shellCount": 1,
+      "trial": 3,
+      "windowId": "check-4172::shell-1",
+      "elapsedMs": 122.5
+    },
+    {
+      "theme": "light",
+      "shellCount": 1,
+      "trial": 1,
+      "windowId": "check-4172::shell-1",
+      "elapsedMs": 150.5
+    },
+    {
+      "theme": "light",
+      "shellCount": 1,
+      "trial": 2,
+      "windowId": "check-4172::shell-1",
+      "elapsedMs": 121.60000000149012
+    },
+    {
+      "theme": "light",
+      "shellCount": 1,
+      "trial": 3,
+      "windowId": "check-4172::shell-1",
+      "elapsedMs": 121.09999999403954
+    },
+    {
+      "theme": "dark",
+      "shellCount": 8,
+      "trial": 1,
+      "windowId": "check-4172::shell-8",
+      "elapsedMs": 128.10000000149012
+    },
+    {
+      "theme": "dark",
+      "shellCount": 8,
+      "trial": 2,
+      "windowId": "check-4172::shell-8",
+      "elapsedMs": 121.10000000149012
+    },
+    {
+      "theme": "dark",
+      "shellCount": 8,
+      "trial": 3,
+      "windowId": "check-4172::shell-8",
+      "elapsedMs": 122.10000000149012
+    },
+    {
+      "theme": "light",
+      "shellCount": 8,
+      "trial": 1,
+      "windowId": "check-4172::shell-8",
+      "elapsedMs": 109.5
+    },
+    {
+      "theme": "light",
+      "shellCount": 8,
+      "trial": 2,
+      "windowId": "check-4172::shell-8",
+      "elapsedMs": 120.39999999850988
+    },
+    {
+      "theme": "light",
+      "shellCount": 8,
+      "trial": 3,
+      "windowId": "check-4172::shell-8",
+      "elapsedMs": 121.09999999403954
+    },
+    {
+      "theme": "dark",
+      "shellCount": 24,
+      "trial": 1,
+      "windowId": "check-4172::shell-24",
+      "elapsedMs": 139.20000000298023
+    },
+    {
+      "theme": "dark",
+      "shellCount": 24,
+      "trial": 2,
+      "windowId": "check-4172::shell-24",
+      "elapsedMs": 119.5
+    },
+    {
+      "theme": "dark",
+      "shellCount": 24,
+      "trial": 3,
+      "windowId": "check-4172::shell-24",
+      "elapsedMs": 118.90000000596046
+    },
+    {
+      "theme": "light",
+      "shellCount": 24,
+      "trial": 1,
+      "windowId": "check-4172::shell-24",
+      "elapsedMs": 119.5
+    },
+    {
+      "theme": "light",
+      "shellCount": 24,
+      "trial": 2,
+      "windowId": "check-4172::shell-24",
+      "elapsedMs": 119.79999999701977
+    },
+    {
+      "theme": "light",
+      "shellCount": 24,
+      "trial": 3,
+      "windowId": "check-4172::shell-24",
+      "elapsedMs": 119.30000000447035
+    }
+  ],
+  "themes": [
+    {
+      "theme": "dark",
+      "shellCount": 1,
+      "clickAndConfirmationMs": 75.39720000000125,
+      "screenshot": "1-shells-dark.png"
+    },
+    {
+      "theme": "light",
+      "shellCount": 1,
+      "clickAndConfirmationMs": 83.5030999999999,
+      "screenshot": "1-shells-light.png"
+    },
+    {
+      "theme": "dark",
+      "shellCount": 8,
+      "clickAndConfirmationMs": 114.27970000000278,
+      "screenshot": "8-shells-dark.png"
+    },
+    {
+      "theme": "light",
+      "shellCount": 8,
+      "clickAndConfirmationMs": 102.3820999999989,
+      "screenshot": "8-shells-light.png"
+    },
+    {
+      "theme": "dark",
+      "shellCount": 24,
+      "clickAndConfirmationMs": 181.43530000000464,
+      "screenshot": "24-shells-dark.png"
+    },
+    {
+      "theme": "light",
+      "shellCount": 24,
+      "clickAndConfirmationMs": 147.65840000000026,
+      "screenshot": "24-shells-light.png"
+    }
+  ],
+  "console_error_count": 0,
+  "page_errors": [],
+  "cleanup_errors": [],
+  "fast_path_samples": [
+    {
+      "timestamp": "2026-09-09T22:49:22.349669+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 1,
+        "window_id": "check-4172::shell-1",
+        "write_us": 73,
+        "elapsed_ms": 0,
+        "pty_writer_count": 1
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:22.375209200+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 2,
+        "window_id": "check-4172::shell-1",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 1
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:22.435276300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 3,
+        "window_id": "check-4172::shell-1",
+        "write_us": 58,
+        "elapsed_ms": 0,
+        "pty_writer_count": 1
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:22.625698800+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 4,
+        "window_id": "check-4172::agent-1",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:22.625839300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 5,
+        "window_id": "check-4172::agent-1",
+        "write_us": 31,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:23.121127600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 6,
+        "window_id": "check-4172::agent-1",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:24.315099900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 7,
+        "window_id": "check-4172::shell-1",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:24.493782800+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 8,
+        "window_id": "check-4172::shell-1",
+        "write_us": 87,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:24.622766+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 9,
+        "window_id": "check-4172::shell-1",
+        "write_us": 92,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:24.747968400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 10,
+        "window_id": "check-4172::shell-1",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:25.157538700+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 11,
+        "window_id": "check-4172::shell-1",
+        "write_us": 45,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:25.311398500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 12,
+        "window_id": "check-4172::shell-1",
+        "write_us": 49,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:25.436567+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 13,
+        "window_id": "check-4172::shell-1",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 2
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:25.631608600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 14,
+        "window_id": "check-4172::shell-2",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 3
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:25.657126200+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 15,
+        "window_id": "check-4172::shell-2",
+        "write_us": 59,
+        "elapsed_ms": 0,
+        "pty_writer_count": 3
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:25.716193300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 16,
+        "window_id": "check-4172::shell-2",
+        "write_us": 70,
+        "elapsed_ms": 0,
+        "pty_writer_count": 3
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:27.373696400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 17,
+        "window_id": "check-4172::shell-2",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 4
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:27.389709600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 18,
+        "window_id": "check-4172::shell-3",
+        "write_us": 49,
+        "elapsed_ms": 0,
+        "pty_writer_count": 4
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:27.405315200+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 19,
+        "window_id": "check-4172::shell-3",
+        "write_us": 54,
+        "elapsed_ms": 0,
+        "pty_writer_count": 4
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:27.465438+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 20,
+        "window_id": "check-4172::shell-3",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 4
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:28.841896900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 21,
+        "window_id": "check-4172::shell-3",
+        "write_us": 59,
+        "elapsed_ms": 0,
+        "pty_writer_count": 5
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:28.849155100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 22,
+        "window_id": "check-4172::shell-4",
+        "write_us": 44,
+        "elapsed_ms": 0,
+        "pty_writer_count": 5
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:28.874251400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 23,
+        "window_id": "check-4172::shell-4",
+        "write_us": 47,
+        "elapsed_ms": 0,
+        "pty_writer_count": 5
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:28.934437700+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 24,
+        "window_id": "check-4172::shell-4",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 5
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:30.341792300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 25,
+        "window_id": "check-4172::shell-4",
+        "write_us": 53,
+        "elapsed_ms": 0,
+        "pty_writer_count": 6
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:30.353709600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 26,
+        "window_id": "check-4172::shell-5",
+        "write_us": 79,
+        "elapsed_ms": 0,
+        "pty_writer_count": 6
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:30.373074700+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 27,
+        "window_id": "check-4172::shell-5",
+        "write_us": 49,
+        "elapsed_ms": 0,
+        "pty_writer_count": 6
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:30.434492+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 28,
+        "window_id": "check-4172::shell-5",
+        "write_us": 43,
+        "elapsed_ms": 0,
+        "pty_writer_count": 6
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:31.841585100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 29,
+        "window_id": "check-4172::shell-5",
+        "write_us": 40,
+        "elapsed_ms": 0,
+        "pty_writer_count": 7
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:31.852266+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 30,
+        "window_id": "check-4172::shell-6",
+        "write_us": 60,
+        "elapsed_ms": 3,
+        "pty_writer_count": 7
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:31.872771400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 31,
+        "window_id": "check-4172::shell-6",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 7
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:31.934567900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 32,
+        "window_id": "check-4172::shell-6",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 7
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:33.372900300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 33,
+        "window_id": "check-4172::shell-6",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 8
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:33.385033900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 34,
+        "window_id": "check-4172::shell-7",
+        "write_us": 41,
+        "elapsed_ms": 0,
+        "pty_writer_count": 8
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:33.404089+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 35,
+        "window_id": "check-4172::shell-7",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 8
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:33.467078700+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 36,
+        "window_id": "check-4172::shell-7",
+        "write_us": 59,
+        "elapsed_ms": 0,
+        "pty_writer_count": 8
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:34.841732800+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 37,
+        "window_id": "check-4172::shell-7",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:34.848894100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 38,
+        "window_id": "check-4172::shell-8",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:34.873172100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 39,
+        "window_id": "check-4172::shell-8",
+        "write_us": 57,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:35.014417300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 40,
+        "window_id": "check-4172::shell-8",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:36.347423100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 41,
+        "window_id": "check-4172::shell-8",
+        "write_us": 53,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:36.648568300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 42,
+        "window_id": "check-4172::shell-8",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:36.780351700+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 43,
+        "window_id": "check-4172::shell-8",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:36.904887+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 44,
+        "window_id": "check-4172::shell-8",
+        "write_us": 59,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:37.323679300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 45,
+        "window_id": "check-4172::shell-8",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:37.437446900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 46,
+        "window_id": "check-4172::shell-8",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:37.562095200+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 47,
+        "window_id": "check-4172::shell-8",
+        "write_us": 55,
+        "elapsed_ms": 0,
+        "pty_writer_count": 9
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:37.759176100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 48,
+        "window_id": "check-4172::shell-9",
+        "write_us": 45,
+        "elapsed_ms": 0,
+        "pty_writer_count": 10
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:37.781222+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 49,
+        "window_id": "check-4172::shell-9",
+        "write_us": 54,
+        "elapsed_ms": 0,
+        "pty_writer_count": 10
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:37.842635100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 50,
+        "window_id": "check-4172::shell-9",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 10
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:39.279517400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 51,
+        "window_id": "check-4172::shell-9",
+        "write_us": 56,
+        "elapsed_ms": 0,
+        "pty_writer_count": 11
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:39.287684100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 52,
+        "window_id": "check-4172::shell-10",
+        "write_us": 56,
+        "elapsed_ms": 0,
+        "pty_writer_count": 11
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:39.310611700+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 53,
+        "window_id": "check-4172::shell-10",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 11
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:39.372534400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 54,
+        "window_id": "check-4172::shell-10",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 11
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:40.779893400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 55,
+        "window_id": "check-4172::shell-10",
+        "write_us": 44,
+        "elapsed_ms": 0,
+        "pty_writer_count": 12
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:40.788127+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 56,
+        "window_id": "check-4172::shell-11",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 12
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:40.811131800+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 57,
+        "window_id": "check-4172::shell-11",
+        "write_us": 53,
+        "elapsed_ms": 0,
+        "pty_writer_count": 12
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:40.874571500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 58,
+        "window_id": "check-4172::shell-11",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 12
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:42.248346300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 59,
+        "window_id": "check-4172::shell-11",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 13
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:42.259532100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 60,
+        "window_id": "check-4172::shell-12",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 13
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:42.281038+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 61,
+        "window_id": "check-4172::shell-12",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 13
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:42.341483+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 62,
+        "window_id": "check-4172::shell-12",
+        "write_us": 64,
+        "elapsed_ms": 0,
+        "pty_writer_count": 13
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:43.811683300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 63,
+        "window_id": "check-4172::shell-12",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 14
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:43.820136200+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 64,
+        "window_id": "check-4172::shell-13",
+        "write_us": 45,
+        "elapsed_ms": 0,
+        "pty_writer_count": 14
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:43.842253400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 65,
+        "window_id": "check-4172::shell-13",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 14
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:43.905099600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 66,
+        "window_id": "check-4172::shell-13",
+        "write_us": 47,
+        "elapsed_ms": 0,
+        "pty_writer_count": 14
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:45.311218400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 67,
+        "window_id": "check-4172::shell-13",
+        "write_us": 84,
+        "elapsed_ms": 0,
+        "pty_writer_count": 15
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:45.319351600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 68,
+        "window_id": "check-4172::shell-14",
+        "write_us": 53,
+        "elapsed_ms": 0,
+        "pty_writer_count": 15
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:45.345675500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 69,
+        "window_id": "check-4172::shell-14",
+        "write_us": 57,
+        "elapsed_ms": 0,
+        "pty_writer_count": 15
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:45.406348100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 70,
+        "window_id": "check-4172::shell-14",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 15
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:46.749009900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 71,
+        "window_id": "check-4172::shell-14",
+        "write_us": 44,
+        "elapsed_ms": 0,
+        "pty_writer_count": 16
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:46.760641400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 72,
+        "window_id": "check-4172::shell-15",
+        "write_us": 53,
+        "elapsed_ms": 0,
+        "pty_writer_count": 16
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:46.781961+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 73,
+        "window_id": "check-4172::shell-15",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 16
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:46.843721900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 74,
+        "window_id": "check-4172::shell-15",
+        "write_us": 45,
+        "elapsed_ms": 0,
+        "pty_writer_count": 16
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:48.281522600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 75,
+        "window_id": "check-4172::shell-15",
+        "write_us": 54,
+        "elapsed_ms": 0,
+        "pty_writer_count": 17
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:48.293303400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 76,
+        "window_id": "check-4172::shell-16",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 17
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:48.311219400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 77,
+        "window_id": "check-4172::shell-16",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 17
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:48.372719300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 78,
+        "window_id": "check-4172::shell-16",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 17
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:49.718061+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 79,
+        "window_id": "check-4172::shell-16",
+        "write_us": 47,
+        "elapsed_ms": 0,
+        "pty_writer_count": 18
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:49.727677200+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 80,
+        "window_id": "check-4172::shell-17",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 18
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:49.749023100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 81,
+        "window_id": "check-4172::shell-17",
+        "write_us": 47,
+        "elapsed_ms": 0,
+        "pty_writer_count": 18
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:49.810323700+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 82,
+        "window_id": "check-4172::shell-17",
+        "write_us": 45,
+        "elapsed_ms": 0,
+        "pty_writer_count": 18
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:51.154914200+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 83,
+        "window_id": "check-4172::shell-17",
+        "write_us": 41,
+        "elapsed_ms": 0,
+        "pty_writer_count": 19
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:51.162951600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 84,
+        "window_id": "check-4172::shell-18",
+        "write_us": 47,
+        "elapsed_ms": 0,
+        "pty_writer_count": 19
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:51.187450100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 85,
+        "window_id": "check-4172::shell-18",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 19
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:51.248950500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 86,
+        "window_id": "check-4172::shell-18",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 19
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:52.532013500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 87,
+        "window_id": "check-4172::shell-18",
+        "write_us": 77,
+        "elapsed_ms": 0,
+        "pty_writer_count": 20
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:52.543914200+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 88,
+        "window_id": "check-4172::shell-19",
+        "write_us": 53,
+        "elapsed_ms": 0,
+        "pty_writer_count": 20
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:52.561451400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 89,
+        "window_id": "check-4172::shell-19",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 20
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:52.624649800+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 90,
+        "window_id": "check-4172::shell-19",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 20
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:53.937077100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 91,
+        "window_id": "check-4172::shell-19",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 21
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:53.947596400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 92,
+        "window_id": "check-4172::shell-20",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 21
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:53.969479400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 93,
+        "window_id": "check-4172::shell-20",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 21
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:54.029360600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 94,
+        "window_id": "check-4172::shell-20",
+        "write_us": 46,
+        "elapsed_ms": 0,
+        "pty_writer_count": 21
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:55.373479400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 95,
+        "window_id": "check-4172::shell-20",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 22
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:55.382529300+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 96,
+        "window_id": "check-4172::shell-21",
+        "write_us": 56,
+        "elapsed_ms": 0,
+        "pty_writer_count": 22
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:55.406673800+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 97,
+        "window_id": "check-4172::shell-21",
+        "write_us": 52,
+        "elapsed_ms": 0,
+        "pty_writer_count": 22
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:55.467178500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 98,
+        "window_id": "check-4172::shell-21",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 22
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:56.783189600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 99,
+        "window_id": "check-4172::shell-21",
+        "write_us": 44,
+        "elapsed_ms": 0,
+        "pty_writer_count": 23
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:56.792344400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 100,
+        "window_id": "check-4172::shell-22",
+        "write_us": 49,
+        "elapsed_ms": 0,
+        "pty_writer_count": 23
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:56.813786+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 101,
+        "window_id": "check-4172::shell-22",
+        "write_us": 50,
+        "elapsed_ms": 0,
+        "pty_writer_count": 23
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:56.874373400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 102,
+        "window_id": "check-4172::shell-22",
+        "write_us": 57,
+        "elapsed_ms": 0,
+        "pty_writer_count": 23
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:58.217021+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 103,
+        "window_id": "check-4172::shell-22",
+        "write_us": 43,
+        "elapsed_ms": 0,
+        "pty_writer_count": 24
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:58.225627900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 104,
+        "window_id": "check-4172::shell-23",
+        "write_us": 43,
+        "elapsed_ms": 0,
+        "pty_writer_count": 24
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:58.250674500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 105,
+        "window_id": "check-4172::shell-23",
+        "write_us": 49,
+        "elapsed_ms": 0,
+        "pty_writer_count": 24
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:58.311872500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 106,
+        "window_id": "check-4172::shell-23",
+        "write_us": 53,
+        "elapsed_ms": 0,
+        "pty_writer_count": 24
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:59.719412200+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 107,
+        "window_id": "check-4172::shell-23",
+        "write_us": 47,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:59.731054400+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 108,
+        "window_id": "check-4172::shell-24",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:59.751294600+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 109,
+        "window_id": "check-4172::shell-24",
+        "write_us": 48,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:59.812928700+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 110,
+        "window_id": "check-4172::shell-24",
+        "write_us": 47,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:50:01.191444100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 111,
+        "window_id": "check-4172::shell-24",
+        "write_us": 53,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:50:01.699963500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 112,
+        "window_id": "check-4172::shell-24",
+        "write_us": 56,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:50:01.845075100+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 113,
+        "window_id": "check-4172::shell-24",
+        "write_us": 110,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:50:01.97032+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 114,
+        "window_id": "check-4172::shell-24",
+        "write_us": 82,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:50:02.563556900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 115,
+        "window_id": "check-4172::shell-24",
+        "write_us": 53,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:50:02.688485900+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 116,
+        "window_id": "check-4172::shell-24",
+        "write_us": 51,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:50:02.813814500+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 117,
+        "window_id": "check-4172::shell-24",
+        "write_us": 44,
+        "elapsed_ms": 0,
+        "pty_writer_count": 25
+      },
+      "target": "gwt_input_trace"
+    },
+    {
+      "timestamp": "2026-09-09T22:50:02.997764800+09:00",
+      "level": "DEBUG",
+      "fields": {
+        "message": "terminal_input written to PTY via WS fast-path",
+        "stage": "fast_path_write",
+        "client_id": "b19d4b57-015b-4a6a-9b6b-ddec82fb375b",
+        "seq": 118,
+        "window_id": "check-4172::shell-24",
+        "write_us": 42,
+        "elapsed_ms": 0,
+        "pty_writer_count": 8
+      },
+      "target": "gwt_input_trace"
+    }
+  ],
+  "slow_frontend_samples": [
+    {
+      "timestamp": "2026-09-09T22:49:22.028690400+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "frontend event receive-to-completion latency exceeded budget",
+        "event": "StartupAutoResumeReady",
+        "elapsed_ms": 3693,
+        "queue_wait_ms": 0,
+        "handler_ms": 3693,
+        "receive_to_complete_ms": 3693,
+        "window_count": 1
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:22.305318100+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "frontend event receive-to-completion latency exceeded budget",
+        "event": "CreateWindow",
+        "elapsed_ms": 276,
+        "queue_wait_ms": 3666,
+        "handler_ms": 276,
+        "receive_to_complete_ms": 3942,
+        "window_count": 2
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:22.307983500+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "frontend event receive-to-completion latency exceeded budget",
+        "event": "UpdateWindowGeometry",
+        "elapsed_ms": 0,
+        "queue_wait_ms": 211,
+        "handler_ms": 0,
+        "receive_to_complete_ms": 211,
+        "window_count": 2
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:22.308843900+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "frontend event receive-to-completion latency exceeded budget",
+        "event": "UpdateWindowGeometry",
+        "elapsed_ms": 0,
+        "queue_wait_ms": 211,
+        "handler_ms": 0,
+        "receive_to_complete_ms": 211,
+        "window_count": 2
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:22.309036100+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "frontend event receive-to-completion latency exceeded budget",
+        "event": "UpdateWindowGeometry",
+        "elapsed_ms": 0,
+        "queue_wait_ms": 209,
+        "handler_ms": 0,
+        "receive_to_complete_ms": 209,
+        "window_count": 2
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:30.296680700+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "frontend event receive-to-completion latency exceeded budget",
+        "event": "CreateWindow",
+        "elapsed_ms": 43,
+        "queue_wait_ms": 0,
+        "handler_ms": 43,
+        "receive_to_complete_ms": 43,
+        "window_count": 6
+      },
+      "target": "gwt.frontend.timing"
+    },
+    {
+      "timestamp": "2026-09-09T22:49:43.771040800+09:00",
+      "level": "WARN",
+      "fields": {
+        "message": "frontend event receive-to-completion latency exceeded budget",
+        "event": "CreateWindow",
+        "elapsed_ms": 48,
+        "queue_wait_ms": 0,
+        "handler_ms": 48,
+        "receive_to_complete_ms": 48,
+        "window_count": 14
+      },
+      "target": "gwt.frontend.timing"
+    }
+  ],
+  "limitations": [
+    "Fresh HOME and a shell echo benchmark; runtime fast-path logs also include three incidental writes to agent-1 (115 shell writes, 118 total). Production restored Work/error-ledger workload was not reproduced.",
+    "Echo timing includes shell execution, backend output delivery and animation-frame polling.",
+    "Theme timing includes Playwright click actionability and browser confirmation.",
+    "No before/after performance comparison: this run validates instrumentation and pane-count observations only.",
+    "macOS was examined by common source path, not runtime sampling."
+  ]
+}

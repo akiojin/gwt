@@ -184,16 +184,85 @@ pub fn load_revival_record(
     };
     let record = serde_json::from_str::<ObligationRevivalRecord>(&contents)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    if record.session_id != session_id
-        || record.content_hash.is_empty()
-        || record.content_hash != revival_record_hash(&record)
-    {
+    let expected_content_hash = revival_record_hash(&record);
+    let check = if record.session_id != session_id {
+        Some(RevivalRecordCheck::Identity)
+    } else if record.content_hash.is_empty() || record.content_hash != expected_content_hash {
+        Some(RevivalRecordCheck::Integrity)
+    } else {
+        None
+    };
+    if let Some(check) = check {
+        let path = crate::cli::trusted_store::trusted_dir_for_worktree(worktree)
+            .map(|dir| dir.join(ACTION_OBLIGATION_REVIVAL_FILE))
+            .unwrap_or_else(|| worktree.join(ACTION_OBLIGATION_REVIVAL_STATE_RELATIVE));
         return Err(io::Error::new(
             ErrorKind::InvalidData,
-            "action obligation revival record failed identity/integrity validation",
+            RevivalRecordValidationFailure {
+                check,
+                expected_session_id: session_id.to_string(),
+                actual_session_id: record.session_id,
+                expected_content_hash,
+                actual_content_hash: record.content_hash,
+                path: path.display().to_string(),
+            },
         ));
     }
     Ok(Some(record))
+}
+
+/// Which validation rejected a revival record (Issue #5072 AC-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevivalRecordCheck {
+    /// The record belongs to another session (for example a continuation
+    /// predecessor); its content may be intact.
+    Identity,
+    /// The stored content hash does not match the record content.
+    Integrity,
+}
+
+/// Structured reason for a rejected revival record, so a reader can tell a
+/// foreign-session record from a corrupted one without opening the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RevivalRecordValidationFailure {
+    pub check: RevivalRecordCheck,
+    pub expected_session_id: String,
+    pub actual_session_id: String,
+    pub expected_content_hash: String,
+    pub actual_content_hash: String,
+    pub path: String,
+}
+
+impl std::fmt::Display for RevivalRecordValidationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let check = match self.check {
+            RevivalRecordCheck::Identity => "identity",
+            RevivalRecordCheck::Integrity => "integrity",
+        };
+        write!(
+            f,
+            "action obligation revival record failed {check} validation (session_id expected {} actual {}, content_hash expected {} actual {}, path {})",
+            self.expected_session_id,
+            self.actual_session_id,
+            self.expected_content_hash,
+            self.actual_content_hash,
+            self.path
+        )
+    }
+}
+
+impl std::error::Error for RevivalRecordValidationFailure {}
+
+/// The structured validation failure carried by a [`load_revival_record`]
+/// error, if that is why the record was rejected.
+#[must_use]
+pub fn revival_record_validation_failure(
+    error: &io::Error,
+) -> Option<&RevivalRecordValidationFailure> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<RevivalRecordValidationFailure>())
 }
 
 /// Compute the integrity hash (content with the hash field emptied).
@@ -268,6 +337,31 @@ fn contains_word(lower: &str, word: &str) -> bool {
     false
 }
 
+/// Exclude negated PR requests from both work-verb and PR-reference detection.
+/// Other obligation kinds still use the original prompt for their markers.
+fn without_negated_pr_requests(lower: &str) -> std::borrow::Cow<'_, str> {
+    static NEGATED_PR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?x)
+            (?-u:\b)(?:
+                no[\s-]+ |
+                without\s+(?:(?:creating|opening|making)\s+)? |
+                (?:do\s+not|don't|never)\s+(?:create|open|make)\s+
+            )
+            (?:(?:a|an|any|new|another|implementation)\s+)*
+            (?:pr|pull\s+request)(?-u:\b)
+            |
+            (?:(?-u:\b)(?:pr|pull\s+request)(?-u:\b)|プルリク(?:エスト)?)
+            \s*(?:
+                (?:を|は)?\s*(?:作ら(?:ない|ず)|作成(?:しない|せず)|不要) |
+                の\s*作成\s*は\s*不要
+            )",
+        )
+        .expect("valid negated PR pattern")
+    });
+    NEGATED_PR.replace_all(lower, " ")
+}
+
 /// T-240 core classifier: a prompt arms an obligation only when it carries
 /// an explicit WORK verb (imperative/te-form). Polite forms alone
 /// ("ください", "お願い", "please", "can you") are not sufficient — polite
@@ -302,10 +396,13 @@ pub fn classify_prompt(prompt: &str) -> Option<ObligationKind> {
         "create ",
         "update ",
     ];
-    if !WORK_FORMS.iter().any(|form| lower.contains(form)) {
+    let affirmative = without_negated_pr_requests(&lower);
+    if !WORK_FORMS.iter().any(|form| affirmative.contains(form)) {
         return None;
     }
-    if lower.contains("pull request") || lower.contains("プルリク") || contains_word(&lower, "pr")
+    if affirmative.contains("pull request")
+        || affirmative.contains("プルリク")
+        || contains_word(&affirmative, "pr")
     {
         return Some(ObligationKind::Pr);
     }
@@ -398,7 +495,7 @@ pub fn mark_from_prompt(worktree: &Path, session_id: &str, prompt: &str) -> io::
     };
     match crate::cli::trusted_store::with_write_lease_wait(
         worktree,
-        std::time::Duration::from_millis(300),
+        prompt_write_lease_wait(),
         || {
             let kind = classify_prompt_for_worktree(worktree, prompt, base_kind);
             mark_locked(worktree, session_id, prompt, kind)
@@ -415,6 +512,43 @@ pub fn mark_from_prompt(worktree: &Path, session_id: &str, prompt: &str) -> io::
         Err(err) => Err(err),
         Ok(()) => Ok(true),
     }
+}
+
+fn prompt_write_lease_wait() -> std::time::Duration {
+    let configured = std::time::Duration::from_millis(300);
+    gwt_core::operation_deadline::current().map_or(configured, |deadline| {
+        configured.min(deadline.saturating_duration_since(std::time::Instant::now()))
+    })
+}
+
+/// Prepare the owning session's leftover obligations for a delivered-owner
+/// settlement. The caller holds the trusted write lease and records its audit
+/// before saving this state; foreign or corrupt obligations fail closed.
+pub(crate) fn prepare_delivered_settlement(
+    worktree: &Path,
+    session_id: &str,
+    evidence: &str,
+) -> io::Result<Option<ActionObligationState>> {
+    let Some(mut state) = load(worktree)? else {
+        return Ok(None);
+    };
+    if state.session_id != session_id || !integrity_ok(&state) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "delivered-owner settlement requires integrity-valid obligations owned by this session",
+        ));
+    }
+    let mut changed = false;
+    for obligation in &mut state.obligations {
+        if obligation.settled.is_none() {
+            obligation.settled = Some(ObligationSettlement {
+                evidence: evidence.to_string(),
+                settled_at: Utc::now(),
+            });
+            changed = true;
+        }
+    }
+    Ok(changed.then_some(state))
 }
 
 /// Settle every open obligation of the given kinds with the named canonical
@@ -568,9 +702,13 @@ pub fn open_obligation_refusal(
         .join(", ");
     Some(format!(
         "open action obligations [{kinds}] from this session's prompts are unsettled (T-247). \
-         Settle them first — `issue.comment` / `issue.spec.edit` for issue_update, a plan-covering \
-         all-passing `verify.run` for implementation/verification, `pr.create` / `pr.edit` / `pr.ready` \
-         for pr — or defer them with `execution.blocked` and a non-empty `params.reason`."
+         Settle them with the operation that is executable in the current state — \
+         issue_update: `issue.comment` / `issue.spec.edit`; implementation/verification: a \
+         plan-covering all-passing `verify.run`; pr: `pr.edit` (any PR state, including MERGED), \
+         `pr.ready` (open draft only), `pr.create` (only while no PR exists). A PR that someone \
+         else readied or merged on your behalf is settled by `pr.edit` on it. `execution.blocked` \
+         is not a shortcut: it is terminal, and recovery costs `execution.reopen` plus a fresh \
+         derived-plan `verify.run` — use it only for a real blocker."
     ))
 }
 
@@ -596,6 +734,49 @@ pub fn open_kinds(worktree: &Path, session_id: &str) -> Vec<ObligationKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_lease_wait_is_bounded_by_the_hook_operation_deadline() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let held_worktree = worktree.path().to_path_buf();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            crate::cli::trusted_store::with_write_lease(&held_worktree, || {
+                acquired_tx.send(()).expect("signal acquired lease");
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("release lease");
+                Ok(())
+            })
+            .expect("hold write lease");
+        });
+        acquired_rx.recv().expect("lease acquired");
+        let started = std::time::Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + std::time::Duration::from_millis(40),
+        );
+
+        let armed = mark_from_prompt(worktree.path(), "session-deadline", "バグを修正して")
+            .expect("WouldBlock fallback remains fail-open");
+
+        assert!(armed);
+        // Assert the bound itself rather than how long the call happened to
+        // take. The wall clock here measures the runner as much as the code:
+        // under CI's default parallelism this observed 208ms against a 200ms
+        // limit even though the deadline was honoured (Issue #3777, CI run
+        // 34450187892), and in isolation the same call returns in 0.05s.
+        // `prompt_write_lease_wait` is a pure function of the ambient deadline,
+        // so checking it proves the clamp that the timing was only a proxy for.
+        assert!(
+            prompt_write_lease_wait() <= std::time::Duration::from_millis(40),
+            "the lease wait must be clamped to the hook deadline, not the \
+             standalone 300ms wait: {:?}",
+            prompt_write_lease_wait()
+        );
+        release_tx.send(()).expect("release holder");
+        holder.join().expect("holder thread");
+    }
 
     // T-240 core: request-form producing prompts arm typed kinds; status
     // and design questions never arm.
@@ -658,6 +839,54 @@ mod tests {
         assert_eq!(
             classify_prompt("調査の進捗はどうですか？よろしくお願いします"),
             None
+        );
+    }
+
+    #[test]
+    fn classifier_does_not_arm_pr_for_negated_pr_requests() {
+        for prompt in [
+            "PR を作らずに修正して",
+            "PR を作らないで修正して",
+            "新規 PR は作成しない。修正して",
+            "PR を作成せずに修正して",
+            "PR は不要です。修正して",
+            "PR の作成は不要です。修正して",
+            "fix this with no PR",
+            "fix this with no pull request",
+            "fix this without creating a new PR",
+            "fix this; do not create a PR",
+            "fix this; don't open a pull request",
+            "Before changing code, evaluate every remaining acceptance criterion. If all criteria are already satisfied, close Issue #4059 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.",
+            "Before changing code, evaluate every remaining acceptance criterion against origin/develop, not against your work branch. A commit that exists only on the work branch is not delivered and does not satisfy a criterion. If origin/develop already satisfies all criteria, close Issue #4059 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.",
+        ] {
+            assert_ne!(classify_prompt(prompt), Some(ObligationKind::Pr), "{prompt}");
+        }
+        assert_eq!(
+            classify_prompt("PR を作らずにテストを実行して"),
+            Some(ObligationKind::Verification)
+        );
+        for prompt in [
+            "Do not change tests; create a PR",
+            "新規 PR は作成しない。既存 PR を更新して",
+            "PR の作成は不要です。既存 PR を更新して",
+        ] {
+            assert_eq!(
+                classify_prompt(prompt),
+                Some(ObligationKind::Pr),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn classifier_requires_work_outside_negated_pr_requests() {
+        assert_eq!(
+            classify_prompt("Do not create a PR. Tests already passed."),
+            None
+        );
+        assert_eq!(
+            classify_prompt("Do not create a PR. Fix the tests."),
+            Some(ObligationKind::Verification)
         );
     }
 
@@ -920,6 +1149,30 @@ mod tests {
         let refusal = open_obligation_refusal(dir.path(), "sess-1", &[]).unwrap();
         assert!(refusal.contains("pr"), "{refusal}");
         assert!(refusal.contains("issue_update"), "{refusal}");
+        // Issue #3868 AC-28 / AC-29: the means are stated per PR state, a
+        // proxied Ready/merge has a settlement path, and the deferral names
+        // its recovery cost instead of posing as the easy way out.
+        assert!(
+            refusal.contains("`pr.edit` (any PR state, including MERGED)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("`pr.ready` (open draft only)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("`pr.create` (only while no PR exists)"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("readied or merged on your behalf"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("`execution.blocked` is not a shortcut"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("`execution.reopen`"), "{refusal}");
 
         // A PR mutation settles its own kind — excluding it leaves only the
         // issue update in the way.
@@ -1073,6 +1326,52 @@ mod tests {
             record.result,
             ObligationRevivalOutcome::PersistFailed { .. }
         ));
+    }
+
+    // Issue #5072 AC-1/AC-4: a rejected revival record names the failed
+    // check, the expected and observed values, and the record path.
+    #[test]
+    fn revival_record_validation_failure_is_structured() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        save_revival_record(
+            dir.path(),
+            "sess-predecessor",
+            &ObligationRevivalOutcome::Deferred {
+                reason: "obligation_state_missing".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(load_revival_record(dir.path(), "sess-predecessor")
+            .unwrap()
+            .is_some());
+
+        let error = load_revival_record(dir.path(), "sess-successor").unwrap_err();
+        let failure = revival_record_validation_failure(&error).expect("structured failure");
+        assert_eq!(failure.check, RevivalRecordCheck::Identity);
+        assert_eq!(failure.expected_session_id, "sess-successor");
+        assert_eq!(failure.actual_session_id, "sess-predecessor");
+        assert_eq!(failure.expected_content_hash, failure.actual_content_hash);
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path())
+            .unwrap()
+            .join(ACTION_OBLIGATION_REVIVAL_FILE);
+        assert_eq!(failure.path, trusted.display().to_string());
+        assert!(error.to_string().contains("identity"), "{error}");
+
+        let mut record: ObligationRevivalRecord =
+            serde_json::from_str(&fs::read_to_string(&trusted).unwrap()).unwrap();
+        record.content_hash = "0".repeat(64);
+        fs::write(&trusted, serde_json::to_vec(&record).unwrap()).unwrap();
+        let error = load_revival_record(dir.path(), "sess-predecessor").unwrap_err();
+        let failure = revival_record_validation_failure(&error).expect("structured failure");
+        assert_eq!(failure.check, RevivalRecordCheck::Integrity);
+        assert_eq!(failure.actual_content_hash, "0".repeat(64));
+        assert_eq!(failure.expected_content_hash, revival_record_hash(&record));
     }
 
     // No-secrets: raw prompts never persist, only digests.

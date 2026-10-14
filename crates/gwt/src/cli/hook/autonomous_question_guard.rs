@@ -93,14 +93,18 @@ Question: {question}\n\n",
             "WARNING: the handoff could not be written to the Issue Monitor control plane. The question is \
 still refused; report this failure in your closing summary so the owner Issue is not silently lost.\n\n",
         );
+    } else {
+        detail.push_str(
+            "The handoff is queued for the Issue Monitor. Recording it does not confirm a NeedsHuman \
+park or slot release; inspect issue.monitor.status for the current state.\n\n",
+        );
     }
     detail.push_str(
         "What to do now:\n\
 - If this decision is actually reversible and inside the owner Issue / SPEC scope, choose the smallest \
 fail-closed default, record the assumption and its reason, and continue working. Do not call a question \
 tool again.\n\
-- Otherwise stop working on this Issue. It is parked for a human and the Issue Monitor slot has been \
-released for the next ready Issue. Summarize what you completed, what remains, and the exact question, \
+- Otherwise stop work that requires the human decision. Summarize what you completed, what remains, and the exact question, \
 then end your turn.\n\n\
 User verification, PR/merge gates, branch protection and permission boundaries are unchanged and must \
 not be bypassed.",

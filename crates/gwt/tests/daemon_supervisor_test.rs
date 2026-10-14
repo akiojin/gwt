@@ -69,7 +69,9 @@ fn seed_live_endpoint(gwt_home: &Path, project_root: &Path, pid: u32) -> Runtime
         pid,
         gwt_home.join("daemon.sock").display().to_string(),
         "auth-token".to_string(),
-        "9.99.0".to_string(),
+        // Issue #4038 (AC-6): a daemon of another version is retired, so a
+        // reusable fixture endpoint must report this build's version.
+        env!("CARGO_PKG_VERSION").to_string(),
     );
     persist_endpoint(&scope.endpoint_path(gwt_home), &endpoint).expect("persist endpoint");
     scope
@@ -119,6 +121,8 @@ fn ensure_running_starts_a_daemon_when_no_endpoint_is_published() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");
@@ -146,6 +150,8 @@ fn ensure_running_reuses_a_live_daemon_endpoint_instead_of_spawning() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");
@@ -164,6 +170,315 @@ fn ensure_running_reuses_a_live_daemon_endpoint_instead_of_spawning() {
     supervisor.shutdown();
 }
 
+/// The project authority may live in another worktree's endpoint slot.
+#[test]
+fn ensure_running_reuses_the_project_authority_before_its_local_endpoint() {
+    let fixture = fixture();
+    let caller_scope = RuntimeScope::from_project_root(&fixture.project_root, RuntimeTarget::Host)
+        .expect("caller scope");
+    let owner_scope = RuntimeScope::new(
+        caller_scope.repo_hash.clone(),
+        "owner-worktree",
+        fixture.project_root.join("owner"),
+        RuntimeTarget::Host,
+    )
+    .expect("owner scope");
+    let owner = DaemonEndpoint::new(
+        owner_scope.clone(),
+        std::process::id(),
+        fixture.gwt_home.join("owner.sock").display().to_string(),
+        "owner-token".into(),
+        env!("CARGO_PKG_VERSION").into(),
+    );
+    persist_endpoint(&owner_scope.endpoint_path(&fixture.gwt_home), &owner).unwrap();
+    let prefs_path = fixture
+        .gwt_home
+        .join("projects")
+        .join(&caller_scope.repo_hash)
+        .join("project-state/issue-monitor.json");
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+    let (_, _lease) = gwt::establish_issue_monitor_authority_fence(
+        &prefs_path,
+        &gwt::IssueMonitorAuthorityFence::current_process(),
+        always_alive,
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let supervisor = counting_supervisor(Arc::clone(&calls), spawn_long_lived_child);
+    let result = supervisor.ensure_running_with(
+        &fixture.project_root,
+        DaemonEnsureInputs {
+            gwt_home: fixture.gwt_home.clone(),
+            is_process_alive: &always_alive,
+            expected_daemon_version: env!("CARGO_PKG_VERSION"),
+            retire_stale_daemon: &|_| {},
+        },
+    );
+    supervisor.shutdown();
+    assert_eq!(
+        result.unwrap(),
+        DaemonEnsureOutcome::AlreadyRunning { pid: owner.pid }
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+/// A persisted v2 PID can belong to an unrelated process after the daemon exits.
+#[test]
+fn free_v2_authority_lease_recovers_without_retiring_a_reused_pid() {
+    let fixture = fixture();
+    let scope = seed_live_endpoint(&fixture.gwt_home, &fixture.project_root, std::process::id());
+    let prefs_path = fixture
+        .gwt_home
+        .join("projects")
+        .join(&scope.repo_hash)
+        .join("project-state/issue-monitor.json");
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+    gwt::persist_issue_monitor_authority_fence(
+        &prefs_path,
+        &gwt::IssueMonitorAuthorityFence::current_process(),
+    )
+    .unwrap();
+    let fence_path = gwt::issue_monitor_authority_fence_path(&prefs_path);
+    let original_fence = std::fs::read(&fence_path).unwrap();
+    let original_prefs = std::fs::read(&prefs_path).unwrap();
+
+    for descriptor_present in [true, false] {
+        if !descriptor_present {
+            std::fs::remove_file(scope.endpoint_path(&fixture.gwt_home)).unwrap();
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let retire_calls = AtomicUsize::new(0);
+        let supervisor = counting_supervisor(Arc::clone(&calls), spawn_long_lived_child);
+        let result = supervisor.ensure_running_with(
+            &fixture.project_root,
+            DaemonEnsureInputs {
+                gwt_home: fixture.gwt_home.clone(),
+                is_process_alive: &always_alive,
+                expected_daemon_version: "next-version",
+                retire_stale_daemon: &|_| {
+                    retire_calls.fetch_add(1, Ordering::SeqCst);
+                },
+            },
+        );
+        supervisor.shutdown();
+        assert_eq!(
+            retire_calls.load(Ordering::SeqCst),
+            0,
+            "a free v2 lease cannot authorize retiring the fence PID"
+        );
+        assert!(
+            matches!(result, Ok(DaemonEnsureOutcome::Spawned { .. })),
+            "stale v2 authority must recover even without its descriptor: {result:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&fence_path).unwrap(), original_fence);
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), original_prefs);
+    }
+}
+
+#[test]
+fn held_lease_with_stale_descriptor_cannot_retire_an_unverified_pid() {
+    let fixture = fixture();
+    let scope = seed_live_endpoint(&fixture.gwt_home, &fixture.project_root, std::process::id());
+    let prefs_path = fixture
+        .gwt_home
+        .join("projects")
+        .join(&scope.repo_hash)
+        .join("project-state/issue-monitor.json");
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+    let (_, _new_owner_lease) = gwt::establish_issue_monitor_authority_fence(
+        &prefs_path,
+        &gwt::IssueMonitorAuthorityFence::current_process(),
+        always_alive,
+    )
+    .unwrap();
+    // A new starter holds the lease, while the old process's fence and
+    // descriptor still name a PID now reused by an unrelated process.
+    gwt::persist_issue_monitor_authority_fence(
+        &prefs_path,
+        &gwt::IssueMonitorAuthorityFence::current_process(),
+    )
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let retired = AtomicUsize::new(0);
+    let supervisor = counting_supervisor(Arc::clone(&calls), spawn_long_lived_child);
+    let result = supervisor.ensure_running_with(
+        &fixture.project_root,
+        DaemonEnsureInputs {
+            gwt_home: fixture.gwt_home.clone(),
+            is_process_alive: &always_alive,
+            expected_daemon_version: "next-version",
+            retire_stale_daemon: &|_| {
+                retired.fetch_add(1, Ordering::SeqCst);
+            },
+        },
+    );
+    supervisor.shutdown();
+    assert_eq!(
+        retired.load(Ordering::SeqCst),
+        0,
+        "lease contention does not authenticate the stale PID"
+    );
+    assert!(
+        result.is_err(),
+        "unreachable stale candidate must fail closed: {result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_queued_ensure_cannot_spawn_after_shutdown() {
+    let fixture = fixture();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let supervisor = Arc::new(counting_supervisor(
+        Arc::clone(&calls),
+        spawn_long_lived_child,
+    ));
+    let reservation = supervisor
+        .reserve_ensure(&fixture.project_root)
+        .unwrap()
+        .unwrap();
+    assert!(supervisor
+        .reserve_ensure(&fixture.project_root)
+        .unwrap()
+        .is_none());
+    let worker = Arc::clone(&supervisor);
+    let queued = move || {
+        let _reservation = reservation;
+        worker.ensure_running_with(
+            &fixture.project_root,
+            DaemonEnsureInputs {
+                gwt_home: fixture.gwt_home.clone(),
+                is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
+            },
+        )
+    };
+    supervisor.shutdown();
+    let result = queued();
+    supervisor.shutdown();
+    assert!(
+        result.is_err(),
+        "shutdown must reject queued ensure: {result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn shutdown_during_retirement_authentication_prevents_termination() {
+    use std::io::{BufRead, Write};
+    let fixture = fixture();
+    let scope = seed_live_endpoint(&fixture.gwt_home, &fixture.project_root, std::process::id());
+    let listener =
+        std::os::unix::net::UnixListener::bind(fixture.gwt_home.join("daemon.sock")).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let retired = AtomicUsize::new(0);
+    let supervisor = Arc::new(counting_supervisor(
+        Arc::clone(&calls),
+        spawn_long_lived_child,
+    ));
+    let stopping = Arc::clone(&supervisor);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let request: gwt_core::daemon::IpcHandshakeRequest = serde_json::from_str(&line).unwrap();
+        assert_eq!(request.scope, scope);
+        assert_eq!(request.auth_token, "auth-token");
+        stopping.shutdown();
+        writeln!(
+            stream,
+            "{}",
+            serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
+                protocol_version: request.protocol_version,
+                daemon_version: env!("CARGO_PKG_VERSION").into(),
+                accepted: true,
+                rejection_reason: None,
+            })
+            .unwrap()
+        )
+        .unwrap();
+    });
+    let result = supervisor.ensure_running_with(
+        &fixture.project_root,
+        DaemonEnsureInputs {
+            gwt_home: fixture.gwt_home.clone(),
+            is_process_alive: &always_alive,
+            expected_daemon_version: "next-version",
+            retire_stale_daemon: &|_| {
+                retired.fetch_add(1, Ordering::SeqCst);
+            },
+        },
+    );
+    server.join().unwrap();
+    assert!(result
+        .unwrap_err()
+        .contains("shut down during retirement verification"));
+    assert_eq!(retired.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_contended_prefs_lock_bounds_the_supervisor_authority_probe() {
+    let fixture = fixture();
+    let scope = seed_live_endpoint(&fixture.gwt_home, &fixture.project_root, std::process::id());
+    let prefs_path = fixture
+        .gwt_home
+        .join("projects")
+        .join(&scope.repo_hash)
+        .join("project-state/issue-monitor.json");
+    gwt::save_issue_monitor_prefs(&prefs_path, &gwt::IssueMonitorPrefs::default()).unwrap();
+    gwt::persist_issue_monitor_authority_fence(
+        &prefs_path,
+        &gwt::IssueMonitorAuthorityFence::current_process(),
+    )
+    .unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(prefs_path.with_extension("lock"))
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lock).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let supervisor = Arc::new(counting_supervisor(
+        Arc::clone(&calls),
+        spawn_long_lived_child,
+    ));
+    let worker = Arc::clone(&supervisor);
+    let (send, receive) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let result = worker.ensure_running_with(
+            &fixture.project_root,
+            DaemonEnsureInputs {
+                gwt_home: fixture.gwt_home.clone(),
+                is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
+            },
+        );
+        let _ = send.send(result);
+    });
+    // Safety ceiling only: the lock stays held until a bounded result arrives.
+    // Always release it before joining, including the expected RED path.
+    let result = receive.recv_timeout(Duration::from_secs(5));
+    fs2::FileExt::unlock(&lock).unwrap();
+    thread.join().unwrap();
+    supervisor.shutdown();
+    assert!(
+        matches!(result, Ok(Err(ref error)) if error.contains("deadline expired")),
+        "probe must fail before the unrelated holder releases prefs.lock: {result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
 /// A daemon needs time between `fork` and publishing its endpoint. Without
 /// in-flight tracking every tick during that window starts another daemon.
 #[test]
@@ -174,6 +489,8 @@ fn ensure_running_does_not_start_a_second_daemon_while_the_first_is_still_starti
     let inputs = || DaemonEnsureInputs {
         gwt_home: fixture.gwt_home.clone(),
         is_process_alive: &always_alive,
+        expected_daemon_version: env!("CARGO_PKG_VERSION"),
+        retire_stale_daemon: &|_| {},
     };
 
     let first = supervisor
@@ -191,6 +508,54 @@ fn ensure_running_does_not_start_a_second_daemon_while_the_first_is_still_starti
     supervisor.shutdown();
 }
 
+#[test]
+fn same_project_clones_share_one_starting_child() {
+    let fixture = fixture();
+    let sibling = fixture._temp.path().join("other-clone");
+    std::fs::create_dir_all(&sibling).unwrap();
+    for root in [&fixture.project_root, &sibling] {
+        for args in [
+            vec!["init", "--quiet"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/single-project.git",
+            ],
+        ] {
+            let status =
+                resolved_command(ProcessPlanRequest::new("git").args(args).current_dir(root))
+                    .unwrap()
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap();
+            assert!(status.success());
+        }
+    }
+    let first_scope =
+        RuntimeScope::from_project_root(&fixture.project_root, RuntimeTarget::Host).unwrap();
+    let second_scope = RuntimeScope::from_project_root(&sibling, RuntimeTarget::Host).unwrap();
+    assert_eq!(first_scope.repo_hash, second_scope.repo_hash);
+    assert_ne!(first_scope.worktree_hash, second_scope.worktree_hash);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let supervisor = counting_supervisor(Arc::clone(&calls), spawn_long_lived_child);
+    let inputs = || DaemonEnsureInputs {
+        gwt_home: fixture.gwt_home.clone(),
+        is_process_alive: &always_alive,
+        expected_daemon_version: env!("CARGO_PKG_VERSION"),
+        retire_stale_daemon: &|_| {},
+    };
+    let first = supervisor.ensure_running_with(&fixture.project_root, inputs());
+    let second = supervisor.ensure_running_with(&sibling, inputs());
+    supervisor.shutdown();
+    let DaemonEnsureOutcome::Spawned { pid } = first.unwrap() else {
+        panic!("first clone must start the owner")
+    };
+    assert_eq!(second.unwrap(), DaemonEnsureOutcome::Starting { pid });
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 /// AC-2: a daemon that crashed or exited must be replaced without operator
 /// action. The supervisor recognises its own dead child and starts a new one.
 #[test]
@@ -201,6 +566,8 @@ fn ensure_running_replaces_a_daemon_that_exited() {
     let inputs = || DaemonEnsureInputs {
         gwt_home: fixture.gwt_home.clone(),
         is_process_alive: &always_alive,
+        expected_daemon_version: env!("CARGO_PKG_VERSION"),
+        retire_stale_daemon: &|_| {},
     };
 
     let first = supervisor
@@ -241,6 +608,8 @@ fn ensure_running_starts_a_daemon_when_the_published_endpoint_owner_is_dead() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &never_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");
@@ -265,6 +634,8 @@ fn ensure_running_reports_the_reason_when_the_daemon_cannot_be_started() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect_err("spawn failure must be reported");
@@ -272,6 +643,33 @@ fn ensure_running_reports_the_reason_when_the_daemon_cannot_be_started() {
     assert!(
         error.contains("gwtd binary could not be resolved"),
         "the failure reason must reach the caller: {error}"
+    );
+    supervisor.shutdown();
+}
+
+#[test]
+fn ensure_running_records_a_daemon_fault_in_the_error_ledger() {
+    let fixture = fixture();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(&fixture.gwt_home);
+    let supervisor = DaemonSupervisor::with_spawner(|_context: &DaemonSpawnContext<'_>| {
+        Err(std::io::Error::other("gwtd binary could not be resolved"))
+    });
+
+    let error = supervisor
+        .ensure_running(&fixture.project_root)
+        .expect_err("spawn failure must be reported");
+    assert!(
+        error.contains("gwtd binary could not be resolved"),
+        "{error}"
+    );
+
+    let listed = gwt_core::error_ledger::list_since(None).expect("list");
+    assert!(
+        listed.iter().any(|row| {
+            row.kind == gwt_core::error_ledger::ErrorKind::DaemonFault
+                && row.message.contains("gwtd binary could not be resolved")
+        }),
+        "daemon fault must land in the error ledger: {listed:?}"
     );
     supervisor.shutdown();
 }
@@ -327,6 +725,8 @@ fn supervisor_resolves_against_the_current_daemon_protocol_version() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");
@@ -362,6 +762,8 @@ fn the_spawn_context_anchors_the_daemon_diagnostic_log_next_to_its_endpoint() {
             DaemonEnsureInputs {
                 gwt_home: fixture.gwt_home.clone(),
                 is_process_alive: &always_alive,
+                expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                retire_stale_daemon: &|_| {},
             },
         )
         .expect("ensure running");

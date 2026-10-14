@@ -207,6 +207,44 @@ mod tests {
         assert!(mgr.get_pane(&id).is_none());
     }
 
+    /// Issue #4142 AC-2: closing a pane must give its PTY descriptors back.
+    /// The count is of terminal descriptors, which for this process means the
+    /// PTY masters and their `portable-pty` clones — the `/dev/ptmx` entries
+    /// the issue measured with `lsof`.
+    #[cfg(unix)]
+    #[test]
+    fn closing_panes_releases_every_pty_descriptor() {
+        const PANES: usize = 8;
+
+        let _pty_guard = lock_pty_test();
+        let open_tty_fds =
+            || gwt_core::fd_limit::open_tty_fd_count().expect("unix exposes an fd table");
+        let baseline = open_tty_fds();
+
+        let mut mgr = PaneManager::new(80, 24);
+        let ids: Vec<String> = (0..PANES)
+            .map(|_| {
+                mgr.spawn_shell(std::env::temp_dir(), HashMap::new())
+                    .expect("spawn failed")
+            })
+            .collect();
+        let held = open_tty_fds();
+        assert!(
+            held >= baseline + PANES,
+            "{PANES} live panes must hold at least one PTY descriptor each: {baseline} -> {held}"
+        );
+
+        for id in &ids {
+            mgr.close_pane(id).expect("close failed");
+        }
+
+        assert_eq!(
+            open_tty_fds(),
+            baseline,
+            "closing {PANES} panes did not release their PTY descriptors"
+        );
+    }
+
     #[test]
     fn test_close_nonexistent_pane_returns_error() {
         let mut mgr = PaneManager::new(80, 24);

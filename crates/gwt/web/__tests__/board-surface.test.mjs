@@ -86,19 +86,15 @@ test("Board surface wires all active Work ids into currentWorkspaceIds (SPEC-235
 });
 
 test("Board message body renders sanitized server Markdown with a plaintext fallback (SPEC-2963)", () => {
-  // The card body reuses the Knowledge markdown renderer, which sets innerHTML
-  // from the server-sanitized `body_html` and falls back to plaintext.
+  // Both cards use the typed content renderer. Its DOM behavior is covered by
+  // ui-content.test.mjs; this contract preserves the shared wiring and styles.
   assert.match(
     appSource,
     /createKnowledgeMarkdownBody\(entry,\s*"board-message-body"\)/,
   );
   assert.match(
     appSource,
-    /function createKnowledgeMarkdownBody[\s\S]{0,400}body_html[\s\S]{0,200}innerHTML/,
-  );
-  assert.match(
-    appSource,
-    /function createKnowledgeMarkdownBody[\s\S]{0,400}is-plaintext[\s\S]{0,120}textContent/,
+    /function createKnowledgeMarkdownBody[\s\S]{0,200}renderUiContent\(document, markdownContent\(section\)/,
   );
   // Only the plaintext fallback forces pre-wrap; rendered HTML lays itself out.
   assert.match(

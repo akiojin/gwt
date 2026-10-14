@@ -83,8 +83,11 @@ fn live_autonomous_merge_against_real_github() {
     monitor.capture_acceptance_snapshot(pr, classify_acceptance_criteria(body).snapshot());
     monitor.begin_review(pr, pr, &reviewed);
     monitor.record_review_verdict(pr, true);
+    let mergeability = gwt_git::pr_status::try_fetch_pr_merge_readback(&repo, pr)
+        .expect("PR mergeability")
+        .mergeability;
     let inputs = monitor
-        .autonomous_gate_inputs(pr, protection, &rollup, &head, body)
+        .autonomous_gate_inputs(pr, protection, &rollup, &head, body, mergeability)
         .expect("gate ready");
     assert_eq!(
         evaluate_autonomous_gate(&inputs),

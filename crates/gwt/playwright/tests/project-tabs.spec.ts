@@ -1,437 +1,313 @@
-import { expect, test } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { expect, test, type Page } from "@playwright/test";
+import { randomUUID } from "node:crypto";
+import { readFile, rename, writeFile } from "node:fs/promises";
+import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 test.describe("Project tabs", () => {
+  const browserErrors = new WeakMap<Page, string[]>();
+  test.beforeEach(async ({ page }) => {
+    browserErrors.set(page, collectBrowserErrors(page));
+  });
+  test.afterEach(async ({ page }) => {
+    expect(browserErrors.get(page)).toEqual([]);
+  });
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("tab switching stays responsive while streamed WebSocket output is backlogged", async ({
-    page,
-  }) => {
-    const burstSize = 500;
-    const streamedStateBoundary = 32;
-    await installEmbeddedRoutes(page);
-    await installProjectTabsBackend(page, projectTabsFixture(12, {
-      hotAgentWindowId: "agent-burst",
-    }));
-
-    await page.goto(APP_URL);
-    await expect(page.locator(".project-tab")).toHaveCount(12, {
-      timeout: 10_000,
-    });
-    const first = page.locator(".project-tab").nth(0);
-    const second = page.locator(".project-tab").nth(1);
-    await expect(first).toHaveAttribute("aria-current", "page");
-
-    expect(burstSize / streamedStateBoundary).toBeGreaterThanOrEqual(10);
-    await page.evaluate(
-      ({ count, windowId }) => {
-        const socket = window.__gwtProjectTabsFixtureSocket;
-        if (
-          !socket ||
-          typeof socket.emitTerminalOutputBurstSync !== "function"
-        ) {
-          throw new Error("project tabs fixture socket burst helper is missing");
+  test("live catalog keeps Window List and Fleet Minimap on the same revision", async ({ page }, testInfo) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base, "requires browser-check isolated checkout server");
+    await withLiveGwtBackendLock(base!, testInfo, async () => {
+      let workspace: any;
+      page.on("websocket", socket => socket.on("framereceived", ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === "workspace_state") workspace = event.workspace;
+      }));
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await expect.poll(() => workspace?.active_tab_id).toBeTruthy();
+      const activeWindows = () => workspace.tabs.find(tab => tab.id === workspace.active_tab_id).workspace.windows;
+      const previousIds = new Set(activeWindows().map(window => window.id));
+      const createdIds = () => activeWindows().filter(window => !previousIds.has(window.id)).map(window => window.id) as string[];
+      let ownedIds: string[] = [];
+      try {
+        for (const x of [120, 760]) {
+          await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell",
+            bounds: { x, y: 100, width: 520, height: 300 } });
+          await expect.poll(createdIds).toHaveLength(ownedIds.length + 1);
+          ownedIds = createdIds();
         }
-        socket.emitTerminalOutputBurstSync({ count, windowId });
-      },
-      { count: burstSize, windowId: "agent-burst" },
-    );
+        const [firstId, secondId] = ownedIds;
+        const first = page.locator(`.workspace-window[data-id="${firstId}"]`);
+        const cell = page.locator(`.fleet-minimap__cell[data-window-id="${firstId}"]`);
+        await expect(first).toBeVisible();
+        await expect(cell).toHaveCount(1);
+        await expect(page.locator(`.fleet-minimap__cell[data-window-id="${secondId}"]`)).toHaveCount(1);
+        await page.locator("#window-list-button").click();
+        await expect(page.locator("#window-list-panel")).toBeVisible();
 
-    const start = await page.evaluate(() => performance.now());
-    await second.click();
-    await expect(second).toHaveAttribute("aria-current", "page", {
-      timeout: 1_000,
-    });
-    const latencyMs = await page.evaluate((startedAt) => {
-      return performance.now() - startedAt;
-    }, start);
+        // Read after the app's pointer handlers in the same browser turn, before
+        // a backend echo can acknowledge local focus or the geometry commit.
+        const before = await page.evaluate(id => {
+          const mapCell = document.querySelector<HTMLElement>(`.fleet-minimap__cell[data-window-id="${id}"]`)!;
+          const versions = () => ({
+            list: document.getElementById("window-list-panel")!.dataset.catalogVersion,
+            minimap: document.getElementById("fleet-minimap")!.dataset.catalogVersion,
+          });
+          (window as any).__catalogGesture = {};
+          window.addEventListener("pointerdown", () => {
+            (window as any).__catalogGesture.down = {
+              ...versions(), focused: mapCell.classList.contains("is-focused"),
+            };
+          }, { once: true });
+          window.addEventListener("pointerup", () => {
+            (window as any).__catalogGesture.up = {
+              ...versions(), left: parseFloat(mapCell.style.left), top: parseFloat(mapCell.style.top),
+            };
+          }, { once: true });
+          return { ...versions(), focused: mapCell.classList.contains("is-focused"),
+            left: parseFloat(mapCell.style.left), top: parseFloat(mapCell.style.top) };
+        }, firstId);
+        const titlebar = await first.locator(".titlebar").boundingBox();
+        expect(titlebar).not.toBeNull();
+        const startX = titlebar!.x + 40;
+        const startY = titlebar!.y + titlebar!.height / 2;
+        await page.mouse.move(startX, startY);
+        await page.mouse.down();
+        await page.mouse.move(startX + 80, startY + 60, { steps: 2 });
+        await page.mouse.up();
+        const gesture = await page.evaluate(() => (window as any).__catalogGesture);
+        expect(before.list).toBeTruthy();
+        expect(before.list).toBe(before.minimap);
+        expect(before.focused).toBe(false);
+        expect(gesture.down.focused).toBe(true);
+        expect(gesture.down.list).toBe(gesture.down.minimap);
+        expect(gesture.up.list).toBe(gesture.up.minimap);
+        expect(Number(gesture.up.list)).toBeGreaterThan(Number(gesture.down.list));
+        expect(gesture.up.left).toBeGreaterThan(before.left);
+        expect(gesture.up.top).toBeGreaterThan(before.top);
+        await page.locator("#window-list-button").click();
+        await expect(page.locator("#window-list-panel")).toBeVisible();
 
-    expect(latencyMs).toBeLessThan(1_000);
-    test.info().annotations.push({
-      type: "measurement",
-      description:
-        `tab switch latency under ${burstSize} streamed events: ` +
-        `${latencyMs.toFixed(1)}ms`,
+        // Use the existing wire-event bridge, never a model/renderer test API.
+        // Capture each result synchronously so live shell updates cannot race
+        // the workspace, runtime, and List-only snapshot assertions.
+        const result = await page.evaluate(({ workspace, firstId, secondId }) => {
+          const inject = (detail: unknown) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+          const list = document.getElementById("window-list-panel")!;
+          const minimap = document.getElementById("fleet-minimap")!;
+          const versions = () => ({ list: list.dataset.catalogVersion, minimap: minimap.dataset.catalogVersion });
+          const current = structuredClone(workspace);
+          const windows = current.tabs.find(tab => tab.id === current.active_tab_id).workspace.windows;
+          for (const [id, title] of [[firstId, "Catalog primary 5016"], [secondId, "Catalog secondary 5016"]]) {
+            Object.assign(windows.find(entry => entry.id === id), {
+              title, dynamic_title: null, purpose_title: null, dynamic_title_detail: "Shared catalog update",
+            });
+          }
+          inject({ kind: "workspace_state", workspace: current });
+          const row = () => [...list.querySelectorAll<HTMLElement>(".window-list-row")]
+            .find(entry => entry.querySelector(".window-list-title")?.textContent === "Catalog primary 5016")!;
+          const cell = minimap.querySelector<HTMLElement>(`.fleet-minimap__cell[data-window-id="${firstId}"]`)!;
+          const catalog = { ...versions(), title: row().querySelector(".window-list-title")!.textContent,
+            tooltip: cell.title, cells: minimap.querySelectorAll(".fleet-minimap__cell").length };
+          const cameraState = structuredClone(current);
+          const cameraWorkspace = cameraState.tabs.find(tab => tab.id === cameraState.active_tab_id).workspace;
+          cameraWorkspace.viewport = { ...cameraWorkspace.viewport, x: cameraWorkspace.viewport.x + 25 };
+          inject({ kind: "workspace_state", workspace: cameraState });
+          const camera = { ...versions(), cellRetained:
+            minimap.querySelector(`.fleet-minimap__cell[data-window-id="${firstId}"]`) === cell };
+          inject({ kind: "terminal_status", id: firstId, status: "error", detail: "Catalog runtime" });
+          const runtime = { ...versions(), status: row().querySelector(".status-label")!.textContent,
+            telemetry: cell.dataset.telemetry };
+          inject({ kind: "window_list", windows: [{ id: firstId }] });
+          const gate = { ...versions(), rows: list.querySelectorAll(".window-list-row").length,
+            cells: minimap.querySelectorAll(".fleet-minimap__cell").length,
+            secondRetained: Boolean(minimap.querySelector(`.fleet-minimap__cell[data-window-id="${secondId}"]`)) };
+          return { catalog, camera, runtime, gate };
+        }, { workspace, firstId, secondId });
+        expect(result.catalog.list).toBe(result.catalog.minimap);
+        expect(result.catalog.title).toBe("Catalog primary 5016");
+        expect(result.catalog.tooltip).toBe("Catalog primary 5016 · Shared catalog update");
+        expect(result.camera.list).toBe(result.catalog.list);
+        expect(result.camera.minimap).toBe(result.catalog.minimap);
+        expect(result.camera.cellRetained).toBe(true);
+        expect(result.runtime.list).toBe(result.runtime.minimap);
+        expect(Number(result.runtime.list)).toBeGreaterThan(Number(result.catalog.list));
+        expect(result.runtime.status).toBe("Error");
+        expect(result.runtime.telemetry).toBe("error");
+        expect(result.gate.list).toBe(result.runtime.list);
+        expect(result.gate.list).toBe(result.gate.minimap);
+        expect(result.gate.rows).toBe(1);
+        expect(result.gate.cells).toBe(result.catalog.cells);
+        expect(result.gate.secondRetained).toBe(true);
+        await page.screenshot({ path: testInfo.outputPath("shared-catalog.png"), fullPage: true });
+      } finally {
+        for (const id of ownedIds) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id });
+          await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
+        }
+      }
     });
-    console.log(
-      `[project-tabs] high-load tab switch latency=${latencyMs.toFixed(1)}ms ` +
-        `burst=${burstSize} streamed_state_boundary=${streamedStateBoundary}`,
-    );
   });
 
-  test("tab switching under streamed output stays within CPU and heap budgets", async ({
-    page,
-  }) => {
-    const burstSize = 500;
-    const streamedStateBoundary = 32;
-    const latencyBudgetMs = 1_000;
-    const longTaskBudgetMs = 100;
-    const rafGapBudgetMs = 250;
-    const heapDriftBudgetBytes = 32 * 1024 * 1024;
-    await installEmbeddedRoutes(page);
-    await installProjectTabsBackend(page, projectTabsFixture(12, {
-      hotAgentWindowId: "agent-burst",
-    }));
-
-    await page.goto(APP_URL);
-    await expect(page.locator(".project-tab")).toHaveCount(12, {
-      timeout: 10_000,
-    });
-    const first = page.locator(".project-tab").nth(0);
-    const second = page.locator(".project-tab").nth(1);
-    await expect(first).toHaveAttribute("aria-current", "page");
-
-    const heapBefore = await sampleBrowserHeap(page);
-    await runPaletteCommand(page, "Start UI Trace");
-    expect(burstSize / streamedStateBoundary).toBeGreaterThanOrEqual(10);
-    await page.evaluate(
-      ({ count, windowId }) => {
-        const socket = window.__gwtProjectTabsFixtureSocket;
-        if (
-          !socket ||
-          typeof socket.emitTerminalOutputBurstSync !== "function"
-        ) {
-          throw new Error("project tabs fixture socket burst helper is missing");
+  test("live watcher applies a burst of projection updates to the pane title", async ({ page }, testInfo) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    const projectionPath = process.env.GWT_PLAYWRIGHT_PROJECTION_PATH;
+    const projectRoot = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT;
+    test.skip(!base || !projectionPath || !projectRoot, "requires browser-check isolated watcher fixture");
+    await withLiveGwtBackendLock(base!, testInfo, async () => {
+      const errors = collectBrowserErrors(page);
+      const patches: any[] = [];
+      let windowId = "";
+      page.on("websocket", (socket) => socket.on("framereceived", ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === "active_work_projection_patch") patches.push(event.projection);
+        if (event.kind === "workspace_state") {
+          for (const tab of event.workspace.tabs) {
+            const window = (tab.workspace?.windows ?? []).find((entry) => entry.preset === "shell");
+            if (window) windowId = window.id;
+          }
         }
-        socket.emitTerminalOutputBurstSync({ count, windowId });
-      },
-      { count: burstSize, windowId: "agent-burst" },
-    );
-
-    const start = await page.evaluate(() => performance.now());
-    await second.click();
-    await expect(second).toHaveAttribute("aria-current", "page", {
-      timeout: latencyBudgetMs,
+      }));
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell", bounds: { x: 80, y: 80, width: 720, height: 420 } });
+      await expect.poll(() => windowId).not.toBe("");
+      const saved = await readFile(projectionPath!, "utf8");
+      const projection = JSON.parse(saved);
+      const sessionId = randomUUID();
+      const now = new Date().toISOString();
+      projection.agents = [{ session_id: sessionId, window_id: windowId, agent_id: "codex", display_name: "Codex",
+        status_category: "active", current_focus: "Watcher preparation", title_summary: "Watcher purpose 0",
+        worktree_path: projectRoot, branch: "work/watcher", last_board_entry_id: null,
+        affiliation_status: "assigned", updated_at: now }];
+      projection.status_category = "active";
+      projection.updated_at = now;
+      const writeProjection = async (contents: string) => {
+        const staging = `${projectionPath}.watcher-test`;
+        await writeFile(staging, contents);
+        // Windows readers can briefly deny replacement. Retry only that file
+        // operation; application assertions and the whole test run stay strict.
+        await expect.poll(async () => {
+          try {
+            await rename(staging, projectionPath!);
+            return null;
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (process.platform !== "win32" || (code !== "EPERM" && code !== "EBUSY")) throw error;
+            return code;
+          }
+        }, { timeout: 5000, intervals: [100, 200, 500] }).toBeNull();
+      };
+      try {
+        for (let index = 1; index <= 10; index++) {
+          projection.agents[0].title_summary = `Watcher purpose ${index}`;
+          await writeProjection(JSON.stringify(projection));
+        }
+        await expect(page.locator(`.workspace-window[data-id="${windowId}"] .title-text`)).toContainText("Watcher purpose 10");
+        await expect.poll(() => patches.some((patch) => patch.agents.some((agent) =>
+          agent.session_id === sessionId && agent.title_summary === "Watcher purpose 10"))).toBe(true);
+        await page.screenshot({ path: testInfo.outputPath("watcher.png"), fullPage: true });
+        expect(errors).toEqual([]);
+      } finally {
+        await writeProjection(saved);
+        await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
+      }
     });
-    const latencyMs = await page.evaluate((startedAt) => {
-      return performance.now() - startedAt;
-    }, start);
-    await page.waitForTimeout(100);
-    const tracePayload = await stopUiTraceViaPalette(page);
-    const heapAfter = await sampleBrowserHeap(page);
-    const trace = tracePayload?.trace;
-    expect(
-      trace,
-      "fixture socket should capture the UI trace save payload",
-    ).toBeTruthy();
+  });
 
-    const entries = trace.entries ?? [];
-    const terminalMessages = entries.filter(
-      (entry) =>
-        entry.kind === "ws_message" &&
-        entry.event_kind === "terminal_output",
-    );
-    const overBudgetLongTasks = entries.filter(
-      (entry) =>
-        entry.kind === "long_task" &&
-        Number(entry.duration_ms ?? 0) > longTaskBudgetMs,
-    );
-    const overBudgetRafGaps = entries.filter(
-      (entry) =>
-        entry.kind === "raf_gap" &&
-        Number(entry.gap_ms ?? 0) > rafGapBudgetMs,
-    );
-    const heapDriftBytes =
-      heapBefore.supported && heapAfter.supported
-        ? heapAfter.usedJSHeapSize - heapBefore.usedJSHeapSize
-        : null;
-
-    expect(latencyMs).toBeLessThan(latencyBudgetMs);
-    expect(terminalMessages.length).toBeGreaterThanOrEqual(burstSize);
-    expect(overBudgetLongTasks).toEqual([]);
-    expect(overBudgetRafGaps).toEqual([]);
-    if (heapDriftBytes !== null) {
-      expect(heapDriftBytes).toBeLessThan(heapDriftBudgetBytes);
+  test("live checkout bootstraps a project-scoped connection and accepts terminal input", async ({ page }, testInfo) => {
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    test.skip(!base, "requires browser-check isolated checkout server");
+    await withLiveGwtBackendLock(base!, testInfo, async () => {
+    const errors: string[] = [];
+    const sockets: string[] = [];
+    let projectKey: string | undefined;
+    let scopedWorkspaceReceived = false;
+    let backendWindowIds: string[] = [];
+    const terminalOutputs = new Map<string, string>();
+    const inputFrames: Array<{ scope: string | null; id: string; data: string }> = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("websocket", (socket) => {
+      sockets.push(socket.url());
+      socket.on("framesent", ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === "terminal_input") inputFrames.push({
+          scope: new URL(socket.url()).searchParams.get("repo_hash"),
+          id: event.id, data: event.data,
+        });
+      });
+      socket.on("framereceived", ({ payload }) => {
+        const event = JSON.parse(String(payload));
+        if (event.kind === "terminal_output") {
+          terminalOutputs.set(event.id, (terminalOutputs.get(event.id) ?? "")
+            + Buffer.from(event.data_base64, "base64").toString("utf8"));
+        }
+        if (event.kind !== "workspace_state") return;
+        const workspace = event.workspace;
+        const tab = workspace.tabs.find((entry) => entry.id === workspace.active_tab_id)
+          ?? workspace.tabs[0];
+        projectKey = tab?.project_key;
+        if (projectKey && new URL(socket.url()).searchParams.get("repo_hash") === projectKey) {
+          backendWindowIds = (tab.workspace?.windows ?? []).map((entry) => entry.id);
+          scopedWorkspaceReceived = true;
+        }
+      });
+    });
+    // Issue #4538: the live page is bound to its `/p/<key>` route.
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await expect(page.locator("#close-project-button")).toBeVisible();
+    await expect.poll(() => scopedWorkspaceReceived).toBe(true);
+    expect(projectKey).toMatch(/^[0-9a-f]{16}$/);
+    expect(new URL(page.url()).pathname).toBe(`/p/${projectKey}`);
+    const scoped = sockets.filter((url) => new URL(url).searchParams.has("repo_hash"));
+    expect(scoped.length).toBeGreaterThan(0);
+    expect(scoped.every((url) => new URL(url).searchParams.get("repo_hash") === projectKey)).toBe(true);
+    const shellSelector = '.workspace-window[data-preset="shell"]';
+    const previousIds = new Set(backendWindowIds);
+    await sendLiveGwtEvent(page, {
+      kind: "create_window", preset: "shell",
+      bounds: { x: 80, y: 80, width: 720, height: 420 },
+    });
+    const newIds = () => backendWindowIds.filter((id) => !previousIds.has(id));
+    await expect.poll(newIds, { timeout: 30_000 }).toHaveLength(1);
+    const id = newIds()[0]!;
+    const shell = page.locator(`${shellSelector}[data-id="${id}"]`);
+    try {
+      await expect(shell).toBeVisible();
+      await expect.poll(() => page.evaluate((id) =>
+        window.__gwtTerminalTestApi.metrics(id).isReady, id)).toBe(true);
+      // DOM/xterm readiness precedes shell startup. Wait for its actual prompt
+      // before typing: shell initialization can discard earlier PTY input.
+      await expect.poll(() => page.evaluate((id) =>
+        window.__gwtTerminalTestApi.bufferText(id).trim(), id), { timeout: 30_000 })
+        .toMatch(/[^\n]+[>$#%]$/);
+      const terminal = shell.locator(".terminal-root");
+      await terminal.click();
+      await expect(terminal.locator(".xterm-helper-textarea")).toBeFocused();
+      const command = "node -p \"'GWT_' + 'SCOPED_4536'\"\r";
+      await page.keyboard.type(command);
+      // Windows shells can elicit cursor-position and focus replies before
+      // typing; those protocol frames share the terminal_input transport.
+      await expect.poll(() => inputFrames.filter((frame) => frame.id === id)
+        .map((frame) => frame.data).join("")).toContain(command);
+      expect(inputFrames.filter((frame) => frame.id === id)
+        .every((frame) => frame.scope === projectKey)).toBe(true);
+      await expect.poll(() => terminalOutputs.get(id) ?? "", { timeout: 15_000 }).toContain("GWT_SCOPED_4536");
+    } finally {
+      await sendLiveGwtEvent(page, { kind: "close_window", id });
     }
-
-    const memorySummary =
-      heapDriftBytes === null
-        ? "memory=unsupported"
-        : `heap_drift=${heapDriftBytes}`;
-    test.info().annotations.push({
-      type: "measurement",
-      description:
-        `tab switch latency=${latencyMs.toFixed(1)}ms ` +
-        `long_tasks=${overBudgetLongTasks.length} ` +
-        `raf_gaps=${overBudgetRafGaps.length} ${memorySummary}`,
+    expect(errors).toEqual([]);
     });
-    console.log(
-      `[project-tabs] budget latency=${latencyMs.toFixed(1)}ms ` +
-        `ws_terminal_messages=${terminalMessages.length} ` +
-        `long_tasks_over_${longTaskBudgetMs}ms=${overBudgetLongTasks.length} ` +
-        `raf_gaps_over_${rafGapBudgetMs}ms=${overBudgetRafGaps.length} ` +
-        `${memorySummary} burst=${burstSize} ` +
-        `streamed_state_boundary=${streamedStateBoundary}`,
-    );
   });
 
-  test("many project tabs keep project actions visible and remain switchable", async ({
-    page,
-  }) => {
-    await installEmbeddedRoutes(page);
-    await installProjectTabsBackend(page, 12);
-
-    await page.goto(APP_URL);
-    await expect(page.locator(".project-tab")).toHaveCount(12, {
-      timeout: 10_000,
-    });
-    await expect(page.locator("#app-version")).toBeVisible();
-    // SPEC-2013 Phase 8 (518f7a10b) — the Open Project split-button was retired
-    // and project intake/switching consolidated into the `Projects ▾` switcher.
-    // The project action that must stay reachable is now #project-switcher-button.
-    await expect(page.locator("#project-switcher-button")).toBeVisible();
-
-    const layout = await page.evaluate(() => {
-      const rectOf = (selector: string) => {
-        const element = document.querySelector(selector);
-        if (!element) return null;
-        const rect = element.getBoundingClientRect();
-        return {
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-          right: rect.right,
-        };
-      };
-      const tabs = document.querySelector("#project-tabs");
-      return {
-        viewportWidth: window.innerWidth,
-        tabs: rectOf("#project-tabs"),
-        actions: rectOf(".project-actions"),
-        projectSwitcher: rectOf("#project-switcher-button"),
-        version: rectOf("#app-version"),
-        tabsClientWidth: tabs?.clientWidth ?? 0,
-        tabsScrollWidth: tabs?.scrollWidth ?? 0,
-      };
-    });
-
-    expect(layout.actions?.right).toBeLessThanOrEqual(layout.viewportWidth);
-    expect(layout.projectSwitcher?.right).toBeLessThanOrEqual(layout.viewportWidth);
-    expect(layout.version?.right).toBeLessThanOrEqual(layout.viewportWidth);
-    expect(layout.tabs?.right).toBeLessThanOrEqual(layout.actions?.x ?? 0);
-    expect(layout.tabsScrollWidth).toBeGreaterThan(layout.tabsClientWidth);
-
-    const first = page.locator(".project-tab").nth(0);
-    const second = page.locator(".project-tab").nth(1);
-    await first.click();
-    await expect(first).toHaveAttribute("aria-current", "page");
-    await second.click();
-    await expect(second).toHaveAttribute("aria-current", "page");
-    await expect(first).not.toHaveAttribute("aria-current", "page");
-  });
-
-  test("project tab cue appears only when the project has a running agent", async ({
-    page,
-  }) => {
-    await installEmbeddedRoutes(page);
-    await installProjectTabsBackend(page, [
-      {
-        id: "tab-running",
-        title: "Running Agent",
-        project_root: "/fixture/running-agent",
-        kind: "git",
-        workspace: {
-          viewport: { x: 0, y: 0, zoom: 1 },
-          windows: [{ id: "agent-running", preset: "codex", status: "running" }],
-        },
-      },
-      {
-        id: "tab-no-agent",
-        title: "Shell Only",
-        project_root: "/fixture/shell-only",
-        kind: "git",
-        workspace: {
-          viewport: { x: 0, y: 0, zoom: 1 },
-          windows: [{ id: "shell-running", preset: "shell", status: "running" }],
-        },
-      },
-    ]);
-
-    await page.goto(APP_URL);
-
-    const runningCue = page.locator(
-      '[data-project-tab-id="tab-running"] [data-role="project-tab-state-cue"]',
-    );
-    const shellOnlyCue = page.locator(
-      '[data-project-tab-id="tab-no-agent"] [data-role="project-tab-state-cue"]',
-    );
-
-    await expect(runningCue).toHaveAttribute("data-state", "run");
-    await expect(runningCue).toHaveText("RUN");
-    await expect(runningCue).toHaveAttribute("aria-label", "1 running agent");
-    await expect(shellOnlyCue).toHaveAttribute("data-state", "");
-    await expect(runningCue).toHaveCSS(
-      "animation-name",
-      "none",
-    );
-  });
 });
 
-async function runPaletteCommand(page, query: string) {
-  await page.locator("#op-palette-button").click();
-  const input = page.locator("#op-palette-input");
-  await expect(input).toBeVisible();
-  await input.fill(query);
-  await page.keyboard.press("Enter");
-  await expect(page.locator("#op-palette-backdrop")).not.toHaveAttribute(
-    "data-open",
-    "true",
-  );
-}
-
-async function stopUiTraceViaPalette(page) {
-  await runPaletteCommand(page, "Stop UI Trace");
-  return await page.evaluate(() => {
-    const socket = window.__gwtProjectTabsFixtureSocket;
-    return socket?.savedUiTracePayload ?? null;
+function collectBrowserErrors(page: Page): string[] {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
   });
-}
-
-async function sampleBrowserHeap(page) {
-  return await page.evaluate(() => {
-    const memory = performance.memory;
-    if (!memory || typeof memory.usedJSHeapSize !== "number") {
-      return { supported: false };
-    }
-    return {
-      supported: true,
-      usedJSHeapSize: memory.usedJSHeapSize,
-    };
-  });
-}
-
-function projectTabsFixture(
-  count: number,
-  { hotAgentWindowId }: { hotAgentWindowId?: string } = {},
-) {
-  return Array.from({ length: count }, (_, index) => {
-    const number = String(index + 1).padStart(2, "0");
-    return {
-      id: `tab-${number}`,
-      title: `known-project-${number}`,
-      project_root: `/fixture/known-project-${number}`,
-      kind: "git",
-      workspace: {
-        viewport: { x: 0, y: 0, zoom: 1 },
-        windows:
-          index === 0 && hotAgentWindowId
-            ? [
-                {
-                  id: hotAgentWindowId,
-                  title: "Burst Agent",
-                  preset: "codex",
-                  status: "running",
-                  geometry: { x: 96, y: 96, width: 720, height: 420 },
-                  z_index: 1,
-                },
-              ]
-            : [],
-      },
-    };
-  });
-}
-
-async function installProjectTabsBackend(page, tabFixture: number | unknown[]) {
-  await page.addInitScript((fixture) => {
-    const tabs = Array.isArray(fixture)
-      ? fixture
-      : Array.from({ length: fixture }, (_, index) => {
-          const number = String(index + 1).padStart(2, "0");
-          return {
-            id: `tab-${number}`,
-            title: `known-project-${number}`,
-            project_root: `/fixture/known-project-${number}`,
-            kind: "git",
-            workspace: {
-              viewport: { x: 0, y: 0, zoom: 1 },
-              windows: [],
-            },
-          };
-        });
-    const workspaceState = {
-      kind: "workspace_state",
-      workspace: {
-        app_version: "playwright",
-        tabs,
-        active_tab_id: tabs[0]?.id ?? null,
-        recent_projects: [],
-      },
-    };
-
-    class FixtureWebSocket extends EventTarget {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      static CLOSING = 2;
-      static CLOSED = 3;
-
-      constructor(url) {
-        super();
-        this.url = url;
-        this.readyState = FixtureWebSocket.CONNECTING;
-        window.__gwtProjectTabsFixtureSocket = this;
-        setTimeout(() => {
-          this.readyState = FixtureWebSocket.OPEN;
-          this.dispatchEvent(new Event("open"));
-        }, 0);
-      }
-
-      send(raw) {
-        let message;
-        try {
-          message = JSON.parse(raw);
-        } catch {
-          return;
-        }
-        if (message.kind === "frontend_ready") {
-          this.emit(workspaceState);
-          return;
-        }
-        if (message.kind === "save_ui_trace") {
-          this.savedUiTracePayload = message;
-          return;
-        }
-        if (
-          message.kind === "select_project_tab" &&
-          tabs.some((tab) => tab.id === message.tab_id)
-        ) {
-          workspaceState.workspace.active_tab_id = message.tab_id;
-          this.emitSync(workspaceState);
-        }
-      }
-
-      close() {
-        this.readyState = FixtureWebSocket.CLOSED;
-        this.dispatchEvent(new CloseEvent("close"));
-      }
-
-      emit(payload) {
-        setTimeout(() => {
-          this.emitSync(payload);
-        }, 0);
-      }
-
-      emitSync(payload) {
-        this.dispatchEvent(
-          new MessageEvent("message", { data: JSON.stringify(payload) }),
-        );
-      }
-
-      emitTerminalOutputBurstSync({ count, windowId }) {
-        const data_base64 = btoa("gwt responsiveness burst\\r\\n");
-        for (let i = 0; i < count; i += 1) {
-          this.emitSync({
-            kind: "terminal_output",
-            id: windowId,
-            data_base64,
-          });
-        }
-      }
-    }
-
-    Object.defineProperty(window, "WebSocket", {
-      configurable: true,
-      value: FixtureWebSocket,
-    });
-  }, tabFixture);
+  return errors;
 }

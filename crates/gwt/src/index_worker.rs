@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     fmt, io,
     path::{Path, PathBuf},
@@ -9,16 +9,28 @@ use std::{
 
 use gwt_core::{
     index::{
+        broker::{
+            RefreshBroker, RefreshClaim, RefreshIntent, RefreshReason, RefreshResourceClass,
+            RefreshScope, RefreshTarget, RefreshTargetKind, DEFAULT_REFRESH_CLAIM_TIMEOUT,
+            REFRESH_INTENT_PROTOCOL_VERSION,
+        },
         paths::gwt_index_root,
         runtime::{reconcile_repo, PythonRunnerSpawner, ReconcileOptions, RunnerSpawner},
     },
-    index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey},
+    index_coordinator::{
+        HeavyHolderContext, IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey,
+        INDEX_HEAVY_LEASE_TTL,
+    },
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
 use serde::Serialize;
 
+use crate::index_status_projection;
+
 const DISABLE_BACKGROUND_INDEX_ENV: &str = "GWT_DISABLE_BACKGROUND_INDEX";
+const REFRESH_CHECKPOINT_RESERVE: Duration = Duration::from_secs(5);
+const REFRESH_QUANTUM_EXHAUSTED: &str = "background refresh quantum exhausted";
 
 /// SPEC-3170 FR-073/FR-074: emergency opt-out shared by every automatic
 /// project-index bootstrap entry. Explicit search, status refresh, and manual
@@ -131,6 +143,11 @@ fn default_project_index_worktree_root_from_context(
     Ok(context.repo_root.clone())
 }
 
+/// Startup / FrontendReady / Agent launch admission (SPEC #1939 Phase 71
+/// FR-416 / AS-32). Registration only: one canonical repo base intent is
+/// submitted to the host-wide Refresh Broker. Nothing here ensures the Python
+/// runtime, spawns a runner, or mutates index metadata; the broker owner does
+/// that work later through [`execute_claimed_project_index_refresh`].
 pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), String> {
     if test_fixture_status_path().is_some() {
         tracing::info!(
@@ -140,19 +157,13 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
         );
         return Ok(());
     }
-    let runtime_started = Instant::now();
-    gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %project_root.display(),
-        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
-        "project index runtime ensured for bootstrap"
-    );
+    let broker =
+        RefreshBroker::open_default().map_err(|err| format!("open refresh broker: {err}"))?;
     let spawner = PythonRunnerSpawner {
         python_executable: project_index_python_path(),
         runner_script: gwt_core::runtime::project_index_runner_path(),
     };
-    bootstrap_project_index_for_path_with(project_root, &gwt_index_root(), &spawner)
+    bootstrap_project_index_for_path_with_broker(project_root, &gwt_index_root(), &broker, &spawner)
 }
 
 /// Per-cell index rebuild scope used by the orchestrator, in-flight set, and
@@ -232,6 +243,10 @@ pub struct ScopeHealthView {
     pub repair_required: bool,
     pub document_count: u64,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legacy_residue_detected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -245,6 +260,8 @@ impl ScopeHealthView {
             repair_required: false,
             document_count,
             reason: "ready".to_string(),
+            fallback_source: None,
+            view_id: None,
             legacy_residue_detected: None,
             last_repair_at: None,
         }
@@ -256,6 +273,8 @@ impl ScopeHealthView {
             repair_required: true,
             document_count: 0,
             reason: reason.into(),
+            fallback_source: None,
+            view_id: None,
             legacy_residue_detected: None,
             last_repair_at: None,
         }
@@ -415,6 +434,14 @@ pub fn parse_scope_health(payload: &serde_json::Value) -> Option<ScopeHealthView
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown")
         .to_string();
+    let fallback_source = obj
+        .get("fallback_source")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let view_id = obj
+        .get("view_id")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
     let legacy_residue_detected = obj
         .get("legacy_residue_detected")
         .and_then(serde_json::Value::as_bool);
@@ -428,6 +455,8 @@ pub fn parse_scope_health(payload: &serde_json::Value) -> Option<ScopeHealthView
         repair_required,
         document_count,
         reason,
+        fallback_source,
+        view_id,
         legacy_residue_detected,
         last_repair_at,
     })
@@ -536,28 +565,41 @@ pub fn build_aggregated_status_view(
     }
 }
 
+fn scope_requires_repair(view: &ScopeHealthView) -> bool {
+    !view.healthy || view.repair_required
+}
+
+fn scope_requires_immediate_repair(view: &ScopeHealthView) -> bool {
+    scope_requires_repair(view)
+        && !(view.healthy && view.fallback_source.as_deref() == Some("legacy"))
+}
+
 fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
     let mut count = 0;
-    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+    if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+    if matches!(&scopes.discussions, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    if matches!(&scopes.board, Some(view) if !view.healthy) {
+    if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
-    count += scopes.files.values().filter(|view| !view.healthy).count();
+    count += scopes
+        .files
+        .values()
+        .filter(|view| scope_requires_repair(view))
+        .count();
     count += scopes
         .files_docs
         .values()
-        .filter(|view| !view.healthy)
+        .filter(|view| scope_requires_repair(view))
         .count();
     count
 }
@@ -618,6 +660,7 @@ pub fn aggregate_project_index_status_for_path(project_root: &Path) -> ProjectIn
     match aggregate_project_index_status_for_path_inner(
         project_root,
         StatusProbeScope::AllWorktrees,
+        None,
     ) {
         Ok(status) => status,
         Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
@@ -636,6 +679,27 @@ pub fn aggregate_current_worktree_index_status_for_path(
     match aggregate_project_index_status_for_path_inner(
         project_root,
         StatusProbeScope::CurrentWorktree,
+        None,
+    ) {
+        Ok(status) => status,
+        Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
+    }
+}
+
+/// Issue #4398 AC-3: [`aggregate_current_worktree_index_status_for_path`] over
+/// a worktree inventory the caller already listed, so the probe runs no
+/// `git worktree list` of its own.
+pub fn aggregate_current_worktree_index_status_with_inventory(
+    project_root: &Path,
+    inventory: &[crate::worktree_inventory::WorktreeEntry],
+) -> ProjectIndexStatusView {
+    if let Some(fixture) = load_test_fixture_status() {
+        return fixture;
+    }
+    match aggregate_project_index_status_for_path_inner(
+        project_root,
+        StatusProbeScope::CurrentWorktree,
+        Some(inventory),
     ) {
         Ok(status) => status,
         Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
@@ -710,6 +774,7 @@ fn select_probe_inputs_for_scope(
 fn aggregate_project_index_status_for_path_inner(
     project_root: &Path,
     probe_scope: StatusProbeScope,
+    inventory: Option<&[crate::worktree_inventory::WorktreeEntry]>,
 ) -> Result<ProjectIndexStatusView, String> {
     let Some(context) = project_index_git_context(project_root) else {
         return Ok(ProjectIndexStatusView::new(
@@ -724,8 +789,12 @@ fn aggregate_project_index_status_for_path_inner(
             "No origin remote configured",
         ));
     };
+    let inputs = match inventory {
+        Some(entries) => probe_inputs_from_inventory(entries)?,
+        None => list_worktree_probe_inputs(&repo_root)?,
+    };
     let selection = select_probe_inputs_for_scope(
-        list_worktree_probe_inputs(&repo_root)?,
+        inputs,
         probe_scope,
         context.current_worktree_root.as_deref(),
         all_worktree_status_batch_limit(),
@@ -743,84 +812,8 @@ fn aggregate_project_index_status_for_path_inner(
         );
     }
 
-    let runtime_started = Instant::now();
-    let report =
-        gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %project_root.display(),
-        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
-        "project index runtime ensured for aggregated status"
-    );
-
     let coverage = selection.coverage;
-    // Phase 70 FR-393 / AS-13: one batch status process covers every
-    // selected worktree instead of one serial Python spawn per worktree.
-    let worktree_hashes: Vec<String> = selection
-        .inputs
-        .iter()
-        .map(|input| input.worktree_hash.clone())
-        .collect();
-    let batch = probe_worktrees_status_batch(&repo_root, &repo_hash, &worktree_hashes);
-    let mut probes: Vec<WorktreeProbeOutcome> = Vec::with_capacity(selection.inputs.len());
-    match batch {
-        Ok(payload) => {
-            let runtime = payload
-                .get("runtime")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            let repo_status = payload
-                .get("status")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            let worktrees = payload
-                .get("worktrees")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            for input in selection.inputs {
-                let Some(worktree_obj) = worktrees
-                    .get(&input.worktree_hash)
-                    .and_then(serde_json::Value::as_object)
-                else {
-                    // PR #3301 review: a worktree the batch request asked for
-                    // but the response does not cover must degrade to an
-                    // error, never to a Ready view built from repo scopes.
-                    probes.push(WorktreeProbeOutcome {
-                        status_payload: Err(format!(
-                            "batch status response is missing worktree {}",
-                            input.worktree_hash
-                        )),
-                        input,
-                    });
-                    continue;
-                };
-                let mut status = repo_status.clone();
-                if let Some(status_obj) = status.as_object_mut() {
-                    for (key, value) in worktree_obj {
-                        status_obj.insert(key.clone(), value.clone());
-                    }
-                }
-                probes.push(WorktreeProbeOutcome {
-                    input,
-                    status_payload: Ok(serde_json::json!({
-                        "ok": true,
-                        "runtime": runtime.clone(),
-                        "status": status,
-                    })),
-                });
-            }
-        }
-        Err(error) => {
-            for input in selection.inputs {
-                probes.push(WorktreeProbeOutcome {
-                    input,
-                    status_payload: Err(error.clone()),
-                });
-            }
-        }
-    }
-
-    let mut view = build_aggregated_status_view(report.runner_hash.as_str(), &probes);
+    let mut view = project_disk_status_view(&repo_hash, selection.inputs);
     if coverage.truncated {
         view.detail = format!(
             "Partial status: probed {}/{} worktrees; {}",
@@ -829,6 +822,54 @@ fn aggregate_project_index_status_for_path_inner(
     }
     view.coverage = Some(coverage);
     Ok(view)
+}
+
+/// Model-free status projection (SPEC #1939 AS-32 / FR-416): every selected
+/// worktree is projected from on-disk metadata through
+/// [`crate::index_status_projection`]; no runtime ensure and no runner
+/// process. The payload keeps the runner `status` shape so
+/// [`build_aggregated_status_view`] and the GUI contract stay unchanged.
+fn project_disk_status_view(
+    repo_hash: &RepoHash,
+    inputs: Vec<WorktreeProbeInput>,
+) -> ProjectIndexStatusView {
+    let started = Instant::now();
+    let index_root = gwt_index_root();
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(repo_hash);
+    let repo_shared =
+        index_status_projection::repo_shared_status(&index_root, repo_hash.as_str(), &cache_root);
+    let probes: Vec<WorktreeProbeOutcome> = inputs
+        .into_iter()
+        .map(|input| {
+            let mut status = repo_shared.clone();
+            status.extend(index_status_projection::worktree_file_status(
+                &index_root,
+                repo_hash.as_str(),
+                &input.worktree_hash,
+            ));
+            WorktreeProbeOutcome {
+                input,
+                status_payload: Ok(serde_json::json!({
+                    "ok": true,
+                    "runtime": {"healthy": true},
+                    "status": status,
+                })),
+            }
+        })
+        .collect();
+    let view = build_aggregated_status_view(
+        &index_status_projection::runner_asset_hash_read_only(),
+        &probes,
+    );
+    tracing::debug!(
+        target: "gwt::index",
+        repo_hash = repo_hash.as_str(),
+        worktree_count = probes.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        state = %view.state,
+        "project index status projected from disk"
+    );
+    view
 }
 
 fn collect_current_worktree_probe_inputs(
@@ -849,15 +890,32 @@ pub fn list_worktree_probe_inputs(repo_root: &Path) -> Result<Vec<WorktreeProbeI
     if gwt_core::operation_deadline::current().is_some() {
         return list_worktree_probe_inputs_result(repo_root).map_err(|error| error.to_string());
     }
-    let output = gwt_core::process::hidden_command("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|error| error.to_string())?;
+    // Issue #4398 AC-4: the logged wrapper records this listing in the gwt.log
+    // process summary; a raw hidden spawn left it out of every measurement.
+    let output =
+        gwt_core::process::run_git_logged(&["worktree", "list", "--porcelain"], Some(repo_root))
+            .map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     parse_worktree_probe_inputs(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Probe inputs from an already-listed inventory, filtered like
+/// [`parse_worktree_probe_inputs`]: the inventory has already dropped
+/// prunable entries, and a checkout always has a `.git` entry while a bare
+/// repository has none.
+fn probe_inputs_from_inventory(
+    entries: &[crate::worktree_inventory::WorktreeEntry],
+) -> Result<Vec<WorktreeProbeInput>, String> {
+    let mut inputs = Vec::new();
+    for entry in entries {
+        if !entry.path.join(".git").exists() {
+            continue;
+        }
+        push_worktree_probe_input(&mut inputs, entry.path.clone(), entry.branch.clone())?;
+    }
+    Ok(inputs)
 }
 
 fn list_worktree_probe_inputs_result(repo_root: &Path) -> io::Result<Vec<WorktreeProbeInput>> {
@@ -961,52 +1019,6 @@ fn push_worktree_probe_input(
         path,
     });
     Ok(())
-}
-
-/// One batch status process for every selected worktree (FR-393 / AS-13).
-fn probe_worktrees_status_batch(
-    repo_root: &Path,
-    repo_hash: &RepoHash,
-    worktree_hashes: &[String],
-) -> Result<serde_json::Value, String> {
-    let runner_started = Instant::now();
-    let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_core::runtime::project_index_runner_path())
-        .arg("--action")
-        .arg("status")
-        .arg("--repo-hash")
-        .arg(repo_hash.as_str())
-        .arg("--worktree-hashes")
-        .arg(worktree_hashes.join(","))
-        .current_dir(repo_root)
-        .output()
-        .map_err(|err| format!("run project index status: {err}"))?;
-    if !output.status.success() {
-        // FR-393: a failed runner invocation invalidates the positive probe
-        // cache so the next ensure re-verifies the runtime.
-        gwt_core::runtime::invalidate_project_index_probe_cache();
-        tracing::warn!(
-            target: "gwt::index",
-            project_root = %repo_root.display(),
-            worktree_count = worktree_hashes.len(),
-            elapsed_ms = runner_started.elapsed().as_millis() as u64,
-            exit_status = %output.status,
-            "project index batch status runner failed"
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(format!("runner exit {}: {detail}", output.status));
-    }
-    tracing::debug!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        worktree_count = worktree_hashes.len(),
-        elapsed_ms = runner_started.elapsed().as_millis() as u64,
-        "project index batch status runner completed"
-    );
-    serde_json::from_slice(&output.stdout)
-        .map_err(|err| format!("parse project index status: {err}"))
 }
 
 /// TTL cache for the aggregated status. Used to debounce repeated callers
@@ -1132,10 +1144,31 @@ pub(crate) fn run_coordinated_index_job<T>(
     scope_label: &str,
     worktree_hash: Option<&str>,
     priority: JobPriority,
-    mut build: impl FnMut() -> Result<BuildStep<T>, String>,
+    holder_context: Option<&HeavyHolderContext>,
+    build: impl FnMut() -> Result<BuildStep<T>, String>,
 ) -> Result<CoordinatedRun<T>, String> {
     let coordinator = IndexCoordinator::open_default()
         .map_err(|err| format!("index coordinator unavailable: {err}"))?;
+    run_coordinated_index_job_with_coordinator(
+        &coordinator,
+        repo_hash,
+        scope_label,
+        worktree_hash,
+        priority,
+        holder_context,
+        build,
+    )
+}
+
+fn run_coordinated_index_job_with_coordinator<T>(
+    coordinator: &IndexCoordinator,
+    repo_hash: &str,
+    scope_label: &str,
+    worktree_hash: Option<&str>,
+    priority: JobPriority,
+    holder_context: Option<&HeavyHolderContext>,
+    mut build: impl FnMut() -> Result<BuildStep<T>, String>,
+) -> Result<CoordinatedRun<T>, String> {
     let key = match worktree_hash {
         Some(worktree) => TargetKey::worktree(repo_hash, scope_label, worktree),
         None => TargetKey::repo_shared(repo_hash, scope_label),
@@ -1153,10 +1186,31 @@ pub(crate) fn run_coordinated_index_job<T>(
                 loop {
                     let heavy_timeout =
                         index_wait_timeout(INDEX_HEAVY_LEASE_TIMEOUT, "index heavy lease")?;
-                    let heavy = guard
-                        .acquire_heavy(heavy_timeout)
+                    // Issue #4086: index leases carry a TTL horizon so status
+                    // output never reports `expires_at_ms=unknown`.
+                    let lease_ttl = if scope_label == "issues" {
+                        gwt_core::index::runtime::ISSUE_INDEX_BUILD_TIMEOUT
+                    } else {
+                        INDEX_HEAVY_LEASE_TTL
+                    };
+                    let mut heavy = guard
+                        .acquire_heavy_with_ttl(heavy_timeout, lease_ttl)
                         .map_err(|err| format!("index heavy lease failed: {err}"))?;
-                    let step = build();
+                    if let Some(context) = holder_context {
+                        heavy.record_runner_context(
+                            &context.project_root,
+                            &context.action,
+                            &context.qos,
+                        );
+                    }
+                    let step = {
+                        let _deadline = (scope_label == "issues").then(|| {
+                            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                                Instant::now() + lease_ttl,
+                            )
+                        });
+                        build()
+                    };
                     drop(heavy);
                     match step {
                         Ok(BuildStep::Done(value)) => {
@@ -1224,7 +1278,7 @@ pub fn default_rebuild_runner(
     rebuild_index_target(project_root, scope, worktree_hash, JobPriority::Background)
 }
 
-/// User-initiated rebuild runner (per-cell GUI rebuild, `gwt index rebuild`).
+/// User-initiated rebuild runner for the per-cell GUI/background worker path.
 pub fn manual_rebuild_runner(
     project_root: &Path,
     scope: IndexRebuildScope,
@@ -1238,26 +1292,113 @@ pub fn manual_rebuild_runner(
     )
 }
 
+fn rebuild_action_uses_file_index_v2(action: crate::cli::index::runtime::RebuildAction) -> bool {
+    matches!(action.scope, Some("files") | Some("files-docs"))
+}
+
+fn protocol_aware_rebuild_runner_args(
+    context: &crate::cli::index::runtime::IndexContext,
+    action: crate::cli::index::runtime::RebuildAction,
+    qos: &str,
+) -> Vec<OsString> {
+    let mut args = crate::cli::index::runtime::rebuild_runner_args(context, action, qos);
+    if rebuild_action_uses_file_index_v2(action) {
+        args.extend([
+            OsString::from("--file-index-protocol"),
+            OsString::from("v2"),
+        ]);
+    }
+    args
+}
+
 fn run_rebuild_runner_observing_deadline(
     context: &crate::cli::index::runtime::IndexContext,
     action: crate::cli::index::runtime::RebuildAction,
     qos: &str,
 ) -> io::Result<gwt_core::process_console::SpawnOutput> {
-    let args = crate::cli::index::runtime::rebuild_runner_args(context, action, qos);
+    let args = protocol_aware_rebuild_runner_args(context, action, qos);
+    #[cfg(test)]
+    let args = crate::cli::index::runtime::rebuild_runner_fixture_args().unwrap_or(args);
 
-    gwt_core::operation_deadline::ensure_remaining("project index rebuild runner")?;
-    gwt_core::process_console::spawn_logged_blocking(
+    let deadline = gwt_core::operation_deadline::ensure_remaining("project index rebuild runner")?;
+    let mut options = gwt_core::process_console::SpawnOptions::new(format!(
+        "project index rebuild {}",
+        action.label,
+    ))
+    .current_dir(&context.project_root)
+    .forward_output(false);
+    let run_id = deadline.filter(|_| qos == "background").map(|deadline| {
+        let remaining = deadline.saturating_duration_since(gwt_core::operation_deadline::now());
+        let soft_millis = remaining
+            .saturating_sub(REFRESH_CHECKPOINT_RESERVE)
+            .as_millis() as u64;
+        let run_id = uuid::Uuid::new_v4().to_string();
+        options.envs.push((
+            OsString::from("GWT_INDEX_REFRESH_YIELD_AT_MS"),
+            OsString::from(unix_millis_now().saturating_add(soft_millis).to_string()),
+        ));
+        options.envs.push((
+            OsString::from("GWT_INDEX_REFRESH_RUN_ID"),
+            OsString::from(&run_id),
+        ));
+        run_id
+    });
+    let result = gwt_core::process_console::spawn_logged_blocking(
         &gwt_core::process_console::ProcessConsoleHub::new(),
         gwt_core::process_console::ProcessKind::IndexRunner,
         context.python.clone(),
         &args,
-        gwt_core::process_console::SpawnOptions::new(format!(
-            "project index rebuild {}",
-            action.label
-        ))
-        .current_dir(&context.project_root)
-        .forward_output(false),
-    )
+        options,
+    );
+    if let (Err(error), Some(run_id)) = (&result, run_id) {
+        // Only our reaped child reaching its known hard deadline may release
+        // an incomplete Issues build. Other failures keep the repair stop.
+        if action.label == "issues"
+            && error
+                .get_ref()
+                .and_then(|cause| {
+                    cause.downcast_ref::<gwt_core::process_console::spawn::ProcessDeadlineExpired>()
+                })
+                .is_some_and(|deadline| deadline.interrupted_child_reaped())
+        {
+            let repair = gwt_index_root()
+                .join(context.repo_hash.as_str())
+                .join("issues/repair.json");
+            if let Err(error) = mark_expected_issue_budget_interruption(&repair, &run_id) {
+                tracing::warn!(target: "gwt::index", error = %error,
+                    "could not identify the interrupted issue build; explicit repair remains required");
+            }
+        }
+    }
+    result
+}
+
+fn mark_expected_issue_budget_interruption(path: &Path, run_id: &str) -> io::Result<bool> {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut repair: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if repair["last_error"].as_str() != Some("BUILD_INCOMPLETE")
+        || repair["refresh_run_id"].as_str() != Some(run_id)
+    {
+        return Ok(false);
+    }
+    let Some(fingerprint) = repair["fingerprint"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+    repair["expected_budget_interruption"] = serde_json::json!({
+        "fingerprint": fingerprint, "run_id": run_id,
+    });
+    let bytes = serde_json::to_vec(&repair)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    gwt_core::atomic_file::write_atomic(path, &bytes)?;
+    Ok(true)
 }
 
 enum RebuildRunnerOutput {
@@ -1303,7 +1444,20 @@ fn run_rebuild_runner_for_target(
     action: crate::cli::index::runtime::RebuildAction,
     qos: &str,
 ) -> Result<RebuildRunnerOutput, String> {
-    if gwt_core::operation_deadline::current().is_none() {
+    if (action.label == "issues" && qos != "background")
+        || gwt_core::operation_deadline::current().is_none()
+    {
+        if rebuild_action_uses_file_index_v2(action) {
+            let args = protocol_aware_rebuild_runner_args(context, action, qos);
+            #[cfg(test)]
+            let args = crate::cli::index::runtime::rebuild_runner_fixture_args().unwrap_or(args);
+            return gwt_core::process::hidden_command(&context.python)
+                .args(&args)
+                .current_dir(&context.project_root)
+                .output()
+                .map(RebuildRunnerOutput::Canonical)
+                .map_err(|error| error.to_string());
+        }
         return crate::cli::index::runtime::run_runner_rebuild(context, action, qos)
             .map(RebuildRunnerOutput::Canonical)
             .map_err(|error| error.to_string());
@@ -1334,38 +1488,15 @@ fn format_rebuild_runner_failure(output: &gwt_core::process_console::SpawnOutput
 /// `gwt index rebuild`, gated by the host-wide index coordinator so
 /// concurrent CLI/GUI/agent rebuilds coalesce and the heavy runner stays
 /// exclusive host-wide.
-pub fn rebuild_index_target(
-    project_root: &Path,
+/// The production runner action for every rebuildable scope. Keeping this a
+/// total function over [`IndexRebuildScope`] is what guarantees no scope is
+/// left without a rebuild path (Issue #4455 AC-4).
+pub(crate) fn rebuild_action_for_scope(
     scope: IndexRebuildScope,
-    worktree_hash: Option<&str>,
-    priority: JobPriority,
-) -> Result<(), String> {
-    use crate::cli::index::runtime::{resolve_index_context, RebuildAction};
+) -> crate::cli::index::runtime::RebuildAction {
+    use crate::cli::index::runtime::RebuildAction;
 
-    let mut ctx = resolve_index_context(project_root).map_err(|err| err.to_string())?;
-    #[cfg(test)]
-    if [
-        "GWT_INDEX_TEST_REBUILD_HANG",
-        "GWT_INDEX_TEST_REBUILD_FAILURE",
-    ]
-    .iter()
-    .any(|key| std::env::var_os(key).as_deref() == Some(OsStr::new("1")))
-    {
-        // Keep the deadline fixture away from the user's shared project-index
-        // runtime. The local runner seam launches this test binary only.
-        ctx.python = std::env::current_exe().map_err(|err| err.to_string())?;
-        ctx.runner = PathBuf::from("--ignored");
-    }
-    if let Some(target_hash) = worktree_hash {
-        let inputs = list_worktree_probe_inputs(&ctx.project_root)?;
-        let target = inputs
-            .into_iter()
-            .find(|input| input.worktree_hash == target_hash)
-            .ok_or_else(|| format!("worktree with hash {target_hash} not found"))?;
-        ctx.project_root = target.path;
-        ctx.worktree_hash = target_hash.to_string();
-    }
-    let action = match scope {
+    match scope {
         IndexRebuildScope::Issues => RebuildAction {
             label: "issues",
             action: "index-issues",
@@ -1414,7 +1545,41 @@ pub fn rebuild_index_target(
             scope: Some("files-docs"),
             needs_worktree_hash: true,
         },
-    };
+    }
+}
+
+pub fn rebuild_index_target(
+    project_root: &Path,
+    scope: IndexRebuildScope,
+    worktree_hash: Option<&str>,
+    priority: JobPriority,
+) -> Result<(), String> {
+    use crate::cli::index::runtime::resolve_index_context;
+
+    let mut ctx = resolve_index_context(project_root).map_err(|err| err.to_string())?;
+    #[cfg(test)]
+    if [
+        "GWT_INDEX_TEST_REBUILD_HANG",
+        "GWT_INDEX_TEST_REBUILD_FAILURE",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).as_deref() == Some(OsStr::new("1")))
+    {
+        // Keep the deadline fixture away from the user's shared project-index
+        // runtime. The local runner seam launches this test binary only.
+        ctx.python = std::env::current_exe().map_err(|err| err.to_string())?;
+        ctx.runner = PathBuf::from("--ignored");
+    }
+    if let Some(target_hash) = worktree_hash {
+        let inputs = list_worktree_probe_inputs(&ctx.project_root)?;
+        let target = inputs
+            .into_iter()
+            .find(|input| input.worktree_hash == target_hash)
+            .ok_or_else(|| format!("worktree with hash {target_hash} not found"))?;
+        ctx.project_root = target.path;
+        ctx.worktree_hash = target_hash.to_string();
+    }
+    let action = rebuild_action_for_scope(scope);
     let coordinator_worktree = action
         .needs_worktree_hash
         .then(|| ctx.worktree_hash.clone());
@@ -1427,6 +1592,11 @@ pub fn rebuild_index_target(
         action.label,
         coordinator_worktree.as_deref(),
         priority,
+        Some(&HeavyHolderContext {
+            project_root: ctx.project_root.clone(),
+            action: action.action.to_string(),
+            qos: qos.to_string(),
+        }),
         || {
             let rebuild_started = Instant::now();
             let rebuild_label = action.label;
@@ -1452,7 +1622,21 @@ pub fn rebuild_index_target(
             if !output.success() {
                 return Err(output.failure());
             }
+            if let Some(failure) = runner_payload_failure(output.stdout()) {
+                return Err(failure);
+            }
             if runner_payload_yielded(output.stdout()) {
+                if serde_json::from_slice::<serde_json::Value>(output.stdout())
+                    .ok()
+                    .and_then(|payload| {
+                        payload
+                            .get("budget_exhausted")
+                            .and_then(serde_json::Value::as_bool)
+                    })
+                    == Some(true)
+                {
+                    return Err(REFRESH_QUANTUM_EXHAUSTED.to_string());
+                }
                 tracing::info!(
                     target: "gwt::index",
                     scope = rebuild_label,
@@ -1482,33 +1666,66 @@ pub(crate) fn runner_payload_yielded(stdout: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+/// Convert an action-aware runner's structured failure into the build error
+/// consumed by the coordinator. File-index-v2 intentionally uses exit status
+/// 0 for typed action results, so process status alone cannot distinguish a
+/// published generation from a failed publication.
+fn runner_payload_failure(stdout: &[u8]) -> Option<String> {
+    let payload = serde_json::from_slice::<serde_json::Value>(stdout).ok()?;
+    if payload.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
+        return None;
+    }
+    let code = payload
+        .get("error_code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("RUNNER_FAILED");
+    let detail = ["error", "detail", "message"]
+        .into_iter()
+        .find_map(|field| payload.get(field).and_then(serde_json::Value::as_str));
+    Some(match detail {
+        Some(detail) if !detail.is_empty() => {
+            format!("runner structured failure: {code}: {detail}")
+        }
+        _ => format!("runner structured failure: {code}"),
+    })
+}
+
 /// Collect every unhealthy `(scope, worktree_hash?)` cell from an aggregated
 /// status payload, in a deterministic order: issues, specs, files, files-docs.
 pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<RebuildTarget> {
     let mut targets = Vec::new();
-    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+    if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
     }
-    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Memory, None));
     }
-    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+    if matches!(&scopes.discussions, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Discussions, None));
     }
-    if matches!(&scopes.board, Some(view) if !view.healthy) {
+    if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Board, None));
     }
-    for (wt_hash, view) in &scopes.files {
-        if !view.healthy {
-            targets.push((IndexRebuildScope::Files, Some(wt_hash.clone())));
-        }
-    }
-    for (wt_hash, view) in &scopes.files_docs {
-        if !view.healthy {
-            targets.push((IndexRebuildScope::FilesDocs, Some(wt_hash.clone())));
+    let worktree_hashes = scopes
+        .files
+        .keys()
+        .chain(scopes.files_docs.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for wt_hash in worktree_hashes {
+        let file_view_requires_repair = scopes
+            .files
+            .get(&wt_hash)
+            .is_some_and(scope_requires_immediate_repair)
+            || scopes
+                .files_docs
+                .get(&wt_hash)
+                .is_some_and(scope_requires_immediate_repair);
+        if file_view_requires_repair {
+            targets.push((IndexRebuildScope::Files, Some(wt_hash)));
         }
     }
     targets
@@ -1536,27 +1753,32 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     current_worktree_hash: Option<&str>,
 ) -> Vec<RebuildTarget> {
     let mut targets = Vec::new();
-    if matches!(&scopes.issues, Some(view) if !view.healthy) {
+    if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
     }
-    if matches!(&scopes.specs, Some(view) if !view.healthy) {
+    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
-    if matches!(&scopes.memory, Some(view) if !view.healthy) {
+    if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Memory, None));
     }
-    if matches!(&scopes.discussions, Some(view) if !view.healthy) {
+    if matches!(&scopes.discussions, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Discussions, None));
     }
-    if matches!(&scopes.board, Some(view) if !view.healthy) {
+    if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Board, None));
     }
     if let Some(current_hash) = current_worktree_hash {
-        if matches!(scopes.files.get(current_hash), Some(view) if !view.healthy) {
+        let file_view_requires_repair = scopes
+            .files
+            .get(current_hash)
+            .is_some_and(scope_requires_immediate_repair)
+            || scopes
+                .files_docs
+                .get(current_hash)
+                .is_some_and(scope_requires_immediate_repair);
+        if file_view_requires_repair {
             targets.push((IndexRebuildScope::Files, Some(current_hash.to_string())));
-        }
-        if matches!(scopes.files_docs.get(current_hash), Some(view) if !view.healthy) {
-            targets.push((IndexRebuildScope::FilesDocs, Some(current_hash.to_string())));
         }
     }
     targets
@@ -1703,73 +1925,21 @@ fn project_index_status_for_path_inner(
         .current_worktree_root
         .or_else(|| first_active_worktree_path(&repo_root))
         .unwrap_or_else(|| repo_root.clone());
-    let worktree_hash = compute_worktree_hash(&worktree_root)
-        .map_err(|err| format!("compute worktree hash: {err}"))?;
-    let runtime_started = Instant::now();
-    let report =
-        gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %project_root.display(),
-        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
-        "project index runtime ensured for status"
+    let selection = select_probe_inputs_for_scope(
+        list_worktree_probe_inputs(&repo_root)?,
+        StatusProbeScope::CurrentWorktree,
+        Some(&worktree_root),
+        all_worktree_status_batch_limit(),
     );
-    let runner_started = Instant::now();
-    let output = gwt_core::process::hidden_command(project_index_python_path())
-        .arg(gwt_core::runtime::project_index_runner_path())
-        .arg("--action")
-        .arg("status")
-        .arg("--repo-hash")
-        .arg(repo_hash.as_str())
-        .arg("--worktree-hash")
-        .arg(worktree_hash.as_str())
-        .current_dir(&repo_root)
-        .output()
-        .map_err(|err| format!("run project index status: {err}"))?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = runner_started.elapsed().as_millis() as u64,
-        exit_status = %output.status,
-        "project index status runner completed"
-    );
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
+    if selection.inputs.is_empty() {
         return Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::Error,
-            format!("runner exit {}: {detail}", output.status),
-        ));
+            ProjectIndexStatusState::Skipped,
+            "No matching current worktree for project index status",
+        )
+        .with_coverage(selection.coverage));
     }
-    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|err| format!("parse project index status: {err}"))?;
-    let unhealthy = payload
-        .get("status")
-        .and_then(serde_json::Value::as_object)
-        .map(|status| {
-            status
-                .values()
-                .filter(|scope| {
-                    !scope
-                        .get("healthy")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0);
-    if unhealthy == 0 {
-        Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::Ready,
-            format!("Runtime ready; asset {}", report.runner_hash),
-        ))
-    } else {
-        Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::RepairRequired,
-            format!("{unhealthy} index scope(s) require repair"),
-        ))
-    }
+    let coverage = selection.coverage;
+    Ok(project_disk_status_view(&repo_hash, selection.inputs).with_coverage(coverage))
 }
 
 fn read_issue_index_source_fingerprint(index_root: &Path, repo_hash: &RepoHash) -> Option<String> {
@@ -1796,22 +1966,300 @@ fn issue_index_needs_rebuild_for_cache(
     if source.document_count == 0 {
         return Ok(false);
     }
+    let interrupted = std::fs::read(
+        index_root
+            .join(repo_hash.as_str())
+            .join("issues/repair.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+    if let Some(repair) = interrupted {
+        let expected = &repair["expected_budget_interruption"];
+        if repair["last_error"].as_str() == Some("BUILD_INCOMPLETE")
+            && repair["fingerprint"].as_str() == Some(source.fingerprint.as_str())
+            && expected["fingerprint"].as_str() == Some(source.fingerprint.as_str())
+            && repair["refresh_run_id"].as_str().is_some_and(|run_id| {
+                !run_id.is_empty() && expected["run_id"].as_str() == Some(run_id)
+            })
+        {
+            // Publication may precede the deadline; even current metadata
+            // must drain the known interruption and clear its repair marker.
+            return Ok(true);
+        }
+    }
     Ok(
         read_issue_index_source_fingerprint(index_root, repo_hash).as_deref()
             != Some(source.fingerprint.as_str()),
     )
 }
 
-fn refresh_issue_cache_and_index_for_startup<S: RunnerSpawner + ?Sized>(
+/// Project roots this process registered with the Refresh Broker, keyed by
+/// repo hash. Broker records carry only hashes, so the drain resolves an
+/// executable path here and leaves foreign targets to their own owner.
+#[derive(Debug, Clone)]
+pub struct RegisteredRefreshProject {
+    pub project_root: PathBuf,
+    pub index_root: PathBuf,
+}
+
+fn refresh_project_registry() -> &'static Mutex<HashMap<String, RegisteredRefreshProject>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, RegisteredRefreshProject>>> = OnceLock::new();
+    REGISTRY.get_or_init(Mutex::default)
+}
+
+fn register_refresh_project(repo_hash: &str, project_root: &Path, index_root: &Path) {
+    let mut registry = refresh_project_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.insert(
+        repo_hash.to_string(),
+        RegisteredRefreshProject {
+            project_root: project_root.to_path_buf(),
+            index_root: index_root.to_path_buf(),
+        },
+    );
+}
+
+/// Project registered for `repo_hash` by a bootstrap in this process.
+pub fn registered_refresh_project(repo_hash: &str) -> Option<RegisteredRefreshProject> {
+    refresh_project_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(repo_hash)
+        .cloned()
+}
+
+/// Both Files scopes always travel together so one View head publishes them
+/// atomically (SPEC #1939 AS-23).
+pub const REFRESH_FILE_SCOPES: [RefreshScope; 2] = [RefreshScope::Files, RefreshScope::FilesDocs];
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Canonical repo base intent for startup admission (Flow A). The desired
+/// snapshot pins the locally available canonical root tree without a fetch;
+/// the epoch is wall-clock so a newer startup supersedes an older one.
+fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> RefreshIntent {
+    let desired_epoch = unix_millis_now();
+    let desired_snapshot = match gwt_git::refs::resolve_canonical_root_tree(repo_root) {
+        Ok(Some(tree)) => format!("tree:{}", tree.root_tree_oid),
+        Ok(None) => "tree:unborn".to_string(),
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt::index",
+                project_root = %repo_root.display(),
+                error = %error,
+                "canonical root tree unavailable for startup refresh intent"
+            );
+            format!("epoch:{desired_epoch}")
+        }
+    };
+    RefreshIntent {
+        protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+        target: RefreshTarget::base(repo_hash.as_str(), REFRESH_FILE_SCOPES),
+        desired_epoch,
+        desired_snapshot,
+        priority: JobPriority::Background,
+        reason: RefreshReason::Startup,
+        resource_class: RefreshResourceClass::Embedding,
+    }
+}
+
+/// Injectable startup admission (SPEC #1939 FR-416). Registers the project
+/// root for the broker drain and submits one canonical base intent. Main plus
+/// N linked worktrees of one repository coalesce onto the same target; a
+/// replay only refreshes the desired epoch. The spawner is accepted for
+/// signature parity with the claim executor and is never invoked here:
+/// registration must not spawn a runner.
+pub fn bootstrap_project_index_for_path_with_broker<S: RunnerSpawner + ?Sized>(
+    project_root: &Path,
+    index_root: &Path,
+    broker: &RefreshBroker,
+    _spawner: &S,
+) -> Result<(), String> {
+    if test_fixture_status_path().is_some() {
+        tracing::info!(
+            target: "gwt::index",
+            project_root = %project_root.display(),
+            "GWT_INDEX_TEST_FIXTURE applied: skipping project index bootstrap registration"
+        );
+        return Ok(());
+    }
+    let bootstrap_started = Instant::now();
+    let Some(context) = project_index_git_context(project_root) else {
+        return Ok(());
+    };
+    let repo_root = context.repo_root;
+    let refresh_project_root =
+        default_project_index_worktree_root(project_root).unwrap_or_else(|| repo_root.clone());
+    let Some(repo_hash) = detect_repo_hash(&repo_root) else {
+        return Ok(());
+    };
+    register_refresh_project(repo_hash.as_str(), &refresh_project_root, index_root);
+    let intent = startup_base_refresh_intent(&repo_root, &repo_hash);
+    let snapshot = broker
+        .submit(intent)
+        .map_err(|err| format!("submit project index refresh intent: {err}"))?;
+    tracing::info!(
+        target: "gwt::index",
+        project_root = %repo_root.display(),
+        repo_hash = repo_hash.as_str(),
+        state = ?snapshot.state(),
+        desired_epoch = snapshot.desired_epoch(),
+        quiet_deadline_millis = snapshot.quiet_deadline_millis(),
+        elapsed_ms = bootstrap_started.elapsed().as_millis() as u64,
+        "project index base refresh intent registered"
+    );
+    Ok(())
+}
+
+/// Claim the next runnable target whose repository this process registered.
+pub fn claim_registered_project_index_refresh(
+    broker: &RefreshBroker,
+) -> Result<Option<RefreshClaim>, String> {
+    let registered: std::collections::HashSet<String> = refresh_project_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .keys()
+        .cloned()
+        .collect();
+    broker
+        .claim_next_where(|target| registered.contains(target.repo_hash()))
+        .map_err(|err| format!("claim project index refresh: {err}"))
+}
+
+/// Execute one claimed refresh for a registered project. Returns the project
+/// root so the caller can re-project status for it.
+pub fn execute_claimed_project_index_refresh(claim: RefreshClaim) -> Result<PathBuf, String> {
+    let Some(project) = registered_refresh_project(claim.target().repo_hash()) else {
+        let message = format!(
+            "no registered project root for repo {}",
+            claim.target().repo_hash()
+        );
+        let _ = claim.fail(message.clone());
+        return Err(message);
+    };
+    execute_claimed_refresh(claim, |intent| {
+        gwt_core::runtime::ensure_project_index_runtime()
+            .map_err(|error| format!("project index runtime ensure failed: {error}"))?;
+        execute_claimed_refresh_inner(intent, &project.project_root, &project.index_root)
+    })
+    .map(|()| project.project_root)
+}
+
+/// Broker-owned maintenance for one claimed target (SPEC #1939 Flow A). Only
+/// the claim owner reconciles legacy / orphan index state, checks the Issue
+/// source cache, and runs model work; all builds go through the host-wide
+/// coordinator at the claim priority. The spawner is accepted for signature
+/// parity and never invoked: there is no direct issue runner escape hatch.
+pub fn execute_claimed_project_index_refresh_with<S: RunnerSpawner + ?Sized>(
+    claim: RefreshClaim,
+    project_root: &Path,
+    index_root: &Path,
+    _spawner: &S,
+) -> Result<(), String> {
+    execute_claimed_refresh(claim, |intent| {
+        execute_claimed_refresh_inner(intent, project_root, index_root)
+    })
+}
+
+fn execute_claimed_refresh(
+    claim: RefreshClaim,
+    maintenance: impl FnOnce(&RefreshIntent) -> Result<(), String>,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let intent = claim.intent().clone();
+    let result = {
+        let _deadline = (intent.priority == JobPriority::Background).then(|| {
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                gwt_core::operation_deadline::now() + DEFAULT_REFRESH_CLAIM_TIMEOUT,
+            )
+        });
+        maintenance(&intent).and_then(|()| {
+            gwt_core::operation_deadline::ensure_remaining("project index refresh completion")
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    };
+    match result {
+        Ok(()) => {
+            tracing::info!(
+                target: "gwt::index",
+                repo_hash = intent.target.repo_hash(),
+                kind = ?intent.target.kind(),
+                desired_epoch = intent.desired_epoch,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "project index refresh claim completed"
+            );
+            claim
+                .complete()
+                .map_err(|err| format!("complete project index refresh claim: {err}"))
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt::index",
+                repo_hash = intent.target.repo_hash(),
+                kind = ?intent.target.kind(),
+                error = %error,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "project index refresh claim failed"
+            );
+            let _ = claim.fail(error.clone());
+            Err(error)
+        }
+    }
+}
+
+fn reconcile_claimed_refresh_worktrees(
     repo_root: &Path,
-    refresh_project_root: &Path,
     index_root: &Path,
     repo_hash: &RepoHash,
-    spawner: &S,
+) -> Result<Vec<PathBuf>, String> {
+    // A failed inventory cannot authorize orphan deletion.
+    let active_worktrees = list_git_worktree_paths(repo_root)?;
+    reconcile_repo(&ReconcileOptions {
+        index_root: index_root.to_path_buf(),
+        repo_hash: repo_hash.clone(),
+        active_worktree_paths: active_worktrees.clone(),
+        legacy_worktree_dirs: active_worktrees.clone(),
+    })
+    .map_err(|err| err.to_string())?;
+    Ok(active_worktrees)
+}
+
+fn execute_claimed_refresh_inner(
+    intent: &RefreshIntent,
+    project_root: &Path,
+    index_root: &Path,
 ) -> Result<(), String> {
-    let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(repo_hash);
+    let Some(context) = project_index_git_context(project_root) else {
+        return Err(format!(
+            "no git worktree detected for claimed refresh at {}",
+            project_root.display()
+        ));
+    };
+    let repo_root = context.repo_root;
+    let refresh_project_root =
+        default_project_index_worktree_root(project_root).unwrap_or_else(|| repo_root.clone());
+    let repo_hash = detect_repo_hash(&repo_root)
+        .ok_or_else(|| "no origin remote configured for claimed refresh".to_string())?;
+    if repo_hash.as_str() != intent.target.repo_hash() {
+        return Err(format!(
+            "claimed target repo {} does not match project repo {}",
+            intent.target.repo_hash(),
+            repo_hash.as_str()
+        ));
+    }
+
+    let active_worktrees = reconcile_claimed_refresh_worktrees(&repo_root, index_root, &repo_hash)?;
+
+    let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(&repo_hash);
     match crate::issue_cache::sync_issue_cache_from_remote_if_stale_with_fingerprint(
-        refresh_project_root,
+        &refresh_project_root,
         &cache_root,
         crate::issue_cache::ISSUE_CACHE_TTL,
     ) {
@@ -1834,85 +2282,91 @@ fn refresh_issue_cache_and_index_for_startup<S: RunnerSpawner + ?Sized>(
         }
     }
 
-    if issue_index_needs_rebuild_for_cache(index_root, repo_hash, &cache_root)? {
-        spawner
-            .spawn_index_issues(repo_hash.as_str(), refresh_project_root, false)
-            .map_err(|err| format!("spawn issue index: {err}"))?;
+    let priority = intent.priority;
+    if issue_index_needs_rebuild_for_cache(index_root, &repo_hash, &cache_root)? {
+        rebuild_index_target(
+            &refresh_project_root,
+            IndexRebuildScope::Issues,
+            None,
+            priority,
+        )?;
+    }
+
+    let file_scopes = file_rebuild_scopes(intent.target.scopes());
+    if file_scopes.is_empty() {
+        // Issue #4086 AC-3: an Issues-only intent is fully served by the
+        // Issue-cache check above.
+        return Ok(());
+    }
+    let build_root = match intent.target.kind() {
+        RefreshTargetKind::Base => refresh_project_root,
+        RefreshTargetKind::Overlay => {
+            let wanted = intent.target.worktree_hash().unwrap_or_default();
+            active_worktrees
+                .into_iter()
+                .find(|path| {
+                    compute_worktree_hash(path)
+                        .map(|hash| hash.as_str() == wanted)
+                        .unwrap_or(false)
+                })
+                .ok_or_else(|| format!("overlay worktree {wanted} is not an active worktree"))?
+        }
+    };
+    let build_hash = compute_worktree_hash(&build_root)
+        .map_err(|err| format!("compute worktree hash: {err}"))?
+        .to_string();
+    for rebuild_scope in file_scopes {
+        rebuild_index_target(&build_root, rebuild_scope, Some(&build_hash), priority)?;
     }
     Ok(())
 }
 
-pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
-    project_root: &Path,
-    index_root: &Path,
-    spawner: &S,
-) -> Result<(), String> {
-    if test_fixture_status_path().is_some() {
-        tracing::info!(
-            target: "gwt::index",
-            project_root = %project_root.display(),
-            "GWT_INDEX_TEST_FIXTURE applied: skipping project index bootstrap helper"
-        );
-        return Ok(());
-    }
-    let bootstrap_started = Instant::now();
-    let Some(context) = project_index_git_context(project_root) else {
+/// File scopes of a refresh target, in build order. Non-file scopes
+/// (`Issues`) are handled by the claim's Issue-cache check, not here.
+fn file_rebuild_scopes(scopes: &[RefreshScope]) -> Vec<IndexRebuildScope> {
+    scopes
+        .iter()
+        .filter_map(|scope| match scope {
+            RefreshScope::Files => Some(IndexRebuildScope::Files),
+            RefreshScope::FilesDocs => Some(IndexRebuildScope::FilesDocs),
+            RefreshScope::Issues => None,
+        })
+        .collect()
+}
+
+/// Issue #4086 AC-3: register an Issue-index refresh intent instead of
+/// rebuilding in-process. The host drains it after the broker quiet period
+/// (`DEFAULT_REFRESH_QUIET_PERIOD`), so a burst of gwtd calls coalesces into
+/// one background build that also defers to any pending search or manual
+/// rebuild on the model lane (verification runs on its own lane, #4285).
+pub fn submit_issue_index_refresh(
+    broker: &RefreshBroker,
+    repo_hash: &str,
+) -> Result<gwt_core::index::broker::RefreshTargetSnapshot, String> {
+    let desired_epoch = unix_millis_now();
+    broker
+        .submit(RefreshIntent {
+            protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+            target: RefreshTarget::base(repo_hash, [RefreshScope::Issues]),
+            desired_epoch,
+            desired_snapshot: format!("epoch:{desired_epoch}"),
+            priority: JobPriority::Background,
+            reason: RefreshReason::DirtyEvent,
+            resource_class: RefreshResourceClass::Embedding,
+        })
+        .map_err(|err| format!("submit issue index refresh intent: {err}"))
+}
+
+/// gwtd entrypoint for [`submit_issue_index_refresh`]: resolves the repo hash
+/// of `repo_path` and the default broker. Repositories without an origin
+/// remote have no index and are skipped.
+pub fn queue_issue_index_refresh(repo_path: &Path) -> Result<(), String> {
+    let Some(repo_hash) = detect_repo_hash(repo_path) else {
         return Ok(());
     };
-    let repo_root = context.repo_root;
-    let refresh_project_root =
-        default_project_index_worktree_root(project_root).unwrap_or_else(|| repo_root.clone());
-    let Some(repo_hash) = detect_repo_hash(&repo_root) else {
-        return Ok(());
-    };
-
-    let worktree_list_started = Instant::now();
-    let active_worktrees =
-        list_git_worktree_paths(&repo_root).unwrap_or_else(|_| vec![repo_root.clone()]);
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = worktree_list_started.elapsed().as_millis() as u64,
-        worktree_count = active_worktrees.len(),
-        "project index active worktrees listed"
-    );
-    let reconcile_started = Instant::now();
-    reconcile_repo(&ReconcileOptions {
-        index_root: index_root.to_path_buf(),
-        repo_hash: repo_hash.clone(),
-        active_worktree_paths: active_worktrees.clone(),
-        legacy_worktree_dirs: active_worktrees,
-    })
-    .map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = reconcile_started.elapsed().as_millis() as u64,
-        "project index repository reconciled"
-    );
-
-    let refresh_started = Instant::now();
-    refresh_issue_cache_and_index_for_startup(
-        &repo_root,
-        &refresh_project_root,
-        index_root,
-        &repo_hash,
-        spawner,
-    )?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = refresh_started.elapsed().as_millis() as u64,
-        "project index issue source refresh checked"
-    );
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = bootstrap_started.elapsed().as_millis() as u64,
-        "project index bootstrap helper completed"
-    );
-
-    Ok(())
+    let broker = RefreshBroker::open_default()
+        .map_err(|err| format!("open project index refresh broker: {err}"))?;
+    submit_issue_index_refresh(&broker, repo_hash.as_str()).map(|_| ())
 }
 
 fn run_project_index_git_probe(
@@ -2089,16 +2543,13 @@ fn process_cwd_worktree_root_for_repo(repo_root: &Path) -> Option<PathBuf> {
 }
 
 fn list_git_worktree_paths(project_root: &Path) -> Result<Vec<PathBuf>, String> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(project_root)
-        .output()
+    let output = run_project_index_git_probe(project_root, &["worktree", "list", "--porcelain"])
         .map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    if !output.success() {
+        return Err(output.stderr.trim().to_string());
     }
 
-    let mut worktrees = parse_git_worktree_paths(&String::from_utf8_lossy(&output.stdout));
+    let mut worktrees = parse_git_worktree_paths(&output.stdout);
 
     if worktrees.is_empty() {
         worktrees.push(canonicalize_path(project_root.to_path_buf()));
@@ -2122,7 +2573,294 @@ pub(crate) fn project_index_python_path() -> PathBuf {
 mod tests {
     use super::*;
 
+    #[test]
+    fn background_refresh_maintenance_has_one_finite_deadline() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broker = RefreshBroker::open(temp.path(), Duration::ZERO).expect("broker");
+        let target = RefreshTarget::base("budget-repo", [RefreshScope::Issues]);
+        broker
+            .submit(RefreshIntent {
+                protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+                target: target.clone(),
+                desired_epoch: 7,
+                desired_snapshot: "snapshot-7".to_string(),
+                priority: JobPriority::Background,
+                reason: RefreshReason::Startup,
+                resource_class: RefreshResourceClass::Embedding,
+            })
+            .expect("submit");
+        let claim = broker.claim_next().expect("claim").expect("claimable");
+        let started = Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(started);
+        execute_claimed_refresh(claim, |_| {
+            assert_eq!(
+                gwt_core::operation_deadline::current(),
+                Some(started + Duration::from_secs(60)),
+                "runtime provision and every nested runner share this deadline",
+            );
+            Ok(())
+        })
+        .expect("maintenance");
+        assert!(gwt_core::operation_deadline::current().is_none());
+        assert_eq!(
+            broker
+                .inspect()
+                .expect("snapshot")
+                .target(&target)
+                .expect("target")
+                .completed_epoch(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn background_refresh_deadline_keeps_required_work_pending() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broker = RefreshBroker::open(temp.path(), Duration::ZERO).expect("broker");
+        let target = RefreshTarget::base("budget-repo", [RefreshScope::Issues]);
+        broker
+            .submit(RefreshIntent {
+                protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+                target: target.clone(),
+                desired_epoch: 7,
+                desired_snapshot: "snapshot-7".to_string(),
+                priority: JobPriority::Background,
+                reason: RefreshReason::DirtyEvent,
+                resource_class: RefreshResourceClass::Embedding,
+            })
+            .expect("submit");
+        let claim = broker.claim_next().expect("claim").expect("claimable");
+        let started = Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(started);
+        let error = execute_claimed_refresh(claim, |_| {
+            let _expired = gwt_core::operation_deadline::ScopedOperationClock::set(
+                started + Duration::from_secs(60),
+            );
+            gwt_core::operation_deadline::ensure_remaining("refresh maintenance")
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .expect_err("quantum expires");
+        assert!(error.contains("deadline expired"));
+        let snapshot = broker.inspect().expect("snapshot");
+        let pending = snapshot.target(&target).expect("target");
+        assert_eq!(
+            pending.state(),
+            gwt_core::index::broker::RefreshTargetState::Quiet
+        );
+        assert_eq!(pending.desired_epoch(), 7);
+        assert_eq!(pending.completed_epoch(), None);
+        assert!(pending
+            .last_error()
+            .expect("error")
+            .contains("deadline expired"));
+        assert!(gwt_core::operation_deadline::current().is_none());
+    }
+
+    #[test]
+    fn background_issue_runner_backstop_marks_its_owned_interruption() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let _home = ScopedGwtHome::set(&home);
+        let repo_hash =
+            gwt_core::repo_hash::compute_repo_hash("https://github.com/example/budget.git");
+        let repair = gwt_index_root()
+            .join(repo_hash.as_str())
+            .join("issues/repair.json");
+        let ready = temp.path().join("ready");
+        let _hang = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_HANG", "1");
+        let _ready = ScopedEnvVar::set("GWT_INDEX_TEST_REBUILD_MARKER", ready.as_os_str());
+        let _repair = ScopedEnvVar::set("GWT_INDEX_TEST_REPAIR_PATH", repair.as_os_str());
+        let context = crate::cli::index::runtime::IndexContext {
+            project_root: temp.path().to_path_buf(),
+            repo_hash,
+            worktree_hash: "wt-budget".to_string(),
+            python: std::env::current_exe().expect("fixture binary"),
+            runner: PathBuf::from("--ignored"),
+        };
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + gwt_core::deadline_budget::HANG_GUARD,
+        );
+        let error = gwt_core::process_console::spawn::with_spawn_ready_for_tests(
+            // The cleanup reserve is a quarter of this budget, capped at the
+            // 1s production grace. A 1s budget left only 250ms to reap the
+            // Windows process tree on a loaded runner, so the fail-closed
+            // path (no reap evidence, no marker) fired instead.
+            Duration::from_secs(4),
+            move || {
+                let started = Instant::now();
+                while !ready.exists() {
+                    assert!(started.elapsed() < gwt_core::deadline_budget::HANG_GUARD);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            },
+            || {
+                run_rebuild_runner_for_target(
+                    &context,
+                    rebuild_action_for_scope(IndexRebuildScope::Issues),
+                    "background",
+                )
+            },
+        )
+        .err()
+        .expect("child deadline");
+        assert!(error.contains("process deadline expired"), "{error}");
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(repair).expect("repair")).expect("JSON");
+        assert_eq!(
+            marker["expected_budget_interruption"]["fingerprint"],
+            "source-fingerprint"
+        );
+        assert_eq!(
+            marker["expected_budget_interruption"]["run_id"],
+            marker["refresh_run_id"]
+        );
+        assert!(marker["refresh_run_id"].is_string());
+    }
+
     static GWT_INDEX_TEST_FIXTURE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // Issue #4086 AC-3: gwtd issue.* calls hand the rebuild to the refresh
+    // broker's quiet window instead of running a full index in-process.
+    #[test]
+    fn issue_index_refresh_is_queued_behind_the_broker_quiet_window() {
+        use gwt_core::index::broker::{
+            RefreshBroker, RefreshTargetState, DEFAULT_REFRESH_QUIET_PERIOD,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let broker = RefreshBroker::open(tmp.path(), DEFAULT_REFRESH_QUIET_PERIOD).unwrap();
+        let before = unix_millis_now();
+        let snapshot = submit_issue_index_refresh(&broker, "99a8660247f5bc49").unwrap();
+        assert_eq!(snapshot.state(), RefreshTargetState::Quiet);
+        assert_eq!(
+            snapshot.target(),
+            &RefreshTarget::base("99a8660247f5bc49", [RefreshScope::Issues])
+        );
+        let deadline = snapshot.quiet_deadline_millis().expect("quiet deadline");
+        assert!(deadline >= before + DEFAULT_REFRESH_QUIET_PERIOD.as_millis() as u64);
+
+        // A burst of gwtd calls coalesces onto the same quiet record.
+        let again = submit_issue_index_refresh(&broker, "99a8660247f5bc49").unwrap();
+        assert_eq!(again.state(), RefreshTargetState::Quiet);
+        assert_eq!(broker.inspect().unwrap().target_count(), 1);
+    }
+
+    #[test]
+    fn issues_only_refresh_target_builds_no_file_scopes() {
+        assert!(file_rebuild_scopes(&[RefreshScope::Issues]).is_empty());
+        assert_eq!(
+            file_rebuild_scopes(&[
+                RefreshScope::Files,
+                RefreshScope::FilesDocs,
+                RefreshScope::Issues
+            ]),
+            vec![IndexRebuildScope::Files, IndexRebuildScope::FilesDocs]
+        );
+    }
+
+    fn arg_pair_count(args: &[OsString], flag: &str, value: &str) -> usize {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag && pair[1] == value)
+            .count()
+    }
+
+    fn protocol_rebuild_context() -> crate::cli::index::runtime::IndexContext {
+        crate::cli::index::runtime::IndexContext {
+            project_root: PathBuf::from("project-root"),
+            repo_hash: gwt_core::repo_hash::compute_repo_hash(
+                "https://example.com/protocol-aware-rebuild.git",
+            ),
+            worktree_hash: "wt-hash".to_string(),
+            python: PathBuf::from("python"),
+            runner: PathBuf::from("runner.py"),
+        }
+    }
+
+    #[test]
+    fn protocol_aware_rebuild_args_request_v2_for_file_scopes() {
+        use crate::cli::index::runtime::RebuildAction;
+
+        let context = protocol_rebuild_context();
+        let actions = [
+            RebuildAction {
+                label: "files",
+                action: "index-files",
+                scope: Some("files"),
+                needs_worktree_hash: true,
+            },
+            RebuildAction {
+                label: "files-docs",
+                action: "index-files",
+                scope: Some("files-docs"),
+                needs_worktree_hash: true,
+            },
+        ];
+
+        for action in actions {
+            let args = protocol_aware_rebuild_runner_args(&context, action, "background");
+
+            assert_eq!(arg_pair_count(&args, "--action", action.action), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--repo-hash", context.repo_hash.as_str()),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--worktree-hash", "wt-hash"), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--scope", action.scope.expect("file scope")),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--qos", "background"), 1);
+            assert_eq!(arg_pair_count(&args, "--file-index-protocol", "v2"), 1);
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.as_os_str() == OsStr::new("--file-index-protocol"))
+                    .count(),
+                1,
+                "file rebuild protocol flag must appear exactly once: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_aware_rebuild_args_keep_non_file_scopes_legacy() {
+        use crate::cli::index::runtime::RebuildAction;
+
+        let context = protocol_rebuild_context();
+        let actions = [
+            ("issues", "index-issues"),
+            ("specs", "index-specs"),
+            ("memory", "index-memory"),
+            ("discussions", "index-discussions"),
+            ("board", "index-board"),
+            ("works", "index-works"),
+        ];
+
+        for (label, action_name) in actions {
+            let action = RebuildAction {
+                label,
+                action: action_name,
+                scope: None,
+                needs_worktree_hash: false,
+            };
+            let args = protocol_aware_rebuild_runner_args(&context, action, "interactive");
+
+            assert_eq!(arg_pair_count(&args, "--action", action_name), 1);
+            assert_eq!(
+                arg_pair_count(&args, "--repo-hash", context.repo_hash.as_str()),
+                1
+            );
+            assert_eq!(arg_pair_count(&args, "--qos", "interactive"), 1);
+            assert!(
+                !args.iter().any(|arg| arg == "--file-index-protocol"),
+                "repo scope {label} must retain legacy/default argv: {args:?}"
+            );
+        }
+    }
 
     #[test]
     fn automatic_background_index_opt_out_is_exact() {
@@ -2149,6 +2887,14 @@ mod tests {
         let marker = std::env::var_os("GWT_INDEX_TEST_REBUILD_MARKER")
             .map(PathBuf::from)
             .expect("rebuild marker path");
+        if let Some(path) = std::env::var_os("GWT_INDEX_TEST_REPAIR_PATH").map(PathBuf::from) {
+            std::fs::create_dir_all(path.parent().expect("repair parent"))
+                .expect("repair directory");
+            std::fs::write(path, serde_json::to_vec(&serde_json::json!({
+                "fingerprint": "source-fingerprint", "failures": 1,
+                "last_error": "BUILD_INCOMPLETE", "refresh_run_id": std::env::var("GWT_INDEX_REFRESH_RUN_ID").ok(),
+            })).expect("repair JSON")).expect("write incomplete repair");
+        }
         std::fs::write(marker, b"started").expect("write rebuild marker");
         // Stay alive beyond the loaded-machine deadline used by the parent
         // fixture so settlement proves process-tree termination, not a normal
@@ -2172,6 +2918,14 @@ mod tests {
     #[test]
     fn project_index_git_context_does_not_fall_through_an_expired_deadline() {
         let checkout_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = gwt_core::repo_hash::compute_repo_hash("https://example.test/inventory.git");
+        let kept = temp
+            .path()
+            .join(repo.as_str())
+            .join("worktrees/linked-index/keep");
+        std::fs::create_dir_all(kept.parent().expect("parent")).expect("index directory");
+        std::fs::write(&kept, b"live index").expect("live index");
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             Instant::now() - Duration::from_millis(1),
         );
@@ -2180,6 +2934,15 @@ mod tests {
             project_index_git_context(&checkout_root).is_none(),
             "an expired git probe must not reuse an earlier raw probe result"
         );
+        let error = list_git_worktree_paths(&checkout_root)
+            .expect_err("worktree enumeration must honor the same expired deadline");
+        assert!(error.contains("deadline expired"), "{error}");
+        let result = reconcile_claimed_refresh_worktrees(temp.path(), temp.path(), &repo);
+        assert_eq!(
+            std::fs::read(kept).expect("expired inventory retains index"),
+            b"live index"
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2380,6 +3143,70 @@ detached
         (bare, develop)
     }
 
+    #[test]
+    fn current_worktree_status_reuses_startup_inventory_without_changing_coverage() {
+        // Issue #4398 AC-3: the startup probe reuses the inventory the startup
+        // path already listed; `coverage.total_worktrees` keeps its value
+        // (the bare main entry stays excluded).
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env_guard = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fixture = gwt_core::test_support::ScopedEnvVar::unset("GWT_INDEX_TEST_FIXTURE");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bare, develop) = make_bare_workspace_with_origin(&temp.path().join("ws"));
+        let feature = temp.path().join("ws").join("feature");
+        run_git_at(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/x",
+                feature.to_str().unwrap(),
+                "develop",
+            ],
+        );
+        let inventory =
+            crate::worktree_inventory::enumerate_worktrees(&develop, None).expect("inventory");
+
+        let listed = aggregate_current_worktree_index_status_for_path(&develop);
+        let reused = aggregate_current_worktree_index_status_with_inventory(&develop, &inventory);
+
+        let listed_coverage = listed.coverage.expect("listed coverage");
+        assert_eq!(listed_coverage.total_worktrees, 2);
+        assert_eq!(reused.coverage, Some(listed_coverage));
+        assert_eq!(
+            reused.worktrees.keys().collect::<Vec<_>>(),
+            listed.worktrees.keys().collect::<Vec<_>>()
+        );
+
+        // The inventory is the only source: the probe does not list again.
+        let without_feature: Vec<_> = inventory
+            .iter()
+            .filter(|entry| entry.branch.as_deref() != Some("feature/x"))
+            .cloned()
+            .collect();
+        let trimmed =
+            aggregate_current_worktree_index_status_with_inventory(&develop, &without_feature);
+        assert_eq!(trimmed.coverage.expect("coverage").total_worktrees, 1);
+    }
+
+    #[test]
+    fn worktree_listing_for_status_is_a_logged_git_spawn() {
+        // Issue #4398 AC-4: the listing reaches the gwt.log process summary
+        // through the logged wrapper instead of an invisible hidden spawn.
+        let temp = tempfile::tempdir().expect("tempdir");
+        init_git_repo_with_origin(temp.path());
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        list_worktree_probe_inputs(temp.path()).expect("list worktrees");
+
+        assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 1);
+    }
+
     struct CurrentDirGuard {
         previous: PathBuf,
     }
@@ -2500,6 +3327,13 @@ detached
 
     #[test]
     fn deadline_aware_git_context_matches_public_resolver_path_semantics() {
+        // Sibling tests change process cwd under env_test_lock. Without the
+        // same lock, parallel `cargo test` can make the public resolver and
+        // the deadline-aware probe observe different worktree/standalone
+        // classifications for the same temp path.
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let (bare, linked_worktree) = make_bare_workspace_with_origin(temp.path());
         let standalone = temp.path().join("standalone");
@@ -2643,6 +3477,8 @@ detached
             "repair_required": true,
             "document_count": 42,
             "reason": "manifest_missing",
+            "fallback_source": "previous",
+            "view_id": "view-previous",
             "legacy_residue_detected": true,
             "last_repair_at": "2026-04-24T06:15:20Z"
         });
@@ -2653,10 +3489,104 @@ detached
         assert!(view.repair_required);
         assert_eq!(view.document_count, 42);
         assert_eq!(view.reason, "manifest_missing");
+        assert_eq!(view.fallback_source.as_deref(), Some("previous"));
+        assert_eq!(view.view_id.as_deref(), Some("view-previous"));
         assert_eq!(view.legacy_residue_detected, Some(true));
         assert_eq!(
             view.last_repair_at.expect("timestamp").to_rfc3339(),
             "2026-04-24T06:15:20+00:00"
+        );
+    }
+
+    fn fallback_serving_file_status_view() -> ProjectIndexStatusView {
+        build_aggregated_status_view(
+            "asset-hash-12",
+            &[WorktreeProbeOutcome {
+                input: WorktreeProbeInput {
+                    worktree_hash: "wtAhash".to_string(),
+                    branch: "develop".to_string(),
+                    path: PathBuf::from("/abs/wtA"),
+                },
+                status_payload: Ok(serde_json::json!({
+                    "status": {
+                        "files": {
+                            "healthy": true,
+                            "repair_required": true,
+                            "reason": "active_view_corrupt",
+                            "fallback_source": "previous",
+                            "view_id": "view-previous",
+                            "document_count": 310
+                        },
+                        "files-docs": {
+                            "healthy": true,
+                            "repair_required": true,
+                            "reason": "active_view_corrupt",
+                            "fallback_source": "previous",
+                            "view_id": "view-previous",
+                            "document_count": 16
+                        }
+                    }
+                })),
+            }],
+        )
+    }
+
+    #[test]
+    fn fallback_serving_file_scope_still_requires_repair() {
+        // T-IDX-431 RED: a previous View can keep queries healthy while the
+        // corrupt active View still requires a coordinated repair.
+        let view = fallback_serving_file_status_view();
+
+        assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
+        assert_eq!(view.detail, "2 index scope(s) require repair");
+    }
+
+    #[test]
+    fn fallback_serving_file_scope_is_collected_as_rebuild_target() {
+        let view = fallback_serving_file_status_view();
+        let targets = collect_unhealthy_rebuild_targets(&view.scopes);
+
+        assert!(
+            targets.contains(&(IndexRebuildScope::Files, Some("wtAhash".to_string()))),
+            "healthy fallback serving must not hide the required Files repair: {targets:?}"
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|(_, worktree)| worktree.as_deref() == Some("wtAhash"))
+                .count(),
+            1,
+            "one atomic Files/FilesDocs View must map to one canonical rebuild: {targets:?}"
+        );
+    }
+
+    #[test]
+    fn healthy_legacy_file_fallback_does_not_trigger_eager_auto_repair() {
+        let mut scopes = ProjectIndexScopes::default();
+        for target in [&mut scopes.files, &mut scopes.files_docs] {
+            target.insert(
+                "wtAhash".to_string(),
+                ScopeHealthView {
+                    healthy: true,
+                    repair_required: true,
+                    document_count: 1,
+                    reason: "view_head_missing".to_string(),
+                    fallback_source: Some("legacy".to_string()),
+                    view_id: None,
+                    legacy_residue_detected: None,
+                    last_repair_at: None,
+                },
+            );
+        }
+
+        assert!(
+            collect_unhealthy_rebuild_targets(&scopes).is_empty(),
+            "a readable legacy fallback migrates lazily on demand, not at startup"
+        );
+        assert!(
+            collect_unhealthy_rebuild_targets_for_worktree_hash(&scopes, Some("wtAhash"))
+                .is_empty(),
+            "the current worktree bootstrap must preserve lazy migration"
         );
     }
 
@@ -2927,12 +3857,76 @@ detached
         );
         let _fixture_env = FixtureEnvGuard::set(&fixture_path);
 
-        bootstrap_project_index_for_path_with(
+        let broker = RefreshBroker::open(temp.path().join("broker"), Duration::from_secs(30))
+            .expect("open refresh broker");
+        bootstrap_project_index_for_path_with_broker(
             &repo,
             &temp.path().join("index"),
+            &broker,
             &PanicRunnerSpawner,
         )
         .expect("fixture-backed bootstrap");
+        assert_eq!(
+            broker.inspect().expect("inspect").target_count(),
+            0,
+            "fixture-backed bootstrap must not register a refresh intent"
+        );
+    }
+
+    #[test]
+    fn bootstrap_with_broker_registers_one_quiet_base_target_without_touching_index_root() {
+        let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repo");
+        init_git_repo_with_origin(&repo);
+        let index_root = temp.path().join("index");
+        let broker = RefreshBroker::open(temp.path().join("broker"), Duration::from_secs(30))
+            .expect("open refresh broker");
+
+        for _ in 0..3 {
+            bootstrap_project_index_for_path_with_broker(
+                &repo,
+                &index_root,
+                &broker,
+                &PanicRunnerSpawner,
+            )
+            .expect("register startup intent");
+        }
+
+        let repo_hash = detect_repo_hash(&repo).expect("repo hash");
+        let snapshot = broker.inspect().expect("inspect");
+        assert_eq!(
+            snapshot.target_count(),
+            1,
+            "replays coalesce onto one base target"
+        );
+        assert_eq!(snapshot.queue_depth(), 0);
+        assert_eq!(snapshot.running_count(), 0);
+        let expected = RefreshTarget::base(repo_hash.as_str(), REFRESH_FILE_SCOPES);
+        let pending = snapshot.target(&expected).expect("base target");
+        assert_eq!(
+            pending.state(),
+            gwt_core::index::broker::RefreshTargetState::Quiet
+        );
+        assert_eq!(pending.priority(), JobPriority::Background);
+        assert!(pending.quiet_deadline_millis().is_some());
+        assert!(
+            broker.claim_next().expect("probe").is_none(),
+            "startup target is not claimable before its quiet deadline"
+        );
+        assert!(
+            !index_root.exists(),
+            "registration must not create the index root"
+        );
+        assert_eq!(
+            registered_refresh_project(repo_hash.as_str())
+                .expect("registered project")
+                .index_root,
+            index_root
+        );
     }
 
     #[test]
@@ -3144,7 +4138,6 @@ detached
                 (IndexRebuildScope::Issues, None),
                 (IndexRebuildScope::Specs, None),
                 (IndexRebuildScope::Files, Some(current_hash.clone())),
-                (IndexRebuildScope::FilesDocs, Some(current_hash)),
             ]
         );
     }
@@ -3284,6 +4277,36 @@ detached
                 .expect("rebuild decision"),
             "startup must rebuild issues when source cache fingerprint differs from index meta",
         );
+        let source = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
+            .expect("source fingerprint")
+            .expect("source");
+        std::fs::write(
+            issues_dir.join("meta.json"),
+            serde_json::json!({
+                "source_cache_fingerprint": source.fingerprint,
+            })
+            .to_string(),
+        )
+        .expect("current published metadata");
+        assert!(
+            !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root)
+                .expect("current source")
+        );
+        std::fs::write(
+            issues_dir.join("repair.json"),
+            serde_json::json!({
+                "last_error": "BUILD_INCOMPLETE", "fingerprint": source.fingerprint,
+                "refresh_run_id": "own-run", "expected_budget_interruption": {
+                    "fingerprint": source.fingerprint, "run_id": "own-run",
+                },
+            })
+            .to_string(),
+        )
+        .expect("budget interrupted after metadata publication");
+        assert!(
+            issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root)
+                .expect("known interruption must resume and clear the marker")
+        );
     }
 
     #[test]
@@ -3348,11 +4371,16 @@ detached
 
     #[test]
     fn run_coordinated_index_job_runs_the_owner_build() {
-        let run = run_coordinated_index_job(
+        let temp = tempfile::tempdir().expect("tempdir");
+        let coordinator =
+            IndexCoordinator::open(temp.path().join("coordinator")).expect("open coordinator");
+        let run = run_coordinated_index_job_with_coordinator(
+            &coordinator,
             "ownertestrepo001",
             "files",
             Some("wt001"),
             JobPriority::Background,
+            None,
             || Ok(BuildStep::Done(7)),
         )
         .expect("owner build succeeds");
@@ -3364,11 +4392,16 @@ detached
 
     #[test]
     fn run_coordinated_index_job_propagates_build_failures() {
-        let error = run_coordinated_index_job::<()>(
+        let temp = tempfile::tempdir().expect("tempdir");
+        let coordinator =
+            IndexCoordinator::open(temp.path().join("coordinator")).expect("open coordinator");
+        let error = run_coordinated_index_job_with_coordinator::<()>(
+            &coordinator,
             "failtestrepo0001",
             "issues",
             None,
             JobPriority::Background,
+            None,
             || Err("boom".to_string()),
         )
         .expect_err("build failure propagates");
@@ -3376,13 +4409,44 @@ detached
     }
 
     #[test]
+    fn issues_build_has_a_deadline_and_bounded_heavy_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open(temp.path()).unwrap();
+        run_coordinated_index_job_with_coordinator(
+            &coordinator,
+            "issues-deadline",
+            "issues",
+            None,
+            JobPriority::Background,
+            None,
+            || {
+                let deadline =
+                    gwt_core::operation_deadline::current().expect("issues build deadline");
+                assert!(
+                    deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(600)
+                );
+                let lease = coordinator.heavy_lease_status().unwrap();
+                assert!(lease.remaining_ms.unwrap() <= 600_000);
+                Ok(BuildStep::Done(()))
+            },
+        )
+        .unwrap();
+        assert!(gwt_core::operation_deadline::current().is_none());
+    }
+
+    #[test]
     fn run_coordinated_index_job_resumes_after_a_yield() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let coordinator =
+            IndexCoordinator::open(temp.path().join("coordinator")).expect("open coordinator");
         let mut calls = 0;
-        let run = run_coordinated_index_job(
+        let run = run_coordinated_index_job_with_coordinator(
+            &coordinator,
             "yieldtestrepo001",
             "files",
             Some("wt002"),
             JobPriority::Background,
+            None,
             || {
                 calls += 1;
                 if calls == 1 {
@@ -3400,15 +4464,17 @@ detached
     #[test]
     fn run_coordinated_index_job_coalesces_into_a_running_equivalent_job() {
         use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, TargetKey};
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
+        let coordinator_root = tmp.path().join("coordinator");
+        let coordinator =
+            IndexCoordinator::open(&coordinator_root).expect("open isolated coordinator");
         let started = tmp.path().join("owner-started");
         let started_for_thread = started.clone();
+        let owner_coordinator_root = coordinator_root.clone();
 
         let owner = std::thread::spawn(move || {
-            let coordinator = IndexCoordinator::open_default().expect("open coordinator");
+            let coordinator =
+                IndexCoordinator::open(owner_coordinator_root).expect("open owner coordinator");
             let key = TargetKey::repo_shared("coalescetestrepo", "specs");
             let guard = match coordinator
                 .request_job(
@@ -3437,11 +4503,13 @@ detached
             assert!(Instant::now() < deadline, "owner never started");
             std::thread::sleep(Duration::from_millis(10));
         }
-        let run = run_coordinated_index_job::<()>(
+        let run = run_coordinated_index_job_with_coordinator::<()>(
+            &coordinator,
             "coalescetestrepo",
             "specs",
             None,
             JobPriority::Background,
+            None,
             || panic!("a coalesced caller must not run its own build"),
         )
         .expect("coalesced join succeeds");

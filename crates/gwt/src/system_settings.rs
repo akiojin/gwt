@@ -16,9 +16,9 @@
 
 use std::path::Path;
 
-use gwt_config::{BoardProviderKind, Settings};
+use gwt_config::{AgentResourceConfig, BoardProviderKind, Settings};
 
-use crate::protocol::BackendEvent;
+use crate::protocol::{AgentResourceSettings, BackendEvent};
 
 /// Service-layer error for System Settings operations. Mapped to
 /// [`BackendEvent::SystemSettingsError`] in the dispatch layer.
@@ -28,6 +28,9 @@ pub enum SystemSettingsError {
     InvalidLanguage(String),
     #[error("invalid board provider `{0}`: expected `local`, `slack`, or `teams`")]
     InvalidBoardProvider(String),
+    /// SPEC #1921 Phase 86 (#3813): agent resource policy failed validation.
+    #[error("invalid agent resource policy: {0}")]
+    InvalidAgentResource(String),
     #[error("config storage error: {0}")]
     Storage(String),
 }
@@ -41,9 +44,12 @@ pub const ALLOWED_BOARD_PROVIDERS: &[&str] = &["local", "slack", "teams"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemSettingsSnapshot {
+    pub auto_apply_updates: bool,
     pub language: String,
     pub codex_trust_managed_hooks: Option<bool>,
     pub board_provider: String,
+    /// SPEC #1921 Phase 86 (#3813): effective agent process-tree policy.
+    pub agent_resource: AgentResourceConfig,
 }
 
 /// Validate that `value` is one of [`ALLOWED_BOARD_PROVIDERS`] (case-insensitive,
@@ -85,6 +91,7 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
         Settings::default()
     };
     Ok(SystemSettingsSnapshot {
+        auto_apply_updates: settings.auto_apply_updates.unwrap_or(false),
         language: settings
             .ai
             .language
@@ -92,6 +99,7 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
             .unwrap_or_else(|| "auto".to_string()),
         codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
         board_provider: settings.board.provider.as_str().to_string(),
+        agent_resource: settings.agent.resource.clone(),
     })
 }
 
@@ -99,7 +107,7 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
 /// canonical value that was written so the dispatch layer can echo it
 /// back to the frontend.
 pub fn write_language(path: &Path, language: &str) -> Result<String, SystemSettingsError> {
-    Ok(write_settings(path, language, None, None)?.language)
+    Ok(write_settings(path, language, None, None, None)?.language)
 }
 
 pub fn write_settings(
@@ -107,34 +115,37 @@ pub fn write_settings(
     language: &str,
     codex_trust_managed_hooks: Option<bool>,
     board_provider: Option<&str>,
+    agent_resource: Option<&AgentResourceConfig>,
 ) -> Result<SystemSettingsSnapshot, SystemSettingsError> {
     let canonical = validate_language(language)?;
     // Validate the provider (if supplied) before touching disk so an invalid
     // value never half-writes config.
     let provider = board_provider.map(validate_board_provider).transpose()?;
-    let mut settings = if path.exists() {
-        Settings::load_from_path(path)
-            .map_err(|err| SystemSettingsError::Storage(err.to_string()))?
-    } else {
-        Settings::default()
-    };
-    settings.ai.language = Some(canonical.clone());
-    if let Some(value) = codex_trust_managed_hooks {
-        settings.agent.codex_trust_managed_hooks = Some(value);
+    if let Some(resource) = agent_resource {
+        resource
+            .validate()
+            .map_err(|error| SystemSettingsError::InvalidAgentResource(error.to_string()))?;
     }
-    if let Some((_, kind)) = provider {
-        settings.board.provider = kind;
-        // No in-memory cache to update: `board_provider::provider()` reads the
-        // selection fresh from config on each call, so the persisted value
-        // takes effect immediately (FR-008).
-    }
-    settings
-        .save(path)
-        .map_err(|err| SystemSettingsError::Storage(err.to_string()))?;
+    let settings = Settings::update_at_path(path, |settings| {
+        settings.ai.language = Some(canonical.clone());
+        if let Some(value) = codex_trust_managed_hooks {
+            settings.agent.codex_trust_managed_hooks = Some(value);
+        }
+        if let Some((_, kind)) = provider {
+            settings.board.provider = kind;
+        }
+        if let Some(resource) = agent_resource {
+            settings.agent.resource = resource.clone();
+        }
+        Ok(settings.clone())
+    })
+    .map_err(|error| SystemSettingsError::Storage(error.to_string()))?;
     Ok(SystemSettingsSnapshot {
+        auto_apply_updates: settings.auto_apply_updates.unwrap_or(false),
         language: canonical,
         codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
         board_provider: settings.board.provider.as_str().to_string(),
+        agent_resource: settings.agent.resource.clone(),
     })
 }
 
@@ -356,8 +367,10 @@ pub fn get_event(path: &Path) -> BackendEvent {
     match read_settings(path) {
         Ok(snapshot) => BackendEvent::SystemSettings {
             language: snapshot.language,
+            auto_apply_updates: snapshot.auto_apply_updates,
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
             board_provider: Some(snapshot.board_provider),
+            agent_resource: Some(AgentResourceSettings::from_config(&snapshot.agent_resource)),
         },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
@@ -371,17 +384,33 @@ pub fn update_event(
     language: String,
     codex_trust_managed_hooks: Option<bool>,
     board_provider: Option<String>,
+    agent_resource: Option<AgentResourceSettings>,
 ) -> BackendEvent {
+    let agent_resource = match agent_resource
+        .as_ref()
+        .map(AgentResourceSettings::to_config)
+    {
+        Some(Ok(config)) => Some(config),
+        Some(Err(message)) => {
+            return BackendEvent::SystemSettingsError {
+                message: SystemSettingsError::InvalidAgentResource(message).to_string(),
+            }
+        }
+        None => None,
+    };
     match write_settings(
         path,
         &language,
         codex_trust_managed_hooks,
         board_provider.as_deref(),
+        agent_resource.as_ref(),
     ) {
         Ok(snapshot) => BackendEvent::SystemSettingsUpdated {
             language: snapshot.language,
+            auto_apply_updates: snapshot.auto_apply_updates,
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
             board_provider: Some(snapshot.board_provider),
+            agent_resource: Some(AgentResourceSettings::from_config(&snapshot.agent_resource)),
         },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
@@ -467,7 +496,7 @@ mod tests {
             "missing config should render System Settings as enabled by default"
         );
 
-        let snapshot = write_settings(&path, "en", Some(false), None).unwrap();
+        let snapshot = write_settings(&path, "en", Some(false), None, None).unwrap();
         assert_eq!(snapshot.language, "en");
         assert_eq!(snapshot.codex_trust_managed_hooks, Some(false));
 
@@ -479,7 +508,7 @@ mod tests {
     fn update_event_returns_updated_on_success() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "ja".to_string(), Some(true), None);
+        let event = update_event(&path, "ja".to_string(), Some(true), None, None);
         match event {
             BackendEvent::SystemSettingsUpdated {
                 language,
@@ -497,7 +526,7 @@ mod tests {
     fn update_event_returns_error_for_invalid_language() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "zh".to_string(), None, None);
+        let event = update_event(&path, "zh".to_string(), None, None, None);
         match event {
             BackendEvent::SystemSettingsError { message } => {
                 assert!(message.contains("invalid language"));
@@ -534,12 +563,12 @@ mod tests {
         assert_eq!(read_settings(&path).unwrap().board_provider, "local");
 
         // Persist slack and read it back; language is unchanged.
-        let snapshot = write_settings(&path, "auto", None, Some("slack")).unwrap();
+        let snapshot = write_settings(&path, "auto", None, Some("slack"), None).unwrap();
         assert_eq!(snapshot.board_provider, "slack");
         assert_eq!(read_settings(&path).unwrap().board_provider, "slack");
 
         // None leaves the persisted provider unchanged.
-        let snapshot = write_settings(&path, "en", None, None).unwrap();
+        let snapshot = write_settings(&path, "en", None, None, None).unwrap();
         assert_eq!(snapshot.board_provider, "slack");
     }
 
@@ -555,7 +584,13 @@ mod tests {
     fn update_event_persists_board_provider() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "auto".to_string(), None, Some("teams".to_string()));
+        let event = update_event(
+            &path,
+            "auto".to_string(),
+            None,
+            Some("teams".to_string()),
+            None,
+        );
         match event {
             BackendEvent::SystemSettingsUpdated { board_provider, .. } => {
                 assert_eq!(board_provider.as_deref(), Some("teams"))
@@ -754,5 +789,128 @@ mod tests {
         .unwrap();
         assert_eq!(snapshot.slack_client_id.as_deref(), Some("C123"));
         assert_eq!(snapshot.slack_default_channel, None);
+    }
+
+    #[test]
+    fn read_settings_reports_default_agent_resource_policy_when_config_missing() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let snapshot = read_settings(&path).unwrap();
+        assert_eq!(
+            snapshot.agent_resource,
+            gwt_config::AgentResourceConfig::default()
+        );
+        assert!(snapshot.agent_resource.enabled);
+    }
+
+    #[test]
+    fn write_settings_persists_agent_resource_policy_and_partial_updates_preserve_it() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let resource = gwt_config::AgentResourceConfig {
+            enabled: true,
+            preset: gwt_config::AgentResourcePreset::Custom,
+            priority: gwt_config::AgentProcessPriority::Idle,
+            cpu_limit_percent: Some(40),
+            build_jobs: Some(2),
+        };
+
+        let snapshot = write_settings(&path, "en", None, None, Some(&resource)).unwrap();
+        assert_eq!(snapshot.agent_resource, resource);
+        assert_eq!(read_settings(&path).unwrap().agent_resource, resource);
+
+        let snapshot = write_settings(&path, "ja", None, None, None).unwrap();
+        assert_eq!(snapshot.language, "ja");
+        assert_eq!(snapshot.agent_resource, resource);
+        let reloaded = Settings::load_from_path(&path).unwrap();
+        assert_eq!(reloaded.agent.resource, resource);
+    }
+
+    #[test]
+    fn write_settings_rejects_invalid_agent_resource_before_persisting() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_settings(&path, "ja", None, None, None).unwrap();
+
+        let invalid = gwt_config::AgentResourceConfig {
+            preset: gwt_config::AgentResourcePreset::Custom,
+            cpu_limit_percent: Some(0),
+            ..gwt_config::AgentResourceConfig::default()
+        };
+        let error = write_settings(&path, "en", None, None, Some(&invalid)).unwrap_err();
+        assert!(
+            matches!(error, SystemSettingsError::InvalidAgentResource(_)),
+            "{error}"
+        );
+        let reloaded = read_settings(&path).unwrap();
+        assert_eq!(
+            reloaded.language, "ja",
+            "invalid update must not half-write"
+        );
+        assert_eq!(
+            reloaded.agent_resource,
+            gwt_config::AgentResourceConfig::default()
+        );
+    }
+
+    #[test]
+    fn agent_resource_wire_shape_roundtrips_and_rejects_unknown_priority() {
+        use crate::protocol::{AgentResourceSettings, FrontendEvent};
+
+        let legacy: FrontendEvent =
+            serde_json::from_str(r#"{"kind":"update_system_settings","language":"en"}"#).unwrap();
+        assert!(matches!(
+            legacy,
+            FrontendEvent::UpdateSystemSettings {
+                agent_resource: None,
+                ..
+            }
+        ));
+
+        let event: FrontendEvent = serde_json::from_str(
+            r#"{"kind":"update_system_settings","language":"en","agent_resource":{"enabled":true,"preset":"custom","priority":"idle","cpu_limit_percent":null,"build_jobs":3}}"#,
+        )
+        .unwrap();
+        let FrontendEvent::UpdateSystemSettings {
+            agent_resource: Some(wire),
+            ..
+        } = event
+        else {
+            panic!("expected agent_resource");
+        };
+        let config = wire.to_config().unwrap();
+        assert_eq!(config.preset, gwt_config::AgentResourcePreset::Custom);
+        assert_eq!(config.priority, gwt_config::AgentProcessPriority::Idle);
+        assert_eq!(config.cpu_limit_percent, None);
+        assert_eq!(config.build_jobs, Some(3));
+        assert_eq!(AgentResourceSettings::from_config(&config), wire);
+
+        let unknown = AgentResourceSettings {
+            enabled: true,
+            preset: "automatic".to_string(),
+            priority: "realtime".to_string(),
+            cpu_limit_percent: None,
+            build_jobs: None,
+        };
+        assert!(unknown.to_config().is_err());
+        let unknown_preset = AgentResourceSettings {
+            enabled: true,
+            preset: "turbo".to_string(),
+            priority: "below-normal".to_string(),
+            cpu_limit_percent: None,
+            build_jobs: None,
+        };
+        assert!(unknown_preset.to_config().is_err());
+
+        let reply = get_event(&tempdir().unwrap().path().join("config.toml"));
+        let json = serde_json::to_value(&reply).unwrap();
+        assert_eq!(
+            json["agent_resource"]["enabled"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(json["agent_resource"]["preset"], "automatic");
+        assert_eq!(json["agent_resource"]["priority"], "below-normal");
+        assert!(json["agent_resource"]["cpu_limit_percent"].is_null());
+        assert!(json["agent_resource"]["build_jobs"].is_null());
     }
 }

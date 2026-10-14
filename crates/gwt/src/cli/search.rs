@@ -152,6 +152,12 @@ pub fn run<E: CliEnv>(
             render_search_unavailable(out, cmd.json, &error);
             return Ok(error.exit_code());
         }
+        Err(error @ crate::index_search::IndexSearchAttemptError::RepairRequired(_)) => {
+            // Issue #3866 AC-3: a stop state only `index.repair` clears is
+            // non-retryable and carries its recovery step.
+            render_repair_required(out, cmd.json, &error);
+            return Ok(error.exit_code());
+        }
         Err(crate::index_search::IndexSearchAttemptError::Public(error)) => {
             return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
         }
@@ -198,6 +204,33 @@ fn render_search_unavailable(
             "retryable": true,
             "reason": unavailable.reason,
             "retry_after_ms": unavailable.retry_after_ms,
+            "holder": unavailable.holder,
+            "start_decision": crate::index_search::SEARCH_UNAVAILABLE_START_DECISION,
+            "recovery": unavailable.recovery(),
+        });
+        out.push_str(&payload.to_string());
+        out.push('\n');
+    } else {
+        out.push_str(&format!("{error}\n"));
+    }
+}
+
+fn render_repair_required(
+    out: &mut String,
+    json: bool,
+    error: &crate::index_search::IndexSearchAttemptError,
+) {
+    let crate::index_search::IndexSearchAttemptError::RepairRequired(required) = error else {
+        return;
+    };
+    if json {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_code": "INDEX_REPAIR_REQUIRED",
+            "retryable": false,
+            "reason": required.reason,
+            "affected_scopes": required.affected_scopes,
+            "recovery": required.recovery,
         });
         out.push_str(&payload.to_string());
         out.push('\n');
@@ -219,6 +252,10 @@ fn render_not_ready(out: &mut String, json: bool, error: &crate::index_search::I
             "affected_scopes": not_ready.affected_scopes,
             "waited_ms": not_ready.waited_ms,
             "retry_after_ms": not_ready.retry_after_ms,
+            // Issue #4455 AC-3: a preflight caller must be able to tell a
+            // running rebuild apart from an index nobody is repairing.
+            "rebuild_in_progress": not_ready.rebuild_in_progress,
+            "rebuilding_scopes": not_ready.rebuilding_scopes,
         });
         out.push_str(&payload.to_string());
         out.push('\n');
@@ -505,6 +542,8 @@ mod tests {
             affected_scopes: vec!["files".to_string()],
             waited_ms: 30_100,
             retry_after_ms: 5_000,
+            rebuild_in_progress: true,
+            rebuilding_scopes: vec!["files".to_string()],
         });
         render_not_ready(&mut out, true, &error);
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
@@ -514,6 +553,13 @@ mod tests {
         assert_eq!(payload["affected_scopes"][0], "files");
         assert_eq!(payload["waited_ms"], 30_100);
         assert_eq!(payload["retry_after_ms"], 5_000);
+        // Issue #4455 AC-3: a preflight caller must be able to tell a running
+        // rebuild apart from an index nobody is repairing.
+        assert_eq!(
+            payload["rebuild_in_progress"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(payload["rebuilding_scopes"][0], "files");
         assert_eq!(error.exit_code(), 75);
     }
 
@@ -546,6 +592,13 @@ mod tests {
         let error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
             reason: "project index runner unavailable".to_string(),
             retry_after_ms: 5_000,
+            holder: Some(Box::new(crate::index_resources::IndexRunnerHolder {
+                repo_hash: "other-repo".into(),
+                owner_pid: Some(42),
+                project_root: Some(std::path::PathBuf::from("other-project")),
+                action: Some("index-issues".into()),
+                qos: Some("background".into()),
+            })),
         });
 
         render_search_unavailable(&mut out, true, &error);
@@ -555,10 +608,73 @@ mod tests {
         assert_eq!(payload["error_code"], "SEARCH_UNAVAILABLE");
         assert_eq!(payload["retryable"], serde_json::Value::Bool(true));
         assert_eq!(payload["retry_after_ms"], 5_000);
+        assert_eq!(payload["holder"]["repo_hash"], "other-repo");
+        assert_eq!(payload["holder"]["project_root"], "other-project");
+        assert_eq!(payload["holder"]["action"], "index-issues");
+        assert_eq!(payload["holder"]["qos"], "background");
+        assert_eq!(payload["start_decision"], "known_approved_owner_only");
+        let recovery = payload["recovery"]
+            .as_str()
+            .expect("start and retry guidance");
+        assert!(recovery.contains("index.status"), "{recovery}");
+        assert!(recovery.contains("approved implementation"), "{recovery}");
+        assert!(recovery.contains("creating an Issue/SPEC"), "{recovery}");
+        // Issue #4840 AC-c / AC-h: an index-independent preflight path and a
+        // runner-specific action, distinct from lease contention guidance.
+        assert!(recovery.contains("gh search issues"), "{recovery}");
+        assert!(recovery.contains("index.repair"), "{recovery}");
+        assert!(!recovery.contains("checkpoint"), "{recovery}");
         assert_eq!(error.error_code(), Some("SEARCH_UNAVAILABLE"));
         assert!(error.retryable());
         assert_eq!(error.retry_after_ms(), Some(5_000));
         assert_eq!(error.exit_code(), 1);
+    }
+
+    #[test]
+    fn render_search_unavailable_lease_contention_gets_its_own_recovery() {
+        use crate::index_search::{IndexSearchAttemptError, IndexSearchUnavailable};
+        let mut out = String::new();
+        let error = IndexSearchAttemptError::Unavailable(IndexSearchUnavailable {
+            reason: "search heavy lease unavailable".to_string(),
+            retry_after_ms: 5_000,
+            holder: None,
+        });
+
+        render_search_unavailable(&mut out, true, &error);
+
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        let recovery = payload["recovery"].as_str().expect("lease guidance");
+        assert!(recovery.contains("checkpoint"), "{recovery}");
+        assert!(recovery.contains("gh search issues"), "{recovery}");
+        assert!(!recovery.contains("index.repair"), "{recovery}");
+        assert!(error.to_string().contains(recovery), "{error}");
+    }
+
+    #[test]
+    fn render_repair_required_json_reports_non_retryable_recovery_contract() {
+        use crate::index_search::{IndexSearchAttemptError, IndexSearchRepairRequired};
+        let error = IndexSearchAttemptError::RepairRequired(IndexSearchRepairRequired {
+            reason: "issues index is cancelled".to_string(),
+            affected_scopes: vec!["issues".to_string()],
+            recovery: "run the index.repair JSON operation".to_string(),
+        });
+
+        let mut out = String::new();
+        render_repair_required(&mut out, true, &error);
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+        assert_eq!(payload["error_code"], "INDEX_REPAIR_REQUIRED");
+        assert_eq!(payload["retryable"], serde_json::Value::Bool(false));
+        assert_eq!(payload["affected_scopes"][0], "issues");
+        assert_eq!(payload["reason"], "issues index is cancelled");
+        assert_eq!(payload["recovery"], "run the index.repair JSON operation");
+        assert!(payload.get("retry_after_ms").is_none(), "{payload}");
+        assert_eq!(error.exit_code(), 1);
+
+        let mut text = String::new();
+        render_repair_required(&mut text, false, &error);
+        assert!(text.contains("index repair required"), "{text}");
+        assert!(text.contains("index.repair"), "{text}");
     }
 
     #[test]
@@ -594,6 +710,8 @@ mod tests {
             affected_scopes: vec!["files".to_string()],
             waited_ms: 30_000,
             retry_after_ms: 5_000,
+            rebuild_in_progress: false,
+            rebuilding_scopes: Vec::new(),
         });
         render_not_ready(&mut out, false, &error);
         assert!(out.contains("index not ready"), "{out}");

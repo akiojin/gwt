@@ -7,8 +7,6 @@ use std::{
 
 use chrono::{NaiveDate, Utc};
 
-use super::writer::LOG_FILE_BASENAME;
-
 /// Summary of a housekeeping run. Non-fatal errors are collected into
 /// `errors` rather than being returned as `Err`, so that a single
 /// unreadable file cannot block TUI startup.
@@ -19,19 +17,36 @@ pub struct HousekeepReport {
     pub errors: Vec<(PathBuf, String)>,
 }
 
-/// Delete rotated log files older than `retention_days` relative to today's
-/// UTC date, matching the rolling writer's UTC boundary. Returns a
+/// Delete dated files older than `retention_days` relative to today's UTC
+/// date. Matching files start with `file_name_prefix`; the remainder of the
+/// file name must parse using `date_suffix_format`. Returns a
 /// `HousekeepReport` describing what was done.
 ///
-/// `retention_days == 0` disables housekeeping entirely. The active file
-/// (`gwt.log`) and files whose date suffix cannot be parsed are left
-/// untouched.
-pub fn housekeep(log_dir: &Path, retention_days: u32) -> HousekeepReport {
-    housekeep_at(log_dir, retention_days, Utc::now().date_naive())
+/// `retention_days == 0` disables housekeeping entirely. Files with another
+/// prefix or an unparseable date suffix are left untouched.
+pub fn housekeep(
+    log_dir: &Path,
+    retention_days: u32,
+    file_name_prefix: &str,
+    date_suffix_format: &str,
+) -> HousekeepReport {
+    housekeep_at(
+        log_dir,
+        retention_days,
+        file_name_prefix,
+        date_suffix_format,
+        Utc::now().date_naive(),
+    )
 }
 
 /// Deterministic version of `housekeep` that lets tests pin `today`.
-pub fn housekeep_at(log_dir: &Path, retention_days: u32, today: NaiveDate) -> HousekeepReport {
+pub fn housekeep_at(
+    log_dir: &Path,
+    retention_days: u32,
+    file_name_prefix: &str,
+    date_suffix_format: &str,
+    today: NaiveDate,
+) -> HousekeepReport {
     let mut report = HousekeepReport::default();
     if retention_days == 0 {
         return report;
@@ -59,16 +74,10 @@ pub fn housekeep_at(log_dir: &Path, retention_days: u32, today: NaiveDate) -> Ho
         };
         report.inspected += 1;
 
-        // Active file: skip.
-        if file_name == LOG_FILE_BASENAME {
-            continue;
-        }
-
-        // Rotated files look like `gwt.log.YYYY-MM-DD`.
-        let Some(suffix) = file_name.strip_prefix(&format!("{LOG_FILE_BASENAME}.")) else {
+        let Some(suffix) = file_name.strip_prefix(file_name_prefix) else {
             continue;
         };
-        let Ok(date) = NaiveDate::parse_from_str(suffix, "%Y-%m-%d") else {
+        let Ok(date) = NaiveDate::parse_from_str(suffix, date_suffix_format) else {
             continue;
         };
 
@@ -87,6 +96,9 @@ pub fn housekeep_at(log_dir: &Path, retention_days: u32, today: NaiveDate) -> Ho
 mod tests {
     use super::*;
 
+    const GWT_LOG_PREFIX: &str = "gwt.log.";
+    const GWT_LOG_DATE_SUFFIX_FORMAT: &str = "%Y-%m-%d";
+
     fn touch(path: &Path) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create parent");
@@ -98,7 +110,7 @@ mod tests {
     fn missing_directory_is_not_an_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("does-not-exist");
-        let report = housekeep(&missing, 7);
+        let report = housekeep(&missing, 7, GWT_LOG_PREFIX, GWT_LOG_DATE_SUFFIX_FORMAT);
         assert!(report.errors.is_empty());
         assert_eq!(report.inspected, 0);
     }
@@ -107,7 +119,7 @@ mod tests {
     fn retention_zero_disables_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
         touch(&dir.path().join("gwt.log.2020-01-01"));
-        let report = housekeep(dir.path(), 0);
+        let report = housekeep(dir.path(), 0, GWT_LOG_PREFIX, GWT_LOG_DATE_SUFFIX_FORMAT);
         assert!(report.deleted.is_empty());
         assert!(dir.path().join("gwt.log.2020-01-01").exists());
     }
@@ -123,7 +135,13 @@ mod tests {
         touch(&dir.path().join("gwt.log.2026-03-15")); // way old → deleted
         touch(&dir.path().join("unrelated.txt")); // unrelated — ignored
 
-        let report = housekeep_at(dir.path(), 7, today);
+        let report = housekeep_at(
+            dir.path(),
+            7,
+            GWT_LOG_PREFIX,
+            GWT_LOG_DATE_SUFFIX_FORMAT,
+            today,
+        );
 
         assert_eq!(report.deleted.len(), 2);
         assert!(dir.path().join("gwt.log").exists());
@@ -135,11 +153,36 @@ mod tests {
     }
 
     #[test]
+    fn deletes_daily_files_for_arbitrary_prefix_and_date_format() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let today = NaiveDate::from_ymd_opt(2026, 4, 10).unwrap();
+        touch(&dir.path().join("perf-2026-04-04.jsonl")); // retention boundary
+        touch(&dir.path().join("perf-2026-04-03.jsonl")); // expired
+        touch(&dir.path().join("other-2026-04-03.jsonl")); // different prefix
+
+        let report = housekeep_at(dir.path(), 7, "perf-", "%Y-%m-%d.jsonl", today);
+
+        assert_eq!(
+            report.deleted,
+            vec![dir.path().join("perf-2026-04-03.jsonl")]
+        );
+        assert!(dir.path().join("perf-2026-04-04.jsonl").exists());
+        assert!(!dir.path().join("perf-2026-04-03.jsonl").exists());
+        assert!(dir.path().join("other-2026-04-03.jsonl").exists());
+    }
+
+    #[test]
     fn malformed_suffix_is_left_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
         touch(&dir.path().join("gwt.log.not-a-date"));
         let today = NaiveDate::from_ymd_opt(2099, 12, 31).unwrap();
-        let report = housekeep_at(dir.path(), 7, today);
+        let report = housekeep_at(
+            dir.path(),
+            7,
+            GWT_LOG_PREFIX,
+            GWT_LOG_DATE_SUFFIX_FORMAT,
+            today,
+        );
         assert!(report.deleted.is_empty());
         assert!(dir.path().join("gwt.log.not-a-date").exists());
     }

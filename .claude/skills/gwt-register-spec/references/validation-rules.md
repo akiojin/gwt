@@ -35,6 +35,13 @@ offset inside the body.
 | R10 | Structural | `機能要件` section contains ≥1 line matching `^- \*\*FR-\d{3}\*\*` | no FR present |
 | R11 | Structural | No occurrence of `[NEEDS CLARIFICATION]` anywhere | unresolved markers |
 | R12 | Format | FR identifiers are contiguous (`FR-001`, `FR-002`, …) | `FR-001, FR-003` |
+| R13 | Structural | Section `## 受け入れ基準` exists (Issue #3873) | AC lines under `## 成功基準` only |
+
+R13 exists because the Issue Monitor's autonomous gate reads acceptance
+criteria only from a `## 受け入れ基準` / `## Acceptance Criteria` heading
+followed by `- [ ] AC-N:` items. `## 成功基準` is the human-facing
+verification recipe and is never scanned, so a SPEC that keeps its AC
+lines there is registered but silently ineligible for autonomous execution.
 
 R8 explicitly permits `## Out of Scope (v1)` so version-suffixed sections
 keep passing validation. Implementation: prefix match on
@@ -66,6 +73,9 @@ on line patterns to keep the implementation small and predictable.
 - Tense, voice, or style of FR sentences (no NLP).
 - Numbering of acceptance scenarios (any 1-based numeric list is
   accepted).
+- The `- [ ] AC-N:` line shape inside `## 受け入れ基準`. That is enforced
+  at write time by `issue.spec.create` / `issue.spec.edit` whenever the
+  Issue carries the `auto-merge` label, reusing the Monitor's classifier.
 - Existence of plan / tasks sections — those are added later by
   `gwt-plan-spec`.
 - Section ordering — sections may appear in any order as long as all
@@ -96,6 +106,9 @@ hi.
 
 ## 成功基準
 - ok
+
+## 受け入れ基準
+- [ ] AC-1: ok
 
 ## Related Artifacts
 - none

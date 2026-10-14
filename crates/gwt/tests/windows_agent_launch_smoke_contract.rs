@@ -1,6 +1,6 @@
 //! Issue #3566: authenticated Windows official-provider smoke contract.
 //!
-//! SPEC-1921 Phase 75 remains the reference design for the existing E2E.
+//! SPEC-1921 Phase L1b: installed runner launch coverage.
 
 use std::{fs, path::PathBuf};
 
@@ -19,10 +19,10 @@ fn windows_official_provider_smoke_is_explicit_sanitized_and_checkout_local() {
         .unwrap_or_else(|error| panic!("read {}: {error}", script_path.display()));
 
     for required in [
-        "@openai/codex",
-        "@anthropic-ai/claude-code",
-        "npm.cmd",
-        "npx.cmd",
+        "codex/installed",
+        "claude/installed",
+        "observed_version",
+        "runner_kind = \"installed\"",
         "cargo",
         "build",
         "--bin",
@@ -35,8 +35,6 @@ fn windows_official_provider_smoke_is_explicit_sanitized_and_checkout_local() {
         "SessionStart",
         "authenticated_session_start",
         "same_provider_session_resume",
-        "requested_selector",
-        "resolved_exact_version",
         "session_fingerprint_sha256",
         "ConvertTo-Json",
     ] {
@@ -46,15 +44,10 @@ fn windows_official_provider_smoke_is_explicit_sanitized_and_checkout_local() {
         );
     }
 
-    for provider in ["codex", "claude"] {
-        for selector in ["latest", "exact"] {
-            let case = format!("{provider}/{selector}");
-            assert!(
-                source.contains(&case),
-                "official-provider smoke must name the {case} case explicitly"
-            );
-        }
-    }
+    assert!(
+        !source.contains("npx.cmd") && !source.contains("Resolve-LatestExactVersion"),
+        "installed-provider smoke must never select or dispatch a package runner"
+    );
 
     assert!(
         source.contains("credential") && source.contains("throw"),
@@ -65,6 +58,12 @@ fn windows_official_provider_smoke_is_explicit_sanitized_and_checkout_local() {
             && source.contains("-CommandType Application")
             && source.contains("$startInfo.FileName = Resolve-ExecutablePath -FilePath $FilePath"),
         "bare .cmd launchers must be resolved to absolute application paths before ProcessStartInfo starts them"
+    );
+    assert!(
+        source.contains("[IO.Path]::GetExtension($startInfo.FileName)")
+            && source.contains("'/d /v:off /s /c \"'")
+            && source.contains("-FilePath \"cmd.exe\""),
+        "installed .cmd runners must execute through cmd.exe with delayed expansion disabled"
     );
     assert!(
         source.contains("[AllowEmptyString()][string[]]$Arguments"),
@@ -135,9 +134,9 @@ fn windows_launch_e2e_bounds_marker_waits_with_saturation_aware_diagnosable_budg
     );
     assert!(
         e2e.lines().any(|line| {
-            line.trim() == "const TEST_NPX_EXIT_TIMEOUT: Duration = Duration::from_secs(30);"
+            line.trim() == "const TEST_PROVIDER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);"
         }),
-        "the post-marker npx exit budget must be a named 30-second constant"
+        "the post-marker provider exit budget must be a named 30-second constant"
     );
     assert!(
         e2e.contains(
@@ -188,9 +187,9 @@ fn windows_launch_e2e_bounds_marker_waits_with_saturation_aware_diagnosable_budg
         "marker wait diagnostics must not Debug-print raw un-sanitized PTY output"
     );
     assert!(
-        wait_fn.contains("Instant::now() + TEST_NPX_EXIT_TIMEOUT")
+        wait_fn.contains("Instant::now() + TEST_PROVIDER_EXIT_TIMEOUT")
             && !wait_fn.contains("Duration::from_secs(10)"),
-        "the post-marker npx exit wait must consume the named exit budget"
+        "the post-marker provider exit wait must consume the named exit budget"
     );
 
     // Issue #3656 AC-1/AC-4: the sanitizer is shared cross-platform machinery
@@ -209,232 +208,59 @@ fn windows_launch_e2e_bounds_marker_waits_with_saturation_aware_diagnosable_budg
 }
 
 #[test]
-fn windows_launch_e2e_preflights_the_loopback_registry_with_bounded_diagnostics() {
+fn windows_launch_e2e_installs_fixture_before_direct_launch_without_registry_access() {
     let root = repo_root();
-    let e2e_path = root.join("crates/gwt/tests/windows_agent_launch_e2e.rs");
-    let e2e = fs::read_to_string(&e2e_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", e2e_path.display()));
-    let fixture_path = root.join("crates/gwt-core/src/test_support.rs");
-    let fixture = fs::read_to_string(&fixture_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display()));
-    let workflow_path = root.join(".github/workflows/test.yml");
-    let workflow = fs::read_to_string(&workflow_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", workflow_path.display()));
-
+    let e2e = fs::read_to_string(root.join("crates/gwt/tests/windows_agent_launch_e2e.rs"))
+        .expect("read Windows E2E source");
+    let workflow =
+        fs::read_to_string(root.join(".github/workflows/test.yml")).expect("read test workflow");
     for required in [
-        "gwt_agent::prepare::probe_host_runner_with_timeout",
-        "HostRunnerProbeKind::Runner",
+        "windows_official_provider_launch_uses_installed_direct_runner",
+        "install_fixture_provider",
+        "spawn_logged_blocking_with_deadline",
+        "TEST_FIXTURE_INSTALL_TIMEOUT",
         "npm.cmd",
-        "config",
-        "get",
-        "registry",
-        "view",
-        "version",
-        "metadata preflight",
-        "--json",
-        "loopback registry preflight failure",
-        "accepted_connection_count",
-        "header_complete_request_count",
-        "accepted_connection_delta",
-        "header_complete_request_delta",
-        "request_snapshot",
-        "registry_request_diagnostic_snapshot",
-        "probe_registry_health",
-        "tracing_subscriber",
-        "with_test_writer",
+        "--prefix",
+        "--ignore-scripts",
+        "node_modules",
+        "installed_bin",
         "prepare_agent_launch",
+        "persisted.tool_runtime_provenance.is_none()",
+        "registry_requests_after_install",
+        "installed launches must not access the registry",
     ] {
         assert!(
             e2e.contains(required),
-            "Windows launch E2E must contain {required:?}"
+            "installed Windows E2E must contain {required:?}"
         );
     }
     assert!(
-        e2e.lines().any(|line| {
-            line.trim() == "const TEST_REGISTRY_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);"
-        }),
-        "the registry healthcheck deadline must stay explicitly bounded at its constant definition"
+        e2e.split_whitespace()
+            .collect::<String>()
+            .contains("fixture.requests().len(),registry_requests_after_install,"),
+        "registry requests must remain unchanged after installed launches"
     );
-    let preflight = e2e
-        .split("fn assert_loopback_registry_preflight(")
-        .nth(1)
-        .and_then(|tail| tail.split("\nfn route_capture_path(").next())
-        .expect("loopback registry preflight source");
-    assert!(
-        e2e.lines().any(|line| {
-            line.trim() == "const TEST_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(60);"
-        }) && preflight.matches("TEST_PREFLIGHT_TIMEOUT,").count() >= 2,
-        "the npm config and metadata preflights must share the explicit 60-second bound"
-    );
-    for required in [
-        "if requested_selector == \"latest\"",
-        "provider.package()",
-        "format!(\"{}@latest\", provider.package())",
-        "serde_json::from_str::<String>",
-        "fixture.exact_version",
-        "metadata_request_count_before",
-        "metadata_outcome",
-        "metadata preflight process failed",
-        "reached_packument",
-        ".get(metadata_request_count_before..)",
-        "metadata preflight did not reach the loopback packument",
+    for removed in [
+        ".version(requested_selector)",
+        "HostRunnerProbeKind::Runner",
+        "ToolRuntimeProvenance {",
+        "SELECTOR_ENV",
     ] {
         assert!(
-            preflight.contains(required),
-            "latest-selector metadata preflight must contain {required:?}"
+            !e2e.contains(removed),
+            "Windows launch must not retain {removed:?}"
         );
     }
     assert!(
-        !preflight.contains("ToolRuntimeProvenance"),
-        "the test-only metadata preflight must not inject resolved provenance"
+        workflow.contains("name: Test (Windows agent launch)")
+            && workflow.contains("for provider in codex claude; do")
+            && !workflow.contains("GWT_WINDOWS_AGENT_SELECTOR"),
+        "required Windows job must run both installed providers without selector shards"
     );
-    let metadata_success_guard_offset = preflight
-        .find("if !metadata_outcome.success")
-        .expect("metadata preflight process failure guard");
-    let metadata_parse_offset = preflight
-        .find("serde_json::from_str::<String>")
-        .expect("metadata preflight JSON parse");
-    assert!(
-        metadata_success_guard_offset < metadata_parse_offset,
-        "metadata process failures must retain their primary outcome before JSON parsing"
-    );
-    let clone_offset = preflight
-        .find("let mut preflight_env = launch_env.clone();")
-        .expect("preflight must clone the production-equivalent launch environment");
-    let registry_remove_offset = preflight
-        .find("preflight_env.remove(\"NPM_CONFIG_REGISTRY\")")
-        .expect("preflight must remove the expected URL from probe redaction inputs");
-    let probe_offset = preflight
-        .find("gwt_agent::prepare::probe_host_runner_with_timeout")
-        .expect("preflight must call the public bounded probe seam");
-    assert!(
-        clone_offset < registry_remove_offset && registry_remove_offset < probe_offset,
-        "preflight must remove NPM_CONFIG_REGISTRY before calling the bounded probe"
-    );
-    assert!(
-        preflight[probe_offset..].contains("&preflight_env,"),
-        "the bounded probe must receive the redaction-safe preflight environment"
-    );
-    assert!(
-        preflight.contains("HostRunnerProbeKind::Runner")
-            && !preflight.contains("HostRunnerProbeKind::Metadata"),
-        "the config preflight must use a non-Metadata trace label"
-    );
-    let strict_compare_offset = preflight
-        .find("observed_registry != fixture.registry_url")
-        .expect("preflight must strictly compare the configured registry URL");
-    let health_probe_offset = preflight
-        .find("fixture.probe_registry_health")
-        .expect("preflight must run the bounded loopback HTTP healthcheck");
-    assert!(
-        strict_compare_offset < health_probe_offset,
-        "the npm config result must match before the fixture healthcheck runs"
-    );
-
-    let diagnostic_snapshot = e2e
-        .split("fn registry_request_diagnostic_snapshot(")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("\nfn assert_loopback_registry_preflight(")
-                .next()
-        })
-        .expect("redacted registry request diagnostic snapshot helper");
-    for required in ["request.method", "request.path"] {
-        assert!(
-            diagnostic_snapshot.contains(required),
-            "diagnostic snapshot helper must retain {required}"
-        );
-    }
-    assert!(
-        !diagnostic_snapshot.contains("headers")
-            && !e2e.contains("let request_snapshot = fixture.requests();"),
-        "failure diagnostics must not Debug-print raw registry request headers"
-    );
-
-    for required in [
-        "AtomicUsize",
-        "accepted_connection_count",
-        "probe_registry_health",
-        "GET /-/gwt-health HTTP/1.1",
-    ] {
-        assert!(
-            fixture.contains(required),
-            "loopback registry fixture must expose {required:?}"
-        );
-    }
-    let healthcheck = fixture
-        .split("pub fn probe_registry_health(")
-        .nth(1)
-        .and_then(|tail| tail.split("\n}\n\n#[cfg(windows)]\nimpl Drop").next())
-        .expect("loopback registry healthcheck source");
-    for required in [
-        "let deadline = Instant::now()",
-        ".checked_add(timeout)",
-        "remaining_timeout",
-        "TcpStream::connect_timeout",
-        "set_read_timeout",
-        "set_write_timeout",
-        "let mut written = 0;",
-        "while written < request.len()",
-        "written += count;",
-        "Duration::from_millis(1)",
-        "ErrorKind::TimedOut",
-        "ErrorKind::WouldBlock",
-    ] {
-        assert!(
-            healthcheck.contains(required),
-            "loopback registry healthcheck must contain {required:?}"
-        );
-    }
-    assert_eq!(
-        healthcheck.matches("let deadline = Instant::now()").count(),
-        1,
-        "registry healthcheck must create exactly one end-to-end deadline"
-    );
-    assert!(
-        healthcheck.matches("remaining_timeout()?").count() >= 4,
-        "connect, write, each read, and final success must recompute remaining deadline time"
-    );
-    assert!(
-        !healthcheck.contains("connect_timeout(&self.address, timeout)")
-            && !healthcheck.contains("Some(timeout)"),
-        "registry healthcheck must not restart the full timeout for individual I/O operations"
-    );
-    let request_handler = fixture
-        .split("fn serve_npm_request(")
-        .nth(1)
-        .and_then(|tail| tail.split("\nfn percent_decode_registry_path(").next())
-        .expect("loopback registry request handler source");
-    for required in [
-        "let mut header_complete = false;",
-        "header_complete = true;",
-        "raw.len() > 64 * 1024",
-        "if !header_complete",
-        "UnexpectedEof",
-        "InvalidData",
-        "\"/-/gwt-health\"",
-        "200 OK",
-    ] {
-        assert!(
-            request_handler.contains(required),
-            "loopback registry request handler must contain {required:?}"
-        );
-    }
-    let complete_guard_offset = request_handler
-        .find("if !header_complete")
-        .expect("partial header guard");
-    let request_record_offset = request_handler
-        .find(".push(NpmRegistryRequest")
-        .expect("completed request recording");
-    assert!(
-        complete_guard_offset < request_record_offset,
-        "only header-complete requests may enter the fixture request log"
-    );
-
     assert!(
         workflow.contains(
             "cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture"
         ),
-        "Windows launch E2E must retain tracing output in CI with --nocapture"
+        "Windows launch E2E must retain native execution and tracing output in CI"
     );
 }

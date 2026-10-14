@@ -49,6 +49,32 @@ export function createBranchesCleanupSurface({
       const branchListStateMap = new Map();
       let branchCleanupWindowId = null;
       const WORKSPACE_CLEANUP_WINDOW_ID = "__workspace_cleanup__";
+      // Issue #4433: every cleanup run carries an id the backend echoes on
+      // progress / result, so a client that reconnects mid-cleanup can
+      // re-subscribe to the run it started and drop a superseded run's events.
+      let branchCleanupOperationSequence = 0;
+
+      function newBranchCleanupOperationId(windowId) {
+        branchCleanupOperationSequence += 1;
+        const safeWindowId = String(windowId || "cleanup").replace(
+          /[^a-zA-Z0-9_-]/g,
+          "-",
+        );
+        return `${safeWindowId}-${Date.now()}-${branchCleanupOperationSequence}`;
+      }
+
+      function idleBranchCleanupModalState() {
+        return {
+          open: false,
+          stage: "confirm",
+          deleteRemote: false,
+          forceFilesystemDelete: false,
+          progress: null,
+          results: [],
+          operationId: null,
+          connectionInterrupted: false,
+        };
+      }
 
       function workspaceCleanupEntry(candidate) {
         return {
@@ -88,14 +114,10 @@ export function createBranchesCleanupSurface({
         state.cleanupSelected = new Set(candidates.map((candidate) => candidate.branch));
         state.notice = "";
         state.cleanupModal = {
+          ...idleBranchCleanupModalState(),
           open: true,
-          stage: "confirm",
           // Workspace cleanup is local-only by default even when
           // cleanup_candidate.default_delete_remote is present on the wire.
-          deleteRemote: false,
-          forceFilesystemDelete: false,
-          progress: null,
-          results: [],
         };
         branchCleanupWindowId = cleanupWindowId;
         renderBranchCleanupModal();
@@ -118,14 +140,7 @@ export function createBranchesCleanupSurface({
             lastLoadId: 0,
             detailCheckStale: false,
             needsResync: false,
-            cleanupModal: {
-              open: false,
-              stage: "confirm",
-              deleteRemote: false,
-              forceFilesystemDelete: false,
-              progress: null,
-              results: [],
-            },
+            cleanupModal: idleBranchCleanupModalState(),
           });
         }
         return branchListStateMap.get(windowId);
@@ -519,6 +534,10 @@ export function createBranchesCleanupSurface({
       function updateBranchCleanupProgress(windowId, event) {
         const state = ensureBranchListState(windowId);
         const branches = Array.from(state.cleanupSelected);
+        // Issue #4433: hearing from the operation again means the status feed
+        // is live, whether this is the first progress frame or a replay after
+        // a reconnect.
+        state.cleanupModal.connectionInterrupted = false;
         if (!state.cleanupModal.progress) {
           state.cleanupModal.progress = initialBranchCleanupProgress(
             branches.length > 0 ? branches : [event.branch],
@@ -551,8 +570,68 @@ export function createBranchesCleanupSurface({
         state.cleanupModal.open = true;
         state.cleanupModal.stage = "result";
         state.cleanupModal.results = branchCleanupFailureResults(state, message);
+        state.cleanupModal.connectionInterrupted = false;
         branchCleanupWindowId = windowId;
         return true;
+      }
+
+      // Issue #4433: losing the WebSocket says nothing about the cleanup, which
+      // keeps running on the backend. Mark the status feed as interrupted
+      // instead of inventing a failure the user would act on. Repaints through
+      // the owner dispatcher because a Workspace-hosted cleanup has no
+      // `.branch-list` for `renderBranches` to paint into.
+      function markRunningBranchCleanupConnectionInterrupted(windowId) {
+        const state = ensureBranchListState(windowId);
+        if (state.cleanupModal.stage !== "running") {
+          return false;
+        }
+        state.cleanupModal.open = true;
+        state.cleanupModal.connectionInterrupted = true;
+        branchCleanupWindowId = windowId;
+        renderBranchCleanupOwner(windowId);
+        return true;
+      }
+
+      // Issue #4433 AC-2: after reconnecting, re-subscribe to every cleanup
+      // this client still shows as running. The backend replies with the
+      // operation's latest progress or its final result.
+      function syncRunningBranchCleanups() {
+        for (const [windowId, state] of branchListStateMap.entries()) {
+          const operationId = state.cleanupModal.operationId;
+          if (state.cleanupModal.stage !== "running" || !operationId) {
+            continue;
+          }
+          send({
+            kind: "sync_branch_cleanup",
+            id: windowId,
+            operation_id: operationId,
+          });
+        }
+      }
+
+      // Issue #4433: progress is broadcast now, so it can land on a client that
+      // never started the run — a reloaded page, or a second window. Adopt it
+      // into the running view, except when it would rewind a cleanup that has
+      // already reported its result or interrupt a confirm dialog the user is
+      // still filling in.
+      function branchCleanupProgressIsAdoptable(state, event) {
+        if (state.cleanupModal.stage === "running") {
+          return true;
+        }
+        if (state.cleanupModal.stage === "result") {
+          return false;
+        }
+        return !state.cleanupModal.open && Boolean(event.operation_id);
+      }
+
+      // Issue #4433: a tagged event from any run other than the one this
+      // window is showing belongs to a superseded cleanup and is dropped.
+      function branchCleanupEventIsStale(state, event) {
+        return Boolean(
+          event.operation_id &&
+            state.cleanupModal.operationId &&
+            state.cleanupModal.operationId !== event.operation_id,
+        );
       }
 
       function cleanupToggleClass(entry, state) {
@@ -768,12 +847,7 @@ export function createBranchesCleanupSurface({
           return;
         }
         state.notice = "";
-        state.cleanupModal.open = true;
-        state.cleanupModal.stage = "confirm";
-        state.cleanupModal.deleteRemote = false;
-        state.cleanupModal.forceFilesystemDelete = false;
-        state.cleanupModal.progress = null;
-        state.cleanupModal.results = [];
+        state.cleanupModal = { ...idleBranchCleanupModalState(), open: true };
         branchCleanupWindowId = windowId;
         renderBranches(windowId);
       }
@@ -785,15 +859,26 @@ export function createBranchesCleanupSurface({
           return;
         }
         const state = ensureBranchListState(windowId);
-        if (state.cleanupModal.stage === "running") {
+        // Issue #4433: a cleanup whose status feed was interrupted is
+        // dismissable — otherwise a disconnect traps the user in a modal that
+        // can never reach a result.
+        if (
+          state.cleanupModal.stage === "running" &&
+          !state.cleanupModal.connectionInterrupted
+        ) {
           return;
         }
-        state.cleanupModal.open = false;
-        state.cleanupModal.stage = "confirm";
-        state.cleanupModal.deleteRemote = false;
-        state.cleanupModal.forceFilesystemDelete = false;
-        state.cleanupModal.progress = null;
-        state.cleanupModal.results = [];
+        const { operationId } = state.cleanupModal;
+        state.cleanupModal = idleBranchCleanupModalState();
+        if (operationId) {
+          // Issue #4433 AC-3: release the backend snapshot so it cannot be
+          // replayed into the next cleanup.
+          send({
+            kind: "clear_branch_cleanup_status",
+            id: windowId,
+            operation_id: operationId,
+          });
+        }
         if (branchCleanupWindowId === windowId) {
           branchCleanupWindowId = null;
         }
@@ -809,9 +894,12 @@ export function createBranchesCleanupSurface({
           return;
         }
         state.notice = "";
+        const operationId = newBranchCleanupOperationId(windowId);
         state.cleanupModal.stage = "running";
         state.cleanupModal.progress = initialBranchCleanupProgress(branches);
         state.cleanupModal.results = [];
+        state.cleanupModal.operationId = operationId;
+        state.cleanupModal.connectionInterrupted = false;
         renderBranchCleanupModal();
         if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
           send({
@@ -819,6 +907,7 @@ export function createBranchesCleanupSurface({
             branch: branches[0],
             delete_remote: state.cleanupModal.deleteRemote,
             force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
+            operation_id: operationId,
           });
           return;
         }
@@ -828,6 +917,7 @@ export function createBranchesCleanupSurface({
           branches,
           delete_remote: state.cleanupModal.deleteRemote,
           force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
+          operation_id: operationId,
         });
       }
 
@@ -974,15 +1064,38 @@ export function createBranchesCleanupSurface({
             const state = ensureBranchListState(
               event.id,
             );
+            if (branchCleanupEventIsStale(state, event)) {
+              break;
+            }
             state.cleanupSelected.clear();
             state.cleanupModal.open = true;
             state.cleanupModal.stage = "result";
             state.cleanupModal.results = event.results || [];
+            state.cleanupModal.connectionInterrupted = false;
+            if (event.operation_id) {
+              state.cleanupModal.operationId = event.operation_id;
+            }
             branchCleanupWindowId = event.id;
             renderBranchCleanupOwner(event.id);
             break;
           }
           case "branch_cleanup_progress": {
+            const state = ensureBranchListState(
+              event.id,
+            );
+            if (
+              branchCleanupEventIsStale(state, event) ||
+              !branchCleanupProgressIsAdoptable(state, event)
+            ) {
+              break;
+            }
+            if (event.operation_id) {
+              state.cleanupModal.operationId = event.operation_id;
+            }
+            // Issue #4433: a reloaded client has no cleanup state, so the
+            // replayed progress is what opens the running view.
+            state.cleanupModal.open = true;
+            state.cleanupModal.stage = "running";
             updateBranchCleanupProgress(
               event.id,
               event,
@@ -1029,6 +1142,8 @@ export function createBranchesCleanupSurface({
         renderBranchCleanupModal,
         updateBranchCleanupProgress,
         failRunningBranchCleanup,
+        markRunningBranchCleanupConnectionInterrupted,
+        syncRunningBranchCleanups,
         failLoadingBranchesOnConnectionLoss,
         openWorkspaceCleanup,
         mountBranchesWindow,

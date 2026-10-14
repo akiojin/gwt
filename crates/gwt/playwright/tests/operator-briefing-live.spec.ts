@@ -6,6 +6,7 @@
  * stop intercepting pointer input.
  */
 import { expect, test } from "@playwright/test";
+import { liveGwtRouteUrl } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 
@@ -13,14 +14,16 @@ test.describe("Mission Briefing dismissal (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
 
   test("dismisses within the live startup deadline", async ({ page }) => {
-    await page.goto(BASE);
+    // Issue #4538: the briefing belongs to the Project app at `/p/<key>`.
+    await page.goto(await liveGwtRouteUrl(page, BASE));
 
     const briefing = page.locator("#op-briefing");
     await expect(briefing).toBeHidden({ timeout: 3_000 });
   });
 
   test("does not intercept pointer input after hydration", async ({ page }) => {
-    await page.goto(BASE);
+    // Issue #4538: the briefing belongs to the Project app at `/p/<key>`.
+    await page.goto(await liveGwtRouteUrl(page, BASE));
 
     const briefing = page.locator("#op-briefing");
     await expect(briefing).toBeHidden({ timeout: 3_000 });
@@ -32,7 +35,8 @@ test.describe("Mission Briefing dismissal (live backend)", () => {
     await page.addInitScript(() => {
       window.sessionStorage.setItem("gwt:ui:briefing", "1");
     });
-    await page.goto(BASE);
+    // Issue #4538: the briefing belongs to the Project app at `/p/<key>`.
+    await page.goto(await liveGwtRouteUrl(page, BASE));
 
     await expect(page.locator("#op-briefing")).toBeHidden({ timeout: 1_000 });
   });

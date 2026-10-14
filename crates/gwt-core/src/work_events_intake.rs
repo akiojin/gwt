@@ -18,19 +18,20 @@
 //! - only works.json is written — sessions / current.json / journal.jsonl
 //!   are untouched (SC-261).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{GwtError, JsonDecodeKind, Result};
+use crate::error::{GwtError, Result, WorkspaceStateLoadError, WorkspaceStateLoadErrorKind};
 use crate::workspace_projection::{
     decode_workspace_work_event_line, load_workspace_work_items_from_path,
     save_workspace_work_items_projection_to_path, workspace_execution_container_same,
     DecodedWorkspaceWorkEvent, DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome,
-    WorkEventKind, WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef,
+    WorkEventKind, WorkItem, WorkItemsIntakeSnapshot, WorkItemsProjection,
+    WorkspaceExecutionContainerRef,
 };
 
 /// Per-run accounting so callers (and tests) can see what happened.
@@ -50,23 +51,24 @@ impl WorkEventsIntakeReport {
     }
 }
 
-/// One shared `events.jsonl` source plus the execution container inferred from
-/// its worktree or remote ref. The raw content remains immutable and may be
-/// shared across several refs that point at the same Git blob.
+/// One shared `events.jsonl` source plus its reader context for diagnostics.
+/// Only explicit event containers establish Work refs; the reader's worktree
+/// or remote ref must never supply one. The raw content remains immutable and
+/// may be shared across several refs that point at the same Git blob.
 #[derive(Debug, Clone)]
 pub struct SharedWorkEventsSource {
     content: Arc<str>,
-    fallback_execution_container: Option<WorkspaceExecutionContainerRef>,
+    source_execution_container: Option<WorkspaceExecutionContainerRef>,
 }
 
 impl SharedWorkEventsSource {
     pub fn new(
         content: impl Into<Arc<str>>,
-        fallback_execution_container: Option<WorkspaceExecutionContainerRef>,
+        source_execution_container: Option<WorkspaceExecutionContainerRef>,
     ) -> Self {
         Self {
             content: content.into(),
-            fallback_execution_container,
+            source_execution_container,
         }
     }
 }
@@ -80,7 +82,9 @@ fn is_close_kind(kind: WorkEventKind) -> bool {
 
 /// The first durable terminal close instant. Metadata and heartbeat events may
 /// advance `updated_at`, but must never move this cutoff.
-fn terminal_close_time(item: &crate::workspace_projection::WorkItem) -> Option<DateTime<Utc>> {
+pub(crate) fn terminal_close_time(
+    item: &crate::workspace_projection::WorkItem,
+) -> Option<DateTime<Utc>> {
     if !item.is_terminal() {
         return None;
     }
@@ -126,16 +130,14 @@ pub fn ingest_work_events_sources(
     work_items_path: &Path,
     sources: impl IntoIterator<Item = SharedWorkEventsSource>,
 ) -> Result<WorkEventsIntakeReport> {
-    let sources = sources.into_iter().collect::<Vec<_>>();
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        ingest_work_events_sources_locked(work_items_path, sources, None)
-    })
+    ingest_work_event_sources_with_local_path(work_items_path, sources, None)
+        .map(|(report, _)| report)
 }
 
 /// Ingest changed shared sources plus the strict machine-local lifecycle log.
-/// The local file is read while holding the same projection transaction lock
-/// used by event writers, which also recovers an event appended before a
-/// failed or interrupted projection save.
+/// Authoritative files are snapshotted under the writer's transaction lock;
+/// decode/fold/serialize run outside it, then byte comparison fences publication.
+/// This also recovers an event appended before an interrupted projection save.
 pub fn ingest_work_events_with_local_path<'a>(
     work_items_path: &Path,
     shared_contents: impl IntoIterator<Item = &'a str>,
@@ -156,31 +158,27 @@ pub fn ingest_work_event_sources_with_local_path(
     shared_sources: impl IntoIterator<Item = SharedWorkEventsSource>,
     local_path: Option<&Path>,
 ) -> Result<(WorkEventsIntakeReport, Option<String>)> {
+    let snapshot = WorkItemsIntakeSnapshot::capture(work_items_path, local_path)?;
     let shared_sources = shared_sources.into_iter().collect::<Vec<_>>();
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        let local_content = match local_path.map(std::fs::read_to_string) {
-            Some(Ok(content)) => Some(content),
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Some(Err(error)) => return Err(error.into()),
-            None => None,
-        };
-        let local_fingerprint = local_content.as_deref().map(content_fingerprint);
-        let report = ingest_work_events_sources_locked(
-            work_items_path,
-            shared_sources,
-            local_content.as_deref(),
-        )?;
-        Ok((report, local_fingerprint))
-    })
+    let local_content = snapshot.local_content()?;
+    let local_fingerprint = local_content.map(content_fingerprint);
+    let (report, projection) =
+        prepare_ingested_work_events(&snapshot, shared_sources, local_content)?;
+    let prepared = projection
+        .map(|projection| snapshot.prepare(projection))
+        .transpose()?;
+    snapshot.commit(prepared.as_deref())?;
+    Ok((report, local_fingerprint))
 }
 
-fn ingest_work_events_sources_locked(
-    work_items_path: &Path,
+fn prepare_ingested_work_events(
+    snapshot: &WorkItemsIntakeSnapshot,
     sources: Vec<SharedWorkEventsSource>,
     local_content: Option<&str>,
-) -> Result<WorkEventsIntakeReport> {
+) -> Result<(WorkEventsIntakeReport, Option<WorkItemsProjection>)> {
     let mut report = WorkEventsIntakeReport::default();
-    let previous = load_workspace_work_items_from_path(work_items_path)?
+    let previous = snapshot
+        .projection()?
         .unwrap_or_else(|| WorkItemsProjection::empty(Utc::now()));
     let seen_event_ids: HashSet<String> = previous
         .work_items
@@ -191,8 +189,40 @@ fn ingest_work_events_sources_locked(
     if let Some(content) = local_content {
         incoming.extend(collect_machine_local_work_events(content)?);
     }
+    // Issue #4508: an event dropped by inline-history compaction is already
+    // folded into its Work item's authoritative state. Its source shard is
+    // immutable and keeps offering it, so without this watermark every pass
+    // would re-apply it, re-grow the truncated history, and mark the
+    // projection changed — rewriting works.json on every scan for no state
+    // change.
+    //
+    // Close kinds are exempt. Close state is owned by the machine-local
+    // lifecycle log (FR-384), and a close stamped before the Work's last
+    // update would otherwise be dropped and never close it. Re-applying one is
+    // already guarded: a terminal item refuses events at or before its close.
+    let compacted_through = previous
+        .work_items
+        .iter()
+        .filter_map(|item| {
+            item.events_compacted_through()
+                .map(|through| (item.id.clone(), through))
+        })
+        .collect::<HashMap<_, _>>();
+    if !compacted_through.is_empty() {
+        incoming.retain(|(event, _)| {
+            let already_folded = !is_close_kind(event.kind)
+                && !seen_event_ids.contains(&event.id)
+                && compacted_through
+                    .get(&event.work_item_id)
+                    .is_some_and(|through| event.updated_at <= *through);
+            if already_folded {
+                report.skipped_duplicate += 1;
+            }
+            !already_folded
+        });
+    }
     if incoming.is_empty() {
-        return Ok(report);
+        return Ok((report, None));
     }
 
     // Keep the existing per-run accounting behavior, then independently
@@ -220,6 +250,7 @@ fn ingest_work_events_sources_locked(
         })
         .collect();
     let mut projection = refold_work_events_projection_with_keys(&previous, replayable)?;
+    snapshot.apply_detachments(&mut projection)?;
     let changed = !work_item_sets_equal(&projection, &previous);
     reconcile_refold_report(
         &previous,
@@ -230,9 +261,8 @@ fn ingest_work_events_sources_locked(
     );
     if changed {
         projection.updated_at = Utc::now();
-        save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     }
-    Ok(report)
+    Ok((report, changed.then_some(projection)))
 }
 
 fn work_item_sets_equal(left: &WorkItemsProjection, right: &WorkItemsProjection) -> bool {
@@ -400,43 +430,42 @@ pub fn rebuild_work_events_contents<'a>(
     shared_contents: impl IntoIterator<Item = &'a str>,
     close_content: Option<&str>,
 ) -> Result<WorkEventsIntakeReport> {
+    let snapshot = WorkItemsIntakeSnapshot::capture(work_items_path, None)?;
     let shared_sources = shared_contents
         .into_iter()
         .map(|content| SharedWorkEventsSource::new(content, None))
         .collect::<Vec<_>>();
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        rebuild_work_event_sources_locked(work_items_path, shared_sources, close_content)
-    })
+    publish_rebuilt_work_events(&snapshot, shared_sources, close_content)
 }
 
 /// Rebuild using the machine-local lifecycle log at `close_path`. The file is
-/// read only after the projection transaction lock is held, so a concurrent
-/// terminal writer is either fully before or fully after this rebuild.
+/// snapshotted under the projection lock and checked again before publication,
+/// so a concurrent terminal writer is never overwritten by this rebuild.
 pub fn rebuild_work_events_paths<'a>(
     work_items_path: &Path,
     shared_contents: impl IntoIterator<Item = &'a str>,
     close_path: Option<&Path>,
 ) -> Result<WorkEventsIntakeReport> {
-    let shared_sources = shared_contents
-        .into_iter()
-        .map(|content| SharedWorkEventsSource::new(content, None))
-        .collect::<Vec<_>>();
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        let close_content = match close_path.map(std::fs::read_to_string) {
-            Some(Ok(content)) => Some(content),
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Some(Err(error)) => return Err(error.into()),
-            None => None,
-        };
-        rebuild_work_event_sources_locked(work_items_path, shared_sources, close_content.as_deref())
-    })
+    rebuild_work_events_with_shared_loader(
+        work_items_path,
+        || {
+            Ok((
+                shared_contents
+                    .into_iter()
+                    .map(|content| SharedWorkEventsSource::new(content, None))
+                    .collect(),
+                (),
+            ))
+        },
+        close_path,
+    )
+    .map(|(report, _, _)| report)
 }
 
-/// Rebuild from shared source contents loaded only after the project-scoped
-/// projection lock is held. The loader lets the orchestrator discover and
-/// fingerprint sources first, then re-read mutable worktree logs at the
-/// transaction boundary so a writer cannot be overwritten by a stale
-/// pre-lock snapshot.
+/// Capture authoritative state before loading mutable shared sources, then run
+/// the loader and heavy preparation without the Work lock. Byte comparison at
+/// publication rejects concurrent writers; callers must not advance fingerprints
+/// on that error and should retry discovery on their next poll.
 pub fn rebuild_work_events_with_shared_loader<F, T>(
     work_items_path: &Path,
     load_shared_contents: F,
@@ -445,22 +474,31 @@ pub fn rebuild_work_events_with_shared_loader<F, T>(
 where
     F: FnOnce() -> Result<(Vec<SharedWorkEventsSource>, T)>,
 {
-    crate::workspace_projection::with_workspace_work_items_lock(work_items_path, || {
-        let (shared_contents, loaded_metadata) = load_shared_contents()?;
-        let close_content = match close_path.map(std::fs::read_to_string) {
-            Some(Ok(content)) => Some(content),
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Some(Err(error)) => return Err(error.into()),
-            None => None,
-        };
-        let close_fingerprint = close_content.as_deref().map(content_fingerprint);
-        let report = rebuild_work_event_sources_locked(
-            work_items_path,
-            shared_contents,
-            close_content.as_deref(),
-        )?;
-        Ok((report, loaded_metadata, close_fingerprint))
-    })
+    let snapshot = WorkItemsIntakeSnapshot::capture(work_items_path, close_path)?;
+    let (shared_contents, loaded_metadata) = load_shared_contents()?;
+    let close_content = snapshot.local_content()?;
+    let close_fingerprint = close_content.map(content_fingerprint);
+    let report = publish_rebuilt_work_events(&snapshot, shared_contents, close_content)?;
+    Ok((report, loaded_metadata, close_fingerprint))
+}
+
+fn publish_rebuilt_work_events(
+    snapshot: &WorkItemsIntakeSnapshot,
+    shared_sources: Vec<SharedWorkEventsSource>,
+    close_content: Option<&str>,
+) -> Result<WorkEventsIntakeReport> {
+    let (report, projection, corrupt_state) = prepare_rebuilt_work_events(
+        snapshot.projection(),
+        shared_sources,
+        close_content,
+        Vec::new(),
+    )?;
+    let prepared = snapshot.prepare(projection)?;
+    snapshot.commit(Some(&prepared))?;
+    if let Some(error) = corrupt_state {
+        tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
+    }
+    Ok(report)
 }
 
 /// Issue #3524 (folded into #3606): rebuild without taking the projection lock,
@@ -468,7 +506,7 @@ where
 ///
 /// The store consolidation has to hold the `works.lock` of the canonical store
 /// *and* of every store it quarantines for the whole move-then-rebuild
-/// sequence. Re-entering [`crate::workspace_projection::with_workspace_work_items_lock`]
+/// sequence. Re-entering `with_workspace_work_items_lock`
 /// from inside that transaction would deadlock against the lock the caller
 /// already owns, so this entry point is lock-free by contract.
 ///
@@ -493,37 +531,51 @@ pub(crate) fn rebuild_work_events_contents_locked<'a>(
     )
 }
 
-fn rebuild_work_event_sources_locked(
-    work_items_path: &Path,
-    shared_sources: Vec<SharedWorkEventsSource>,
-    close_content: Option<&str>,
-) -> Result<WorkEventsIntakeReport> {
-    rebuild_work_event_sources_locked_with_legacy(
-        work_items_path,
-        shared_sources,
-        close_content,
-        Vec::new(),
-    )
-}
-
 fn rebuild_work_event_sources_locked_with_legacy(
     work_items_path: &Path,
     shared_sources: Vec<SharedWorkEventsSource>,
     close_content: Option<&str>,
     extra_legacy_items: Vec<WorkItem>,
 ) -> Result<WorkEventsIntakeReport> {
-    let previous = match load_workspace_work_items_from_path(work_items_path) {
+    let (report, mut projection, corrupt_state) = prepare_rebuilt_work_events(
+        load_workspace_work_items_from_path(work_items_path),
+        shared_sources,
+        close_content,
+        extra_legacy_items,
+    )?;
+    crate::workspace_projection::apply_workspace_container_detachments(
+        work_items_path,
+        &mut projection,
+    )?;
+    if let Some(error) = corrupt_state {
+        crate::workspace_projection::save_workspace_work_items_projection_after_rebuild(
+            work_items_path,
+            &projection,
+        )?;
+        tracing::warn!(%error, "work events rebuild: recovered corrupt projection from complete event history");
+    } else {
+        save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+    }
+    Ok(report)
+}
+
+fn prepare_rebuilt_work_events(
+    previous: Result<Option<WorkItemsProjection>>,
+    shared_sources: Vec<SharedWorkEventsSource>,
+    close_content: Option<&str>,
+    extra_legacy_items: Vec<WorkItem>,
+) -> Result<(
+    WorkEventsIntakeReport,
+    WorkItemsProjection,
+    Option<WorkspaceStateLoadError>,
+)> {
+    let mut corrupt_state = None;
+    let previous = match previous {
         Ok(previous) => previous,
-        Err(GwtError::JsonDecode {
-            kind: JsonDecodeKind::Malformed,
-            message: error,
-            ..
-        }) => {
-            tracing::warn!(
-                %error,
-                path = %work_items_path.display(),
-                "work events rebuild: discarding corrupt projection"
-            );
+        Err(GwtError::WorkspaceStateLoad(error))
+            if error.kind == WorkspaceStateLoadErrorKind::Malformed =>
+        {
+            corrupt_state = Some(error);
             None
         }
         Err(error) => return Err(error),
@@ -545,6 +597,16 @@ fn rebuild_work_event_sources_locked_with_legacy(
         incoming.extend(collect_machine_local_work_events(content)?);
     }
 
+    if let Some(error) = &corrupt_state {
+        if incoming.is_empty() || report.skipped_invalid > 0 || report.skipped_opaque > 0 {
+            let mut error = error.clone();
+            error
+                .message
+                .push_str("; recovery refused: complete readable event history is required");
+            return Err(error.into());
+        }
+    }
+
     let initial_updated_at = incoming
         .iter()
         .map(|(event, _)| event.updated_at)
@@ -560,8 +622,7 @@ fn rebuild_work_event_sources_locked_with_legacy(
         .work_items
         .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
     projection.updated_at = Utc::now();
-    save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
-    Ok(report)
+    Ok((report, projection, corrupt_state))
 }
 
 #[derive(Debug, Clone)]
@@ -592,6 +653,11 @@ where
 {
     let mut incoming = Vec::new();
     let mut decoded_by_content_identity = HashMap::<usize, Vec<CachedSharedWorkEventLine>>::new();
+    // Issue #4371: one shard is offered once per origin ref that holds it
+    // (701 refs peaked the rebuild at 4.7 GB). The fold keeps the canonical
+    // event, and the first identical duplicate records its provenance; any
+    // further identical copy is a no-op it would only count as a duplicate.
+    let mut copies_by_stable_key = HashMap::<String, u8>::new();
     for source in sources {
         let content_identity = Arc::as_ptr(&source.content) as *const () as usize;
         let decoded = decoded_by_content_identity
@@ -607,6 +673,14 @@ where
                         }
                         Some(match decode(line.as_bytes()) {
                             Ok(DecodedWorkspaceWorkEvent::Known(event)) => {
+                                if event.execution_container.is_none() && !is_close_kind(event.kind) {
+                                    tracing::warn!(
+                                        event_id = %event.id,
+                                        work_item_id = %event.work_item_id,
+                                        source = ?source.source_execution_container,
+                                        "work events intake: event has no explicit container; retaining history without a Work ref"
+                                    );
+                                }
                                 CachedSharedWorkEventLine::Known(event)
                             }
                             Ok(DecodedWorkspaceWorkEvent::Opaque) => {
@@ -618,7 +692,7 @@ where
                     .collect()
             });
         for cached in decoded.iter() {
-            let mut event = match cached {
+            let event = match cached {
                 CachedSharedWorkEventLine::Known(event) => event.as_ref().clone(),
                 CachedSharedWorkEventLine::Opaque => {
                     report.skipped_opaque += 1;
@@ -630,9 +704,6 @@ where
                     continue;
                 }
             };
-            if event.execution_container.is_none() {
-                event.execution_container = source.fallback_execution_container.clone();
-            }
             if is_close_kind(event.kind) {
                 report.skipped_close_kind += 1;
                 continue;
@@ -640,6 +711,12 @@ where
             let stable_key = serde_json::to_string(&event).map_err(|error| {
                 GwtError::Other(format!("work events intake stable key: {error}"))
             })?;
+            let copies = copies_by_stable_key.entry(stable_key.clone()).or_default();
+            if *copies >= 2 {
+                report.skipped_duplicate += 1;
+                continue;
+            }
+            *copies += 1;
             incoming.push((event, stable_key));
         }
     }
@@ -761,6 +838,16 @@ fn fold_work_events(
 }
 
 fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy: WorkItem) {
+    // Issue #4508: a compacted item keeps deriving its replay base from
+    // itself. Storing the copy back would re-add a duplicate of every field
+    // the compaction just dropped, and a projection that gained a snapshot
+    // counts as changed, so every pass would rewrite works.json without any
+    // state change. Leaving the snapshot empty also preserves the watermark
+    // that `WorkItem::events_compacted_through` reads back, which is what
+    // stops the next intake pass from replaying the folded prefix. Read it
+    // before forcing `legacy_metadata_authoritative`, which would otherwise
+    // make an eventless legacy row look compacted.
+    let retain_snapshot = legacy.events_compacted_through().is_none();
     legacy.legacy_metadata_authoritative = true;
     let legacy_snapshot_at = legacy
         .legacy_metadata_snapshot_at
@@ -775,7 +862,7 @@ fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy:
     });
     let mut legacy_base = (*immutable_snapshot).clone();
     legacy_base.events.clear();
-    legacy_base.legacy_metadata_snapshot = Some(immutable_snapshot.clone());
+    legacy_base.legacy_metadata_snapshot = retain_snapshot.then(|| immutable_snapshot.clone());
     legacy_base.legacy_metadata_authoritative = true;
     legacy_base.legacy_metadata_snapshot_at = Some(legacy_snapshot_at);
     legacy_base.duplicate_event_containers.clear();
@@ -802,7 +889,7 @@ fn merge_eventless_legacy_item(projection: &mut WorkItemsProjection, mut legacy:
         snapshot_projection.apply_event(event);
     }
     let mut legacy = snapshot_projection.work_items.pop().unwrap();
-    legacy.legacy_metadata_snapshot = Some(immutable_snapshot);
+    legacy.legacy_metadata_snapshot = retain_snapshot.then_some(immutable_snapshot);
     legacy.legacy_metadata_authoritative = true;
     legacy.legacy_metadata_snapshot_at = Some(legacy_snapshot_at);
     legacy.events = rebuilt_events;
@@ -917,6 +1004,9 @@ fn repair_duplicate_event_container(
 /// sha256, or immutable-file metadata bound to source/container identity.
 /// Deleting the cache only costs re-reading sources; event-id dedup preserves
 /// correctness.
+///
+/// Issue #4397: this is the logical view, and the shape of the legacy
+/// single-file cache. It is persisted as a [`WorkEventsIntakeStore`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkEventsIntakeState {
     #[serde(default)]
@@ -944,22 +1034,416 @@ impl WorkEventsIntakeState {
     }
 }
 
-/// Load the intake state; missing or corrupt files yield the default state
-/// (the cache is advisory).
+/// Load the whole intake state; a missing or corrupt store yields the default
+/// state (the cache is advisory).
 pub fn load_work_events_intake_state(path: &Path) -> WorkEventsIntakeState {
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return WorkEventsIntakeState::default();
-    };
-    serde_json::from_str(&body).unwrap_or_default()
+    WorkEventsIntakeStore::open(path)
+        .to_state()
+        .unwrap_or_default()
 }
 
+/// Replace the whole intake state.
 pub fn save_work_events_intake_state(path: &Path, state: &WorkEventsIntakeState) -> Result<()> {
-    let body = serde_json::to_vec_pretty(state)
-        .map_err(|error| GwtError::Other(format!("work events intake state: {error}")))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let mut store = WorkEventsIntakeStore::open(path);
+    store.clear();
+    store.index.projection_version = state.projection_version.clone();
+    store.index_dirty = true;
+    let mut groups = BTreeMap::<&str, BTreeMap<String, String>>::new();
+    for (key, fingerprint) in &state.sources {
+        match work_events_intake_group_of(key) {
+            Some(group) => {
+                groups
+                    .entry(group)
+                    .or_default()
+                    .insert(key.clone(), fingerprint.clone());
+            }
+            None => store.record(key.clone(), fingerprint.clone()),
+        }
     }
-    crate::workspace_projection::write_atomic(path, &body)
+    for (group, sources) in groups {
+        store.set_group(group, None, sources);
+    }
+    store.save().map(|_| ())
+}
+
+const INTAKE_STORE_FORMAT: u32 = 2;
+const WORKTREE_GROUP_PREFIX: &str = "worktree:";
+const REF_GROUP_PREFIX: &str = "ref:";
+const WORKTREE_EVENT_STORE_MARKERS: [&str; 2] = [".gwt/work/events", ".gwt\\work\\events"];
+
+/// The group a source key belongs to (Issue #4397).
+///
+/// - `ref:<refname>:<tree path>` belongs to `ref:<refname>` (git refnames
+///   cannot contain `:`);
+/// - `worktree:<worktree>/.gwt/work/events…` belongs to `worktree:<worktree>`;
+/// - anything else (the local lifecycle log, the source-list fingerprint) is
+///   ungrouped and lives in the index.
+pub fn work_events_intake_group_of(key: &str) -> Option<&str> {
+    if let Some(rest) = key.strip_prefix(REF_GROUP_PREFIX) {
+        let (refname, _) = rest.split_once(':')?;
+        return Some(&key[..REF_GROUP_PREFIX.len() + refname.len()]);
+    }
+    if key.starts_with(WORKTREE_GROUP_PREFIX) {
+        let marker = WORKTREE_EVENT_STORE_MARKERS
+            .iter()
+            .filter_map(|marker| key.rfind(marker))
+            .max()?;
+        let group = key[..marker].trim_end_matches(['/', '\\']);
+        return (group.len() > WORKTREE_GROUP_PREFIX.len()).then_some(group);
+    }
+    None
+}
+
+/// One group's entry in the intake index.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkEventsIntakeGroup {
+    /// Identity of the scan whose sources the group holds. `None` until a
+    /// scan verified them, so the next pass compares the group per source.
+    #[serde(default)]
+    pub snapshot: Option<String>,
+    /// Number of source fingerprints the group holds.
+    #[serde(default)]
+    pub sources: usize,
+    /// Size of the group file on disk.
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct IntakeIndex {
+    format: u32,
+    #[serde(default)]
+    projection_version: Option<String>,
+    #[serde(default)]
+    ungrouped: BTreeMap<String, String>,
+    #[serde(default)]
+    groups: BTreeMap<String, WorkEventsIntakeGroup>,
+}
+
+#[derive(Deserialize)]
+struct IntakeGroupFile {
+    group: String,
+    sources: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct IntakeGroupFileRef<'a> {
+    group: &'a str,
+    sources: &'a BTreeMap<String, String>,
+}
+
+/// What one [`WorkEventsIntakeStore::save`] wrote.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkEventsIntakeSaveReport {
+    pub groups_written: usize,
+    pub bytes_written: u64,
+}
+
+/// The intake fingerprint cache, partitioned per source group (Issue #4397).
+///
+/// `<state>/index.json` holds each group's snapshot and size plus the
+/// ungrouped keys; `<state>/groups/<sha256(group)>.json` holds one group's
+/// fingerprints. A pass opens only the index, loads the groups whose snapshot
+/// changed, and writes only the groups it changed, so its I/O follows the
+/// changed sources instead of the whole history. The index is written last:
+/// it is the commit point. A legacy flat `work-events-intake.json` is
+/// migrated verbatim on open and retired by the first save.
+pub struct WorkEventsIntakeStore {
+    dir: PathBuf,
+    legacy_path: PathBuf,
+    retire_legacy: bool,
+    prune_orphan_groups: bool,
+    index: IntakeIndex,
+    index_bytes: u64,
+    index_dirty: bool,
+    loaded: HashMap<String, Option<BTreeMap<String, String>>>,
+    dirty_groups: BTreeSet<String>,
+    removed_groups: BTreeSet<String>,
+}
+
+impl WorkEventsIntakeStore {
+    /// Open the store belonging to the legacy state path `state_path`.
+    pub fn open(state_path: &Path) -> Self {
+        let mut store = Self {
+            dir: state_path.with_extension(""),
+            legacy_path: state_path.to_path_buf(),
+            retire_legacy: false,
+            prune_orphan_groups: false,
+            index: IntakeIndex::default(),
+            index_bytes: 0,
+            index_dirty: false,
+            loaded: HashMap::new(),
+            dirty_groups: BTreeSet::new(),
+            removed_groups: BTreeSet::new(),
+        };
+        if let Ok(body) = std::fs::read(store.index_path()) {
+            match serde_json::from_slice::<IntakeIndex>(&body) {
+                Ok(index) if index.format == INTAKE_STORE_FORMAT => {
+                    store.index_bytes = body.len() as u64;
+                    store.index = index;
+                    // A legacy file beside a valid index was written by an
+                    // older gwt after the migration. The index stays
+                    // authoritative (dedup is event-id based), so the next
+                    // save retires the leftover instead of keeping it forever.
+                    store.retire_legacy = state_path.exists();
+                    return store;
+                }
+                _ => store.prune_orphan_groups = true,
+            }
+        }
+        let Ok(body) = std::fs::read(state_path) else {
+            return store;
+        };
+        let Ok(legacy) = serde_json::from_slice::<WorkEventsIntakeState>(&body) else {
+            return store;
+        };
+        let mut groups = BTreeMap::<String, BTreeMap<String, String>>::new();
+        for (key, fingerprint) in legacy.sources {
+            match work_events_intake_group_of(&key).map(str::to_owned) {
+                Some(group) => {
+                    groups.entry(group).or_default().insert(key, fingerprint);
+                }
+                None => {
+                    store.index.ungrouped.insert(key, fingerprint);
+                }
+            }
+        }
+        for (group, sources) in groups {
+            store.set_group(&group, None, sources);
+        }
+        store.index.projection_version = legacy.projection_version;
+        store.index_dirty = true;
+        store.retire_legacy = true;
+        store.prune_orphan_groups = true;
+        store
+    }
+
+    fn index_path(&self) -> PathBuf {
+        self.dir.join("index.json")
+    }
+
+    fn group_path(&self, group: &str) -> PathBuf {
+        self.dir
+            .join("groups")
+            .join(format!("{}.json", content_fingerprint(group)))
+    }
+
+    pub fn projection_is_current(&self, required: &str) -> bool {
+        self.index.projection_version.as_deref() == Some(required)
+    }
+
+    pub fn record_projection_version(&mut self, version: impl Into<String>) {
+        let version = Some(version.into());
+        if self.index.projection_version != version {
+            self.index.projection_version = version;
+            self.index_dirty = true;
+        }
+    }
+
+    /// True when the ungrouped `key` already holds `fingerprint`.
+    pub fn is_current(&self, key: &str, fingerprint: &str) -> bool {
+        self.index.ungrouped.get(key).map(String::as_str) == Some(fingerprint)
+    }
+
+    /// True when the ungrouped `key` holds any fingerprint.
+    pub fn contains(&self, key: &str) -> bool {
+        self.index.ungrouped.contains_key(key)
+    }
+
+    /// Record an ungrouped key.
+    pub fn record(&mut self, key: impl Into<String>, fingerprint: impl Into<String>) {
+        let fingerprint = fingerprint.into();
+        let previous = self.index.ungrouped.insert(key.into(), fingerprint.clone());
+        if previous.as_deref() != Some(fingerprint.as_str()) {
+            self.index_dirty = true;
+        }
+    }
+
+    pub fn group(&self, group: &str) -> Option<&WorkEventsIntakeGroup> {
+        self.index.groups.get(group)
+    }
+
+    pub fn group_names(&self) -> impl Iterator<Item = &str> {
+        self.index.groups.keys().map(String::as_str)
+    }
+
+    /// The fingerprints `group` holds, loading its file on first use. A group
+    /// the index does not know is empty; `None` means its file is unreadable,
+    /// so nothing about the group's history can be trusted.
+    pub fn group_sources(&mut self, group: &str) -> Option<&BTreeMap<String, String>> {
+        if !self.loaded.contains_key(group) {
+            let sources = if self.index.groups.contains_key(group) {
+                self.read_group(group)
+            } else {
+                Some(BTreeMap::new())
+            };
+            self.loaded.insert(group.to_string(), sources);
+        }
+        self.loaded.get(group).and_then(Option::as_ref)
+    }
+
+    fn read_group(&self, group: &str) -> Option<BTreeMap<String, String>> {
+        let body = std::fs::read(self.group_path(group)).ok()?;
+        let file = serde_json::from_slice::<IntakeGroupFile>(&body).ok()?;
+        (file.group == group).then_some(file.sources)
+    }
+
+    /// Replace `group`'s fingerprints. Every key must belong to `group`.
+    pub fn set_group(
+        &mut self,
+        group: &str,
+        snapshot: Option<String>,
+        sources: BTreeMap<String, String>,
+    ) {
+        let entry = self.index.groups.entry(group.to_string()).or_default();
+        entry.snapshot = snapshot;
+        entry.sources = sources.len();
+        self.loaded.insert(group.to_string(), Some(sources));
+        self.dirty_groups.insert(group.to_string());
+        self.removed_groups.remove(group);
+        self.index_dirty = true;
+    }
+
+    /// Record which scan `group`'s unchanged fingerprints were verified by.
+    pub fn set_group_snapshot(&mut self, group: &str, snapshot: Option<String>) {
+        if let Some(entry) = self.index.groups.get_mut(group) {
+            if entry.snapshot != snapshot {
+                entry.snapshot = snapshot;
+                self.index_dirty = true;
+            }
+        }
+    }
+
+    pub fn remove_group(&mut self, group: &str) {
+        if self.index.groups.remove(group).is_some() {
+            self.removed_groups.insert(group.to_string());
+            self.index_dirty = true;
+        }
+        self.loaded.remove(group);
+        self.dirty_groups.remove(group);
+    }
+
+    /// Drop every fingerprint (a rebuild establishes a new source snapshot).
+    pub fn clear(&mut self) {
+        let groups = self.index.groups.keys().cloned().collect::<Vec<_>>();
+        for group in groups {
+            self.remove_group(&group);
+        }
+        if !self.index.ungrouped.is_empty() {
+            self.index.ungrouped.clear();
+            self.index_dirty = true;
+        }
+    }
+
+    /// Fingerprints held, grouped and ungrouped.
+    pub fn source_count(&self) -> usize {
+        self.index
+            .groups
+            .values()
+            .map(|group| group.sources)
+            .sum::<usize>()
+            + self.index.ungrouped.len()
+    }
+
+    /// Bytes the store occupies on disk, as of its last open or save.
+    pub fn stored_bytes(&self) -> u64 {
+        self.index_bytes
+            + self
+                .index
+                .groups
+                .values()
+                .map(|group| group.bytes)
+                .sum::<u64>()
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.index_dirty
+            || self.retire_legacy
+            || !self.dirty_groups.is_empty()
+            || !self.removed_groups.is_empty()
+    }
+
+    /// Assemble the logical view; `None` when a group file is unreadable.
+    pub fn to_state(&mut self) -> Option<WorkEventsIntakeState> {
+        let mut sources = self.index.ungrouped.clone();
+        let groups = self.index.groups.keys().cloned().collect::<Vec<_>>();
+        for group in groups {
+            sources.extend(
+                self.group_sources(&group)?
+                    .iter()
+                    .map(|(key, fingerprint)| (key.clone(), fingerprint.clone())),
+            );
+        }
+        Some(WorkEventsIntakeState {
+            sources,
+            projection_version: self.index.projection_version.clone(),
+        })
+    }
+
+    /// Write the changed groups, then the index, then retire what they
+    /// replaced.
+    pub fn save(&mut self) -> Result<WorkEventsIntakeSaveReport> {
+        let mut report = WorkEventsIntakeSaveReport::default();
+        if !self.is_dirty() {
+            return Ok(report);
+        }
+        std::fs::create_dir_all(self.dir.join("groups"))?;
+        for group in std::mem::take(&mut self.dirty_groups) {
+            let Some(Some(sources)) = self.loaded.get(&group) else {
+                continue;
+            };
+            let body = serde_json::to_vec(&IntakeGroupFileRef {
+                group: &group,
+                sources,
+            })
+            .map_err(|error| GwtError::Other(format!("work events intake group: {error}")))?;
+            crate::workspace_projection::write_atomic(&self.group_path(&group), &body)?;
+            if let Some(entry) = self.index.groups.get_mut(&group) {
+                entry.bytes = body.len() as u64;
+            }
+            report.groups_written += 1;
+            report.bytes_written += body.len() as u64;
+        }
+
+        self.index.format = INTAKE_STORE_FORMAT;
+        let body = serde_json::to_vec(&self.index)
+            .map_err(|error| GwtError::Other(format!("work events intake index: {error}")))?;
+        crate::workspace_projection::write_atomic(&self.index_path(), &body)?;
+        self.index_bytes = body.len() as u64;
+        self.index_dirty = false;
+        report.bytes_written += body.len() as u64;
+
+        for group in std::mem::take(&mut self.removed_groups) {
+            remove_file_if_present(&self.group_path(&group));
+        }
+        if std::mem::take(&mut self.prune_orphan_groups) {
+            let kept = self
+                .index
+                .groups
+                .keys()
+                .map(|group| self.group_path(group))
+                .collect::<HashSet<_>>();
+            if let Ok(entries) = std::fs::read_dir(self.dir.join("groups")) {
+                for entry in entries.flatten() {
+                    if !kept.contains(&entry.path()) {
+                        remove_file_if_present(&entry.path());
+                    }
+                }
+            }
+        }
+        if std::mem::take(&mut self.retire_legacy) {
+            remove_file_if_present(&self.legacy_path);
+        }
+        Ok(report)
+    }
+}
+
+fn remove_file_if_present(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, path = %path.display(), "work events intake: stale file removal failed");
+        }
+    }
 }
 
 /// Content sha256 used as the fingerprint for filesystem sources (git blob
@@ -978,6 +1462,94 @@ mod tests {
     use chrono::TimeZone;
     use std::sync::Arc;
 
+    /// AC-3: benchmark an isolated copy, never resolve or mutate the live HOME.
+    #[test]
+    #[ignore = "requires GWT_STARTUP_STORE_COPY pointing to a copied production store"]
+    fn issue_5335_measure_copied_store() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let source = PathBuf::from(std::env::var("GWT_STARTUP_STORE_COPY").unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let works = temp.path().join("works.json");
+        let ledger = temp.path().join("work-events-closed.jsonl");
+        for name in [
+            "works.json",
+            "work-events-closed.jsonl",
+            "works.detachments.json",
+        ] {
+            if source.join(name).is_file() {
+                std::fs::copy(source.join(name), temp.path().join(name)).unwrap();
+            }
+        }
+        let work_count = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap()
+            .work_items
+            .len();
+        let event_count = std::fs::read_to_string(&ledger).unwrap().lines().count();
+        assert!(work_count >= 1000 && event_count >= 200_000);
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(works.with_extension("lock"))
+            .unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let observing = Arc::clone(&done);
+        let (ready, started_observing) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            let mut held_since = None;
+            let mut holds = Vec::new();
+            let mut last_probe = Instant::now();
+            let mut max_gap = 0.0_f64;
+            ready.send(()).unwrap();
+            while !observing.load(Ordering::Acquire) {
+                max_gap = max_gap.max(last_probe.elapsed().as_secs_f64());
+                last_probe = Instant::now();
+                match fs2::FileExt::try_lock_exclusive(&lock) {
+                    Ok(()) => {
+                        fs2::FileExt::unlock(&lock).unwrap();
+                        if let Some(started) = held_since.take() {
+                            holds.push(Instant::now().duration_since(started).as_secs_f64());
+                        }
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            || error.raw_os_error()
+                                == fs2::lock_contended_error().raw_os_error() =>
+                    {
+                        held_since.get_or_insert_with(Instant::now);
+                    }
+                    Err(error) => panic!("observe copied store lock: {error}"),
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if let Some(started) = held_since {
+                holds.push(started.elapsed().as_secs_f64());
+            }
+            max_gap = max_gap.max(last_probe.elapsed().as_secs_f64());
+            (holds, max_gap)
+        });
+        started_observing.recv().unwrap();
+        let mode = std::env::var("GWT_STARTUP_MEASURE_MODE").unwrap_or_else(|_| "rebuild".into());
+        let started = Instant::now();
+        let result = if mode == "ingest" {
+            ingest_work_events_with_local_path(&works, [], Some(&ledger)).map(|result| result.0)
+        } else {
+            rebuild_work_events_paths(&works, [], Some(&ledger))
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        done.store(true, Ordering::Release);
+        let (holds, max_gap) = observer.join().unwrap();
+        // Use observed probe gaps, including scheduling delays, to cover both
+        // interval edges and any hold that fell entirely between two probes.
+        let max_hold_upper_bound = holds.iter().copied().fold(0.0, f64::max) + 2.0 * max_gap;
+        eprintln!("copied-store mode={mode} works={work_count} ledger_events={event_count} total_seconds={elapsed:.3} sampled_lock_holds_seconds={holds:?} max_probe_gap_seconds={max_gap:.3} max_hold_upper_bound_seconds={max_hold_upper_bound:.3}");
+        result.unwrap();
+    }
+
     fn event_json(id: &str, work_id: &str, kind: &str, updated_at: &str, extra: &str) -> String {
         format!(
             "{{\"id\":\"{id}\",\"work_item_id\":\"{work_id}\",\"kind\":\"{kind}\",\"updated_at\":\"{updated_at}\"{extra}}}"
@@ -995,7 +1567,7 @@ mod tests {
     }
 
     #[test]
-    fn contextual_shared_content_decodes_once_and_preserves_source_provenance() {
+    fn contextual_shared_content_decodes_once_without_inventing_containers() {
         let content: Arc<str> = Arc::from(
             [
                 event_json(
@@ -1028,14 +1600,60 @@ mod tests {
         assert_eq!(report.skipped_opaque, 2, "accounting remains per source");
         assert_eq!(report.skipped_invalid, 2, "accounting remains per source");
         assert_eq!(incoming.len(), 2);
-        assert_eq!(
-            incoming[0].0.execution_container.as_ref(),
-            Some(&source_container("work/one"))
-        );
-        assert_eq!(
-            incoming[1].0.execution_container.as_ref(),
-            Some(&source_container("work/two"))
-        );
+        assert!(incoming
+            .iter()
+            .all(|(event, _)| event.execution_container.is_none()));
+    }
+
+    #[test]
+    fn legacy_claim_does_not_acquire_new_launch_source_containers() {
+        // The container-less #2359 claim copied into the four affected refs.
+        let legacy = r#"{"id":"bff5fbd9-66be-4fb2-8505-e44f7f587437","work_item_id":"work-work-issue-2359-34a6ca7a","kind":"claim","status_category":"active","owner":"SPEC-2359","agent_session_id":"8e38a0f0-9dde-4b7e-a7fa-4852b978a308","agent_id":"codex","execution_container":null,"updated_at":"2026-08-03T05:20:28.093392Z"}"#;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works.json");
+        for issue in [4595, 4558, 4557, 4554] {
+            let branch = format!("work/issue-{issue}");
+            let work_id = format!("work-launch-{issue}");
+            let launch = event_json(
+                &format!("launch-{issue}"),
+                &work_id,
+                "start",
+                "2026-10-02T06:00:00Z",
+                &format!(",\"title\":\"new launch\",\"status_category\":\"active\",\"execution_container\":{{\"branch\":\"{branch}\"}}"),
+            );
+            let original = format!("{legacy}\n{launch}\n");
+            let content: Arc<str> = Arc::from(original.as_str());
+            ingest_work_events_sources(
+                &works,
+                [SharedWorkEventsSource::new(
+                    Arc::clone(&content),
+                    Some(source_container(&branch)),
+                )],
+            )
+            .expect("ingest legacy claim and explicit launch");
+            assert_eq!(content.as_ref(), original, "source must remain unchanged");
+            let projection = load_workspace_work_items_from_path(&works)
+                .expect("load")
+                .expect("projection");
+            let legacy_work = projection
+                .work_items
+                .iter()
+                .find(|item| item.id == "work-work-issue-2359-34a6ca7a")
+                .expect("legacy history retained");
+            assert!(
+                legacy_work.execution_containers.is_empty(),
+                "source {branch} must not become an old Work ref"
+            );
+            let new_work = projection
+                .work_items
+                .iter()
+                .find(|item| item.id == work_id)
+                .expect("new launch retained");
+            assert_eq!(
+                new_work.execution_containers,
+                vec![source_container(&branch)]
+            );
+        }
     }
 
     #[test]
@@ -1068,6 +1686,68 @@ mod tests {
                 .as_ref()
                 .and_then(|container| container.branch.as_deref()),
             Some("work/original")
+        );
+    }
+
+    fn event_with_own_container() -> Arc<str> {
+        Arc::from(event_json(
+            "evt-owned",
+            "work-owned",
+            "start",
+            "2026-07-28T10:00:00Z",
+            ",\"title\":\"owned\",\"status_category\":\"active\",\"execution_container\":{\"branch\":\"work/original\"}",
+        ))
+    }
+
+    fn sources_from_refs(content: &Arc<str>, refs: usize) -> Vec<SharedWorkEventsSource> {
+        (0..refs)
+            .map(|index| {
+                SharedWorkEventsSource::new(
+                    Arc::clone(content),
+                    Some(source_container(&format!("work/ref-{index}"))),
+                )
+            })
+            .collect()
+    }
+
+    /// Issue #4371: a shard held by many origin refs reaches the rebuild once
+    /// per ref. Past the canonical event and the first duplicate — the one that
+    /// records duplicate provenance — further identical copies change nothing.
+    #[test]
+    fn identical_copies_beyond_the_first_duplicate_do_not_change_the_rebuild() {
+        let content = event_with_own_container();
+        let rebuild = |refs: usize| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let works = tmp.path().join("works.json");
+            let sources = sources_from_refs(&content, refs);
+            rebuild_work_events_with_shared_loader(&works, || Ok((sources, ())), None)
+                .expect("rebuild");
+            let mut projection = load_workspace_work_items_from_path(&works)
+                .expect("load projection")
+                .expect("projection");
+            projection.updated_at = Utc.timestamp_opt(0, 0).single().expect("epoch");
+            serde_json::to_value(&projection).expect("projection json")
+        };
+
+        assert_eq!(rebuild(5), rebuild(2));
+    }
+
+    /// Issue #4371: with 701 origin refs holding the same shards, the rebuild
+    /// held one cloned event plus its JSON key per ref and peaked at 4.7 GB.
+    /// The collected list must not grow with the number of refs.
+    #[test]
+    fn identical_copies_are_collected_at_most_twice() {
+        let content = event_with_own_container();
+        let mut report = WorkEventsIntakeReport::default();
+
+        let incoming =
+            collect_shared_work_event_sources(sources_from_refs(&content, 701), &mut report)
+                .expect("collect sources");
+
+        assert_eq!(incoming.len(), 2, "canonical + the provenance duplicate");
+        assert_eq!(
+            report.skipped_duplicate, 699,
+            "dropped copies are still accounted"
         );
     }
 
@@ -1570,6 +2250,36 @@ mod tests {
             .events
             .iter()
             .any(|event| event.id == "evt-recovered"));
+    }
+
+    #[test]
+    fn rebuild_preserves_corrupt_projection_when_sources_are_empty_or_incomplete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let works = tmp.path().join("works.json");
+        let original = b"{\"updated_at\":";
+        let valid = event_json(
+            "evt-recovered",
+            "work-recovered",
+            "start",
+            "2026-07-16T07:00:00Z",
+            ",\"title\":\"Recovered\",\"status_category\":\"active\"",
+        );
+        let opaque = event_json(
+            "evt-future",
+            "work-recovered",
+            "future_event",
+            "2026-07-16T08:00:00Z",
+            "",
+        );
+        for source in [
+            String::new(),
+            format!("{valid}\n{{"),
+            format!("{valid}\n{opaque}"),
+        ] {
+            std::fs::write(&works, original).unwrap();
+            assert!(rebuild_work_events_contents(&works, [source.as_str()], None).is_err());
+            assert_eq!(std::fs::read(&works).unwrap(), original);
+        }
     }
 
     #[test]
@@ -2345,8 +3055,138 @@ mod tests {
         assert!(loaded.is_current("origin/work/x", "blob-oid-1"));
         assert!(!loaded.is_current("origin/work/x", "blob-oid-2"));
 
-        // Corrupt file → default (advisory cache).
-        std::fs::write(&path, b"{ not json").expect("corrupt");
+        // Corrupt index → default (advisory cache).
+        std::fs::write(
+            tmp.path().join("work-events-intake").join("index.json"),
+            b"{ not json",
+        )
+        .expect("corrupt");
+        assert_eq!(
+            load_work_events_intake_state(&path),
+            WorkEventsIntakeState::default()
+        );
+    }
+
+    #[test]
+    fn intake_group_of_partitions_worktree_and_ref_keys() {
+        assert_eq!(
+            work_events_intake_group_of("ref:refs/remotes/origin/a/b:.gwt/work/events/ab/x.jsonl"),
+            Some("ref:refs/remotes/origin/a/b")
+        );
+        assert_eq!(
+            work_events_intake_group_of("worktree:/r/wt/.gwt/work/events.jsonl"),
+            Some("worktree:/r/wt")
+        );
+        assert_eq!(
+            work_events_intake_group_of(r"worktree:E:\r\wt\.gwt/work/events\ab\x.jsonl"),
+            Some(r"worktree:E:\r\wt")
+        );
+        assert_eq!(work_events_intake_group_of("local-lifecycle:/x"), None);
+        assert_eq!(work_events_intake_group_of("source-list:v1"), None);
+    }
+
+    fn grouped_state() -> WorkEventsIntakeState {
+        let mut state = WorkEventsIntakeState::default();
+        for branch in 0..3 {
+            for shard in 0..4 {
+                state.record(
+                    format!("ref:refs/remotes/origin/b{branch}:.gwt/work/events/aa/{shard}.jsonl"),
+                    format!("fp-{branch}-{shard}"),
+                );
+            }
+        }
+        state.record("worktree:/r/wt/.gwt/work/events.jsonl", "fp-legacy");
+        state.record("local-lifecycle:/home/closed.jsonl", "fp-local");
+        state.record("source-list:v1", "fp-list");
+        state.record_projection_version("v-test");
+        state
+    }
+
+    /// Issue #4397 AC-1: a trigger that changed one group rewrites that group
+    /// and the index, not every fingerprint.
+    #[test]
+    fn intake_store_save_writes_only_changed_groups() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        save_work_events_intake_state(&path, &grouped_state()).expect("seed");
+
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert_eq!(store.source_count(), 15);
+        assert!(store.stored_bytes() > 0);
+        let group = "ref:refs/remotes/origin/b1";
+        let mut sources = store.group_sources(group).expect("readable group").clone();
+        assert_eq!(sources.len(), 4);
+        let added = format!("{group}:.gwt/work/events/bb/new.jsonl");
+        sources.insert(added.clone(), "fp-new".to_string());
+        store.set_group(group, Some("snapshot".to_string()), sources);
+        let report = store.save().expect("save");
+
+        assert_eq!(report.groups_written, 1);
+        let reopened = WorkEventsIntakeStore::open(&path);
+        assert_eq!(
+            reopened
+                .group(group)
+                .and_then(|group| group.snapshot.as_deref()),
+            Some("snapshot")
+        );
+        let mut expected = grouped_state();
+        expected.record(added, "fp-new");
+        assert_eq!(load_work_events_intake_state(&path), expected);
+
+        let mut unchanged = WorkEventsIntakeStore::open(&path);
+        assert!(!unchanged.is_dirty());
+        assert_eq!(unchanged.save().expect("noop save").groups_written, 0);
+    }
+
+    /// Issue #4397 AC-5: the legacy flat file migrates verbatim, and the
+    /// legacy file is removed only once the grouped store is written.
+    #[test]
+    fn intake_store_migrates_legacy_flat_state_without_losing_fingerprints() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        let legacy = grouped_state();
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).expect("legacy");
+
+        assert_eq!(load_work_events_intake_state(&path), legacy);
+        assert!(path.exists(), "reading never discards the legacy file");
+
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert!(store.is_dirty(), "migration must be persisted");
+        assert!(store.group("worktree:/r/wt").is_some());
+        assert_eq!(
+            store
+                .group("ref:refs/remotes/origin/b0")
+                .map(|group| group.snapshot.clone()),
+            Some(None),
+            "migrated groups are unverified until the next scan"
+        );
+        store.save().expect("save migrated");
+
+        assert!(!path.exists(), "legacy file removed after migration");
+        assert_eq!(load_work_events_intake_state(&path), legacy);
+
+        // An older gwt writing the legacy file again does not override the
+        // index; the leftover is retired by the next save.
+        std::fs::write(&path, b"{\"sources\":{}}").expect("downgrade leftover");
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert!(store.is_dirty());
+        store.save().expect("retire leftover");
+        assert!(!path.exists());
+        assert_eq!(load_work_events_intake_state(&path), legacy);
+    }
+
+    #[test]
+    fn intake_store_reports_unreadable_group_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("work-events-intake.json");
+        save_work_events_intake_state(&path, &grouped_state()).expect("seed");
+        let groups_dir = tmp.path().join("work-events-intake").join("groups");
+        for entry in std::fs::read_dir(&groups_dir).expect("groups") {
+            std::fs::write(entry.expect("entry").path(), b"{ not json").expect("corrupt");
+        }
+
+        let mut store = WorkEventsIntakeStore::open(&path);
+        assert!(store.group_sources("ref:refs/remotes/origin/b0").is_none());
         assert_eq!(
             load_work_events_intake_state(&path),
             WorkEventsIntakeState::default()

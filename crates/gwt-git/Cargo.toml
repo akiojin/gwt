@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 gwt-core = { path = "../gwt-core" }
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

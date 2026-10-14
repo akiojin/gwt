@@ -36,6 +36,71 @@ function manualScheduler() {
   };
 }
 
+function browserScheduler(t) {
+  const frames = new Map();
+  const timers = new Map();
+  let nextId = 0;
+  for (const [key, replacement] of Object.entries({
+    requestAnimationFrame: (cb) => {
+      frames.set(++nextId, cb);
+      return nextId;
+    },
+    cancelAnimationFrame: (id) => frames.delete(id),
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value: replacement });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  t.mock.method(globalThis, "setTimeout", (cb, delay) => {
+    timers.set(++nextId, { cb, delay });
+    return nextId;
+  });
+  t.mock.method(globalThis, "clearTimeout", (id) => timers.delete(id));
+  return { frames, timers };
+}
+
+test("default scheduler advances state while animation frames are suspended", (t) => {
+  const received = [];
+  const { frames, timers } = browserScheduler(t);
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    now: () => 0,
+  });
+
+  dispatcher.handle({ data: JSON.stringify({ kind: "workspace_state", revision: 1 }) });
+  dispatcher.handle({ data: JSON.stringify({ kind: "workspace_state", revision: 2 }) });
+  const staleFrame = frames.values().next().value;
+  assert.equal(timers.size, 1, "a timer must progress the queue without a frame or focus event");
+  const timer = timers.values().next().value;
+  assert.ok(timer.delay <= 1000, "fallback must be scheduled within the AC-13 bound");
+  timer.cb();
+
+  assert.deepEqual(received, [{ kind: "workspace_state", revision: 2 }]);
+  assert.equal(frames.size, 0, "timer winner cancels the suspended frame");
+  staleFrame();
+  assert.equal(received.length, 1, "a late frame cannot repeat delivery");
+});
+
+test("animation frame winner cancels its fallback timer", (t) => {
+  const received = [];
+  const { frames, timers } = browserScheduler(t);
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    now: () => 0,
+  });
+  dispatcher.enqueue({ kind: "terminal_output", data: "a" });
+  assert.equal(timers.size, 1);
+  const staleTimer = timers.values().next().value.cb;
+  frames.values().next().value();
+
+  assert.equal(timers.size, 0, "normal frame delivery leaves no timer behind");
+  staleTimer();
+  assert.deepEqual(received, [{ kind: "terminal_output", data: "a" }]);
+});
+
 test("idempotent kinds collapse to the most recent occurrence", () => {
   const queue = [
     { kind: "workspace_state", n: 1 },
@@ -67,18 +132,28 @@ test("non-coalesce kinds preserve order and multiplicity", () => {
   assert.deepEqual(coalesced, queue);
 });
 
+// Issue #3164 retired the only production members of
+// DEFAULT_ORDERED_STATE_KINDS, so these fence tests exercise the generic
+// "activation state must precede scoped outcomes" mechanism with an
+// explicit ordered-state kind set rather than relying on the (now empty)
+// default.
+const SAMPLE_ORDERED_STATE_KINDS = new Set([
+  "project_scoped_notice",
+  "project_scoped_alert",
+]);
+
 test("project snapshots stay after the workspace state that activates their project", () => {
   const workspace = {
     kind: "workspace_state",
     workspace: { active_tab_id: "project-b" },
   };
   const candidates = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/b",
     candidates: [{ id: "impr-b" }],
   };
   const otherProjectCandidates = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/a",
     candidates: [{ id: "impr-a" }],
   };
@@ -87,6 +162,7 @@ test("project snapshots stay after the workspace state that activates their proj
     coalesceEvents(
       [workspace, otherProjectCandidates, candidates],
       DEFAULT_COALESCE_KINDS,
+      { orderedStateKinds: SAMPLE_ORDERED_STATE_KINDS },
     ),
     [workspace, otherProjectCandidates, candidates],
     "project-scoped snapshots must preserve multiplicity without overtaking activation state",
@@ -99,18 +175,20 @@ test("project action outcomes stay behind the workspace activation fence", () =>
     workspace: { active_tab_id: "project-b" },
   };
   const staleError = {
-    kind: "improvement_action_error",
+    kind: "project_scoped_alert",
     project_root: "/projects/a",
     message: "stale project error",
   };
   const candidates = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/b",
     candidates: [{ id: "impr-b" }],
   };
 
   assert.deepEqual(
-    coalesceEvents([workspace, staleError, candidates], DEFAULT_COALESCE_KINDS),
+    coalesceEvents([workspace, staleError, candidates], DEFAULT_COALESCE_KINDS, {
+      orderedStateKinds: SAMPLE_ORDERED_STATE_KINDS,
+    }),
     [workspace, staleError, candidates],
     "the active-project fence must run before scoped action outcomes",
   );
@@ -122,7 +200,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
     workspace: { active_tab_id: "project-b" },
   };
   const staleError = {
-    kind: "improvement_action_error",
+    kind: "project_scoped_alert",
     project_root: "/projects/a",
     message: "stale project error",
   };
@@ -131,7 +209,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
     workspace: { active_tab_id: "project-c" },
   };
   const candidatesC = {
-    kind: "improvement_candidates",
+    kind: "project_scoped_notice",
     project_root: "/projects/c",
     candidates: [{ id: "impr-c" }],
   };
@@ -140,6 +218,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
     coalesceEvents(
       [workspaceB, staleError, workspaceC, candidatesC],
       DEFAULT_COALESCE_KINDS,
+      { orderedStateKinds: SAMPLE_ORDERED_STATE_KINDS },
     ),
     [workspaceC, staleError, candidatesC],
     "the surviving activation must update the frontend fence before stale outcomes",
@@ -167,7 +246,6 @@ test("default coalescing policy mirrors backend latest-wins event policy", () =>
     "terminal_output",
     "terminal_snapshot",
     "runtime_hook_event",
-    "improvement_candidates",
   ]) {
     assert.equal(
       DEFAULT_COALESCE_KINDS.has(kind),
@@ -372,6 +450,12 @@ test("flushNow synchronously drains pending events without waiting for the sched
 
   assert.equal(received.length, 1);
   assert.equal(received[0].revision, 2);
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 3 });
+  scheduler.runOnce();
+  assert.equal(received.length, 1, "the old callback cannot drain a newly scheduled queue");
+  scheduler.runOnce();
+  assert.equal(received[1].revision, 3);
 });
 
 // Issue #2698 PR 3 — terminal_output (streamed) flushes ahead of

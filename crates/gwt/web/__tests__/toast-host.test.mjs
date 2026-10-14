@@ -176,3 +176,43 @@ test("animateDismiss marks leaving then removes via the fallback timer", async (
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(stack.count(), 0, "fallback timer removes after the collapse");
 });
+
+// --- history-region capability (SPEC #3206 v2, T-000) ---
+
+function pressKey(document, target, key) {
+  const view = document.defaultView;
+  const event = new view.Event("keydown", { bubbles: true, cancelable: true });
+  event.key = key;
+  target.dispatchEvent(event);
+}
+
+test("onActivate dismisses the item after activation by default (alerts behaviour, click + keyboard)", () => {
+  const { document, stack } = setup();
+  let activated = 0;
+  const clicked = stack.push({ title: "jump", onActivate: () => (activated += 1) });
+  clicked.dispatchEvent(new document.defaultView.Event("click"));
+  assert.equal(activated, 1);
+  assert.equal(stack.count(), 0, "click activation dismisses by default");
+
+  for (const key of ["Enter", " "]) {
+    const item = stack.push({ title: `key-${key}`, onActivate: () => (activated += 1) });
+    pressKey(document, item, key);
+    assert.equal(stack.count(), 0, `${JSON.stringify(key)} activation dismisses by default`);
+  }
+  assert.equal(activated, 3);
+});
+
+test("dismissOnActivate:false keeps the item after activation (click + keyboard)", () => {
+  const { document, stack } = setup({ dismissOnActivate: false });
+  let activated = 0;
+  const item = stack.push({ title: "history", onActivate: () => (activated += 1) });
+  item.dispatchEvent(new document.defaultView.Event("click"));
+  assert.equal(activated, 1, "handler still runs");
+  assert.equal(stack.count(), 1, "click keeps the history item");
+
+  pressKey(document, item, "Enter");
+  pressKey(document, item, " ");
+  assert.equal(activated, 3, "keyboard activation still runs the handler");
+  assert.equal(stack.count(), 1, "keyboard activation keeps the history item");
+  assert.ok(item.isConnected, "the same element stays mounted for repeated jumps");
+});

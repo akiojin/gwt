@@ -565,6 +565,26 @@ impl BoardProvider for TeamsProvider {
         }))
     }
 
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        diff_since: DateTime<Utc>,
+        _scope: &BoardAudienceScope,
+        status_author: &str,
+        status_kind: &BoardEntryKind,
+        status_since: DateTime<Utc>,
+    ) -> Result<gwt_core::coordination::PromptBoardRead> {
+        Ok(
+            gwt_core::coordination::PromptBoardRead::from_channel_history(
+                self.cached_history(worktree_root)?,
+                diff_since,
+                status_author,
+                status_kind,
+                status_since,
+            ),
+        )
+    }
+
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
         Ok(self
             .cached_history(worktree_root)?

@@ -26,6 +26,18 @@ fn init_git_repo(path: &Path) {
     assert!(status.success(), "git init failed for {}", path.display());
 }
 
+// Contracts belong to the complete delivered skill, not just its lazy router.
+fn skill_contract_text(skill_root: &Path) -> String {
+    let mut files = BTreeSet::new();
+    collect_files_relative_to(skill_root, skill_root, &mut files);
+    files
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        .map(|path| fs::read_to_string(skill_root.join(path)).expect("read skill contract"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn markdown_block<'a>(source: &'a str, start: &str, end: Option<&str>) -> &'a str {
     let start_index = source
         .find(start)
@@ -54,8 +66,7 @@ fn first_inline_code(line: &str) -> &str {
 fn browser_check_shell_block(name: &str) -> String {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
-    let skill = fs::read_to_string(&skill_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", skill_path.display()));
+    let skill = skill_contract_text(skill_path.parent().unwrap());
     let begin = format!("# browser-check-{name}-begin");
     let end = format!("# browser-check-{name}-end");
     let body = skill
@@ -79,15 +90,40 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
     let report = distribute_to_worktree(dir.path()).expect("distribute bundle");
 
     assert!(report.files_written > 0, "bundle must write files");
-    for skill_md in [
-        dir.path().join(".claude/skills/gwt-verify/SKILL.md"),
-        dir.path().join(".codex/skills/gwt-verify/SKILL.md"),
+    for skill in [
+        "gwt-execute",
+        "gwt-verify",
+        "gwt-manage-pr",
+        "gwt-build-spec",
+        "gwt-fix-issue",
     ] {
-        assert!(
-            skill_md.is_file(),
-            "expected bundled skill at {}",
-            skill_md.display()
+        let relative = format!("skills/{skill}/SKILL.md");
+        let claude =
+            skill_contract_text(dir.path().join(".claude").join(&relative).parent().unwrap());
+        let codex =
+            skill_contract_text(dir.path().join(".codex").join(&relative).parent().unwrap());
+        assert_eq!(
+            claude, codex,
+            "{skill} must have identical delivered contracts"
         );
+        for required in ["n/a (autonomous)", "CI auto-merge", "Agent Visual Check"] {
+            assert!(
+                claude.contains(required),
+                "materialized {skill} must contain {required}"
+            );
+        }
+        if matches!(skill, "gwt-execute" | "gwt-verify") {
+            for required in [
+                "bounded host slot pool",
+                "effective Cargo target directories",
+                "shared FIFO queue",
+            ] {
+                assert!(
+                    claude.contains(required),
+                    "materialized {skill} must contain {required}"
+                );
+            }
+        }
     }
 
     let has_gwt_command = fs::read_dir(dir.path().join(".claude/commands"))
@@ -98,6 +134,124 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
         has_gwt_command,
         "at least one gwt-* command must be written"
     );
+}
+
+#[test]
+fn bundled_skill_entrypoints_are_short_routers_with_delivered_references() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init_git_repo(dir.path());
+    distribute_to_worktree(dir.path()).expect("distribute bundle");
+
+    for provider in [".claude", ".codex"] {
+        let skills_root = dir.path().join(provider).join("skills");
+        for entry in fs::read_dir(&skills_root).expect("distributed skills") {
+            let skill_dir = entry.expect("skill entry").path();
+            if skill_dir.file_name().unwrap() == "gwt-coordination" {
+                continue; // Generated guidance has its own contract.
+            }
+            let root_path = skill_dir.join("SKILL.md");
+            let root = fs::read_to_string(&root_path).expect("skill entrypoint");
+            assert!(
+                root.len() <= 2500,
+                "{} is {} bytes",
+                root_path.display(),
+                root.len()
+            );
+            let headings: Vec<_> = root
+                .lines()
+                .filter(|line| line.starts_with("## "))
+                .collect();
+            assert_eq!(
+                headings,
+                ["## When to use", "## Completion", "## References"],
+                "{} must be a router",
+                root_path.display()
+            );
+            for (skill, original_bytes) in [
+                ("gwt-verify", 37497),
+                ("gwt-manage-pr", 28723),
+                ("gwt-discussion", 21847),
+            ] {
+                if skill_dir.file_name().unwrap() == skill {
+                    assert!(
+                        root.len() * 3 <= original_bytes,
+                        "{skill} must shrink to at most one third"
+                    );
+                }
+            }
+            let mut references = 0;
+            for suffix in root.split("](").skip(1) {
+                let target = suffix.split(')').next().expect("link target");
+                if target.starts_with("references/") {
+                    references += 1;
+                    assert!(
+                        skill_dir.join(target.split('#').next().unwrap()).is_file(),
+                        "{} links to missing {target}",
+                        root_path.display()
+                    );
+                }
+            }
+            assert!(
+                references > 0,
+                "{} must route to delivered detail",
+                root_path.display()
+            );
+            let mut assets = BTreeSet::new();
+            collect_files_relative_to(&skill_dir, &skill_dir, &mut assets);
+            for asset in assets
+                .iter()
+                .filter(|asset| asset.extension().is_some_and(|ext| ext == "md"))
+            {
+                let path = skill_dir.join(asset);
+                let content = fs::read_to_string(&path).expect("Markdown asset");
+                let mut fenced = false;
+                for line in content.lines() {
+                    if line.trim_start().starts_with("```") {
+                        fenced = !fenced;
+                    }
+                    if fenced {
+                        continue;
+                    }
+                    for suffix in line.split("](").skip(1) {
+                        let target = suffix.split(')').next().unwrap().split('#').next().unwrap();
+                        if !target.is_empty()
+                            && !target.contains("://")
+                            && !target.starts_with("mailto:")
+                        {
+                            assert!(
+                                path.parent().unwrap().join(target).is_file(),
+                                "{} links to missing {target}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(
+                skill_dir.join("references/router-audit.md").is_file(),
+                "{} must preserve its constraint audit",
+                root_path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn repository_local_release_remains_a_codex_only_router() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill_root = workspace_root.join(".codex/skills/release");
+    let root = fs::read_to_string(skill_root.join("SKILL.md")).expect("release skill");
+    assert!(root.len() <= 2500);
+    assert_eq!(
+        root.lines()
+            .filter(|line| line.starts_with("## "))
+            .collect::<Vec<_>>(),
+        ["## When to use", "## Completion", "## References"]
+    );
+    assert!(root.contains("references/workflow.md"));
+    assert!(skill_root.join("references/workflow.md").is_file());
+    assert!(skill_root.join("references/router-audit.md").is_file());
+    assert!(!workspace_root.join(".claude/skills/release").exists());
 }
 
 #[test]
@@ -126,16 +280,46 @@ fn repo_keeps_bundled_claude_and_codex_skill_assets_in_parity() {
     }
 }
 
+#[test]
+fn browser_check_embedded_seed_disables_automatic_agents() {
+    let embedded = gwt_skills::assets::CLAUDE_SKILLS
+        .get_file("browser-check/references/isolation.md")
+        .expect("embedded browser-check")
+        .contents_utf8()
+        .expect("UTF-8 skill");
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for provider in [".claude", ".codex"] {
+        let source = fs::read_to_string(workspace_root.join(format!(
+            "{provider}/skills/browser-check/references/isolation.md"
+        )))
+        .expect("skill mirror");
+        assert_eq!(source, embedded, "{provider} must match the embedded skill");
+    }
+    let seed = markdown_block(
+        embedded,
+        "# browser-check-agent-seed-begin",
+        Some("# browser-check-agent-seed-end"),
+    );
+    let prefs: Vec<serde_json::Value> = seed
+        .lines()
+        .filter(|line| line.trim_start().starts_with('{'))
+        .map(|line| serde_json::from_str(line.trim()).expect("valid seed JSON"))
+        .collect();
+    assert_eq!(prefs.len(), 2, "seed both PM and Issue Monitor preferences");
+    assert_eq!(prefs[0]["settings"]["auto_start"], false);
+    assert_eq!(prefs[1]["enabled"], false);
+    assert!(prefs[1]["max_active_agents"].as_u64().unwrap() > 0);
+    assert_eq!(prefs[1]["priority_order"], serde_json::json!([]));
+}
+
 #[cfg(unix)]
 #[test]
 fn browser_check_authority_script_rejects_local_build_paths_at_any_depth() {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let claude_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
     let codex_path = workspace_root.join(".codex/skills/browser-check/SKILL.md");
-    let claude = fs::read_to_string(&claude_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", claude_path.display()));
-    let codex = fs::read_to_string(&codex_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", codex_path.display()));
+    let claude = skill_contract_text(claude_path.parent().unwrap());
+    let codex = skill_contract_text(codex_path.parent().unwrap());
 
     assert_eq!(
         claude, codex,
@@ -172,7 +356,7 @@ fn browser_check_authority_script_rejects_local_build_paths_at_any_depth() {
 
 #[cfg(unix)]
 #[test]
-fn browser_check_authority_prefers_portable_logical_name_for_stable_path_entry() {
+fn browser_check_authority_uses_materialization_resolver_even_with_stable_path_entry() {
     use std::os::unix::fs::PermissionsExt;
 
     let tools = tempfile::tempdir().expect("tools tempdir");
@@ -180,6 +364,15 @@ fn browser_check_authority_prefers_portable_logical_name_for_stable_path_entry()
     fs::write(&fake_gwtd, "#!/bin/sh\nexit 0\n").expect("write fake gwtd");
     fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
         .expect("make fake gwtd executable");
+    let resolver = tools.path().join("checkout-gwtd");
+    // Keep executable writer FDs out of this parallel test process (#3521).
+    assert!(hidden_command("bash")
+        .args(["-c", "printf '%s' \"$CHECK_FIXTURE_SCRIPT\" > \"$1\"\nchmod +x \"$1\"", "write-resolver"])
+        .arg(&resolver)
+        .env("CHECK_FIXTURE_SCRIPT", "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"managed_hook_bin\\\":\\\"/canonical/install/gwtd\\\"}\"}'\n")
+        .status()
+        .unwrap()
+        .success());
     let current_path = std::env::var_os("PATH").unwrap_or_default();
     let path = std::env::join_paths(
         std::iter::once(tools.path().to_path_buf()).chain(std::env::split_paths(&current_path)),
@@ -194,11 +387,38 @@ fn browser_check_authority_prefers_portable_logical_name_for_stable_path_entry()
         .args(["-c", &script])
         .env_remove("GWT_HOOK_BIN")
         .env("PATH", path)
+        .env("CHECKOUT_GWTD", resolver)
+        .env("REPO_ROOT", tools.path())
         .output()
         .expect("run authority resolver with stable PATH entry");
 
     assert!(output.status.success(), "{:?}", output);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "gwtd\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/canonical/install/gwtd\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_authority_fails_closed_when_materialization_resolver_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = hidden_command("bash")
+        .args(["-c", &browser_check_shell_block("hook-authority")])
+        .env_remove("GWT_HOOK_BIN")
+        .env("CHECKOUT_GWTD", "/usr/bin/false")
+        .env("REPO_ROOT", dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "resolver failure must stop preflight"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("managed-hook fallback resolver"),
+        "{:?}",
+        output
+    );
 }
 
 #[cfg(unix)]
@@ -261,7 +481,8 @@ fn browser_check_launch_script_unsets_ambient_runtime_override() {
     fs::set_permissions(&fake_gwt, fs::Permissions::from_mode(0o755)).unwrap();
     let log = dir.path().join("launch.log");
     let script = format!(
-        "ENV_ARGS=(GWT_HOOK_BIN=gwtd)\n{}",
+        "ENV_ARGS=(GWT_HOOK_BIN=gwtd)\n{}\n{}\nwait \"$CHECK_PID\"",
+        browser_check_shell_block("process-cleanup"),
         browser_check_shell_block("launch")
     );
     let output = hidden_command("bash")
@@ -273,8 +494,275 @@ fn browser_check_launch_script_unsets_ambient_runtime_override() {
         .expect("run executable fresh GUI launch block");
 
     assert!(output.status.success(), "{:?}", output);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "unset\n");
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("Fresh gwt PID: "));
     assert_eq!(fs::read_to_string(log).unwrap(), "unset\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_cleanup_reaps_owned_pid_on_success_failure_and_signal() {
+    let cleanup = browser_check_shell_block("process-cleanup");
+    let launch = browser_check_shell_block("launch");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwt = dir.path().join("gwt");
+    // Keep executable writer FDs out of this parallel test process (Issue #3521).
+    let written = hidden_command("bash")
+        .args([
+            "-c",
+            "printf '%s' \"$CHECK_FIXTURE_SCRIPT\" > \"$1\"\nchmod +x \"$1\"",
+            "write-fixture",
+        ])
+        .arg(&fake_gwt)
+        .env(
+            "CHECK_FIXTURE_SCRIPT",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CHECK_READY_PIPE\"\nexec sleep 300\n",
+        )
+        .status()
+        .expect("write executable fake gwt");
+    assert!(written.success());
+
+    for (ending, expected_code) in [("exit 0", 0), ("exit 7", 7), ("kill -TERM $$", 143)] {
+        let ready_pipe = dir.path().join(format!("ready-{expected_code}"));
+        let script = format!(
+            "set -e\n{cleanup}\nmkfifo \"$CHECK_READY_PIPE\"\nexec 3<>\"$CHECK_READY_PIPE\"\nENV_ARGS=(CHECK_READY_PIPE=\"$CHECK_READY_PIPE\")\n{launch}\nIFS= read -r -t 10 check_arguments <&3\n[ \"$check_arguments\" = '--no-tray --no-open' ]\n{ending}\n"
+        );
+        let output = hidden_command("bash")
+            .args(["-c", &script])
+            .env("CHECKOUT_GWT", &fake_gwt)
+            .env("CHECK_READY_PIPE", ready_pipe)
+            .env(
+                "LOG_FILE",
+                dir.path().join(format!("launch-{expected_code}.log")),
+            )
+            .output()
+            .expect("run owned browser-check process");
+        assert_eq!(output.status.code(), Some(expected_code), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let pid = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("Fresh gwt PID: "))
+            .expect("launch reports the exact owned PID");
+        let remaining = hidden_command("ps")
+            .args(["-p", pid, "-o", "pid="])
+            .output()
+            .expect("inspect the exact owned PID");
+        assert_eq!(
+            remaining.status.code(),
+            Some(1),
+            "owned PID {pid} remained after {ending}: {remaining:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_authority_never_persists_a_path_local_checkout_daemon() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // PR #3520 review (PRRT_kwDOPLof2M6YcffL): when PATH resolves `gwtd` only
+    // to a checkout-local build, the persisted fallback must never be that
+    // absolute path. The stable install wins when present; otherwise the
+    // logical `gwtd` name is the explicit fail-open state, guarded at hook
+    // runtime by `command -v` in every generated hook config.
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    let local_bin_dir = repo.path().join("target/debug");
+    fs::create_dir_all(&local_bin_dir).expect("target/debug");
+    let local_gwtd = local_bin_dir.join("gwtd");
+    fs::write(
+        &local_gwtd,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"managed_hook_bin\\\":\\\"gwtd\\\"}\"}'\n",
+    )
+    .expect("write checkout-local resolver");
+    fs::set_permissions(&local_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make checkout-local gwtd executable");
+    let jq = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join("jq"))
+        .find(|path| path.is_file())
+        .expect("jq is required for browser-check");
+    std::os::unix::fs::symlink(jq, local_bin_dir.join("jq"))
+        .expect("keep jq available without exposing a host gwtd");
+
+    let script = format!(
+        "{}\nprintf '%s\\n' \"$CHECK_HOOK_BIN\"",
+        browser_check_shell_block("hook-authority")
+    );
+    // Only the checkout-local build resolves `gwtd`; POSIX utilities such as
+    // `grep` stay available because the resolver legitimately depends on them.
+    let path = std::env::join_paths([
+        local_bin_dir.clone(),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ])
+    .expect("compose checkout-local PATH");
+    for inherited in [None, Some(local_gwtd.display().to_string())] {
+        let mut command = hidden_command("/bin/bash");
+        command
+            .args(["-c", &script])
+            .env("PATH", &path)
+            .env("CHECKOUT_GWTD", &local_gwtd)
+            .env("REPO_ROOT", repo.path())
+            .env_remove("GWT_HOOK_BIN");
+        if let Some(inherited) = &inherited {
+            command.env("GWT_HOOK_BIN", inherited);
+        }
+        let output = command
+            .output()
+            .expect("run authority resolver with checkout-local PATH");
+        assert!(output.status.success(), "{:?}", output);
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_ne!(
+            selected,
+            local_gwtd.display().to_string(),
+            "inherited={inherited:?}: the rejected checkout daemon was restored"
+        );
+        assert!(
+            !selected.contains("target/"),
+            "inherited={inherited:?}: a checkout-local path leaked into CHECK_HOOK_BIN: {selected}"
+        );
+        assert!(
+            selected == "gwtd" || (selected.starts_with('/') && Path::new(&selected).is_file()),
+            "inherited={inherited:?}: fallback must be the logical name or a stable install: {selected}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_repair_fails_closed_with_guidance_when_jq_is_missing() {
+    // PR #3520 review (PRRT_kwDOPLof2M6YcfOI): the mandatory repair/audit
+    // block depends on `jq`, which is neither a README requirement nor part of
+    // the browser-check preflight. Without an explicit preflight the block
+    // dies with `jq: command not found` and misreports the GUI as broken.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let empty_path = dir.path().join("tools");
+    fs::create_dir_all(&empty_path).expect("empty PATH dir");
+
+    let output = hidden_command("/bin/bash")
+        .args(["-c", &browser_check_shell_block("hook-repair")])
+        .current_dir(dir.path())
+        .env("PATH", &empty_path)
+        .env("REPO_ROOT", dir.path())
+        .env("CHECK_HOME", dir.path())
+        .env("CHECKOUT_GWTD", dir.path().join("missing-gwtd"))
+        .env("CHECK_HOOK_BIN", "gwtd")
+        .output()
+        .expect("run hook repair block without jq");
+
+    assert!(
+        !output.status.success(),
+        "hook repair must fail closed without jq\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("browser-check preflight failed: jq is required"),
+        "missing actionable jq preflight message: {stderr}"
+    );
+    assert!(
+        stderr.contains("install jq"),
+        "preflight must tell the operator how to recover: {stderr}"
+    );
+    assert!(
+        !stderr.contains("command not found") && !stderr.contains("did not return evidence"),
+        "preflight must run before hook.doctor is attempted: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_hook_repair_blocks_url_handoff_when_doctor_reports_issues() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // SPEC #1935 T-285: a convergence mismatch must stop the skill before any
+    // URL handoff instead of launching a GUI with skewed hook surfaces.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwtd = dir.path().join("gwtd");
+    fs::write(
+        &fake_gwtd,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"repair\\\":{},\\\"health\\\":{\\\"status\\\":\\\"degraded\\\",\\\"issues\\\":[\\\"managed hook fallback is worktree-local: /repo/target/debug/gwtd\\\"]}}\"}'\n",
+    )
+    .expect("write fake gwtd");
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make fake gwtd executable");
+
+    let output = hidden_command("bash")
+        .args(["-c", &browser_check_shell_block("hook-repair")])
+        .current_dir(dir.path())
+        .env("REPO_ROOT", dir.path())
+        .env("CHECK_HOME", dir.path())
+        .env("CHECKOUT_GWTD", &fake_gwtd)
+        .env("CHECK_HOOK_BIN", "gwtd")
+        .output()
+        .expect("run hook repair block against a degraded doctor");
+
+    assert!(
+        !output.status.success(),
+        "a degraded hook.doctor must block the URL handoff\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not converge managed surfaces"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("managed hook fallback is worktree-local"),
+        "the blocking issue must be surfaced to the operator: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_gates_allow_only_fail_open_hook_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwtd = dir.path().join("gwtd");
+    fs::write(
+        &fake_gwtd,
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' \"$DOCTOR_RESPONSE\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755)).unwrap();
+
+    for state in ["fail-open", "fail-closed", "unresolved"] {
+        let issue = format!(
+            "managed hook failure: PostToolUse/forward/live-forward state={state} recorded_at=2026-09-10T00:00:00Z (errors.list id=test)"
+        );
+        let health = serde_json::json!({
+            "status": if state == "fail-open" { "needs-attention" } else { "degraded" },
+            "issues": [issue],
+        });
+        for gate in ["hook-repair", "hook-audit"] {
+            let evidence = if gate == "hook-repair" {
+                serde_json::json!({"health": health})
+            } else {
+                health.clone()
+            };
+            let response = serde_json::json!({"ok": true, "output": evidence.to_string()});
+            let output = hidden_command("bash")
+                .args(["-c", &browser_check_shell_block(gate)])
+                .current_dir(dir.path())
+                .env("REPO_ROOT", dir.path())
+                .env("CHECK_HOME", dir.path())
+                .env("CHECKOUT_GWTD", &fake_gwtd)
+                .env("CHECK_HOOK_BIN", "gwtd")
+                .env("DOCTOR_RESPONSE", response.to_string())
+                .output()
+                .expect("run browser-check gate");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.success(),
+                state == "fail-open",
+                "{gate} state={state}: {stderr}"
+            );
+            if state != "fail-open" {
+                assert!(stderr.contains(&format!("state={state}")), "{stderr}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -292,8 +780,7 @@ fn user_verification_handoff_is_identifiable_and_actionable() {
     ] {
         let skill_path = verify_dir.join("SKILL.md");
         let guide_path = verify_dir.join("references/user-verification-guide.md");
-        let skill = fs::read_to_string(&skill_path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", skill_path.display()));
+        let skill = skill_contract_text(&verify_dir);
         let guide = fs::read_to_string(&guide_path)
             .unwrap_or_else(|err| panic!("read {}: {err}", guide_path.display()));
 
@@ -365,10 +852,21 @@ fn user_verification_handoff_is_identifiable_and_actionable() {
             }
         }
 
+        // Issue #4326: the autonomous waiver and legacy deferred value remain
+        // distinct from a human confirmation or an agent-judged skip.
         assert_eq!(
             line_starting_with(&skill, "User Verification Result:"),
-            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a",
+            "User Verification Result: pending | confirmed | rejected(<reason>) | skipped(<reason>) | n/a | n/a (autonomous) | deferred (autonomous execution)",
             "{} evidence-bundle enum must include every supported result",
+            skill_path.display()
+        );
+
+        // Issue #4001 AC-2: the agent's own headed browser-check is its own
+        // evidence line and is never read as the user's result.
+        assert_eq!(
+            line_starting_with(&skill, "Agent Visual Check:"),
+            "Agent Visual Check: pass | fail(<reason>) | n/a (no UI surface)",
+            "{} evidence bundle must record the agent's own visual check separately",
             skill_path.display()
         );
 
@@ -565,7 +1063,10 @@ fn collect_gwt_skill_files(skills_root: &Path) -> BTreeSet<PathBuf> {
         // gwt-coordination is generated from coordination_guidance.rs at
         // materialization time and has its own dual-target contract below.
         // This parity check owns only source-controlled bundle assets.
-        if file_type.is_dir() && name.starts_with("gwt-") && name != "gwt-coordination" {
+        if file_type.is_dir()
+            && (name.starts_with("gwt-") || matches!(name.as_ref(), "browser-check" | "tui-design"))
+            && name != "gwt-coordination"
+        {
             collect_files_relative_to(skills_root, &entry.path(), &mut files);
         }
     }
@@ -618,12 +1119,40 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
         dir.path().join(".claude/skills/gwt-coordination/SKILL.md"),
         dir.path().join(".codex/skills/gwt-coordination/SKILL.md"),
     ] {
-        let content = fs::read_to_string(&skill_md)
-            .unwrap_or_else(|e| panic!("read {}: {e}", skill_md.display()));
+        let content = skill_contract_text(skill_md.parent().unwrap());
         assert!(content.contains("gwt-coordination"));
+        for required in [
+            "launch_route: autonomous",
+            "Ready PR",
+            "CI auto-merge",
+            "User Verification Result: n/a (autonomous)",
+            "Agent Visual Check",
+            "headed_e2e_commands",
+            "manual",
+        ] {
+            assert!(
+                content.contains(required),
+                "generated guidance must contain {required}"
+            );
+        }
+        assert!(
+            content.contains("Read-only `gh` commands are allowed")
+                && content.contains("Mutations must use gwtd JSON-envelope operations"),
+            "generated guidance must distinguish GitHub reads from mutations"
+        );
         assert!(
             content.contains("\"operation\":\"board.post\""),
             "guidance must instruct Board posting via gwtd JSON envelopes"
+        );
+        // Issue #4396: the guidance told agents to disable auto-merge without
+        // naming a way to do it, and the `pr.merge` it named did not exist. An
+        // agent that followed the text stopped and escalated to a PM who had no
+        // such operation either. Name the hold route, not just the requirement.
+        assert!(
+            content.contains("gwtd has no merge operation")
+                && content.contains("An explicit owner-requested hold uses `pr.draft`")
+                && content.contains("Resume with `pr.ready`"),
+            "generated guidance must name `pr.draft` as the route that holds a merge"
         );
         assert!(
             content.contains(".gwt/work/events/<digest-prefix>/*.jsonl")
@@ -652,11 +1181,60 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
 }
 
 #[test]
+fn generated_coordination_requires_ai_self_naming_before_work() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    generate_coordination_guidance(dir.path()).expect("generate guidance");
+    for (provider, target) in [
+        (".claude", gwt_skills::ManagedAssetTarget::ClaudeCode),
+        (".codex", gwt_skills::ManagedAssetTarget::Codex),
+    ] {
+        let canonical = render_skill_md(target);
+        let path = dir
+            .path()
+            .join(provider)
+            .join("skills/gwt-coordination/SKILL.md");
+        let content = fs::read_to_string(&path).expect("read materialized guidance");
+        assert_eq!(content, canonical, "{}", path.display());
+        assert!(content.contains("At session startup, before your first action"));
+        assert!(content.contains("](references/board.md)"));
+        let mut contract = content.clone();
+        for link in content.split("](references/").skip(1) {
+            let relative = link.split(')').next().expect("reference link target");
+            let reference = path.parent().unwrap().join("references").join(relative);
+            contract.push('\n');
+            contract.push_str(&fs::read_to_string(&reference).unwrap_or_else(|error| {
+                panic!("read delivered reference {}: {error}", reference.display())
+            }));
+        }
+        for required in [
+            "non-PM Agent",
+            "one-word ASCII English proper-name candidate",
+            "task, Issue, branch, pane id, or provider",
+            "before responding to the user or starting normal work",
+            r#""operation":"pane.name","params":{"candidate":"<your candidate>"}"#,
+            "exact assigned name",
+            "already assigned",
+            "invalid candidate",
+            "static name vocabulary",
+            "second LLM request",
+            "PM is exempt",
+        ] {
+            assert!(contract.contains(required), "missing {required:?}");
+        }
+        assert!(
+            contract.find(r#""operation":"pane.name""#)
+                < contract.find(r#""operation":"workspace.update""#),
+            "self-naming must precede the Work purpose instruction"
+        );
+    }
+}
+
+#[test]
 fn render_skill_md_embeds_frontmatter_name_and_description() {
-    let md = render_skill_md();
+    let md = render_skill_md(gwt_skills::ManagedAssetTarget::ClaudeCode);
     assert!(md.starts_with("---\n"), "must start with YAML frontmatter");
     assert!(md.contains("name: gwt-coordination"));
-    assert!(md.contains("\"operation\":\"board.post\""));
+    assert!(md.contains("references/board.md"));
 }
 
 #[test]
@@ -796,5 +1374,64 @@ fn repository_gitignore_tracks_only_bucketed_new_event_shards() {
                 && line.ends_with(".jsonl")
         }),
         "W-33 flat shards are read compatibility only and must not be re-included for new writes"
+    );
+}
+
+/// Issue #5105: a branch that is only behind its base must reach a PR at the
+/// verified HEAD. Merging an unrelated base advance before creation moves HEAD
+/// and voids the canonical verification record, so the local merge (and the
+/// re-verification it forces) is reserved for a real textual conflict, detected
+/// without touching the worktree by `git merge-tree --write-tree`.
+#[test]
+fn create_flow_keeps_verified_head_when_only_behind_base() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill_root = workspace_root.join(".claude/skills/gwt-manage-pr");
+    let read = |relative: &str| {
+        let path = skill_root.join(relative);
+        fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+    };
+    let create_flow = read("references/create-flow.md");
+    let skill = skill_contract_text(&skill_root);
+
+    let step = markdown_block(
+        &create_flow,
+        "## Step 4: Check branch sync against base",
+        Some("## Step 5"),
+    );
+    assert!(
+        !step.contains("into the current branch before PR creation"),
+        "behind > 0 alone must not require a merge before PR creation:\n{step}"
+    );
+    for required in [
+        "git merge-tree --write-tree HEAD \"origin/$base\"",
+        "pr.update_branch",
+        "verify.plan",
+        "verify.run",
+    ] {
+        assert!(
+            step.contains(required),
+            "create-flow Step 4 must state {required:?}:\n{step}"
+        );
+    }
+
+    let script = markdown_block(&create_flow, "behind_count=", Some("# Check existing PRs"));
+    let merge_at = script
+        .find("git merge \"origin/$base\"")
+        .expect("conflicting branches still merge the base locally");
+    let probe_at = script
+        .find("git merge-tree --write-tree HEAD \"origin/$base\"")
+        .expect("the sample script must probe for conflicts first");
+    assert!(
+        probe_at < merge_at,
+        "the local merge must be gated by the conflict probe:\n{script}"
+    );
+
+    let rule = line_starting_with(
+        markdown_block(&skill, "### Decision Rules", Some("### PR Title Rules")),
+        "6. **Branch sync:**",
+    );
+    assert!(
+        rule.contains("git merge-tree") && rule.contains("only"),
+        "SKILL.md decision rule 6 must merge only on conflict: {rule}"
     );
 }

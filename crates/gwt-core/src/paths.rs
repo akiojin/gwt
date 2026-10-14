@@ -2,7 +2,6 @@
 
 use std::{
     collections::HashSet,
-    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -10,104 +9,17 @@ use std::{
 use crate::{
     error::Result,
     repo_hash::{
-        compute_path_hash, detect_repo_hash, resolve_repo_identity, RepoHash,
-        RepoIdentityCandidate, RepoIdentityResolution, RepoIdentitySource,
+        compute_path_hash, resolve_repo_identity, RepoHash, RepoIdentityCandidate,
+        RepoIdentityResolution, RepoIdentitySource,
     },
 };
 
-/// Return the gwt home directory (`~/.gwt/`).
+/// Return the gwt home directory (`~/.gwt/`), sharing settings' test isolation.
 pub fn gwt_home() -> PathBuf {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some(home) = crate::test_support::gwt_home_override() {
-        return home.join(".gwt");
-    }
-
-    let home = std::env::var_os("HOME");
-    let userprofile = std::env::var_os("USERPROFILE");
-    if let Some(test_home) = cargo_test_home_override(home.as_deref(), userprofile.as_deref()) {
-        return test_home.join(".gwt");
-    }
-    resolve_home_dir(home, userprofile, dirs::home_dir()).join(".gwt")
-}
-
-static CARGO_TEST_HOME_OVERRIDE: OnceLock<Option<PathBuf>> = OnceLock::new();
-
-fn cargo_test_home_override(home: Option<&OsStr>, userprofile: Option<&OsStr>) -> Option<PathBuf> {
-    if is_explicit_isolated_home(home) || is_explicit_isolated_home(userprofile) {
-        return None;
-    }
-    CARGO_TEST_HOME_OVERRIDE
-        .get_or_init(detect_cargo_test_home)
-        .clone()
-}
-
-fn detect_cargo_test_home() -> Option<PathBuf> {
-    cargo_test_home_for_exe(
-        &std::env::current_exe().ok()?,
-        &std::env::temp_dir(),
-        std::process::id(),
-    )
-}
-
-fn cargo_test_home_for_exe(exe: &Path, temp_dir: &Path, process_id: u32) -> Option<PathBuf> {
-    if !is_cargo_test_binary(exe) {
-        return None;
-    }
-    let binary_name = exe.file_name()?.to_string_lossy();
-    Some(
-        temp_dir
-            .join("gwt-cargo-test-home")
-            .join(sanitize_test_binary_name(&binary_name))
-            .join(process_id.to_string()),
-    )
-}
-
-fn is_cargo_test_binary(exe: &Path) -> bool {
-    exe.parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name == "deps")
-        && exe
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name.contains('-'))
-}
-
-fn sanitize_test_binary_name(name: &str) -> String {
-    name.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn is_explicit_isolated_home(path: Option<&OsStr>) -> bool {
-    let Some(path) = path
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-    else {
-        return false;
-    };
-    path.starts_with(std::env::temp_dir())
-}
-
-fn resolve_home_dir(
-    home: Option<OsString>,
-    userprofile: Option<OsString>,
-    fallback: Option<PathBuf>,
-) -> PathBuf {
-    non_empty_os(home)
-        .or_else(|| non_empty_os(userprofile))
-        .map(PathBuf::from)
-        .or(fallback)
-        .expect("home directory must be resolvable")
-}
-
-fn non_empty_os(value: Option<OsString>) -> Option<OsString> {
-    value.filter(|value| !value.is_empty())
+    let home = gwt_config::home::user_home().expect("home directory must be resolvable");
+    let path = home.join(".gwt");
+    gwt_config::home::assert_test_path(&path);
+    path
 }
 
 /// Normalize host filesystem paths before passing them to child processes.
@@ -622,6 +534,22 @@ pub fn resolve_current_worktree_root(repo_path: &Path) -> PathBuf {
     if !git_repository_discovery_possible(repo_path) {
         return repo_path.to_path_buf();
     }
+    // Issue #3777 AC-1: a path that carries its own `.git` entry already *is*
+    // the working-tree top level, so `--show-toplevel` can only echo it back.
+    // `gwt_repo_local_work_dir` puts this resolver on the UserPromptSubmit hot
+    // path — every Board read was paying a process launch (~47ms on Windows,
+    // a fifth of the whole 250ms prompt budget) to learn nothing. A
+    // subdirectory has no `.git` of its own and still asks git, so the case
+    // this resolver exists for is untouched.
+    //
+    // Canonicalize rather than echoing the caller's spelling: git reports the
+    // long Windows form, and callers compare these roots against each other
+    // (and against `resolve_main_worktree_root`, which still shells out). An
+    // 8.3 short path like `AKIOJI~1` names the same directory but is not
+    // string-equal, so skipping this would silently split those comparisons.
+    if repo_path.join(".git").exists() {
+        return dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    }
     let Ok(output) = crate::process::run_git_logged(
         &["rev-parse", "--path-format=absolute", "--show-toplevel"],
         Some(repo_path),
@@ -743,6 +671,19 @@ pub fn gwt_work_notes_discussions_path(repo_path: &Path) -> PathBuf {
     gwt_work_notes_dir(repo_path).join("discussions.md")
 }
 
+/// Return the machine-local record of the PM's last `gwt-spec` survey
+/// (`~/.gwt/projects/<repo-hash>/pm/spec-survey.json`).
+///
+/// Issue #4680: the registration gate has to know whether this PM ran
+/// `issue.spec.list` before it registers, and the answer must outlive the
+/// single hook process that observed the call. It is machine-local and
+/// branch-independent for the same reason the Board and Work state are —
+/// writing it into the worktree would leave an untracked file behind the
+/// Stop gate, which is the failure #4669 records.
+pub fn gwt_pm_spec_survey_path(repo_path: &Path) -> PathBuf {
+    gwt_project_dir_for_repo_path(repo_path).join("pm/spec-survey.json")
+}
+
 /// Resolve the project memory path for READS: the machine-local home file
 /// when present, otherwise the legacy git-tracked repo-local file
 /// (`<repo_root>/.gwt/work/memory.md`) as a fallback, otherwise the (not yet
@@ -785,27 +726,6 @@ pub fn gwt_board_remote_roots_path(repo_root: &Path) -> PathBuf {
     gwt_repo_local_work_dir(repo_root).join("board-remote-roots.jsonl")
 }
 
-/// Return the repo-scoped notes root (`~/.gwt/notes/`).
-pub fn gwt_notes_dir() -> PathBuf {
-    gwt_home().join("notes")
-}
-
-/// Return the notes directory for a repository hash.
-pub fn gwt_repo_notes_dir(repo_hash: &RepoHash) -> PathBuf {
-    gwt_notes_dir().join(repo_hash.as_str())
-}
-
-/// Return the notes state path for a repository hash.
-pub fn gwt_notes_state_path(repo_hash: &RepoHash) -> PathBuf {
-    gwt_repo_notes_dir(repo_hash).join("notes.json")
-}
-
-/// Return the notes state path for a repository path.
-pub fn gwt_notes_state_path_for_repo_path(repo_path: &Path) -> PathBuf {
-    let repo_hash = project_scope_hash(repo_path);
-    gwt_notes_state_path(&repo_hash)
-}
-
 /// Return the global session state path (`~/.gwt/session.json`).
 pub fn gwt_session_state_path() -> PathBuf {
     gwt_home().join("session.json")
@@ -816,9 +736,9 @@ pub fn gwt_logs_dir() -> PathBuf {
     gwt_home().join("logs")
 }
 
-/// Return the legacy coordination root (`~/.gwt/coordination/`).
-pub fn gwt_coordination_root() -> PathBuf {
-    gwt_home().join("coordination")
+/// Return the host-wide error ledger directory (`~/.gwt/logs/errors/`).
+pub fn gwt_error_ledger_dir() -> PathBuf {
+    gwt_logs_dir().join("errors")
 }
 
 /// Return the coordination directory for a repository hash.
@@ -826,19 +746,9 @@ pub fn gwt_coordination_dir(repo_hash: &RepoHash) -> PathBuf {
     gwt_project_dir(repo_hash).join("coordination")
 }
 
-/// Return the coordination directory for a repository path, if `origin` exists.
-pub fn gwt_coordination_dir_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
-    detect_repo_hash(repo_path).map(|repo_hash| gwt_coordination_dir(&repo_hash))
-}
-
 /// Return the structured-log directory for a repository hash.
 pub fn gwt_project_logs_dir(repo_hash: &RepoHash) -> PathBuf {
     gwt_project_dir(repo_hash).join("logs")
-}
-
-/// Return the structured-log directory for a repository path, if `origin` exists.
-pub fn gwt_project_logs_dir_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
-    detect_repo_hash(repo_path).map(|repo_hash| gwt_project_logs_dir(&repo_hash))
 }
 
 /// Return the canonical structured-log directory for a project path.
@@ -917,78 +827,27 @@ mod tests {
         assert!(home.ends_with(".gwt"));
     }
 
+    #[cfg(windows)]
     #[test]
-    fn gwt_home_prefers_home_env_over_dirs_home() {
-        let tmp = tempfile::tempdir().unwrap();
-        let override_home = tmp.path().join("custom-home");
+    fn windows_temporary_home_allows_missing_descendants() {
+        use crate::test_support::ScopedEnvVar;
 
-        let home = resolve_home_dir(
-            Some(override_home.clone().into_os_string()),
-            Some(tmp.path().join("ignored-userprofile").into_os_string()),
-            None,
-        )
-        .join(".gwt");
-
-        assert_eq!(home, override_home.join(".gwt"));
-    }
-
-    #[test]
-    fn gwt_home_falls_back_to_userprofile_when_home_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let override_profile = tmp.path().join("custom-userprofile");
-
-        let home = resolve_home_dir(None, Some(override_profile.clone().into_os_string()), None)
-            .join(".gwt");
-
-        assert_eq!(home, override_profile.join(".gwt"));
-    }
-
-    #[test]
-    fn gwt_home_treats_empty_env_values_as_unset() {
-        let tmp = tempfile::tempdir().unwrap();
-        let override_profile = tmp.path().join("custom-userprofile");
-        let fallback = tmp.path().join("fallback-home");
-
-        let userprofile_home = resolve_home_dir(
-            Some(OsString::from("")),
-            Some(override_profile.clone().into_os_string()),
-            Some(fallback.clone()),
-        );
-        let fallback_home = resolve_home_dir(
-            Some(OsString::from("")),
-            Some(OsString::from("")),
-            Some(fallback.clone()),
-        );
-
-        assert_eq!(userprofile_home, override_profile);
-        assert_eq!(fallback_home, fallback);
-    }
-
-    #[test]
-    fn cargo_test_home_for_exe_redirects_test_binaries_to_temp_home() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
-        let exe = Path::new("/repo/target/debug/deps/gwt-abc123");
-
-        let home = cargo_test_home_for_exe(exe, temp.path(), 42).expect("test home");
-
-        assert_eq!(home, temp.path().join("gwt-cargo-test-home/gwt-abc123/42"));
-    }
-
-    #[test]
-    fn cargo_test_home_for_exe_ignores_non_test_binaries() {
-        let temp = tempfile::tempdir().unwrap();
-
-        assert!(
-            cargo_test_home_for_exe(Path::new("/repo/target/debug/gwtd"), temp.path(), 42)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn cargo_test_home_override_preserves_explicit_temp_home() {
-        let temp = tempfile::tempdir().unwrap();
-
-        assert!(cargo_test_home_override(Some(temp.path().as_os_str()), None).is_none());
+        let canonical_temp = temp.path().canonicalize().unwrap();
+        for root in [temp.path(), canonical_temp.as_path()] {
+            let home = root.join("uncreated-profile");
+            let _home = ScopedEnvVar::set("HOME", &home);
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+            assert_eq!(
+                gwt_home(),
+                home.join(".gwt"),
+                "the requested temporary HOME must be accepted"
+            );
+            assert!(!home.exists(), "resolving a test HOME must not create it");
+        }
     }
 
     #[test]
@@ -1181,6 +1040,82 @@ mod tests {
         );
     }
 
+    /// Issue #3777 AC-1: a path that already carries a `.git` entry *is* the
+    /// working-tree top level, so `git rev-parse --show-toplevel` can only
+    /// echo it back. The spawn is pure latency, and it sits on the
+    /// UserPromptSubmit hot path via `gwt_repo_local_work_dir` — every Board
+    /// read paid a process launch (~47ms on Windows) to learn nothing.
+    #[test]
+    fn resolve_current_worktree_root_returns_worktree_top_level_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        std::fs::create_dir_all(worktree.join(".git")).expect("worktree .git");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_current_worktree_root(&worktree);
+
+        assert_eq!(
+            comparable_path(&resolved),
+            comparable_path(&dunce::canonicalize(&worktree).expect("canonical worktree"))
+        );
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "a worktree top level must resolve to itself without spawning git (Issue #3777)"
+        );
+    }
+
+    /// The linked-worktree spelling of the same contract: `git worktree add`
+    /// writes `.git` as a *file* containing a `gitdir:` pointer, not a
+    /// directory. gwt runs almost entirely inside linked worktrees, so this is
+    /// the shape the prompt hot path actually meets.
+    #[test]
+    fn resolve_current_worktree_root_returns_linked_worktree_root_without_git_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("issue-3777");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: /repo.git/worktrees/issue-3777\n",
+        )
+        .expect("gitdir pointer");
+
+        let before = crate::process::thread_git_spawn_count();
+        let resolved = resolve_current_worktree_root(&worktree);
+
+        assert_eq!(
+            comparable_path(&resolved),
+            comparable_path(&dunce::canonicalize(&worktree).expect("canonical worktree"))
+        );
+        assert_eq!(
+            crate::process::thread_git_spawn_count(),
+            before,
+            "a linked worktree root must resolve to itself without spawning git (Issue #3777)"
+        );
+    }
+
+    /// The short-circuit must not swallow the case it exists to serve: a
+    /// *subdirectory* of a working tree still needs git to find the top level.
+    #[test]
+    fn resolve_current_worktree_root_still_resolves_a_subdirectory_to_its_top_level() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree = tmp.path().join("repo");
+        init_git_repo(&worktree);
+        let nested = worktree.join("crates").join("gwt-core");
+        std::fs::create_dir_all(&nested).expect("nested dir");
+
+        let resolved = resolve_current_worktree_root(&nested);
+
+        assert_ne!(
+            resolved, nested,
+            "a nested path must not be mistaken for the working-tree top level"
+        );
+        assert_eq!(
+            dunce::canonicalize(&resolved).expect("canonical resolved"),
+            dunce::canonicalize(&worktree).expect("canonical worktree"),
+        );
+    }
+
     /// A plain directory with no `.git` anywhere up its ancestry and no child
     /// bare repository cannot be a repository; git would only confirm that
     /// with an exit-128 spawn.
@@ -1241,6 +1176,15 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_logs_dir();
         assert!(p.ends_with(gwt_home_suffix(&["logs"])));
+    }
+
+    #[test]
+    fn gwt_error_ledger_dir_is_under_logs() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let p = gwt_error_ledger_dir();
+        assert!(p.ends_with(gwt_home_suffix(&["logs", "errors"])));
     }
 
     #[test]

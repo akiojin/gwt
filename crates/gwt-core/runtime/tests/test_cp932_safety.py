@@ -14,6 +14,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -149,6 +151,67 @@ class Cp932SafetyTests(unittest.TestCase):
             self.assertEqual(specs[0]["spec_id"], "1930")
             self.assertIn("秦泉寺章夫", specs[0]["content"])
             self.assertEqual(specs[0]["title"], "SPEC-1930: 秦泉寺仕様")
+
+
+class NonAsciiStorePathTests(unittest.TestCase):
+    """Issue #4205: chromadb's HNSW layer cannot persist its `.bin` files
+    under a non-ASCII directory on Windows (a Japanese user-profile name puts
+    every index store there). The in-process build still counts correctly, so
+    the rebuild reports success, but every fresh process fails to load the
+    index, reads it as 0 documents and schedules the same rebuild forever."""
+
+    # Above chromadb's default HNSW sync threshold (1000), so the build
+    # flushes the index to disk instead of replaying it from the SQLite log.
+    VECTORS = 1100
+
+    def test_hnsw_store_reopens_in_fresh_process_under_non_ascii_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # resolve() restores the long name of a short-form %TEMP%, which is
+            # the production shape: a non-ASCII profile directory with an 8.3
+            # alias. Elsewhere, add a non-ASCII component of our own.
+            base = Path(tmp).resolve()
+            if str(base).isascii():
+                base = base / "秦泉寺章夫"
+            store = base / "issues"
+            store.mkdir(parents=True)
+            try:
+                client, collection = runner._make_file_index_v2_collection(store, "probe")
+            except runner.IndexStorePathError:
+                self.skipTest("volume has no 8.3 alias for the non-ASCII directory")
+            try:
+                for start in range(0, self.VECTORS, 100):
+                    ids = [str(i) for i in range(start, min(self.VECTORS, start + 100))]
+                    collection.upsert(
+                        ids=ids,
+                        embeddings=[[((int(i) * 7 + j) % 13 + 1) / 13.0 for j in range(8)] for i in ids],
+                    )
+            finally:
+                runner._close_chroma_client(client)
+
+            reopen = (
+                "import sys; sys.path.insert(0, sys.argv[1]);"
+                "from pathlib import Path; import chroma_index_runner as runner;"
+                "client, collection = runner._open_file_index_v2_collection(Path(sys.argv[2]), 'probe');"
+                "print(collection.count()); runner._close_chroma_client(client)"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", reopen, str(Path(runner.__file__).parent), str(store)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=300,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(self.VECTORS), result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "Windows short-path fallback")
+    def test_store_path_without_ascii_alias_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "秦泉寺章夫"
+            store.mkdir()
+            with mock.patch.object(runner, "_windows_short_path", side_effect=lambda text: text):
+                with self.assertRaises(runner.IndexStorePathError):
+                    runner._chroma_store_path(store)
 
 
 if __name__ == "__main__":

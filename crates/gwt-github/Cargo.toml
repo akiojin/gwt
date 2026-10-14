@@ -14,6 +14,8 @@ gwt-core = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

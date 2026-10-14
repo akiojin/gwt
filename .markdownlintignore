@@ -1,3 +1,4 @@
 node_modules/
 CHANGELOG.md
 tasks/release-pr-*-body.md
+crates/gwt/tests/fixtures/

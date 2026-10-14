@@ -58,6 +58,37 @@ struct DurableWorkspaceRequest {
     path: PathBuf,
     workspace: gwt::PersistedWindowCanvasState,
     completion: mpsc::SyncSender<Result<(), String>>,
+    ready: mpsc::Receiver<()>,
+}
+
+/// Reserve FIFO ordering on the GUI thread; the ACK worker authorizes the
+/// write only after materialization. Dropping this handle cancels the gate.
+pub(crate) struct DurableWorkspaceBarrier {
+    ready: mpsc::Sender<()>,
+    completed: mpsc::Receiver<Result<(), String>>,
+}
+
+impl DurableWorkspaceBarrier {
+    pub(crate) fn allow_and_wait(&self) -> std::io::Result<()> {
+        self.ready.send(()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "persist dispatcher stopped before durable workspace authorization",
+            )
+        })?;
+        match self.completed.recv_timeout(DURABLE_BARRIER_TIMEOUT) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(std::io::Error::other(error)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for durable workspace persistence",
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "persist dispatcher stopped before durable workspace persistence completed",
+            )),
+        }
+    }
 }
 
 enum PersistWork {
@@ -73,6 +104,8 @@ struct DispatcherInner {
     cond: Condvar,
     #[cfg(test)]
     before_workspace_write: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    durable_writes: std::sync::atomic::AtomicU64,
 }
 
 /// Owner handle: enqueue snapshots and (in tests) wait until the worker drains.
@@ -159,6 +192,8 @@ impl PersistDispatcher {
             cond: Condvar::new(),
             #[cfg(test)]
             before_workspace_write: Mutex::new(None),
+            #[cfg(test)]
+            durable_writes: std::sync::atomic::AtomicU64::new(0),
         });
         let worker_inner = inner.clone();
         spawner.spawn(move || worker_loop(worker_inner));
@@ -187,14 +222,16 @@ impl PersistDispatcher {
         self.inner.cond.notify_one();
     }
 
-    /// Serialize an exact workspace state after every older dispatcher
-    /// generation and wait until its crash-durable atomic write succeeds.
-    pub(crate) fn flush_workspace_durable(
+    /// Assign the exact snapshot's generation while the GUI owns it, before
+    /// newer ordinary snapshots can enter the dispatcher. This does no disk I/O
+    /// and does not wait; a worker must authorize the durability gate.
+    pub(crate) fn reserve_workspace_durable(
         &self,
         path: PathBuf,
         workspace: gwt::PersistedWindowCanvasState,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<DurableWorkspaceBarrier> {
         let (completion, completed) = mpsc::sync_channel(1);
+        let (authorize, ready) = mpsc::channel();
         {
             let mut state = self
                 .inner
@@ -214,22 +251,31 @@ impl PersistDispatcher {
                 path,
                 workspace,
                 completion,
+                ready,
             });
         }
         self.inner.cond.notify_one();
+        Ok(DurableWorkspaceBarrier {
+            ready: authorize,
+            completed,
+        })
+    }
 
-        match completed.recv_timeout(DURABLE_BARRIER_TIMEOUT) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(std::io::Error::other(error)),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "timed out waiting for durable workspace persistence",
-            )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "persist dispatcher stopped before durable workspace persistence completed",
-            )),
-        }
+    #[cfg(test)]
+    pub(crate) fn flush_workspace_durable(
+        &self,
+        path: PathBuf,
+        workspace: gwt::PersistedWindowCanvasState,
+    ) -> std::io::Result<()> {
+        self.reserve_workspace_durable(path, workspace)?
+            .allow_and_wait()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn durable_write_count(&self) -> u64 {
+        self.inner
+            .durable_writes
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -379,9 +425,19 @@ fn worker_loop(inner: Arc<DispatcherInner>) {
                 (generation, outcome, successful_snapshot, None)
             }
             PersistWork::DurableWorkspace(request) => {
-                let outcome = save_workspace_state_durable(&request.path, &request.workspace)
-                    .map_err(|error| error.to_string());
-                (request.generation, outcome, None, Some(request.completion))
+                // A failed/stale ACK drops the sender. Release its reserved
+                // generation without writing and continue to newer snapshots.
+                if request.ready.recv().is_err() {
+                    (request.generation, Ok(()), None, None)
+                } else {
+                    #[cfg(test)]
+                    inner
+                        .durable_writes
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let outcome = save_workspace_state_durable(&request.path, &request.workspace)
+                        .map_err(|error| error.to_string());
+                    (request.generation, outcome, None, Some(request.completion))
+                }
             }
         };
 
@@ -448,23 +504,36 @@ mod tests {
     fn sample_empty_session() -> gwt::PersistedSessionState {
         gwt::PersistedSessionState {
             tabs: Vec::new(),
-            active_tab_id: None,
+            legacy_active_tab_id: None,
             recent_projects: Vec::new(),
         }
     }
 
-    fn sample_session(active_tab_id: &str) -> gwt::PersistedSessionState {
+    /// A snapshot whose identity is carried by a single tab id. The marker has
+    /// to live in a *persisted* field: Issue #4535 AC-4 stopped writing
+    /// `active_tab_id` back, so a marker stored there would read back as `None`
+    /// and every coalescing assertion below would pass vacuously.
+    fn sample_session(marker: &str) -> gwt::PersistedSessionState {
         gwt::PersistedSessionState {
-            tabs: Vec::new(),
-            active_tab_id: Some(active_tab_id.to_string()),
+            tabs: vec![gwt::PersistedSessionTabState {
+                id: marker.to_string(),
+                title: marker.to_string(),
+                project_root: PathBuf::from("/tmp/persist-dispatcher"),
+                kind: gwt::ProjectKind::Git,
+            }],
+            legacy_active_tab_id: None,
             recent_projects: Vec::new(),
         }
     }
 
-    fn sample_snapshot(session_path: PathBuf, active_tab_id: &str) -> PersistSnapshot {
+    fn on_disk_marker(session: &gwt::PersistedSessionState) -> Option<&str> {
+        session.tabs.first().map(|tab| tab.id.as_str())
+    }
+
+    fn sample_snapshot(session_path: PathBuf, marker: &str) -> PersistSnapshot {
         PersistSnapshot {
             session_path,
-            session: sample_session(active_tab_id),
+            session: sample_session(marker),
             workspaces: Vec::new(),
         }
     }
@@ -475,45 +544,68 @@ mod tests {
                 state: Mutex::new(DispatcherState::default()),
                 cond: Condvar::new(),
                 before_workspace_write: Mutex::new(None),
+                #[cfg(test)]
+                durable_writes: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
 
     #[test]
-    fn enqueue_returns_immediately_so_callers_do_not_block_on_disk_write() {
+    fn enqueue_burst_does_not_wait_for_blocked_disk_write() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let path = temp.path().join("session-state.json");
-        let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
-
-        let started = std::time::Instant::now();
-        for index in 0..200 {
-            dispatcher.enqueue(PersistSnapshot {
-                session_path: path.clone(),
-                session: gwt::PersistedSessionState {
-                    tabs: Vec::new(),
-                    active_tab_id: Some(format!("tab-{index}")),
-                    recent_projects: Vec::new(),
-                },
-                workspaces: Vec::new(),
-            });
+        let session_path = temp.path().join("session-state.json");
+        let workspace_path = temp.path().join("workspace.json");
+        let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));
+        let (write_started_tx, write_started_rx) = mpsc::sync_channel(1);
+        let (release_write_tx, release_write_rx) = mpsc::sync_channel(1);
+        let release_write_rx = Arc::new(Mutex::new(release_write_rx));
+        dispatcher.set_before_workspace_write_hook(Arc::new(move || {
+            write_started_tx
+                .send(())
+                .expect("report blocked workspace write");
+            release_write_rx
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv()
+                .expect("release blocked workspace write");
+        }));
+        dispatcher.enqueue(PersistSnapshot {
+            session_path: session_path.clone(),
+            session: sample_session("blocking-write"),
+            workspaces: vec![(workspace_path, empty_workspace_state())],
+        });
+        let write_started = write_started_rx.recv_timeout(Duration::from_secs(5));
+        if write_started.is_err() {
+            let _ = release_write_tx.send(());
         }
-        let elapsed = started.elapsed();
+        write_started.expect("worker should reach the blocked workspace write");
 
-        assert!(
-            elapsed < Duration::from_millis(20),
-            "200 enqueue calls should not synchronously wait for disk; took {elapsed:?}",
-        );
+        let enqueue_dispatcher = Arc::clone(&dispatcher);
+        let enqueue_session_path = session_path.clone();
+        let (burst_done_tx, burst_done_rx) = mpsc::sync_channel(1);
+        let burst = std::thread::spawn(move || {
+            for index in 0..200 {
+                enqueue_dispatcher.enqueue(PersistSnapshot {
+                    session_path: enqueue_session_path.clone(),
+                    session: sample_session(&format!("tab-{index}")),
+                    workspaces: Vec::new(),
+                });
+            }
+            burst_done_tx.send(()).expect("report enqueue burst");
+        });
+
+        let burst_done = burst_done_rx.recv_timeout(Duration::from_secs(5));
+        let _ = release_write_tx.send(());
+        burst_done.expect("enqueue burst must complete while the worker write is blocked");
+        burst.join().expect("enqueue burst thread");
 
         assert!(dispatcher.wait_idle(Duration::from_secs(5)));
-        let on_disk = load_session_state(&path).expect("load persisted session");
-        assert!(
-            on_disk
-                .active_tab_id
-                .as_deref()
-                .is_some_and(|id| id.starts_with("tab-")),
-            "disk should hold a snapshot from the burst (got {:?})",
-            on_disk.active_tab_id
+        let on_disk = load_session_state(&session_path).expect("load persisted session");
+        assert_eq!(
+            on_disk_marker(&on_disk),
+            Some("tab-199"),
+            "disk should hold the latest snapshot from the non-blocking burst",
         );
     }
 
@@ -527,11 +619,7 @@ mod tests {
         for index in 0..50 {
             dispatcher.enqueue(PersistSnapshot {
                 session_path: path.clone(),
-                session: gwt::PersistedSessionState {
-                    tabs: Vec::new(),
-                    active_tab_id: Some(format!("tab-{index}")),
-                    recent_projects: Vec::new(),
-                },
+                session: sample_session(&format!("tab-{index}")),
                 workspaces: Vec::new(),
             });
         }
@@ -539,7 +627,7 @@ mod tests {
 
         let on_disk = load_session_state(&path).expect("load persisted session");
         assert_eq!(
-            on_disk.active_tab_id.as_deref(),
+            on_disk_marker(&on_disk),
             Some("tab-49"),
             "coalesce should keep only the most recently enqueued snapshot",
         );
@@ -560,21 +648,13 @@ mod tests {
         let started = std::time::Instant::now();
         dispatcher.enqueue(PersistSnapshot {
             session_path: path.clone(),
-            session: gwt::PersistedSessionState {
-                tabs: Vec::new(),
-                active_tab_id: Some("first".to_string()),
-                recent_projects: Vec::new(),
-            },
+            session: sample_session("first"),
             workspaces: Vec::new(),
         });
         std::thread::sleep(Duration::from_millis(20));
         dispatcher.enqueue(PersistSnapshot {
             session_path: path.clone(),
-            session: gwt::PersistedSessionState {
-                tabs: Vec::new(),
-                active_tab_id: Some("second".to_string()),
-                recent_projects: Vec::new(),
-            },
+            session: sample_session("second"),
             workspaces: Vec::new(),
         });
 
@@ -583,7 +663,7 @@ mod tests {
 
         let on_disk = load_session_state(&path).expect("load persisted session");
         assert_eq!(
-            on_disk.active_tab_id.as_deref(),
+            on_disk_marker(&on_disk),
             Some("second"),
             "coalesce window should keep only the latest snapshot",
         );
@@ -625,7 +705,7 @@ mod tests {
         assert!(dispatcher.wait_idle(Duration::from_secs(5)));
         let on_disk = load_session_state(&path).expect("load persisted session");
         assert_eq!(
-            on_disk.active_tab_id.as_deref(),
+            on_disk_marker(&on_disk),
             Some("changed"),
             "changed snapshots must still persist after duplicate suppression",
         );
@@ -695,7 +775,7 @@ mod tests {
         assert!(dispatcher.wait_idle(Duration::from_secs(5)));
 
         let on_disk = load_session_state(&path).expect("load persisted session");
-        assert_eq!(on_disk.active_tab_id.as_deref(), Some("retryable"));
+        assert_eq!(on_disk_marker(&on_disk), Some("retryable"));
         assert_eq!(
             dispatcher.completed_count(),
             2,
@@ -716,11 +796,7 @@ mod tests {
 
         dispatcher.enqueue(PersistSnapshot {
             session_path: path.clone(),
-            session: gwt::PersistedSessionState {
-                tabs: Vec::new(),
-                active_tab_id: Some("durable".to_string()),
-                recent_projects: Vec::new(),
-            },
+            session: sample_session("durable"),
             workspaces: Vec::new(),
         });
 
@@ -729,7 +805,7 @@ mod tests {
 
         let on_disk = load_session_state(&path).expect("load persisted session");
         assert_eq!(
-            on_disk.active_tab_id.as_deref(),
+            on_disk_marker(&on_disk),
             Some("durable"),
             "Drop must flush the pending snapshot before returning",
         );
@@ -757,11 +833,7 @@ mod tests {
             for index in 0..25 {
                 dispatcher.enqueue(PersistSnapshot {
                     session_path: path.clone(),
-                    session: gwt::PersistedSessionState {
-                        tabs: Vec::new(),
-                        active_tab_id: Some(format!("tab-{index}")),
-                        recent_projects: Vec::new(),
-                    },
+                    session: sample_session(&format!("tab-{index}")),
                     workspaces: Vec::new(),
                 });
             }
@@ -769,7 +841,7 @@ mod tests {
 
             let on_disk = load_session_state(&path).expect("load persisted session");
             assert_eq!(
-                on_disk.active_tab_id.as_deref(),
+                on_disk_marker(&on_disk),
                 Some("tab-24"),
                 "tokio spawner must coalesce identically to the thread spawner",
             );

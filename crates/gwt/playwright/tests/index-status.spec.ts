@@ -1,6 +1,6 @@
 /* SPEC-1939 Phase 13+15 — project-bar Index badge withdrawn. The remaining
  * coverage exercises the dedicated Index window health panel (per-cell
- * rebuild IPC) and the separation from the project-tab Agent activity cue
+ * rebuild IPC)
  * using the SPEC-2017 Kanban fixture pattern:
  * the embedded frontend is served via `installEmbeddedRoutes`
  * (`_helpers/embedded-frontend.ts`) and the WebSocket is stubbed with a
@@ -9,6 +9,40 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { acquireLiveGwtBackendLock, gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+
+test("live backend replays fresh index health after reconnect", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires browser-check isolated backend");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const release = await acquireLiveGwtBackendLock(base!, testInfo);
+  const errors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  page.on("pageerror", (error) => errors.push(String(error)));
+  try {
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    const { table } = await openIndexHealthPanel(page, true, true);
+    await expect(table.locator("tr[data-scope='issues']")).toBeVisible();
+    const status = await page.waitForFunction(() => {
+      const messages = (window as any).__gwtPlaywrightMessages ?? [];
+      return messages.map((entry: any) => entry.payload)
+        .findLast((payload: any) => payload.kind === "project_index_status" && payload.status?.scopes?.issues);
+    }).then((handle) => handle.jsonValue());
+    expect(status.status.state).toBe("ready");
+    expect(status.status.scopes.issues.healthy).toBe(true);
+    await sendLiveGwtEvent(page, { kind: "refresh_index_status", project_root: status.project_root });
+    await expect(table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+
+    await gotoLiveGwt(page, page.url(), { enableTestBridge: true });
+    const reconnected = await openIndexHealthPanel(page, false, true);
+    await expect(reconnected.table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+    expect(errors).toEqual([]);
+  } finally {
+    await release();
+  }
+});
 
 test.describe("Project Index status surface", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
@@ -19,97 +53,9 @@ test.describe("Project Index status surface", () => {
 
     await page.goto(APP_URL);
 
-    // The project tab still mounts, but the legacy badge slot must be gone.
-    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    // The Project shell mounts without the retired Index badge.
+    await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
     await expect(page.locator("#index-status")).toHaveCount(0);
-  });
-
-  test("project_index_status does not drive the project tab Agent activity cue", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-
-    // SPEC-2013 Phase 6 supersedes the old Index-health project-tab cue:
-    // the cue now reflects only running Agent windows. Index health remains
-    // visible in the dedicated Index window Health surface.
-    await installIndexStatusBackend(page, {
-      state: "repair_required",
-      scopes: {
-        files: {
-          wtAhash: {
-            healthy: false,
-            repair_required: true,
-            document_count: 0,
-            reason: "manifest_missing",
-          },
-        },
-        "files-docs": {
-          wtAhash: { healthy: true, repair_required: false, document_count: 16 },
-        },
-      },
-      worktrees: {
-        wtAhash: { branch: "develop", path: "/abs/wtA" },
-      },
-    });
-
-    await page.goto(APP_URL);
-    const cue = page.locator(
-      ".project-tab [data-role='project-tab-state-cue']",
-    );
-    await expect(cue).toHaveAttribute("data-state", "", { timeout: 10_000 });
-
-    // Project Index transitions still update the Index Health surface, but
-    // must not light the project tab activity cue.
-    await page.evaluate(() => {
-      window.__gwtFixtureWebSocket.emit({
-        kind: "project_index_status",
-        project_root: "/fixture",
-        status: {
-          state: "repairing",
-          detail: "",
-          progress: { scopes_done: 0, scopes_total: 1 },
-          scopes: {
-            files: {
-              wtAhash: {
-                healthy: true,
-                repair_required: false,
-                document_count: 1,
-              },
-            },
-            "files-docs": {
-              wtAhash: { healthy: true, repair_required: false, document_count: 16 },
-            },
-          },
-          worktrees: {
-            wtAhash: { branch: "develop", path: "/abs/wtA" },
-          },
-        },
-      });
-    });
-    await expect(cue).toHaveAttribute("data-state", "", { timeout: 5_000 });
-
-    await page.evaluate(() => {
-      window.__gwtFixtureWebSocket.emit({
-        kind: "project_index_status",
-        project_root: "/fixture",
-        status: {
-          state: "ready",
-          detail: "",
-          progress: null,
-          scopes: {
-            files: {
-              wtAhash: { healthy: true, repair_required: false, document_count: 310 },
-              wtBhash: { healthy: true, repair_required: false, document_count: 200 },
-            },
-            "files-docs": {
-              wtAhash: { healthy: true, repair_required: false, document_count: 16 },
-            },
-          },
-          worktrees: {
-            wtAhash: { branch: "develop", path: "/abs/wtA" },
-          },
-        },
-      });
-    });
-    await expect(cue).toHaveAttribute("data-state", "", { timeout: 5_000 });
   });
 
   test("Index window Health renders the scope health table from project_index_status (T-IDX-106)", async ({
@@ -405,7 +351,6 @@ test.describe("Project Index status surface", () => {
     await page.goto(APP_URL);
     const { root } = await openIndexSearchPanel(page);
     await root.locator(".index-search-input").fill("memory search loading");
-    await root.locator(".index-run-button").click();
 
     const loading = root.locator(".index-search-loading");
     await expect(loading).toBeVisible({ timeout: 5_000 });
@@ -443,7 +388,6 @@ test.describe("Project Index status surface", () => {
       "All terms required, e.g. Work discussion",
     );
     await root.locator(".index-search-input").fill("Workspace volatile");
-    await root.locator(".index-run-button").click();
 
     const request = await page.waitForFunction(() => {
       const sends = (window.__gwtFixtureWebSocket && window.__gwtFixtureWebSocket.recordedSends) || [];
@@ -577,18 +521,20 @@ test.describe("Project Index status surface", () => {
 
 });
 
-async function openIndexHealthPanel(page) {
-  await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+async function openIndexHealthPanel(page, createWindow = true, live = false) {
+  await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
   // SPEC-1939 Phase 15: settings target=index is now the compatibility
   // entrypoint for the dedicated Index window, not a Settings tab.
-  await page.evaluate(() => {
+  if (createWindow) await page.evaluate(() => {
     document.dispatchEvent(
       new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
     );
   });
 
-  const root = page.locator(".index-search-root").first();
+  const root = page.locator(live
+    ? ".workspace-window.surface-index.focused .index-search-root"
+    : ".index-search-root").first();
   await expect(root).toBeVisible({ timeout: 10_000 });
   await root.locator("[data-index-tab='health']").click();
 
@@ -599,7 +545,7 @@ async function openIndexHealthPanel(page) {
 }
 
 async function openIndexSearchPanel(page) {
-  await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
 
   await page.evaluate(() => {
     document.dispatchEvent(

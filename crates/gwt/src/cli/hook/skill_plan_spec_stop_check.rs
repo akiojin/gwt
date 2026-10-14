@@ -59,6 +59,7 @@ mod tests {
 
     fn active_state(session: &str) -> SkillState {
         SkillState {
+            start_evidence: None,
             active: true,
             owner_spec: Some(1935),
             started_at: Utc.with_ymd_and_hms(2026, 4, 21, 9, 0, 0).unwrap(),

@@ -12,6 +12,7 @@ import {
   findAgentKanbanDropTargetAtPoint,
   isAgentKanbanEligible,
   isAgentKanbanPlacement,
+  isOffCanvasPlacement,
   moveAgentKanbanCardMessage,
   placeAgentWindowMessage,
   setAgentKanbanCardCollapsedMessage,
@@ -47,6 +48,25 @@ test("Agent Kanban groups contained agent windows by stable lane order", () => {
     windowsForAgentKanbanLane(windows, "kanban-1", "active").map((windowData) => windowData.id),
     ["agent-2", "agent-1"],
   );
+});
+
+// SPEC-3671 P1 / T-001: `isOffCanvasPlacement()` is the single seam that decides
+// whether a window is drawn on the canvas. At this phase it must stay behaviourally
+// identical to `isAgentKanbanPlacement()` so the P1 refactor is provably inert.
+test("off-canvas placement predicate matches Agent Kanban containment", () => {
+  const windows = sampleWindows();
+
+  for (const windowData of [...windows, undefined, null, {}, { placement: {} }]) {
+    assert.equal(
+      isOffCanvasPlacement(windowData),
+      isAgentKanbanPlacement(windowData),
+      `off-canvas predicate must agree with agent_kanban containment for ${JSON.stringify(windowData)}`,
+    );
+  }
+
+  assert.equal(isOffCanvasPlacement({ placement: { kind: "agent_kanban" } }), true);
+  assert.equal(isOffCanvasPlacement({ placement: { kind: "canvas" } }), false);
+  assert.equal(isOffCanvasPlacement({ preset: "agent" }), false);
 });
 
 test("Agent Kanban surface renders lanes, card terminals, and card controls", () => {
@@ -129,6 +149,24 @@ test("Agent Kanban card messages preserve board, lane, order, and geometry", () 
   });
 });
 
+test("Agent Kanban uses assigned identity as the primary card label", () => {
+  const fixture = createFixture();
+  const workspace = { windows: sampleWindows() };
+  workspace.windows[1].agent_name = "Lumen";
+  const surface = createAgentKanbanSurface({
+    activeWorkspace: () => workspace,
+    windowDisplayTitle: data => `${data.agent_name || "Naming…"} — ${data.title}`,
+    windowRoleBadgeLabel: data => data.agent_id || "Agent",
+  });
+  surface.mount(fixture.body, workspace.windows[0]);
+  const card = fixture.body.querySelector('[data-window-id="agent-1"]');
+  assert.equal(card.querySelector(".agent-kanban-card-title").textContent, "Lumen");
+  assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /Implement UI/);
+  assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /codex/);
+  const unnamed = fixture.body.querySelector('[data-window-id="agent-2"]');
+  assert.equal(unnamed.querySelector(".agent-kanban-card-title").textContent, "Naming…");
+});
+
 test("Agent Kanban drop target hit-test computes lane insertion order", () => {
   const fixture = createFixture();
   fixture.body.innerHTML = `
@@ -199,7 +237,7 @@ test("Agent Kanban app wiring maps preset, hides contained windows, reparents te
   );
   assert.match(
     extractFunctionBody(appSource, "visibleWindowData"),
-    /isAgentKanbanPlacement\(windowData\)[\s\S]*return\s+false/,
+    /isOffCanvasPlacement\(windowData\)[\s\S]*return\s+false/,
     "contained Agent Kanban cards must not remain visible as top-level windows",
   );
   assert.match(
@@ -209,7 +247,7 @@ test("Agent Kanban app wiring maps preset, hides contained windows, reparents te
   );
   assert.match(
     extractFunctionBody(appSource, "sendGeometry"),
-    /isAgentKanbanPlacement\(windowData\)[\s\S]*updateTerminalGridMessage/,
+    /isOffCanvasPlacement\(windowData\)[\s\S]*updateTerminalGridMessage/,
     "contained terminal fits must update cols/rows without persisting hidden geometry",
   );
   assert.match(
@@ -217,6 +255,35 @@ test("Agent Kanban app wiring maps preset, hides contained windows, reparents te
     /agentKanbanDropTargetAt\(event,\s*dragState\.id\)[\s\S]*placeAgentWindowMessage\(/,
     "titlebar pointer release must place eligible agent windows into Kanban lanes",
   );
+});
+
+// SPEC-3671 P1 / T-002 + T-003: every "is this window drawn on the canvas?" check in
+// app.js must route through `isOffCanvasPlacement()`. Lane-membership checks, which
+// read `placement.board_id` / `placement.lane_id`, deliberately keep using
+// `isAgentKanbanPlacement()` because they ask a different question.
+test("canvas-visibility checks route through the off-canvas seam", () => {
+  for (const name of ["visibleWindowData", "canRefreshTerminalViewport", "sendGeometry"]) {
+    const body = extractFunctionBody(appSource, name);
+    assert.match(
+      body,
+      /isOffCanvasPlacement\(/,
+      `${name} decides canvas rendering and must use isOffCanvasPlacement()`,
+    );
+    assert.doesNotMatch(
+      body,
+      /isAgentKanbanPlacement\(/,
+      `${name} must not re-introduce a direct agent_kanban canvas check`,
+    );
+  }
+
+  // Lane membership keeps the Kanban-specific predicate: it is scoped by board_id.
+  const renderKeyBody = extractFunctionBody(appSource, "agentKanbanBodyRenderKey");
+  assert.match(
+    renderKeyBody,
+    /isAgentKanbanPlacement\(/,
+    "Kanban lane membership must keep asking about agent_kanban containment",
+  );
+  assert.match(renderKeyBody, /placement\.board_id/);
 });
 
 function createFixture() {

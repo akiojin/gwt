@@ -12,6 +12,15 @@ export function isAgentKanbanPlacement(windowData) {
   return windowData?.placement?.kind === "agent_kanban";
 }
 
+// SPEC-3671 FR-004: the single seam that answers "is this window drawn on the
+// canvas?". Callers that ask about Kanban *lane membership* (board_id / lane_id)
+// keep using `isAgentKanbanPlacement()`; callers that decide canvas rendering use
+// this predicate so a new off-canvas placement only has to be added here.
+export function isOffCanvasPlacement(windowData) {
+  const kind = windowData?.placement?.kind;
+  return kind === "agent_kanban" || kind === "issue_preview";
+}
+
 function isCanvasPlacement(windowData) {
   const kind = windowData?.placement?.kind;
   return !kind || kind === "canvas";
@@ -297,12 +306,14 @@ export function createAgentKanbanSurface({
     titleWrap.className = "agent-kanban-card-title-wrap";
     const title = document.createElement("div");
     title.className = "agent-kanban-card-title";
-    title.textContent =
-      windowDisplayTitle?.(windowData) || windowData.title || windowData.id;
+    title.textContent = windowData.is_pm
+      ? windowDisplayTitle?.(windowData) || "Project Manager"
+      : String(windowData.agent_name || "").trim() || "Naming…";
     const meta = document.createElement("div");
     meta.className = "agent-kanban-card-meta";
-    meta.textContent =
-      windowRoleBadgeLabel?.(windowData) || windowData.agent_id || "Agent";
+    const provider = windowRoleBadgeLabel?.(windowData) || windowData.agent_id || "Agent";
+    const purpose = windowData.dynamic_title || windowData.purpose_title || windowData.title || "";
+    meta.textContent = purpose ? `${provider} — ${purpose}` : provider;
     titleWrap.append(title, meta);
 
     const actions = document.createElement("div");

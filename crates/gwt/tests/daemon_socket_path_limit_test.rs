@@ -21,6 +21,7 @@ use std::{
 
 use gwt_core::{
     daemon::{DAEMON_SOCKET_DIR_ENV, MAX_UNIX_SOCKET_PATH_LEN},
+    deadline_budget::HANG_GUARD,
     process::hidden_command,
 };
 use tempfile::TempDir;
@@ -110,6 +111,14 @@ impl LongPathFixture {
         ] {
             command.env_remove(key);
         }
+        // SPEC #4740: the child inherits load mode (`GWT_TEST_SHRINK_BUDGETS`)
+        // on purpose, so a budget dependency inside `gwtd` stays visible. This
+        // test is about the socket path, not about how fast the daemon takes
+        // its startup lease, so it pins that budget for the child explicitly.
+        command.env(
+            "GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS",
+            HANG_GUARD.as_millis().to_string(),
+        );
         command
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
