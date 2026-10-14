@@ -4710,18 +4710,38 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
             .create_new(true)
             .write(true)
             .open(&scratch_path)?;
-        scratch.write_all(content)?;
-        scratch.sync_all()?;
+        timed_pm_prefs_stage("pm_prefs.sync", || {
+            scratch.write_all(content)?;
+            scratch.sync_all()
+        })?;
         // Deadline-aware transactions must not become visible after their
         // acceptance boundary; recheck immediately before the canonical
         // rename (same convention as the Issue Monitor prefs writer).
-        gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
-        fs::rename(&scratch_path, path)?;
-        sync_parent_directory(path)
+        timed_pm_prefs_stage("pm_prefs.rename", || {
+            gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
+            fs::rename(&scratch_path, path)?;
+            sync_parent_directory(path)
+        })
     })();
     if result.is_err() {
         let _ = fs::remove_file(&scratch_path);
     }
+    result
+}
+
+fn timed_pm_prefs_stage<T>(
+    stage: &'static str,
+    action: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let started = std::time::Instant::now();
+    let remaining_budget_ms = gwt_core::operation_deadline::current()
+        .map(|deadline| deadline.saturating_duration_since(started).as_millis() as u64);
+    let result = action();
+    tracing::info!(
+        target: "gwt.pm.refresh", stage,
+        duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+        ?remaining_budget_ms, success = result.is_ok(), "PM refresh stage"
+    );
     result
 }
 

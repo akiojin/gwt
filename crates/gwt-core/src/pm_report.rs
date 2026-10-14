@@ -31,18 +31,25 @@ pub struct PmReport {
     pub created_at: DateTime<Utc>,
 }
 
+impl From<&crate::user_instruction::UserInstruction> for PmReport {
+    fn from(record: &crate::user_instruction::UserInstruction) -> Self {
+        Self {
+            id: record.id.clone(),
+            kind: PmReportKind::Qa,
+            question: Some(record.summary.clone()),
+            body: record.answer.clone(),
+            created_at: record.created_at,
+        }
+    }
+}
+
 /// Reports share the repository's machine-local project store and never expire.
 pub fn reports_path(repo_path: &Path) -> PathBuf {
     crate::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm-reports.jsonl")
 }
 
-/// A successful post has been appended, synced and read back while holding the lock.
-pub fn post_report(
-    repo_path: &Path,
-    kind: PmReportKind,
-    body: &str,
-    question: Option<&str>,
-) -> Result<PmReport> {
+/// Validate fields shared by legacy Reports and instruction-backed Q&A.
+pub fn validate_report_input(kind: PmReportKind, body: &str, question: Option<&str>) -> Result<()> {
     if kind == PmReportKind::Qa && question.is_none_or(|value| value.trim().is_empty()) {
         return Err(GwtError::Config(
             "PM Q&A report question must be nonempty".into(),
@@ -61,6 +68,17 @@ pub fn post_report(
             "PM report body must not exceed 64 KiB".into(),
         ));
     }
+    Ok(())
+}
+
+/// A successful post has been appended, synced and read back while holding the lock.
+pub fn post_report(
+    repo_path: &Path,
+    kind: PmReportKind,
+    body: &str,
+    question: Option<&str>,
+) -> Result<PmReport> {
+    validate_report_input(kind, body, question)?;
     let path = reports_path(repo_path);
     fs::create_dir_all(path.parent().expect("report store has a parent"))?;
     let mut file = OpenOptions::new()
@@ -136,13 +154,23 @@ fn sync_report_parent(_path: &Path) -> io::Result<()> {
 
 pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
     let path = reports_path(repo_path);
-    let mut file = match File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+    let mut reports = match File::open(&path) {
+        Ok(mut file) => {
+            FileExt::lock_shared(&file)?;
+            read_reports(&mut file, &path)?
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error.into()),
     };
-    FileExt::lock_shared(&file)?;
-    read_reports(&mut file, &path)
+    // Captured Q&A and its instruction share one durable source. Legacy
+    // reports remain readable without introducing a second write transaction.
+    reports.extend(
+        crate::user_instruction::load(repo_path)?
+            .iter()
+            .map(PmReport::from),
+    );
+    reports.sort_by_key(|report| report.created_at);
+    Ok(reports)
 }
 
 fn read_reports(file: &mut File, path: &Path) -> Result<Vec<PmReport>> {

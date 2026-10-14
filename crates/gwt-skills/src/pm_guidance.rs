@@ -128,6 +128,33 @@ into this generated skill supplements the PM contract.
   state "No action" and why. Write both fields in the user's language.
   This rule takes precedence over unchanged-cycle silence and digest suppression.
 
+## User instruction memory
+
+- Search past user instructions before judgment, Issue registration, or rulings
+  using the `search` JSON operation with `scopes: ["memory"]` and a query about
+  the current topic. Results carry the full record in `target.user_instruction`.
+  If `stale_scopes` contains `memory`, wait for refresh and retry before making
+  the decision; an old verified snapshot does not establish current instructions.
+- Apply relevant standing records whose `superseded_by` is null. In the answer
+  and Q&A Report, include an "Applied past instructions" line in the user's
+  language, naming the record IDs and their effect, or state that none apply.
+- With every user Q&A post, include an `instruction` object: copy the user's
+  `original` without summarizing, classify `kind` as `standing`, `one_off`, or
+  `question`, and supply `actions` (including outcomes or the reason for no
+  action) and `issue_numbers`. `question` and `body` provide the saved summary
+  and answer. Secrets are redacted before the single atomic save; the record
+  is also the source of its Report, so do not make a second memory/report post.
+- When a newer instruction clearly contradicts an active standing instruction,
+  explain the conflict and which newer instruction applies in the answer and
+  Report. Supply the old record IDs in `supersedes` on that same Q&A post. The
+  store sets `superseded_by` atomically; never delete old records. If both
+  instructions still apply and the conflict is unresolved, use the existing
+  decision policy rather than inventing a priority.
+- Startup and each turn reload active standing instructions from durable
+  machine-local records into the PM context. Treat an unavailable-store
+  diagnostic as missing evidence, not an empty instruction list. Existing
+  `memory.add` work-note lessons remain separate from these records.
+
 ## Current PM status
 
 - Maintain the current-status card separately from Reports with
@@ -311,7 +338,8 @@ body cannot hold `plan` / `tasks` sections.
 
 - Read the queue with `issue.monitor.status`. One snapshot carries the
   ordered queue, the active launches, the issues sitting at
-  `needs_human`, the inbox rows (state, `blocked_by_owner`,
+  `needs_human`, the completed stops in `released`, the inbox rows
+  (state, `blocked_by_owner`,
   `blocked_by_claim_id`, `claim_expires_at`, `exclusion_reason`,
   `launched_window_id`, `error_message`), `last_error`, and
   `agent_blackout`. That snapshot is your source of truth. A row held
@@ -534,7 +562,13 @@ things:
   a `params.reason`, and the identity of the launch you mean:
   `params.claim_id`, `params.delivery_id`, and `params.window_id`, all
   read from that issue's row in `issue.monitor.status`. It revokes the
-  launch's authority, frees its slot, and holds the issue.
+  launch's authority and frees its slot. If the target Issue's canonical
+  Work / ECR is completed, the reply returns `status: "released"` and
+  the inbox row becomes `released`. Read these rows in the separate
+  `released` array from `issue.monitor.status`; they are absent from
+  `needs_human`. A released row needs no human decision, even when the
+  GitHub Issue remains open. Otherwise the reply returns `status: "stopped"`
+  and holds the Issue in `needs_human`, including when its ECR is Blocked.
   It spends no retry attempt and puts nothing back in the queue.
 
   Send the identity exactly as the snapshot reports it. Naming a
@@ -771,6 +805,11 @@ re-derives the failure from the persisted hold, so the row does not move.
   launch still owns the issue — use the stop or the failover, which
   verify the exact identity. `refusal: "not_held"` means nothing was
   holding it, so nothing changed.
+- Requeueing a `released` row warns that the canonical ECR is completed
+  and gives the reason. Releasing this completion hold requires
+  `params.force: true` and a `params.reason` explaining why the completed
+  work should run again. Leave released rows out of the human-intervention
+  inventory. Force does not bypass live-launch or closed-Issue protections.
 - The reply returns `stale_window_id` when the failure retained an error
   window. Close it with `pane.close`; the release already unbound it, so
   the close cannot requeue the issue again.
@@ -1735,6 +1774,9 @@ mod tests {
             "`issue.monitor.stop`",
             "is a mismatch, not a wildcard",
             "It spends no retry attempt",
+            // Issue #4357: completed stops are separate from human handoffs.
+            "`status: \"released\"`",
+            "`released` array from `issue.monitor.status`",
             // FR-029〜031: the failover, and the fact that it is a different
             // outcome rather than a different way to stop.
             "`issue.monitor.failover`",
@@ -1911,6 +1953,23 @@ mod tests {
         assert!(body.contains("`gwt-search`"), "重複確認の導線が要る");
         assert!(body.contains("before registering anything new"));
         assert!(body.contains("Keep the backlog honest"));
+    }
+
+    #[test]
+    fn contract_distinguishes_completed_stops_and_requires_explicit_requeue() {
+        let guidance = body();
+        for phrase in [
+            "canonical Work / ECR is completed",
+            "`status: \"released\"`",
+            "`status: \"stopped\"`",
+            "`released` array from `issue.monitor.status`",
+            "A released row needs no human decision",
+            "warns that the canonical ECR is completed and gives the reason",
+            "requires `params.force: true`",
+            "Force does not bypass live-launch or closed-Issue protections",
+        ] {
+            assert!(guidance.contains(phrase), "missing `{phrase}`");
+        }
     }
 
     #[test]
@@ -3045,6 +3104,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         let intake = unwrapped(&claude);
         for phrase in [
             "`pm.status.set`",
+            "`status: \"released\"`",
+            "`released` array from `issue.monitor.status`",
+            "requires `params.force: true`",
+            "Force does not bypass live-launch or closed-Issue protections",
             "a wait starts or ends",
             "a user action is added or completed",
             "a launch or stop decision is made",
@@ -3069,6 +3132,16 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "state \"No action\" and why",
             "Write both fields in the user's language",
             "takes precedence over unchanged-cycle silence and digest suppression",
+            "Search past user instructions before judgment, Issue registration, or rulings",
+            "`scopes: [\"memory\"]`",
+            "If `stale_scopes` contains `memory`, wait for refresh",
+            "include an `instruction` object",
+            "`original` without summarizing",
+            "Applied past instructions",
+            "`supersedes`",
+            "`superseded_by`",
+            "never delete old records",
+            "Startup and each turn reload active standing instructions",
         ] {
             assert!(intake.contains(phrase), "missing generated Q&A rule `{phrase}`");
         }

@@ -700,6 +700,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
             // An unexplained release of a recorded failure is not auditable.
             reason: required_string(params, "reason")?,
+            force: optional_bool(params, "force")?.unwrap_or(false),
         }),
         "issue.monitor.quota_hold.list" | "issue.monitor.quota-hold.list" => {
             CliCommand::Issue(IssueCommand::MonitorQuotaHoldList {
@@ -1530,11 +1531,29 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             } else {
                 optional_string(params, "question")?
             };
+            let instruction = lookup(params, "instruction")
+                .map(|value| {
+                    serde_json::from_value::<gwt_core::user_instruction::UserInstructionInput>(
+                        value.clone(),
+                    )
+                    .map(Box::new)
+                    .map_err(|error| {
+                        CliParseError::InvalidJson(format!("invalid instruction capture: {error}"))
+                    })
+                })
+                .transpose()?;
+            if instruction.is_some() && kind != gwt_core::pm_report::PmReportKind::Qa {
+                return Err(CliParseError::InvalidValue {
+                    flag: "instruction",
+                    reason: "requires kind: qa",
+                });
+            }
             CliCommand::Pm(crate::cli::pm::PmCommand::ReportPost {
                 project_root: optional_string(params, "project_root")?,
                 kind,
                 question,
                 body: required_string(params, "body")?,
+                instruction,
             })
         }
         "pm.report.list" => CliCommand::Pm(crate::cli::pm::PmCommand::ReportList {
@@ -5005,6 +5024,7 @@ mod tests {
                 project_root: None,
                 number: 3624,
                 reason: "manual recovery after the launch-fence outage".to_string(),
+                force: false,
             })
         );
         assert!(matches!(
@@ -5014,6 +5034,13 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.requeue", json!({"reason": "x"})),
             CliParseError::MissingFlag("number")
+        ));
+        assert!(matches!(
+            ok(
+                "issue.monitor.requeue",
+                json!({"number": 42, "reason": "explicit recovery", "force": true})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorRequeue { force: true, .. })
         ));
     }
 
@@ -5827,10 +5854,28 @@ mod tests {
             },
         )
         .unwrap();
+        let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
+        assert!(error.to_string().contains("instruction"), "{error}");
+        let capture = || match ok(
+            "pm.report.post",
+            json!({"kind":"qa", "question":"Can we ship?", "body":"Checks passed.",
+                "instruction":{"original":"Can we ship? Please explain all results.",
+                    "kind":"question", "actions":["Verified checks: passed"], "issue_numbers":[5342]}}),
+        ) {
+            CliCommand::Pm(command) => command,
+            other => panic!("unexpected report command: {other:?}"),
+        };
         assert_eq!(
-            crate::cli::pm::run(&mut env, post(), &mut output).unwrap(),
+            crate::cli::pm::run(&mut env, capture(), &mut output).unwrap(),
             0
         );
+        let saved: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            saved["instruction"]["original"],
+            "Can we ship? Please explain all results."
+        );
+        assert_eq!(saved["instruction"]["id"], saved["report"]["id"]);
+        assert_eq!(gwt_core::user_instruction::load(&repo).unwrap().len(), 1);
         let CliCommand::Pm(list) = ok("pm.report.list", json!({})) else {
             panic!("expected PM list")
         };
@@ -5847,6 +5892,21 @@ mod tests {
             serde_json::from_str::<Value>(&output).unwrap()["reports"][1]["question"],
             "Can we ship?"
         );
+        let source = gwt_core::user_instruction::instructions_path(&repo);
+        let before = std::fs::read(&source).unwrap();
+        let mut oversized = capture();
+        let crate::cli::pm::PmCommand::ReportPost { question, .. } = &mut oversized else {
+            panic!("expected Q&A capture")
+        };
+        *question = Some("q".repeat(64 * 1024 + 1));
+        output.clear();
+        let error = crate::cli::pm::run(&mut env, oversized, &mut output).unwrap_err();
+        assert!(error.to_string().contains("question"), "{error}");
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        std::fs::write(gwt_core::pm_report::reports_path(&repo), b"broken\n").unwrap();
+        output.clear();
+        assert!(crate::cli::pm::run(&mut env, capture(), &mut output).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), before);
     }
 
     #[test]

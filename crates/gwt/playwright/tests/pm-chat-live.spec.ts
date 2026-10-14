@@ -25,7 +25,9 @@ test.describe('PM reports', () => {
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
       const reports = pane.getByRole('log', { name: 'PM reports' });
-      await expect(reports).toBeVisible();
+      // Startup restores the PM registration after the canvas-ready round trip.
+      // Allow that real backend hydration on a shared, loaded verification host.
+      await expect(reports).toBeVisible({ timeout: 30_000 });
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
       const id = await pane.getAttribute('data-id');
@@ -114,8 +116,14 @@ test.describe('PM reports', () => {
       const question = 'Why did PM recommend waiting?\nWhat should I do next?';
       const answerMarker = `PM answer ${info.project.name}`;
       const answerBody = `# ${answerMarker}\n\n**Confirmed**: use \`pm.report.post\`.\n\n- Keep the question\n- Read the answer`;
-      const qaSaved = pmOperation('pm.report.post', { kind: 'qa', question, body: answerBody });
+      const original = `${question}\nPlease keep the full original request.`;
+      const qaSaved = pmOperation('pm.report.post', {
+        kind: 'qa', question, body: answerBody,
+        instruction: { original, kind: 'question', actions: ['Explained the next steps'], issue_numbers: [5342] },
+      });
       expect(qaSaved.report).toMatchObject({ kind: 'qa', question, body: answerBody });
+      expect(qaSaved.instruction).toMatchObject({ original, summary: question, answer: answerBody, kind: 'question' });
+      expect(qaSaved.instruction.id).toBe(qaSaved.report.id);
       const listed = pmOperation('pm.report.list');
       expect(listed.reports.find((entry: { id: string }) => entry.id === qaSaved.report.id))
         .toMatchObject({ kind: 'qa', question, body: answerBody });
