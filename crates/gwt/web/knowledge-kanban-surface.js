@@ -1647,7 +1647,7 @@ export function createKnowledgeKanbanSurface({
             queuedSearchQuery: "",
             queuedLoadRefresh: false,
             loadRecoveryTimer: null,
-            loadRecoveryRetryCount: 0,
+            loadSlow: false,
             error: "",
             emptyMessage: "",
             baseEmptyMessage: "",
@@ -1770,7 +1770,7 @@ export function createKnowledgeKanbanSurface({
           state.inFlightSearchRequestId = 0;
           state.detailRequestId = 0;
           state.queuedLoadRefresh = false;
-          state.loadRecoveryRetryCount = 0;
+          state.loadSlow = false;
           if (state.loadRecoveryTimer !== null) {
             clearTimeout(state.loadRecoveryTimer);
             state.loadRecoveryTimer = null;
@@ -1822,26 +1822,29 @@ export function createKnowledgeKanbanSurface({
           }
           if (
             !state.loading ||
-            state.loadRequestId !== requestId ||
-            !knowledgeEntriesAreEmpty(state)
+            state.loadRequestId !== requestId
           ) {
             return;
           }
-          if (state.loadRecoveryRetryCount < 1) {
-            state.loadRecoveryRetryCount += 1;
+          // Issue #5413: a slow cache read is still in flight. Show progress
+          // instead of issuing another read that adds backend load.
+          state.loadSlow = true;
+          state.loadRecoveryTimer = setTimeout(() => {
+            state.loadRecoveryTimer = null;
+            if (
+              knowledgeBridgeStateMap.get(windowId) !== state ||
+              !workspaceWindowById(windowId) ||
+              !state.loading ||
+              state.loadRequestId !== requestId
+            ) {
+              return;
+            }
             state.loading = false;
             state.refreshing = false;
-            // Issue #3297: the retry must stay a cache read. Escalating to
-            // refresh=true ran a full remote sync that takes minutes and
-            // always outlived the next 5s timer, turning one slow load into
-            // a guaranteed "Timed out loading cache-backed data".
-            requestKnowledgeBridge(windowId, knowledgeKind, false);
+            state.loadSlow = false;
+            state.error = "Timed out loading cache-backed data";
             renderKnowledgeBridge(windowId);
-            return;
-          }
-          state.loading = false;
-          state.refreshing = false;
-          state.error = "Timed out loading cache-backed data";
+          }, 55000);
           renderKnowledgeBridge(windowId);
         }, 5000);
       }
@@ -1850,7 +1853,7 @@ export function createKnowledgeKanbanSurface({
         clearKnowledgeLoadRecoveryTimer(state);
         state.loading = false;
         state.refreshing = false;
-        state.loadRecoveryRetryCount = 0;
+        state.loadSlow = false;
         const queuedRefresh = state.queuedLoadRefresh;
         state.queuedLoadRefresh = false;
         if (queuedRefresh && workspaceWindowById(windowId)) {
@@ -1863,14 +1866,8 @@ export function createKnowledgeKanbanSurface({
       function requestKnowledgeBridge(windowId, knowledgeKind, refresh = false) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         if (state.loading) {
-          if (refresh && knowledgeEntriesAreEmpty(state)) {
-            clearKnowledgeLoadRecoveryTimer(state);
-            state.loading = false;
-            state.refreshing = false;
-          } else {
-            state.queuedLoadRefresh = state.queuedLoadRefresh || Boolean(refresh);
-            return;
-          }
+          state.queuedLoadRefresh = state.queuedLoadRefresh || Boolean(refresh);
+          return;
         }
         if (state.pendingSearchTimer !== null) {
           clearTimeout(state.pendingSearchTimer);
@@ -1893,6 +1890,7 @@ export function createKnowledgeKanbanSurface({
         state.loadSelectionGeneration = state.selectionGeneration;
         state.loadSelectedNumber = state.selectedNumber;
         state.loading = true;
+        state.loadSlow = false;
         state.refreshing = Boolean(refresh);
         state.searching = false;
         state.queuedLoadRefresh = false;
@@ -4042,6 +4040,12 @@ export function createKnowledgeKanbanSurface({
         if (!issueSurface && state.searching) {
           return { tone: "info", text: "Searching semantic index" };
         }
+        if (state.loading && state.loadSlow) {
+          return {
+            tone: "info",
+            text: `${issueSurface ? "Loading cache-backed work items" : "Loading cache-backed data"} (taking longer than usual)`,
+          };
+        }
         if (state.loading && state.entries.length > 0) {
           return {
             tone: "info",
@@ -4477,6 +4481,10 @@ export function createKnowledgeKanbanSurface({
         const visibleEntries = filteredIssueEntries(state);
         if (state.error) {
           list.insertBefore(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error), other);
+        } else if (state.loading && state.loadSlow && knowledgeEntriesAreEmpty(state)) {
+          const progress = createNode("div", "knowledge-empty", knowledgeStatusView(state, true).text);
+          progress.setAttribute("role", "status");
+          list.insertBefore(progress, other);
         }
         if (splitMode) {
           const pairs = visibleEntries
