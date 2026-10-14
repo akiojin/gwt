@@ -118,16 +118,21 @@ test.describe("Issue Bridge load recovery", () => {
     ).toContainText("Launch agent");
   });
 
-  test("Issue auto refresh stays cache-first while browsing cached issues", async ({
+  test("Issue auto refresh reads only changed visible cache revisions (#5394)", async ({
     page,
-  }) => {
-    await installEmbeddedRoutes(page);
+  }, info) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
     await installIssueBridgeBackend(page, {
       errorOnForcedRefresh: true,
       triggerAutoRefreshOnce: true,
+      theme: info.project.name.includes("light") ? "light" : "dark",
     });
 
-    await page.goto(APP_URL);
+    await page.goto(base ? new URL(new URL(APP_URL).pathname, base).toString() : APP_URL);
 
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
     await page.locator(".surface-knowledge .knowledge-row[data-issue-number='3095']").click();
@@ -137,12 +142,38 @@ test.describe("Issue Bridge load recovery", () => {
     await page.waitForFunction(
       () => typeof window.__triggerKnowledgeAutoRefresh === "function",
     );
-    await page.evaluate(() => window.__triggerKnowledgeAutoRefresh());
-    await page.waitForFunction(() =>
-      window.__knowledgeLoadMessages?.filter(
-        (message) => message.kind === "load_knowledge_bridge",
-      ).length >= 2,
-    );
+    const counts = () => page.evaluate(() => ({
+      loads: window.__knowledgeLoadMessages.filter(message => message.kind === "load_knowledge_bridge").length,
+      probes: window.__knowledgeLoadMessages.filter(message => message.kind === "check_knowledge_revision").length,
+    }));
+    const initial = await counts();
+    const settle = () => page.evaluate(() => new Promise(resolve =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const row = await page.locator(".knowledge-row").first().elementHandle();
+    for (let tick = 0; tick < 3; tick++) {
+      await page.evaluate(() => window.__triggerKnowledgeAutoRefresh());
+      await expect.poll(async () => (await counts()).probes).toBe(initial.probes + tick + 1);
+      await settle();
+    }
+    expect((await counts()).loads).toBe(initial.loads);
+    expect(await row!.evaluate(node => node.isConnected)).toBe(true);
+
+    // Repeated hidden ticks perform neither probes nor list loads. A changed
+    // revision is consumed once on restoration through the real receive path.
+    for (const mode of ["hidden", "minimized", "inactive-tab", "document"]) {
+      await page.evaluate(mode => window.__setKnowledgeVisibility(mode, false), mode);
+      await settle();
+      const before = await counts();
+      await page.evaluate(() => {
+        window.__issueCacheRevision += "-changed";
+        for (let tick = 0; tick < 3; tick++) window.__triggerKnowledgeAutoRefresh();
+      });
+      expect(await counts()).toEqual(before);
+      await page.evaluate(mode => window.__setKnowledgeVisibility(mode, true), mode);
+      await expect.poll(async () => (await counts()).loads).toBe(before.loads + 1);
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      expect((await counts()).loads).toBe(before.loads + 1);
+    }
 
     // SPEC #3885 T-032: the Issue window has no status row; nothing turns red.
     await expect(page.locator(".surface-knowledge .knowledge-status")).toHaveCount(0);
@@ -155,6 +186,9 @@ test.describe("Issue Bridge load recovery", () => {
         .map((message) => message.refresh),
     );
     expect(refreshFlags).not.toContain(true);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-auto-refresh.png") });
   });
 
   test("requests cached issues when a stale detail exists but the list is empty", async ({
@@ -1903,6 +1937,7 @@ async function installIssueBridgeBackend(
       blackedOutFleet: shouldBlackOutFleet,
     }) => {
       window.__knowledgeLoadMessages = [];
+      window.__issueCacheRevision = "revision-1";
       if (selectedTheme) {
         localStorage.setItem("gwt:ui:theme", selectedTheme);
       }
@@ -2084,6 +2119,23 @@ async function installIssueBridgeBackend(
         },
       };
 
+      window.__setKnowledgeVisibility = (mode, visible) => {
+        const data = workspaceState.workspace.tabs[0].workspace.windows[0];
+        if (mode === "hidden") document.querySelector(".surface-knowledge").hidden = !visible;
+        if (mode === "document") Object.defineProperty(document, "hidden", { configurable: true, value: !visible });
+        if (mode === "minimized") data.minimized = !visible;
+        if (mode === "inactive-tab") {
+          data.tab_group_id = "knowledge-tabs";
+          data.tab_group_active = visible;
+        }
+        if (mode === "minimized" || mode === "inactive-tab") {
+          window.__issueBridgeFixtureSocket.dispatchEvent(new MessageEvent("message", {
+            data: JSON.stringify(workspaceState),
+          }));
+        }
+        document.dispatchEvent(new Event("visibilitychange"));
+      };
+
       class FixtureWebSocket extends EventTarget {
         static CONNECTING = 0;
         static OPEN = 1;
@@ -2106,6 +2158,13 @@ async function installIssueBridgeBackend(
         send(raw) {
           const message = JSON.parse(raw);
           window.__knowledgeLoadMessages.push(message);
+          if (message.kind === "check_knowledge_revision") {
+            this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+              kind: "knowledge_revision", id: message.id,
+              knowledge_kind: message.knowledge_kind, revision: window.__issueCacheRevision,
+            }) }));
+            return;
+          }
           if (message.kind === "frontend_ready") {
             if (shouldSeedStaleDetail) {
               this.emit({
@@ -2177,6 +2236,7 @@ async function installIssueBridgeBackend(
             }
             this.emit({
               kind: "knowledge_entries",
+              cache_revision: window.__issueCacheRevision,
               id: message.id,
               knowledge_kind: message.knowledge_kind,
               request_id: message.request_id,

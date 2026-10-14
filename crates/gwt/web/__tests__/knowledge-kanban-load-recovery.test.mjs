@@ -40,7 +40,7 @@ async function importSurfaceModule() {
 }
 
 function createSurface(mod, sent, preset = "issue", options = {}) {
-  const windowData = { id: "win-1", preset };
+  const windowData = options.windowData || { id: "win-1", preset };
   const directSend = options.sendKnowledgeSemanticSearchNow
     || ((message) => {
       sent.push(message);
@@ -53,7 +53,7 @@ function createSurface(mod, sent, preset = "issue", options = {}) {
     createKnowledgeMarkdownBody:
       options.createKnowledgeMarkdownBody || (() => ({ appendChild() {} })),
     windowMap: options.windowMap || new Map(),
-    workspaceWindowById: (id) => (id === "win-1" ? windowData : null),
+    workspaceWindowById: options.workspaceWindowById || ((id) => (id === "win-1" ? windowData : null)),
     getWorkspaceWindows: () => [windowData],
     pendingIndexOpenTargetsByPreset: new Map(),
     knowledgeKindForPreset:
@@ -711,7 +711,7 @@ test("SEARCH_UNAVAILABLE is the second exact typed transient code", async () => 
   });
 });
 
-test("auto refresh waits for every semantic search owner before loading (T-951, AS-17.2)", async () => {
+test("auto refresh gates revision checks on visibility and semantic owners (#5394, T-951)", async () => {
   const mod = await importSurfaceModule();
   await withPatchedTimersAsync(async ({ intervals }) => {
     const originalDocument = globalThis.document;
@@ -722,6 +722,8 @@ test("auto refresh waits for every semantic search owner before loading (T-951, 
       const body = domDocument.createElement("div");
       domDocument.body.appendChild(body);
       const windowMap = new Map([["win-1", body]]);
+      const windowData = { id: "win-1", preset: "issue" };
+      let activeTab = true;
       const createNode = (tag, className, textContent = "") => {
         const node = domDocument.createElement(tag);
         node.className = className || "";
@@ -730,6 +732,8 @@ test("auto refresh waits for every semantic search owner before loading (T-951, 
       };
       const surface = createSurface(mod, sent, "issue", {
         windowMap,
+        windowData,
+        workspaceWindowById: () => activeTab ? windowData : null,
         createNode,
         createKnowledgeMarkdownBody: (value) =>
           createNode("div", "knowledge-markdown", String(value || "")),
@@ -740,6 +744,7 @@ test("auto refresh waits for every semantic search owner before loading (T-951, 
       state.selectedNumber = ROW_A.number;
       state.detail = detailFor(ROW_A, "Alpha body");
       state.refreshEnabled = true;
+      state.cacheRevision = "revision-1";
 
       surface.mountKnowledgeWindow({ id: "win-1", preset: "issue" }, body);
       assert.equal(intervals.length, 1, "mount must install one auto-refresh owner");
@@ -773,11 +778,66 @@ test("auto refresh waits for every semantic search owner before loading (T-951, 
       }
 
       intervals[0].callback();
+      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1);
+      intervals[0].callback();
+      intervals[0].callback();
+      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
+        "a slow revision probe must not be duplicated by subsequent ticks");
+      surface.applyKnowledgeReceiveEvent({ kind: "knowledge_revision", id: "win-1",
+        knowledge_kind: "issue", revision: "revision-1" });
+      assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 0,
+        "unchanged cache must not load or rebuild the list");
+
+      // Repeated hidden ticks coalesce to one revision check on activation.
+      const hiddenCases = [
+        [() => { body.hidden = true; }, () => { body.hidden = false; }],
+        [() => { windowData.minimized = true; }, () => { windowData.minimized = false; }],
+        [() => { windowData.tab_group_id = "group"; windowData.tab_group_active = false; },
+          () => { windowData.tab_group_active = true; }],
+        [() => { activeTab = false; }, () => { activeTab = true; }],
+        [() => { domDocument.hidden = true; }, () => { domDocument.hidden = false; }],
+      ];
+      for (const [hide, reveal] of hiddenCases) {
+        const before = sent.length;
+        hide();
+        intervals[0].callback();
+        intervals[0].callback();
+        assert.equal(sent.length, before, "hidden/minimized/inactive surfaces do no reads");
+        reveal();
+        surface.refreshVisibleKnowledgeWindows();
+        surface.refreshVisibleKnowledgeWindows();
+        assert.equal(sent.length, before + 1, "activation checks only once");
+        surface.applyKnowledgeReceiveEvent({ kind: "knowledge_revision", id: "win-1",
+          knowledge_kind: "issue", revision: "revision-1" });
+      }
+      intervals[0].callback();
+      // A probe that completes after hiding must defer its changed revision.
+      body.hidden = true;
+      surface.applyKnowledgeReceiveEvent({ kind: "knowledge_revision", id: "win-1",
+        knowledge_kind: "issue", revision: "revision-2" });
+      assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 0);
+      body.hidden = false;
+      surface.refreshVisibleKnowledgeWindows();
+      surface.applyKnowledgeReceiveEvent({ kind: "knowledge_revision", id: "win-1",
+        knowledge_kind: "issue", revision: "revision-2" });
       assert.equal(
         sent.filter((message) => message.kind === "load_knowledge_bridge").length,
         1,
-        "auto refresh may load only after every semantic search owner releases",
+        "a changed revision loads once after visibility and semantic owners release",
       );
+      // A concurrent list response may already contain the probed change.
+      state.loading = false;
+      state.refreshing = false;
+      intervals[0].callback();
+      state.loading = true;
+      surface.applyKnowledgeCacheRevision({ kind: "knowledge_revision", id: "win-1",
+        knowledge_kind: "issue", revision: "revision-3" });
+      surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1",
+        knowledge_kind: "issue", entries: [ROW_A, ROW_B], cache_revision: "revision-3",
+        refresh_enabled: true });
+      surface.refreshVisibleKnowledgeWindows();
+      assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 1,
+        "a matching concurrent list response consumes the pending revision change");
       surface.clearKnowledgeBridgeState("win-1");
     } finally {
       globalThis.document = originalDocument;

@@ -349,6 +349,7 @@ mod related_snapshot_cache_tests {
                 KnowledgeKind::Issue,
                 request_id,
                 view,
+                None,
             );
             let event = serde_json::to_value(&events[0].event).expect("serialize entries");
             event["revision"]
@@ -890,12 +891,18 @@ fn knowledge_phase_update_error_event(
     }
 }
 
+fn knowledge_cache_revision(project_root: &Path) -> Option<String> {
+    let root = gwt::issue_cache::issue_cache_root_for_repo_path(project_root)?;
+    gwt_github::Cache::new(root).revision().ok()
+}
+
 fn knowledge_view_events(
     client_id: String,
     id: String,
     kind: KnowledgeKind,
     request_id: Option<u64>,
     view: gwt::KnowledgeBridgeView,
+    cache_revision: Option<String>,
 ) -> Vec<OutboundEvent> {
     use sha2::{Digest, Sha256};
 
@@ -917,6 +924,7 @@ fn knowledge_view_events(
                 selected_number: view.selected_number,
                 empty_message: view.empty_message,
                 refresh_enabled: view.refresh_enabled,
+                cache_revision,
             },
         ),
         OutboundEvent::reply(
@@ -1613,6 +1621,55 @@ impl AppRuntime {
             .replace(project_root, items);
     }
 
+    pub(crate) fn check_knowledge_revision_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        kind: KnowledgeKind,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return Vec::new();
+        };
+        if tab
+            .workspace
+            .window(&address.raw_id)
+            .is_none_or(|window| knowledge_kind_for_preset(window.preset) != Some(kind))
+        {
+            return Vec::new();
+        }
+        let project_root = tab.project_root.clone();
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            // A fresh tick must read only the marker. The fingerprint-based
+            // sync wrapper scans the corpus even when its TTL has not expired.
+            if let Some(root) = gwt::issue_cache::issue_cache_root_for_repo_path(&project_root) {
+                if gwt::issue_cache::issue_cache_refresh_status(
+                    &root,
+                    gwt::issue_cache::ISSUE_CACHE_TTL,
+                    chrono::Utc::now(),
+                )
+                .stale
+                {
+                    let _ = gwt::refresh_knowledge_bridge_cache(&project_root, false);
+                }
+            }
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeRevision {
+                    id,
+                    knowledge_kind: kind,
+                    revision: knowledge_cache_revision(&project_root),
+                },
+            )]));
+        });
+        Vec::new()
+    }
+
     pub(crate) fn load_knowledge_bridge_events(
         &self,
         client_id: &str,
@@ -1686,6 +1743,7 @@ impl AppRuntime {
             reserve_related_snapshot_generation(&related_snapshot, &project_root, kind);
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
+            let cache_revision = knowledge_cache_revision(&project_root);
             let view = match load_knowledge_bridge(&project_root, kind, selected_number, false) {
                 Ok(mut view) => {
                     augment_and_publish_knowledge_bridge_related_works(
@@ -1718,6 +1776,7 @@ impl AppRuntime {
                 kind,
                 request_id,
                 view,
+                cache_revision,
             )));
             if !refresh_after {
                 return;
@@ -1729,6 +1788,7 @@ impl AppRuntime {
             if !refreshed {
                 return;
             }
+            let cache_revision = knowledge_cache_revision(&project_root);
             if let Ok(mut view) = load_knowledge_bridge(&project_root, kind, selected_number, false)
             {
                 augment_and_publish_knowledge_bridge_related_works(
@@ -1745,7 +1805,12 @@ impl AppRuntime {
                     &monitor_snapshot,
                 );
                 proxy.send(UserEvent::Dispatch(knowledge_view_events(
-                    client_id, id, kind, request_id, view,
+                    client_id,
+                    id,
+                    kind,
+                    request_id,
+                    view,
+                    cache_revision,
                 )));
             }
         });
@@ -1785,6 +1850,7 @@ impl AppRuntime {
             if !force && !refreshed {
                 return;
             }
+            let cache_revision = knowledge_cache_revision(&project_root);
             let event =
                 match gwt::load_knowledge_bridge(&project_root, kind, selected_number, false) {
                     Ok(mut view) => {
@@ -1801,7 +1867,7 @@ impl AppRuntime {
                             &mut view,
                             &monitor_snapshot,
                         );
-                        knowledge_view_events(client_id, id, kind, request_id, view)
+                        knowledge_view_events(client_id, id, kind, request_id, view, cache_revision)
                     }
                     Err(error) => vec![OutboundEvent::reply(
                         client_id,
