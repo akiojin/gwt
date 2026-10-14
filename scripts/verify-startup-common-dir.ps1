@@ -1,4 +1,5 @@
 # Issue #4415: frozen-base / checkout headed startup measurements. Build gwt/gwtd first.
+[CmdletBinding(PositionalBinding = $false)]
 param(
   [string]$ControlSha = '7b3c545a48db35f27e52cb5b64bf0985f1791955',
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
@@ -14,11 +15,14 @@ foreach ($relative in @('target/startup-common-dir-control.exe', 'target/debug/g
   }
 }
 $version = [IO.File]::ReadAllText((Join-Path $repoRoot 'scripts/playwright-version.txt')).Trim()
-$deps = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path ([IO.Path]::GetTempPath()) "gwt-playwright-$version" }
+# verify.run changes TEMP for each command; dependencies use the host cache.
+$deps = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else {
+  Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Temp/gwt-playwright-$version"
+}
 $cli = Join-Path $deps 'node_modules/playwright/cli.js'
 $resolver = Join-Path $deps 'resolve-playwright.cjs'
 if (-not (Test-Path -LiteralPath $cli) -or -not (Test-Path -LiteralPath $resolver)) {
-  throw "Pinned Playwright $version is missing; run scripts/run-visual-tests.sh --list once."
+  throw "Pinned Playwright $version is missing; run scripts/run-visual-tests.sh --list once and set GWT_PLAYWRIGHT_DEPS_DIR if using a custom cache."
 }
 $node = (Get-Command node -CommandType Application).Source
 # Keep the observer outside tracked source. Both arms use this same proxy;
