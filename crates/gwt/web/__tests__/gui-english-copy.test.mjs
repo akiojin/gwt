@@ -72,7 +72,7 @@ test('GUI JavaScript and HTML fixed copy stays English', () => {
 function rustCopy(source, path) {
   // Lex only strings/comments/braces. This gate is deliberately not a Rust parser.
   const tokens = [...source.matchAll(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|\br(#+)?"[\s\S]*?"\1|"(?:\\[\s\S]|[^"\\])*"|'(?:\\.|[^'\\])'|[{}]/g)];
-  const testModules = [...source.matchAll(/#\[cfg\(test\)\](?:\s*#\[[^\]]*\])*\s*mod\s+\w+\s*\{/g)].map(match => match.index + match[0].length - 1);
+  const testModules = [...source.matchAll(/#\[cfg\((?:test|all\(test,[^\]]*)\)\](?:\s*#\[[^\]]*\])*\s*mod\s+\w+\s*\{/g)].map(match => match.index + match[0].length - 1);
   const violations = [];
   let testDepth = 0;
   for (const token of tokens) {
@@ -89,16 +89,16 @@ function rustCopy(source, path) {
   return violations;
 }
 
-test('Rust GUI event producers and launch wizard fixed copy stays English', () => {
+test('Rust GUI event producers, launch wizard and native consent fixed copy stay English', () => {
   const violations = [];
   for (const file of filesUnder(rustRoot).filter(path => path.endsWith('.rs') && !/(?:\btests|_tests|test_support)\.rs$/.test(path))) {
     const path = relative(rustRoot, file);
     const source = readFileSync(file, 'utf8');
-    // CLI/agent guidance and native provider-reset consent are distinct from WebView copy.
+    // CLI/agent guidance is separate; native consent is GUI copy regardless of its entrypoint.
     if (path.startsWith('cli/') || path.startsWith('bin/')) continue;
-    if (!path.startsWith('app_runtime/') && !path.startsWith('launch_wizard/')
+    if (!path.startsWith('app_runtime/') && !path.startsWith('launch_wizard/') && !path.startsWith('provider_reset/')
       && !['pm_current.rs', 'protocol.rs'].includes(path) && !/\bBackendEvent\s*(?:::|\{)/.test(source)) continue;
     violations.push(...rustCopy(source, path));
   }
-  assert.deepEqual(violations, [], 'Fixed WebView event/error copy must be English.');
+  assert.deepEqual(violations, [], 'Fixed WebView and native dialog copy must be English.');
 });
