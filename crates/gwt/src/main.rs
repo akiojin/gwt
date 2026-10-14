@@ -2298,7 +2298,7 @@ enum UserEvent {
         client_id: ClientId,
         window_id: String,
         session_id: String,
-        reports: Vec<gwt::protocol::PmReportView>,
+        projection: gwt::protocol::PmReportsProjection,
         current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     },
@@ -11897,8 +11897,8 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
-            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, reports, current, error }) => {
-                clients.dispatch(app.pm_reports_loaded_events(client_id, &window_id, &session_id, reports, current, error));
+            Event::UserEvent(UserEvent::PmReportsLoaded { client_id, window_id, session_id, projection, current, error }) => {
+                clients.dispatch(app.pm_reports_loaded_events(client_id, &window_id, &session_id, projection, current, error));
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);

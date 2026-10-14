@@ -8,19 +8,110 @@ const report = (id = 'one') => ({ id, kind: 'progress', created_at: '2026-10-11T
   body: '# Update\n\n**Ready** and `code`\n\n- checked\n\n```sh\ncargo test\n```',
   body_html: '<h1>Update</h1><p><strong>Ready</strong> and <code>code</code></p><ul><li>checked</li></ul><pre><code>cargo test</code></pre>' });
 
+test('slice revisions fence Reports gaps and RAW interleave while snapshots recover bounded history', () => {
+  const model = createPmWindowModel();
+  model.bindPmWindowState('pm', 'session');
+  const receive = (revision, base, mode, reports, extra = {}) => model.applyPmWindowReceiveEvent({
+    kind: 'pm_reports', id: 'pm', session_id: 'session', reports, reports_mode: mode,
+    slice: { epoch: 'server', base_revision: base, revision }, ...extra });
+  receive(1, 0, 'snapshot', [report()]);
+  assert.equal(model.readPmWindowState().windows.pm.reportsCursor.revision, 1);
+  receive(2, 1, 'delta', [report('two')], { ordered_ids: ['one', 'two'], removed_ids: [] });
+  assert.deepEqual(model.readPmWindowState().windows.pm.reports.map(item => item.id), ['one', 'two']);
+  receive(1, 0, 'snapshot', [report('old')]);
+  assert.equal(model.readPmWindowState().windows.pm.reports[1].id, 'two');
+  assert.equal(receive(4, 3, 'delta', [report('gap')]), 'reports');
+  assert.equal(model.readPmWindowState().windows.pm.reportsCursor.revision, 2);
+  receive(4, 0, 'snapshot', [report('tail')]);
+  assert.deepEqual(model.readPmWindowState().windows.pm.reports.map(item => item.id), ['tail']);
+  const history = model.readPmWindowState().windows.pm.reports;
+  receive(4, 4, 'unchanged', [], { current: { observed_at: '2026-10-14T00:00:00Z', stale_minutes: 12 } });
+  assert.equal(model.readPmWindowState().windows.pm.reports, history);
+  assert.equal(model.readPmWindowState().windows.pm.current.stale_minutes, 12);
+  const consumed = [];
+  for (const id of ['a', 'b', 'c', 'd', 'e']) model.subscribePmWindowState(state => state.windows[id]?.terminal,
+    packet => { if (packet) consumed.push(packet.dataBase64); });
+  for (const id of ['a', 'b', 'c', 'd', 'e']) for (let revision = 1; revision <= 2; revision++) {
+    assert.equal(model.applyPmWindowReceiveEvent({ kind: 'terminal_output', id, data_base64: `${id}${revision}`,
+      slice: { epoch: 'connection', base_revision: revision - 1, revision } }), null);
+  }
+  assert.equal(consumed.length, 10);
+  assert.equal(model.applyPmWindowReceiveEvent({ kind: 'terminal_output', id: 'a', data_base64: 'gap',
+    slice: { epoch: 'connection', base_revision: 3, revision: 4 } }), 'terminal');
+  assert.equal(consumed.length, 10);
+  assert.equal(model.applyPmWindowReceiveEvent({ kind: 'terminal_output', id: 'a', data_base64: 'pending',
+    slice: { epoch: 'connection', base_revision: 4, revision: 5 } }), null, 'one snapshot request covers the pending suffix');
+  model.applyPmWindowReceiveEvent({ kind: 'terminal_snapshot', id: 'a', data_base64: 'recovered',
+    slice: { epoch: 'new-connection', base_revision: 0, revision: 1 } });
+  assert.equal(consumed.at(-1), 'recovered');
+  model.applyPmWindowReceiveEvent({ kind: 'terminal_output', id: 'a', data_base64: 'retired',
+    slice: { epoch: 'connection', base_revision: 2, revision: 3 } });
+  assert.equal(consumed.at(-1), 'recovered');
+});
+
 function fixture() {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const visibility = [], copied = [];
+  const visibility = [], copied = [], requested = [];
   const view = createPmChat({ document, root, sessionId: 'session',
-    onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text) });
+    onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
+    onRequestReports: request => requested.push(request) });
   const model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
-  const update = (reports = [], error = null, current = null) => model.applyPmWindowReceiveEvent({
-    kind: 'pm_reports', id: 'pm', session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current });
-  return { root, model, view, visibility, copied, update };
+  let reportRevision = 0;
+  const update = (reports = [], error = null, current = null, revision = ++reportRevision) => model.applyPmWindowReceiveEvent({
+    kind: 'pm_reports', id: 'pm', session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current,
+    reports_mode: 'snapshot', slice: { epoch: 'reports', base_revision: 0, revision } });
+  return { root, model, view, visibility, copied, requested, update };
 }
+
+test('Reports pages replace bounded visible history and can return to current reports', () => {
+  const { root, model, requested } = fixture();
+  const before = { created_at: '2026-10-11T00:00:00Z', source: 'legacy', ordinal: 20, id: 'new' };
+  const receive = (mode, reports, cursor) => model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm',
+    session_id: 'session', slice: { epoch: 'server', base_revision: 0, revision: 1 },
+    reports_mode: mode, reports, before: cursor });
+  receive('snapshot', [report('new')], before);
+  root.querySelector('[aria-label="Older PM reports"]').click();
+  assert.deepEqual(requested, [{ before }]);
+  receive('history', [report('old')], null);
+  assert.equal(root.querySelectorAll('article').length, 1);
+  assert.equal(root.querySelector('article').dataset.reportId, 'old');
+  assert.equal(root.querySelector('[aria-label="Older PM reports"]').hidden, true);
+  receive('unchanged', [], before);
+  assert.equal(model.readPmWindowState().windows.pm.reportsPage, true, 'delayed polling cannot leave an older page marked as latest');
+  root.querySelector('[aria-label="Latest PM reports"]').click();
+  assert.deepEqual(requested.at(-1), { reset: true });
+  receive('snapshot', [report('new')], before);
+  assert.equal(root.querySelector('article').dataset.reportId, 'new');
+  assert.equal(root.querySelector('[aria-label="Latest PM reports"]').hidden, true);
+  receive('history', [report('old')], null);
+  model.resetPmWindowSlices();
+  assert.equal(model.readPmWindowState().windows.pm.reportsCursor, null, 'reconnect requires a fresh Reports snapshot');
+});
+
+test('Reports request generations preserve the latest paging intent across out-of-order workers', () => {
+  const model = createPmWindowModel();
+  model.bindPmWindowState('pm', 'session');
+  const poll = model.preparePmReportsRequest('pm');
+  const history = model.preparePmReportsRequest('pm', { before: { id: 'anchor' } });
+  const response = (request, reports, mode) => model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm',
+    session_id: 'session', request_id: request.request_id, reports_mode: mode, reports,
+    slice: { epoch: 'server', base_revision: 0, revision: 1 } });
+  response(history, [report('old')], 'history');
+  response(poll, [report('latest')], 'snapshot');
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, 'old');
+  const latest = model.preparePmReportsRequest('pm', { reset: true });
+  assert.equal(model.preparePmReportsRequest('pm'), null, 'routine polling cannot supersede a pending explicit Latest request');
+  response(latest, [report('latest')], 'snapshot');
+  response(history, [report('old')], 'history');
+  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, 'latest');
+  const slowPoll = model.preparePmReportsRequest('pm');
+  assert.equal(model.preparePmReportsRequest('pm'), null, 'slow successful polls must not starve behind newer polls');
+  response(slowPoll, [], 'unchanged');
+  assert.ok(model.preparePmReportsRequest('pm'), 'accepted replies release the pending poll');
+});
 
 test('current card stays above history and distinguishes PM explanation from automatic facts', () => {
   const { root, update } = fixture();
@@ -151,8 +242,8 @@ test('report updates preserve nodes and scroll, append history, and retain histo
   assert.equal(transcript.scrollTop, 20);
   update([report(), report('two')]);
   assert.equal(root.querySelectorAll('article').length, 2);
-  // Concurrent reads may complete out of order; durable history only appends.
-  update([report()]);
+  // Concurrent reads may complete out of order; revision fences older reads.
+  update([report()], null, null, 1);
   assert.equal(root.querySelectorAll('article').length, 2);
   update([], 'Reports could not be loaded');
   assert.equal(root.querySelectorAll('article').length, 2);
@@ -168,12 +259,36 @@ test('Reports and raw terminal share one immutable version without replaying ter
     if (state.terminal && state.terminal !== previousPacket) packets.push(state.terminal.dataBase64);
     previousPacket = state.terminal;
   });
-  model.applyPmWindowReceiveEvent({ kind: 'terminal_snapshot', id: 'pm', data_base64: 'snapshot' });
+  model.applyPmWindowReceiveEvent({ kind: 'terminal_snapshot', id: 'pm', data_base64: 'snapshot',
+    slice: { epoch: 'terminal', base_revision: 0, revision: 1 } });
   update([report()]);
-  model.applyPmWindowReceiveEvent({ kind: 'terminal_output', id: 'pm', data_base64: 'output' });
+  model.applyPmWindowReceiveEvent({ kind: 'terminal_output', id: 'pm', data_base64: 'output',
+    slice: { epoch: 'terminal', base_revision: 1, revision: 2 } });
   assert.deepEqual(versions, [1, 2, 3, 4]);
   assert.deepEqual(packets, ['snapshot', 'output']);
   assert.ok(Object.isFrozen(model.readPmWindowState().windows.pm.reports));
+});
+
+test('RAW updates advance the view version without serializing unchanged filtered Reports', () => {
+  const { root, model, update } = fixture();
+  update([report(), { ...report('qa'), kind: 'qa', question: 'Why?' }]);
+  const select = root.querySelector('select');
+  select.querySelector('option[value="qa"]').selected = true;
+  select.dispatchEvent(new root.ownerDocument.defaultView.Event('change'));
+  const first = root.querySelector('article');
+  const stringify = JSON.stringify;
+  let serialized = 0;
+  try {
+    JSON.stringify = (...args) => { serialized++; return stringify(...args); };
+    for (const [index, packet] of ['one', 'two', 'three'].entries()) {
+      model.applyPmWindowReceiveEvent({ kind: 'terminal_output', id: 'pm',
+        data_base64: Buffer.from(packet).toString('base64'),
+        slice: { epoch: 'terminal', base_revision: index, revision: index + 1 } });
+    }
+  } finally { JSON.stringify = stringify; }
+  assert.equal(serialized, 0, 'RAW never scans the full Reports history');
+  assert.equal(root.querySelector('article'), first);
+  assert.equal(root.dataset.stateVersion, String(model.readPmWindowState().windows.pm.revision));
 });
 
 test('Execution log toggle retains Reports; stale sessions and native transcript cannot replace reports', () => {

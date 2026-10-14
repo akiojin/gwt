@@ -16,4 +16,19 @@ test('the model type selects the shared renderer and preserves sanitized markdow
   assert.equal(fallback.textContent, '<script>literal</script>');
   assert.ok(fallback.classList.contains('is-plaintext'));
   assert.throws(() => renderUiContent(document, {type:'unregistered',body:'answer'}), /Unsupported UI content/);
+  const typed = renderUiContent(document, markdownContent({ body: '**Typed**', content: [
+    { type: 'element', tag: 'p', children: [
+      { type: 'element', tag: 'strong', children: [{ type: 'text', text: 'Typed' }] },
+      { type: 'text', text: '<script>literal</script>' },
+      { type: 'element', tag: 'a', href: 'https://example.com', children: [{ type: 'text', text: 'safe' }] },
+      { type: 'element', tag: 'a', href: 'javascript:alert(1)', children: [{ type: 'text', text: 'unsafe' }] },
+    ] },
+  ] }));
+  assert.equal(typed.querySelector('strong').textContent, 'Typed');
+  assert.equal(typed.querySelector('script'), null);
+  assert.equal(typed.querySelector('a').getAttribute('href'), 'https://example.com');
+  assert.equal(typed.querySelectorAll('a')[1].hasAttribute('href'), false);
+  assert.throws(() => renderUiContent(document, markdownContent({ content: [
+    { type: 'element', tag: 'script', children: [] },
+  ] })), /Unsupported Markdown/);
 });

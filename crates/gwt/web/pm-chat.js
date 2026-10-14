@@ -10,7 +10,8 @@ export function createPmWindowModel() {
   const snapshotTime = value => value.replace(/(?:\.(\d+))?Z$/, (_, digits = '') => `.${digits.padEnd(9, '0')}Z`);
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
-      reports: [], current: null, error: null, loaded: false };
+      reports: [], current: null, error: null, loaded: false, reportsCursor: null,
+      terminalCursor: null, terminalNeedsSnapshot: false, reportsPage: false, reportsBefore: null, reportsRequestId: 0, reportsRequestPending: false };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -21,24 +22,83 @@ export function createPmWindowModel() {
       return { windows: { ...state.windows, [windowId]: { ...next, revision: (previous?.revision || 0) + 1 } }, changedWindowId: windowId };
     });
   }
+  const validSlice = slice => typeof slice?.epoch === 'string' && slice.epoch.length > 0
+    && slice.epoch.length <= 128 && Number.isSafeInteger(slice.revision) && slice.revision >= 0
+    && Number.isSafeInteger(slice.base_revision) && slice.base_revision >= 0 && slice.base_revision <= slice.revision;
+  const boundedReports = reports => Array.isArray(reports) && reports.length <= 200
+    && reports.every(report => typeof report.id === 'string' && typeof report.body === 'string')
+    && new Set(reports.map(report => report.id)).size === reports.length
+    && reports.reduce((bytes, report) => bytes + new TextEncoder().encode(report.body).length, 0) <= 2 * 1024 * 1024;
   function applyPmWindowReceiveEvent(event) {
+    let resync = null;
     model.update(state => {
       const previous = state.windows[event.id];
       let next = previous || emptyWindow(event.id);
+      const slice = event.slice;
       if (event.kind === 'pm_reports') {
         if (!previous || event.session_id !== previous.sessionId) return state;
-        // The durable ledger only appends. Ignore older concurrent reads.
-        if (!event.error && (event.reports || []).length < previous.reports.length) return state;
-        if (!event.error && event.current?.observed_at && previous.current?.observed_at
-          && snapshotTime(event.current.observed_at) < snapshotTime(previous.current.observed_at)) return state;
-        next = { ...next, error: event.error || null, loaded: true,
-          current: event.error ? previous.current : (event.current || null),
-          reports: event.error ? previous.reports : (event.reports || []) };
+        if (previous.reportsRequestId && event.request_id !== previous.reportsRequestId) return state;
+        if (event.error) next = { ...next, error: event.error, loaded: true, reportsRequestPending: false };
+        else {
+          if (!validSlice(slice)) { resync = 'reports'; return state; }
+          const cursor = previous.reportsCursor;
+          if (cursor?.epoch === slice.epoch && slice.revision < cursor.revision) return state;
+          let reports = previous.reports;
+          if (event.reports_mode === 'snapshot' || event.reports_mode === 'history') reports = event.reports;
+          else if (event.reports_mode === 'delta') {
+            if (previous.reportsPage) return state;
+            if (cursor?.epoch === slice.epoch && slice.revision <= cursor.revision) return state;
+            if (!cursor || cursor.epoch !== slice.epoch || cursor.revision !== slice.base_revision) {
+              resync = 'reports'; return state;
+            }
+            if (slice.revision === cursor.revision) return state;
+            const byId = new Map(reports.map(report => [report.id, report]));
+            for (const id of event.removed_ids || []) byId.delete(id);
+            for (const report of event.reports || []) byId.set(report.id, report);
+            reports = (event.ordered_ids || []).map(id => byId.get(id));
+            if (reports.length !== byId.size || reports.some(report => !report)) { resync = 'reports'; return state; }
+          } else if (event.reports_mode !== 'unchanged' || !cursor || cursor.epoch !== slice.epoch
+            || cursor.revision !== slice.revision) { resync = 'reports'; return state; }
+          if (!boundedReports(reports)) { resync = 'reports'; return state; }
+          const staleCurrent = event.current?.observed_at && previous.current?.observed_at
+            && snapshotTime(event.current.observed_at) < snapshotTime(previous.current.observed_at);
+          next = { ...next, error: null, loaded: true, reports, reportsRequestPending: false,
+            reportsCursor: { epoch: slice.epoch, revision: slice.revision },
+            reportsPage: event.reports_mode === 'unchanged' ? previous.reportsPage : event.reports_mode === 'history',
+            reportsBefore: event.reports_mode === 'unchanged' ? previous.reportsBefore : event.before || null,
+            current: staleCurrent ? previous.current : (event.current || null) };
+        }
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
-        next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
+        const cursor = next.terminalCursor;
+        if (!validSlice(slice)) { resync = 'terminal'; return state; }
+        if (cursor?.epoch === slice.epoch && slice.revision <= cursor.revision) return state;
+        if (event.kind === 'terminal_output' && (next.terminalNeedsSnapshot
+          || (cursor ? cursor.epoch !== slice.epoch || cursor.revision !== slice.base_revision : slice.base_revision !== 0))) {
+          resync = next.terminalNeedsSnapshot ? null : 'terminal';
+          if (next.terminalNeedsSnapshot) return state;
+          return { windows: { ...state.windows, [event.id]: { ...next, terminalNeedsSnapshot: true } }, changedWindowId: event.id };
+        }
+        next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 },
+          terminalCursor: { epoch: slice.epoch, revision: slice.revision }, terminalNeedsSnapshot: false };
       } else return state;
       return { windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
     });
+    return resync;
+  }
+  function preparePmReportsRequest(windowId, { reset = false, before = null } = {}) {
+    const previous = model.read().windows[windowId];
+    if (!previous || (!reset && !before && previous.reportsRequestPending)) return null;
+    const request_id = previous.reportsRequestId + 1;
+    if (!Number.isSafeInteger(request_id)) throw new Error('PM Reports request generation exhausted');
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: {
+      ...state.windows[windowId], reportsRequestId: request_id, reportsRequestPending: true,
+    } } }));
+    return { id: windowId, request_id, cursor: reset || before ? null : previous.reportsCursor, before };
+  }
+  function resetPmWindowSlices() {
+    model.update(state => ({ ...state, windows: Object.fromEntries(Object.entries(state.windows).map(([id, value]) =>
+      [id, { ...value, reportsCursor: null, reportsRequestPending: false,
+        terminalCursor: null, terminalNeedsSnapshot: true }])) }));
   }
   function removePmWindowState(windowId) {
     model.update(state => {
@@ -48,17 +108,21 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  function subscribePmWindowView(select, render) { return model.subscribeView(select, render); }
+  return { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState, subscribePmWindowView, resetPmWindowSlices, preparePmReportsRequest };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility,
+export function createPmChat({ document, root, sessionId, onLogVisibility, onRequestReports = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
   let logs = false;
   let digest = '';
   let currentDigest;
+  let previousCurrent = Symbol();
+  let previousReports, previousKind;
+  let visibleReports = [];
   let latestState;
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -93,7 +157,14 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   const transcript = element('div', 'pm-chat__transcript');
   transcript.setAttribute('role', 'log');
   transcript.setAttribute('aria-label', 'PM reports');
-  body.append(currentCard, filter, notice, transcript);
+  const pages = element('div', 'pm-chat__toolbar');
+  const olderButton = element('button', '', 'Older reports');
+  olderButton.setAttribute('aria-label', 'Older PM reports');
+  const latestButton = element('button', '', 'Latest reports');
+  latestButton.setAttribute('aria-label', 'Latest PM reports');
+  olderButton.hidden = latestButton.hidden = true;
+  pages.append(olderButton, latestButton);
+  body.append(currentCard, filter, notice, transcript, pages);
   root.append(toolbar, body);
 
   function showLogs(value) {
@@ -107,7 +178,13 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   const showReports = () => showLogs(false);
   const showLog = () => showLogs(true);
   const filterReports = () => update(latestState);
+  const olderReports = () => latestState?.reportsBefore && onRequestReports({ before: latestState.reportsBefore });
+  const latestReports = () => onRequestReports({ reset: true });
+  olderButton.addEventListener('click', olderReports);
+  latestButton.addEventListener('click', latestReports);
   function renderCurrent(current) {
+    if (previousCurrent === current) return;
+    previousCurrent = current;
     const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
     if (currentDigest === nextDigest) return;
     currentDigest = nextDigest;
@@ -171,15 +248,19 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
+    olderButton.hidden = !state.reportsBefore;
+    latestButton.hidden = !state.reportsPage;
     renderCurrent(state.current);
     const reports = state.reports;
-    const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
-    const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
+    const changed = reports !== previousReports || kindSelect.value !== previousKind;
+    if (changed) visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
+    const nextDigest = changed ? JSON.stringify([kindSelect.value, visibleReports]) : digest;
     if (digest !== nextDigest) {
       const atBottom = transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop <= 32;
       const previousScroll = transcript.scrollTop;
       const nodes = visibleReports.map(report => {
         const row = element('article', 'pm-chat__message');
+        row.dataset.reportId = report.id;
         const qa = report.kind === 'qa';
         const header = element('div', 'pm-chat__author');
         const time = element('time', '', new Date(report.created_at).toLocaleString());
@@ -216,6 +297,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
       transcript.scrollTop = atBottom ? transcript.scrollHeight : previousScroll;
       digest = nextDigest;
     }
+    previousReports = reports;
+    previousKind = kindSelect.value;
     notice.textContent = state.error || (!state.loaded ? 'Loading PM reports…'
       : !reports.length ? 'No PM reports yet. Use the execution log to interact with PM.'
         : visibleReports.length ? '' : `No ${kindLabels[kindSelect.value]} reports yet.`);
@@ -228,6 +311,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     transcript.scrollTop = 0;
     digest = '';
     currentDigest = undefined;
+    previousCurrent = Symbol();
+    previousReports = previousKind = undefined;
+    visibleReports = [];
     showLogs(false);
   }
   function dispose() {
@@ -235,6 +321,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
     kindSelect.removeEventListener('change', filterReports);
+    olderButton.removeEventListener('click', olderReports);
+    latestButton.removeEventListener('click', latestReports);
     root.replaceChildren();
     root.classList.remove('pm-chat', 'pm-chat--logs');
   }

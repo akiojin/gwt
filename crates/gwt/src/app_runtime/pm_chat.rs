@@ -4,6 +4,112 @@ use gwt::pm_conversation::{PmConversationAvailability, PmConversationSnapshot};
 
 use super::{AppRuntime, BackendEvent, ClientId, OutboundEvent, ProjectContext, UserEvent};
 
+use gwt::protocol::{PmReportView, PmReportsMode, PmReportsProjection, SliceCursor, SliceRevision};
+use gwt_core::pm_report::{PmReportsHistoryCursor, PmReportsReader, PmReportsUpdate};
+
+pub(crate) struct PmReportsState {
+    reader: PmReportsReader,
+    epoch: String,
+    revision: u64,
+    tail: Vec<PmReportView>,
+    delta: Option<PmReportsProjection>,
+}
+
+impl Default for PmReportsState {
+    fn default() -> Self {
+        Self {
+            reader: Default::default(),
+            epoch: uuid::Uuid::new_v4().to_string(),
+            revision: 0,
+            tail: Vec::new(),
+            delta: None,
+        }
+    }
+}
+
+impl PmReportsState {
+    fn read(
+        &mut self,
+        root: &std::path::Path,
+        cursor: Option<&SliceCursor>,
+        before: Option<&PmReportsHistoryCursor>,
+    ) -> gwt_core::Result<PmReportsProjection> {
+        let update = self.reader.refresh(root)?;
+        if !matches!(update, PmReportsUpdate::Unchanged) {
+            let base_revision = self.revision;
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .filter(|value| *value <= 9_007_199_254_740_991)
+                .ok_or_else(|| {
+                    gwt_core::GwtError::Config("PM Reports revision exhausted".into())
+                })?;
+            let old = std::mem::take(&mut self.tail);
+            self.tail = self
+                .reader
+                .tail()
+                .iter()
+                .map(|report| {
+                    old.iter()
+                        .find(|view| &view.report == report)
+                        .cloned()
+                        .unwrap_or_else(|| PmReportView::from(report.clone()))
+                })
+                .collect();
+            self.delta = match update {
+                PmReportsUpdate::Delta {
+                    reports,
+                    removed_ids,
+                    ordered_ids,
+                } => Some(PmReportsProjection {
+                    reports_mode: PmReportsMode::Delta,
+                    slice: Some(SliceRevision {
+                        epoch: self.epoch.clone(),
+                        base_revision,
+                        revision: self.revision,
+                    }),
+                    reports: reports.into_iter().map(PmReportView::from).collect(),
+                    removed_ids,
+                    ordered_ids,
+                    before: self.reader.history_cursor(),
+                    request_id: None,
+                }),
+                _ => None,
+            };
+        }
+        let mut projection = PmReportsProjection {
+            slice: Some(SliceRevision {
+                epoch: self.epoch.clone(),
+                base_revision: cursor.map_or(0, |value| value.revision.min(self.revision)),
+                revision: self.revision,
+            }),
+            before: self.reader.history_cursor(),
+            ..Default::default()
+        };
+        if let Some(before) = before {
+            let page = gwt_core::pm_report::load_reports_before(root, Some(before))?;
+            projection.reports_mode = PmReportsMode::History;
+            projection.reports = page.reports.into_iter().map(PmReportView::from).collect();
+            projection.before = page.before;
+        } else if cursor
+            .is_some_and(|value| value.epoch == self.epoch && value.revision == self.revision)
+        {
+            projection.reports_mode = PmReportsMode::Unchanged;
+        } else if let Some(delta) = self.delta.as_ref().filter(|delta| {
+            cursor.is_some_and(|cursor| {
+                cursor.epoch == self.epoch
+                    && Some(cursor.revision)
+                        == delta.slice.as_ref().map(|slice| slice.base_revision)
+            })
+        }) {
+            return Ok(delta.clone());
+        } else {
+            projection.reports = self.tail.clone();
+        }
+        Ok(projection)
+    }
+}
+
 fn empty(availability: PmConversationAvailability, detail: &str) -> PmConversationSnapshot {
     PmConversationSnapshot {
         conversation_id: None,
@@ -19,6 +125,9 @@ impl AppRuntime {
         context: &ProjectContext,
         client_id: ClientId,
         window_id: &str,
+        cursor: Option<SliceCursor>,
+        before: Option<PmReportsHistoryCursor>,
+        request_id: Option<u64>,
     ) -> Vec<OutboundEvent> {
         let Some(session_id) = self.pm_chat_session_id(window_id).map(str::to_owned) else {
             return vec![OutboundEvent::reply(
@@ -26,7 +135,7 @@ impl AppRuntime {
                 BackendEvent::PmReports {
                     id: window_id.to_owned(),
                     session_id: None,
-                    reports: Vec::new(),
+                    projection: PmReportsProjection::default(),
                     current: None,
                     error: Some("This window has no registered PM.".to_owned()),
                 },
@@ -39,23 +148,27 @@ impl AppRuntime {
             return Vec::new();
         };
         let project_root = tab.project_root.clone();
+        let Some(state) = self.project_state(context) else {
+            return Vec::new();
+        };
+        let reader = std::sync::Arc::clone(&state.pm_reports_reader);
         let pending_update = self.pending_update.clone();
         let window_id = window_id.to_owned();
         let proxy = self.proxy.for_project(context.clone());
         self.blocking_tasks.spawn(move || {
-            let (reports, error) = match gwt_core::pm_report::load_reports(&project_root) {
-                Ok(reports) => (
-                    reports
-                        .into_iter()
-                        .map(gwt::protocol::PmReportView::from)
-                        .collect(),
-                    None,
-                ),
-                Err(error) => (
-                    Vec::new(),
-                    Some(format!("PM reports could not be loaded: {error}")),
-                ),
-            };
+            // Serialize read and enqueue: a later poll cannot overtake a delta.
+            let mut reader = reader
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (mut projection, error) =
+                match reader.read(&project_root, cursor.as_ref(), before.as_ref()) {
+                    Ok(projection) => (projection, None),
+                    Err(error) => (
+                        PmReportsProjection::default(),
+                        Some(format!("PM reports could not be loaded: {error}")),
+                    ),
+                };
+            projection.request_id = request_id;
             let (current, error) =
                 match gwt::pm_current::snapshot(&project_root, pending_update.as_ref()) {
                     Ok(current) => (Some(Box::new(current)), error),
@@ -65,7 +178,7 @@ impl AppRuntime {
                 client_id,
                 window_id,
                 session_id,
-                reports,
+                projection,
                 current,
                 error,
             });
@@ -78,7 +191,7 @@ impl AppRuntime {
         client_id: ClientId,
         window_id: &str,
         session_id: &str,
-        reports: Vec<gwt::protocol::PmReportView>,
+        projection: PmReportsProjection,
         current: Option<Box<gwt::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
     ) -> Vec<OutboundEvent> {
@@ -90,7 +203,7 @@ impl AppRuntime {
             BackendEvent::PmReports {
                 id: window_id.to_owned(),
                 session_id: Some(session_id.to_owned()),
-                reports,
+                projection,
                 current,
                 error,
             },
@@ -208,5 +321,64 @@ impl AppRuntime {
                 snapshot,
             },
         )]
+    }
+}
+
+#[cfg(test)]
+mod reports_slice_tests {
+    use super::*;
+
+    #[test]
+    fn pm_reports_slice_sends_delta_noop_and_recovers_stale_cursors() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let first = gwt_core::pm_report::post_report(
+            &repo,
+            gwt_core::pm_report::PmReportKind::Progress,
+            "first",
+            None,
+        )
+        .unwrap();
+        let mut state = PmReportsState::default();
+        let snapshot = state.read(&repo, None, None).unwrap();
+        assert_eq!(
+            snapshot.reports_mode,
+            gwt::protocol::PmReportsMode::Snapshot
+        );
+        assert_eq!(snapshot.reports[0].report.id, first.id);
+        let cursor = gwt::protocol::SliceCursor {
+            epoch: snapshot.slice.as_ref().unwrap().epoch.clone(),
+            revision: snapshot.slice.as_ref().unwrap().revision,
+        };
+        let second = gwt_core::pm_report::post_report(
+            &repo,
+            gwt_core::pm_report::PmReportKind::Progress,
+            "second",
+            None,
+        )
+        .unwrap();
+        let delta = state.read(&repo, Some(&cursor), None).unwrap();
+        assert_eq!(delta.reports_mode, gwt::protocol::PmReportsMode::Delta);
+        assert_eq!(delta.reports.len(), 1);
+        assert_eq!(delta.reports[0].report.id, second.id);
+        assert_eq!(delta.ordered_ids, [first.id, second.id]);
+        let latest = gwt::protocol::SliceCursor {
+            epoch: cursor.epoch,
+            revision: delta.slice.as_ref().unwrap().revision,
+        };
+        let noop = state.read(&repo, Some(&latest), None).unwrap();
+        assert_eq!(noop.reports_mode, gwt::protocol::PmReportsMode::Unchanged);
+        assert!(noop.reports.is_empty());
+        let stale = gwt::protocol::SliceCursor {
+            epoch: "retired-server".into(),
+            revision: latest.revision,
+        };
+        let recovered = state.read(&repo, Some(&stale), None).unwrap();
+        assert_eq!(
+            recovered.reports_mode,
+            gwt::protocol::PmReportsMode::Snapshot
+        );
+        assert_eq!(recovered.reports.len(), 2);
     }
 }

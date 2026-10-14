@@ -520,6 +520,8 @@ pub struct WindowRuntime {
     /// reused by a successor, so background events must carry this value and
     /// prove they still belong to the runtime currently stored for the id.
     incarnation: u64,
+    /// Last preview broadcast by this PTY incarnation; hydration reads the pane.
+    last_terminal_preview: Option<String>,
     /// SPEC-3885 T-020: when this runtime started, in milliseconds since the
     /// Unix epoch. It is the Issue row's elapsed-time source, so it must not
     /// move when the agent merely changes state.
@@ -547,6 +549,7 @@ impl WindowRuntime {
             .shared_pty();
         Self {
             incarnation,
+            last_terminal_preview: None,
             _initial_prompt_file: None,
             started_at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1428,6 +1431,7 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) pm_sessions: HashMap<PathBuf, String>,
     /// One bounded append reader per Project; native file reads stay off tao.
     pub(crate) pm_conversation_reader: Arc<Mutex<gwt::pm_conversation::PmConversationReader>>,
+    pub(crate) pm_reports_reader: Arc<Mutex<pm_chat::PmReportsState>>,
     /// SPEC-3431 T-093 (FR-012): per project, the monitor signal set the wake
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
@@ -1479,6 +1483,7 @@ pub(crate) fn initial_project_states(
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
+                    pm_reports_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
@@ -3987,6 +3992,7 @@ impl AppRuntime {
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
+                    pm_reports_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
@@ -10829,7 +10835,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
-            | FrontendEvent::LoadPmReports { id }
+            | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11177,7 +11183,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
-            | FrontendEvent::LoadPmReports { id }
+            | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
@@ -11448,9 +11454,12 @@ impl AppRuntime {
             FrontendEvent::LoadPmConversation { id } => {
                 self.load_pm_conversation_events(context, client_id, &id)
             }
-            FrontendEvent::LoadPmReports { id } => {
-                self.load_pm_reports_events(context, client_id, &id)
-            }
+            FrontendEvent::LoadPmReports {
+                id,
+                cursor,
+                before,
+                request_id,
+            } => self.load_pm_reports_events(context, client_id, &id, cursor, before, request_id),
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }

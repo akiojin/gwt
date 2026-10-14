@@ -509,7 +509,7 @@ impl AppRuntime {
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
-        self.handle_runtime_output_inner(id, data, true, None)
+        self.handle_runtime_output_inner(id, data, true, None, None)
     }
 
     /// `seq` is the pane stream position the reader thread observed right
@@ -525,7 +525,7 @@ impl AppRuntime {
         if !self.runtime_incarnation_is_current(&id, incarnation) {
             return Vec::new();
         }
-        self.handle_runtime_output_inner(id, data, true, Some(seq))
+        self.handle_runtime_output_inner(id, data, true, Some(seq), None)
     }
 
     pub(crate) fn handle_daemon_runtime_output(
@@ -534,15 +534,22 @@ impl AppRuntime {
         data: Vec<u8>,
         preview_text: Option<String>,
     ) -> Vec<OutboundEvent> {
-        if self.window_lookup.contains_key(&id) {
-            if let Some(text) = preview_text {
-                self.remote_terminal_previews.insert(id.clone(), text);
-            }
-        }
+        let changed_preview = if self.window_lookup.contains_key(&id) {
+            preview_text.filter(|text| {
+                if self.remote_terminal_previews.get(&id) == Some(text) {
+                    return false;
+                }
+                self.remote_terminal_previews
+                    .insert(id.clone(), text.clone());
+                true
+            })
+        } else {
+            None
+        };
         // Daemon publications describe another process; a local PTY
         // incarnation is neither
         // available nor authoritative for this path.
-        self.handle_runtime_output_inner(id, data, false, None)
+        self.handle_runtime_output_inner(id, data, false, None, changed_preview)
     }
 
     fn handle_runtime_output_inner(
@@ -551,6 +558,7 @@ impl AppRuntime {
         data: Vec<u8>,
         publish_to_daemon: bool,
         stream_seq: Option<u64>,
+        remote_preview: Option<String>,
     ) -> Vec<OutboundEvent> {
         let _project_scope = self.enter_window_log_scope(&id);
         let Some(address) = self.window_lookup.get(&id).cloned() else {
@@ -576,7 +584,7 @@ impl AppRuntime {
                     .map(|pane| terminal_preview_text(&pane.screen().contents()))
             })
         } else {
-            self.remote_terminal_previews.get(&id).cloned()
+            remote_preview
         };
         if publish_to_daemon {
             if let Some(tab) = self.tab(&address.tab_id) {
@@ -595,7 +603,19 @@ impl AppRuntime {
             },
         )
         .with_terminal_stream_seq(stream_seq)];
-        if let Some(text) = preview_text {
+        if let Some(text) = preview_text.filter(|text| {
+            if !publish_to_daemon {
+                return true;
+            }
+            let Some(runtime) = self.runtimes.get_mut(&output_id) else {
+                return false;
+            };
+            if runtime.last_terminal_preview.as_ref() == Some(text) {
+                return false;
+            }
+            runtime.last_terminal_preview = Some(text.clone());
+            true
+        }) {
             events.push(OutboundEvent::project(
                 project_key,
                 BackendEvent::TerminalPreview {

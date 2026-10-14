@@ -5,19 +5,195 @@ use gwt_core::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Render-only HTML is derived from durable report Markdown on the host.
+/// Reports carry structured Markdown; DOM strings belong to the view.
 #[derive(Debug, Clone, Serialize)]
 pub struct PmReportView {
     #[serde(flatten)]
     pub report: gwt_core::pm_report::PmReport,
-    pub body_html: String,
+    pub content: Vec<MarkdownNode>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MarkdownNode {
+    Text {
+        text: String,
+    },
+    Element {
+        tag: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        href: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        start: Option<u64>,
+        children: Vec<MarkdownNode>,
+    },
+}
+
+impl MarkdownNode {
+    fn element(tag: &str) -> Self {
+        Self::Element {
+            tag: tag.to_owned(),
+            href: None,
+            start: None,
+            children: Vec::new(),
+        }
+    }
+    fn children(&mut self) -> &mut Vec<Self> {
+        match self {
+            Self::Element { children, .. } => children,
+            _ => unreachable!("parser containers are elements"),
+        }
+    }
+}
+
+fn report_url(value: &str) -> Option<String> {
+    if value
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return None;
+    }
+    if let Some((scheme, _)) = value.split_once(':') {
+        if !scheme.contains(['/', '#', '?'])
+            && !["http", "https", "mailto"].contains(&scheme.to_ascii_lowercase().as_str())
+        {
+            return None;
+        }
+    }
+    Some(value.to_owned())
+}
+
+fn report_markdown(markdown: &str) -> Vec<MarkdownNode> {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let mut stack = vec![MarkdownNode::element("span")];
+    for event in Parser::new_ext(markdown, options) {
+        let node = match event {
+            Event::Start(tag) => {
+                // Bound serialization, destruction and browser recursion too.
+                // Excessively nested Markdown remains readable as literal text.
+                if stack.len() >= 32 {
+                    return vec![MarkdownNode::Element {
+                        tag: "pre".into(),
+                        href: None,
+                        start: None,
+                        children: vec![MarkdownNode::Text {
+                            text: markdown.to_owned(),
+                        }],
+                    }];
+                }
+                let mut node = match tag {
+                    Tag::Paragraph => MarkdownNode::element("p"),
+                    Tag::Heading { level, .. } => MarkdownNode::element(&level.to_string()),
+                    Tag::BlockQuote(_) => MarkdownNode::element("blockquote"),
+                    Tag::CodeBlock(_) => MarkdownNode::element("pre"),
+                    Tag::List(start) => MarkdownNode::Element { tag: if start.is_some() { "ol" } else { "ul" }.into(), href: None, start, children: Vec::new() },
+                    Tag::Item => MarkdownNode::element("li"),
+                    Tag::Table(_) => MarkdownNode::element("table"),
+                    Tag::TableHead => MarkdownNode::element("thead"),
+                    Tag::TableRow => MarkdownNode::element("tr"),
+                    Tag::TableCell => MarkdownNode::element(if stack.iter().any(|node| matches!(node, MarkdownNode::Element { tag, .. } if tag == "thead")) { "th" } else { "td" }),
+                    Tag::Emphasis => MarkdownNode::element("em"),
+                    Tag::Strong => MarkdownNode::element("strong"),
+                    Tag::Strikethrough => MarkdownNode::element("del"),
+                    Tag::Link { dest_url, .. } => MarkdownNode::Element { tag: "a".into(), href: report_url(&dest_url), start: None, children: Vec::new() },
+                    Tag::Image { dest_url, .. } => MarkdownNode::Element { tag: "img".into(), href: report_url(&dest_url).filter(|url| !url.to_ascii_lowercase().starts_with("mailto:")), start: None, children: Vec::new() },
+                    _ => MarkdownNode::element("span"),
+                };
+                // No author-controlled attributes or HTML enter this tree.
+                if let MarkdownNode::Element {
+                    start: Some(value), ..
+                } = &mut node
+                {
+                    *value = (*value).min(9_007_199_254_740_991);
+                }
+                stack.push(node);
+                continue;
+            }
+            Event::End(_) => {
+                let mut node = stack.pop().expect("balanced Markdown start/end");
+                if let MarkdownNode::Element { tag, children, .. } = &mut node {
+                    if tag == "pre" || tag == "thead" {
+                        let mut wrapper =
+                            MarkdownNode::element(if tag == "pre" { "code" } else { "tr" });
+                        *wrapper.children() = std::mem::take(children);
+                        children.push(wrapper);
+                    }
+                }
+                node
+            }
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => MarkdownNode::Text {
+                text: text.into_string(),
+            },
+            Event::Code(text) => MarkdownNode::Element {
+                tag: "code".into(),
+                href: None,
+                start: None,
+                children: vec![MarkdownNode::Text {
+                    text: text.into_string(),
+                }],
+            },
+            Event::SoftBreak => MarkdownNode::Text { text: "\n".into() },
+            Event::HardBreak => MarkdownNode::element("br"),
+            Event::Rule => MarkdownNode::element("hr"),
+            Event::TaskListMarker(checked) => MarkdownNode::Text {
+                text: if checked { "☑ " } else { "☐ " }.into(),
+            },
+            _ => continue,
+        };
+        stack
+            .last_mut()
+            .expect("Markdown root")
+            .children()
+            .push(node);
+    }
+    std::mem::take(stack[0].children())
 }
 
 impl From<gwt_core::pm_report::PmReport> for PmReportView {
     fn from(report: gwt_core::pm_report::PmReport) -> Self {
-        let body_html = crate::board_remote::markdown::markdown_to_html(&report.body);
-        Self { report, body_html }
+        let content = report_markdown(&report.body);
+        Self { report, content }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SliceCursor {
+    pub epoch: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SliceRevision {
+    pub epoch: String,
+    pub base_revision: u64,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PmReportsMode {
+    #[default]
+    Snapshot,
+    Delta,
+    Unchanged,
+    History,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PmReportsProjection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u64>,
+    pub reports_mode: PmReportsMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slice: Option<SliceRevision>,
+    pub reports: Vec<PmReportView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ordered_ids: Vec<String>,
+    pub before: Option<gwt_core::pm_report::PmReportsHistoryCursor>,
 }
 
 fn serialize_release_notes_entries<S: serde::Serializer>(
@@ -604,6 +780,12 @@ pub enum FrontendEvent {
     /// Read explicitly posted reports for the registered PM window.
     LoadPmReports {
         id: String,
+        #[serde(default)]
+        request_id: Option<u64>,
+        #[serde(default)]
+        cursor: Option<SliceCursor>,
+        #[serde(default)]
+        before: Option<gwt_core::pm_report::PmReportsHistoryCursor>,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -2110,7 +2292,8 @@ pub enum BackendEvent {
     PmReports {
         id: String,
         session_id: Option<String>,
-        reports: Vec<PmReportView>,
+        #[serde(flatten)]
+        projection: PmReportsProjection,
         #[serde(skip_serializing_if = "Option::is_none")]
         current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
@@ -3759,38 +3942,42 @@ mod tests {
             "kind": "load_pm_reports", "id": "pm"
         }))
         .unwrap();
-        assert!(matches!(request, FrontendEvent::LoadPmReports { id } if id == "pm"));
+        assert!(matches!(request, FrontendEvent::LoadPmReports { id, .. } if id == "pm"));
         let event = BackendEvent::PmReports {
             id: "pm".into(), session_id: Some("session".into()), error: None,
             current: None,
-            reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
+            projection: super::PmReportsProjection { reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
                 id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
                 body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
                 created_at: chrono::Utc::now(),
             }), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
                 "id": "qa", "kind": "qa", "question": "Can we ship?",
                 "body": "**Yes.** Checks passed.", "created_at": "2026-10-13T00:00:00Z"
-            })).unwrap())],
+            })).unwrap())], ..Default::default() },
         };
         let value = serde_json::to_value(&event).unwrap();
-        let html = value["reports"][0]["body_html"].as_str().unwrap();
-        for expected in [
-            "<h1>Report</h1>",
-            "<strong>Ready</strong>",
-            "<code>code</code>",
-            "<li>Item</li>",
-            "<pre><code",
-        ] {
-            assert!(html.contains(expected), "missing {expected}: {html}");
+        assert!(value["reports"][0].get("body_html").is_none());
+        let nodes = value["reports"][0]["content"]
+            .as_array()
+            .expect("typed Markdown nodes");
+        let encoded = serde_json::to_string(nodes).unwrap();
+        for tag in ["h1", "strong", "code", "li", "pre"] {
+            assert!(
+                encoded.contains(&format!("\"tag\":\"{tag}\"")),
+                "missing {tag}: {encoded}"
+            );
         }
-        assert!(!html.contains("<script>"));
+        assert!(!encoded.contains("\"tag\":\"script\""));
+        assert!(
+            encoded.contains("<script>bad()</script>"),
+            "raw HTML remains literal text"
+        );
         assert_eq!(value["reports"][0]["kind"], "progress");
         assert_eq!(value["reports"][1]["kind"], "qa");
         assert_eq!(value["reports"][1]["question"], "Can we ship?");
-        assert!(value["reports"][1]["body_html"]
-            .as_str()
+        assert!(serde_json::to_string(&value["reports"][1]["content"])
             .unwrap()
-            .contains("<strong>Yes.</strong>"));
+            .contains("Yes."));
         assert_eq!(
             event.delivery_policy().delivery,
             BackendEventDeliveryClass::Snapshot
@@ -3799,6 +3986,25 @@ mod tests {
             event.delivery_policy().backpressure,
             BackendEventBackpressurePolicy::ClientScopedSnapshot
         );
+    }
+
+    #[test]
+    fn pm_reports_typed_markdown_serializes_deep_input_on_a_worker_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let body = format!("{}end", "> ".repeat(4000));
+                let content = super::report_markdown(&body);
+                let encoded = serde_json::to_string(&content).unwrap();
+                assert!(
+                    encoded.len() < body.len() * 4,
+                    "deep input must stay bounded"
+                );
+                assert!(encoded.contains("end"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

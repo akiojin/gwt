@@ -3134,6 +3134,14 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
         .unwrap()
         .process_bytes(b"old\r\n  indented\r\n\r\nlast\r\n");
     let live = runtime.handle_runtime_output(id.clone(), b"last".to_vec());
+    runtime.window_last_output_at.remove(&id);
+    let unchanged = runtime.handle_runtime_output(id.clone(), b"raw".to_vec());
+    assert!(!unchanged
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::TerminalPreview { .. })));
+    assert!(unchanged.iter().any(|event| matches!(&event.event, BackendEvent::TerminalOutput { id: pane, data_base64 } if pane == &id && data_base64 == "cmF3")));
+    assert_eq!(runtime.window_output_bytes[&id], 7);
+    assert!(runtime.window_last_output_at.contains_key(&id));
     let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
     for events in [live, sync] {
         let preview = events
@@ -3143,6 +3151,33 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
             .expect("preview event");
         assert_eq!(preview["id"], id);
         assert_eq!(preview["text"], "  indented\n\nlast");
+    }
+    for (screen, expected) in [
+        (b"\x1b[2J\x1b[Hchanged".as_slice(), "changed"),
+        (b"\x1b[2J\x1b[H".as_slice(), ""),
+    ] {
+        runtime.runtimes[&id]
+            .pane
+            .lock()
+            .unwrap()
+            .process_bytes(screen);
+        let changed = runtime.handle_runtime_output(id.clone(), screen.to_vec());
+        assert!(changed.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { id: pane, text } if pane == &id && text == expected)));
+    }
+    let previous_incarnation = runtime.runtimes[&id].incarnation;
+    let pane = runtime.runtimes[&id].pane.clone();
+    let incarnation = super::super::next_window_runtime_incarnation();
+    runtime
+        .runtimes
+        .insert(id.clone(), WindowRuntime::new(incarnation, pane));
+    assert!(runtime
+        .handle_runtime_output_event(id.clone(), previous_incarnation, b"stale".to_vec(), 1)
+        .is_empty());
+    let restarted =
+        runtime.handle_runtime_output_event(id.clone(), incarnation, b"new".to_vec(), 1);
+    let sync = runtime.frontend_project_sync_events("client-restarted", &runtime.test_context());
+    for events in [restarted, sync] {
+        assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { id: pane, text } if pane == &id && text.is_empty())));
     }
 }
 
@@ -3167,6 +3202,16 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
         b"bytes".to_vec(),
         Some("  remote\n\nlast".into()),
     );
+    for preview in [Some("  remote\n\nlast".into()), None] {
+        runtime.window_last_output_at.remove(&id);
+        let unchanged = runtime.handle_daemon_runtime_output(id.clone(), b"raw".to_vec(), preview);
+        assert!(!unchanged
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalPreview { .. })));
+        assert!(unchanged.iter().any(|event| matches!(&event.event, BackendEvent::TerminalOutput { id: pane, data_base64 } if pane == &id && data_base64 == "cmF3")));
+        assert!(runtime.window_last_output_at.contains_key(&id));
+    }
+    assert_eq!(runtime.window_output_bytes[&id], 16);
     let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
     for events in [live, sync] {
         assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { id: pane, text } if pane == &id && text == "  remote\n\nlast")));

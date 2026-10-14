@@ -1955,7 +1955,7 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness must precede queue replay, and replay must match the immutable
     // connection scope. Other projects retain their own pending messages.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*resetPmWindowSlices\(\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
     )
     .expect("valid regex");
 
@@ -3375,7 +3375,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         )
         .expect("valid regex");
     let terminal_event = regex::Regex::new(
-            r#"case\s*"terminal_output":\s*applyPmWindowReceiveEvent\(event\);\s*break;\s*case\s*"terminal_snapshot":\s*applyPmWindowReceiveEvent\(event\);\s*break;"#,
+            r#"case\s*"terminal_output":\s*case\s*"terminal_snapshot":\s*if \(applyPmWindowReceiveEvent\(event\) === "terminal"\) requestTerminalSnapshots\(\);\s*break;"#,
         )
         .expect("valid regex");
     // SPEC-3064 Phase 3 (E6e): the profile_snapshot body lives in the
@@ -4370,7 +4370,8 @@ fn embedded_web_pm_chat_is_bound_to_registered_pm_session() {
     assert!(js.contains("view.controller.update(state)"));
     assert!(js.contains("view.unsubscribe()"));
     assert!(js.contains("view.controller.dispose()"));
-    assert!(js.contains("kind: \"load_pm_reports\", id: windowData.id"));
+    assert!(js.contains("socket.send(JSON.stringify({ kind: \"load_pm_reports\", ...request }))"));
+    assert!(js.contains("preparePmReportsRequest(windowId, { reset, before })"));
     assert!(js.contains("window.setInterval(requestVisiblePmReports, 5000)"));
     assert!(js.contains("case \"pm_reports\""));
     assert!(

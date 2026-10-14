@@ -293,6 +293,7 @@ pub enum TransportEvent {
 const LOSSY_HIGH_WATER: usize = 256;
 const DRAIN_LOW_WATER: usize = 32;
 const LOSSLESS_HARD_CAP: usize = 8192;
+const MAX_TERMINAL_SLICE_REVISION: u64 = 9_007_199_254_740_991;
 pub const AGENT_STALE_BINDING_CLOSE: ClientCloseFrame = ClientCloseFrame {
     code: 1008,
     reason: "execution binding is no longer current",
@@ -627,6 +628,9 @@ struct ClientQueueState {
     /// `terminal_snapshot` was serialized at, per pane. A `terminal_output`
     /// at or below it is already part of that snapshot and must not follow it.
     snapshot_stream_seq: HashMap<String, u64>,
+    /// Connection-local pane revisions, independent of the PTY stream position.
+    /// Includes pressure-dropped output so the wire can expose delivery holes.
+    terminal_slice_revision: HashMap<String, u64>,
     /// Issue #4206: panes whose streamed output has a hole in it. A chunk the
     /// client never received carried the cursor moves the following chunks
     /// position themselves against, so the surviving suffix is unusable until
@@ -660,10 +664,20 @@ pub enum DrainStep {
 /// bounded mpsc channel whose overflow disconnected the client — under an
 /// agent-startup output flood that evicted the very client that initiated
 /// the launch and lost its lossless replies.
-#[derive(Default)]
 pub struct ClientQueue {
     state: Mutex<ClientQueueState>,
     notify: tokio::sync::Notify,
+    terminal_slice_epoch: Uuid,
+}
+
+impl Default for ClientQueue {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            notify: tokio::sync::Notify::default(),
+            terminal_slice_epoch: Uuid::new_v4(),
+        }
+    }
 }
 
 impl ClientQueue {
@@ -683,6 +697,28 @@ impl ClientQueue {
         if Self::withheld_from_torn_pane(&mut state, message) {
             return false;
         }
+        let terminal_slice = if let Some(pane) = &message.terminal_pane {
+            let current = state
+                .terminal_slice_revision
+                .entry(pane.clone())
+                .or_default();
+            let base_revision = *current;
+            let Some(revision) = base_revision
+                .checked_add(1)
+                .filter(|revision| *revision <= MAX_TERMINAL_SLICE_REVISION)
+            else {
+                // The receiver uses JavaScript safe integers. Reconnecting
+                // establishes a fresh epoch rather than emitting an alias.
+                state.dead = true;
+                drop(state);
+                self.notify.notify_one();
+                return true;
+            };
+            *current = revision;
+            Some((base_revision, revision))
+        } else {
+            None
+        };
         // Snapshot-class kinds without a coalesce key (file trees, resume acks,
         // release notes) must not replace each other by kind alone — different
         // windows would clobber one another. They get lossless append semantics
@@ -698,9 +734,11 @@ impl ClientQueue {
                     .iter_mut()
                     .find(|entry| entry.kind == message.kind)
                 {
-                    entry.payload = message.payload.clone();
+                    entry.payload = self.queued_payload(message, terminal_slice);
                 } else {
-                    state.entries.push_back(Self::queued(message));
+                    state
+                        .entries
+                        .push_back(self.queued(message, terminal_slice));
                 }
             }
             QueueClass::SnapshotLatest => {
@@ -709,7 +747,7 @@ impl ClientQueue {
                 if let Some(entry) = state.entries.iter_mut().find(|entry| {
                     entry.kind == message.kind && entry.coalesce_key == message.coalesce_key
                 }) {
-                    entry.payload = message.payload.clone();
+                    entry.payload = self.queued_payload(message, terminal_slice);
                     entry.stream_seq = message.stream_seq;
                 } else {
                     if state.entries.len() >= LOSSLESS_HARD_CAP {
@@ -718,7 +756,9 @@ impl ClientQueue {
                         self.notify.notify_one();
                         return true;
                     }
-                    state.entries.push_back(Self::queued(message));
+                    state
+                        .entries
+                        .push_back(self.queued(message, terminal_slice));
                 }
             }
             QueueClass::Lossy => {
@@ -733,7 +773,9 @@ impl ClientQueue {
                     }
                     return false;
                 }
-                state.entries.push_back(Self::queued(message));
+                state
+                    .entries
+                    .push_back(self.queued(message, terminal_slice));
             }
             QueueClass::Lossless => {
                 if state.entries.len() >= LOSSLESS_HARD_CAP {
@@ -742,7 +784,9 @@ impl ClientQueue {
                     self.notify.notify_one();
                     return true;
                 }
-                state.entries.push_back(Self::queued(message));
+                state
+                    .entries
+                    .push_back(self.queued(message, terminal_slice));
             }
         }
         drop(state);
@@ -750,9 +794,35 @@ impl ClientQueue {
         false
     }
 
-    fn queued(message: &PreparedOutbound) -> QueuedOutbound {
+    fn queued_payload(
+        &self,
+        message: &PreparedOutbound,
+        terminal_slice: Option<(u64, u64)>,
+    ) -> SharedOutboundPayload {
+        let Some((base_revision, revision)) = terminal_slice else {
+            return message.payload.clone();
+        };
+        let payload = message.payload.clone();
+        let epoch = self.terminal_slice_epoch;
+        // Add connection-specific metadata only when drained, outside the
+        // producer mutex. All non-terminal payloads keep their shared encoding.
+        SharedOutboundPayload::Deferred(Arc::new(LazyLock::new(Box::new(move || {
+            let prefix = payload
+                .strip_suffix('}')
+                .expect("backend event JSON object");
+            Arc::from(format!(
+                r#"{prefix},"slice":{{"epoch":"{epoch}","base_revision":{base_revision},"revision":{revision}}}}}"#
+            ))
+        }))))
+    }
+
+    fn queued(
+        &self,
+        message: &PreparedOutbound,
+        terminal_slice: Option<(u64, u64)>,
+    ) -> QueuedOutbound {
         QueuedOutbound {
-            payload: message.payload.clone(),
+            payload: self.queued_payload(message, terminal_slice),
             kind: message.kind,
             coalesce_key: message.coalesce_key.clone(),
             terminal_pane: message.terminal_pane.clone(),
@@ -4130,6 +4200,81 @@ mod tests {
         )
     }
 
+    #[test]
+    fn client_queue_terminal_slice_versions_are_pane_local_and_connection_scoped() {
+        let queue = ClientQueue::default();
+        for round in 0..2 {
+            for pane in 0..5 {
+                queue.enqueue(&terminal_output_at(
+                    &format!("pane-{pane}"),
+                    &format!("raw-{round}-{pane}"),
+                    100 + round * 5 + pane,
+                ));
+            }
+        }
+        queue.enqueue(&prepare_outbound(&lossless_error("unchanged")));
+
+        let (payloads, _) = drain_all(&queue);
+        assert_eq!(payloads.len(), 11);
+        let values: Vec<serde_json::Value> = payloads
+            .iter()
+            .map(|payload| serde_json::from_str(payload).expect("outbound json"))
+            .collect();
+        let epoch = values[0]["slice"]["epoch"]
+            .as_str()
+            .expect("connection epoch");
+        assert!(!Uuid::parse_str(epoch).expect("opaque UUID epoch").is_nil());
+        for (index, value) in values[..10].iter().enumerate() {
+            let round = index / 5;
+            let pane = index % 5;
+            assert_eq!(value["id"], format!("pane-{pane}"));
+            assert_eq!(value["data_base64"], format!("raw-{round}-{pane}"));
+            assert_eq!(
+                value["slice"],
+                serde_json::json!({
+                    "epoch": epoch,
+                    "base_revision": round,
+                    "revision": round + 1
+                }),
+                "interleaved panes advance only their own revision"
+            );
+        }
+        assert!(values[10].get("slice").is_none());
+
+        let reconnect = ClientQueue::default();
+        reconnect.enqueue(&terminal_output_at("pane-0", "reconnected", 999));
+        let (payloads, _) = drain_all(&reconnect);
+        let value: serde_json::Value = serde_json::from_str(&payloads[0]).expect("reconnect json");
+        assert_ne!(value["slice"]["epoch"], epoch);
+        assert_eq!(value["slice"]["base_revision"], 0);
+        assert_eq!(value["slice"]["revision"], 1);
+    }
+
+    #[test]
+    fn client_queue_terminal_slice_keeps_latest_coalesced_snapshot_version() {
+        let queue = ClientQueue::default();
+        let pane = "pane-a";
+        queue.enqueue(&terminal_snapshot_at(pane, "old", 10));
+        queue.enqueue(&terminal_output_at(pane, "contained", 11));
+        queue.enqueue(&terminal_snapshot_at(pane, "latest", 11));
+        queue.enqueue(&terminal_output_at(pane, "superseded", 11));
+        queue.enqueue(&terminal_output_at(pane, "suffix", 12));
+
+        let (payloads, _) = drain_all(&queue);
+        let values: Vec<serde_json::Value> = payloads
+            .iter()
+            .map(|payload| serde_json::from_str(payload).expect("outbound json"))
+            .collect();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["data_base64"], "latest");
+        assert_eq!(values[0]["slice"]["base_revision"], 2);
+        assert_eq!(values[0]["slice"]["revision"], 3);
+        assert_eq!(values[1]["data_base64"], "suffix");
+        assert_eq!(values[1]["slice"]["base_revision"], 3);
+        assert_eq!(values[1]["slice"]["revision"], 4);
+        assert_eq!(values[0]["slice"]["epoch"], values[1]["slice"]["epoch"]);
+    }
+
     fn drained_terminal_events(queue: &ClientQueue) -> Vec<String> {
         let (payloads, _) = drain_all(queue);
         payloads
@@ -4238,14 +4383,30 @@ mod tests {
         queue.enqueue(&terminal_snapshot_at(torn, "repair", 3));
         queue.enqueue(&terminal_output_at(torn, "rebaselined", 4));
 
+        let (payloads, _) = drain_all(&queue);
+        let values: Vec<serde_json::Value> = payloads
+            .iter()
+            .map(|payload| serde_json::from_str(payload).expect("outbound json"))
+            .collect();
         assert_eq!(
-            drained_terminal_events(&queue),
+            values
+                .iter()
+                .map(|value| format!(
+                    "{}:{}",
+                    value["kind"].as_str().expect("terminal kind"),
+                    value["data_base64"].as_str().expect("raw data")
+                ))
+                .collect::<Vec<_>>(),
             vec![
                 "terminal_snapshot:repair".to_string(),
                 "terminal_output:rebaselined".to_string(),
             ],
             "the repair snapshot re-baselines the screen and the stream resumes"
         );
+        assert_eq!(values[0]["slice"]["base_revision"], 1, "drop is counted");
+        assert_eq!(values[0]["slice"]["revision"], 2, "withheld is excluded");
+        assert_eq!(values[1]["slice"]["base_revision"], 2);
+        assert_eq!(values[1]["slice"]["revision"], 3);
     }
 
     // Issue #4206 AC-1: withholding must not strand a pane. While torn, the

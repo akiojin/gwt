@@ -1,6 +1,19 @@
 // Shared pull-render contract. Models contain data; views subscribe to selectors.
-// Notifications are synchronous so hidden windows never depend on a focus/rAF.
+// Model notifications stay synchronous; DOM views may coalesce at a frame.
 const owned = new WeakSet();
+
+function scheduleViewFrame(callback) {
+  let active = true, frame;
+  const cancel = () => {
+    active = false;
+    clearTimeout(timer);
+    if (frame !== undefined) globalThis.cancelAnimationFrame?.(frame);
+  };
+  const flush = () => { if (active) { cancel(); callback(); } };
+  const timer = setTimeout(flush, 100);
+  if (globalThis.requestAnimationFrame) frame = requestAnimationFrame(flush);
+  return cancel;
+}
 
 function snapshot(value) {
   if (value === null || typeof value !== 'object') {
@@ -19,13 +32,31 @@ function snapshot(value) {
   return Object.freeze(copy);
 }
 
-export function createUiStateStore(initialState) {
+export function createUiStateStore(initialState, { scheduleView = scheduleViewFrame } = {}) {
   let current = snapshot(initialState);
   let disposed = false;
   let notifying = false;
   let dirty = false;
   const views = new Set();
   const read = () => current;
+
+  function queueView(view) {
+    const pending = { cancel: null };
+    view.pending = pending;
+    try {
+      pending.cancel = scheduleView(() => {
+        if (disposed || !views.has(view) || view.pending !== pending) return;
+        view.pending = null;
+        const selected = view.select(read());
+        if (Object.is(selected, view.selected)) return;
+        view.render(selected);
+        view.selected = selected;
+      });
+    } catch (error) {
+      if (view.pending === pending) view.pending = null;
+      throw error;
+    }
+  }
 
   function update(reduce) {
     if (disposed) throw new Error('UI state store is disposed');
@@ -44,8 +75,12 @@ export function createUiStateStore(initialState) {
           try {
             const selected = view.select(read());
             if (Object.is(selected, view.selected)) continue;
-            view.render(selected);
-            view.selected = selected;
+            if (view.batched) {
+              if (!view.pending) queueView(view);
+            } else {
+              view.render(selected);
+              view.selected = selected;
+            }
           } catch (error) { errors.push(error); }
         }
       }
@@ -53,14 +88,24 @@ export function createUiStateStore(initialState) {
     if (errors.length) throw new AggregateError(errors, errors[0].message);
   }
 
-  function subscribe(select, render) {
-    if (disposed) throw new Error('UI state store is disposed');
-    const view = { select, render, selected: select(read()) };
-    views.add(view);
-    try { render(view.selected); } catch (error) { views.delete(view); throw error; }
-    return () => views.delete(view);
+  function removeView(view) {
+    view.pending?.cancel?.();
+    view.pending = null;
+    return views.delete(view);
   }
 
-  function dispose() { disposed = true; views.clear(); }
-  return { read, update, subscribe, dispose };
+  function subscribe(select, render, batched = false) {
+    if (disposed) throw new Error('UI state store is disposed');
+    const view = { select, render, selected: select(read()), batched, pending: null };
+    views.add(view);
+    try { render(view.selected); } catch (error) { removeView(view); throw error; }
+    return () => removeView(view);
+  }
+
+  function subscribeView(select, render) { return subscribe(select, render, true); }
+  function dispose() {
+    disposed = true;
+    for (const view of [...views]) removeView(view);
+  }
+  return { read, update, subscribe, subscribeView, dispose };
 }
