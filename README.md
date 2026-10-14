@@ -1113,9 +1113,11 @@ PM Q&A posts include an `instruction` object with the full `original`, `kind`
 redacted before storage. Memory search includes the saved originals and outcomes;
 active standing instructions are reloaded at PM startup and each turn.
 
-The **PM の現在** card stays above the report history. It separates the PM's
-explanation from observed active windows, queue head, human handoffs, release PR,
-and pending update. Unavailable observations are shown as unknown. The PM updates
+The **PM status** card and report history share one scroll area. The card starts
+with a compact summary; expand it to see **PM notes** and **Live facts**, and each
+window keeps its disclosure state while polling. Live facts show active windows,
+queue head, human handoffs, release PR, and pending update. Unavailable observations
+are shown as **Unknown**. UI labels stay English; authored content keeps its language. The PM updates
 its explanation with `pm.status.set`: supply 1–3 `items` (`kind`: `working` or
 `waiting`, `text`, and RFC3339 `started_at`), `next_trigger`, and optional
 `user_action`. Set `stale_after_minutes` to change the default 15-minute warning.

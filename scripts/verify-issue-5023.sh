@@ -229,4 +229,6 @@ GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
   bash "$REPO_ROOT/scripts/run-visual-tests.sh" \
     --workers=1 --output "$CHECK_HOME/playwright-artifacts" \
     crates/gwt/playwright/tests/pm-chat-live.spec.ts \
+    crates/gwt/playwright/tests/pm-layout-live.spec.ts \
+    crates/gwt/playwright/tests/pm-english-live.spec.ts \
     crates/gwt/playwright/tests/release-notes-live.spec.ts "$@"
