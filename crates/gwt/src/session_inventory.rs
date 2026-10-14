@@ -546,7 +546,7 @@ fn read_candidates_scope(
     session_id: Option<&str>,
     inventory: &mut SessionInventory,
 ) -> Vec<RuntimeCandidate> {
-    let mut legacy_parents = None;
+    let mut process_evidence = None;
     read_candidates_with_liveness(
         project_root,
         sessions_dir,
@@ -564,8 +564,10 @@ fn read_candidates_scope(
             // A legacy orphan may have no recorded child PID. Preserve the
             // parent-PID evidence used by missing-ledger recovery, including
             // Windows, where a child's parent PID survives its parent's exit.
-            // Take at most one minimal snapshot; never collect environments.
-            let (observed, parents) = legacy_parents.get_or_insert_with(|| {
+            // All sidecars have been read before this callback. Retain live
+            // PIDs too: a Host can spawn a child and exit after the snapshot
+            // but before its direct probe. Never collect environments.
+            let (observed, pids) = process_evidence.get_or_insert_with(|| {
                 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
                 let mut system = System::new();
                 system.refresh_processes_specifics(
@@ -577,12 +579,18 @@ fn read_candidates_scope(
                     !system.processes().is_empty(),
                     system
                         .processes()
-                        .values()
-                        .filter_map(|process| process.parent().map(|pid| pid.as_u32()))
+                        .keys()
+                        .map(|pid| pid.as_u32())
+                        .chain(
+                            system
+                                .processes()
+                                .values()
+                                .filter_map(|process| process.parent().map(|pid| pid.as_u32())),
+                        )
                         .collect::<BTreeSet<_>>(),
                 )
             });
-            !*observed || parents.contains(&host_pid)
+            !*observed || pids.contains(&host_pid)
         },
     )
 }
@@ -599,7 +607,7 @@ fn read_candidates_with_liveness(
         .as_deref()
         .and_then(gwt_core::repo_hash::detect_repo_identity)
         .map(|identity| identity.hash.as_str().to_string());
-    let mut candidates = Vec::new();
+    let mut runtimes = Vec::new();
     for namespace in read_paths(&sessions_dir.join("runtime"), inventory) {
         let Some(host_pid) = namespace
             .file_name()
@@ -628,46 +636,54 @@ fn read_candidates_with_liveness(
             if session_id.is_some_and(|expected| expected != id) {
                 continue;
             }
-            // Runtime JSON is small; decode the Session ledger only if this
-            // namespace still has live or uncertain process evidence. Keep
-            // errors until after the original ledger/scope checks below.
+            // Read every small sidecar before taking any process snapshot so
+            // children published during the scan are not compared with an
+            // older parent-PID inventory. No Session ledger is retained here.
             let runtime = SessionRuntimeState::load(&path);
-            if runtime
-                .as_ref()
-                .is_ok_and(|runtime| !may_be_live(host_pid, runtime))
-            {
+            runtimes.push((host_pid, path, runtime));
+        }
+    }
+    let mut candidates = Vec::new();
+    for (host_pid, path, runtime) in runtimes {
+        let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if runtime
+            .as_ref()
+            .is_ok_and(|runtime| !may_be_live(host_pid, runtime))
+        {
+            continue;
+        }
+        // Preserve the original ledger/scope/error priority for uncertain rows.
+        let session = match Session::load(&sessions_dir.join(format!("{id}.toml"))) {
+            Ok(session) => session,
+            Err(error) => {
+                inventory.uncertain(&path, Some(id), format!("session_unreadable: {error}"));
                 continue;
             }
-            let session = match Session::load(&sessions_dir.join(format!("{id}.toml"))) {
-                Ok(session) => session,
-                Err(error) => {
-                    inventory.uncertain(&path, Some(id), format!("session_unreadable: {error}"));
-                    continue;
-                }
-            };
-            let same_repo = repo_hash
-                .as_ref()
-                .is_some_and(|hash| session.repo_hash.as_ref() == Some(hash));
-            let same_root = normalized(
-                session
-                    .project_state_root
-                    .as_deref()
-                    .unwrap_or(&session.worktree_path),
-            );
-            let same_root = project_root.as_ref().is_some_and(|root| same_root == *root);
-            if project_root.is_some() && !same_repo && !same_root {
-                continue;
-            }
-            match runtime {
-                Ok(runtime) => candidates.push(RuntimeCandidate {
-                    host_pid,
-                    path,
-                    session,
-                    runtime,
-                }),
-                Err(error) => {
-                    inventory.uncertain(&path, Some(id), format!("runtime_unreadable: {error}"))
-                }
+        };
+        let same_repo = repo_hash
+            .as_ref()
+            .is_some_and(|hash| session.repo_hash.as_ref() == Some(hash));
+        let same_root = normalized(
+            session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path),
+        );
+        let same_root = project_root.as_ref().is_some_and(|root| same_root == *root);
+        if project_root.is_some() && !same_repo && !same_root {
+            continue;
+        }
+        match runtime {
+            Ok(runtime) => candidates.push(RuntimeCandidate {
+                host_pid,
+                path,
+                session,
+                runtime,
+            }),
+            Err(error) => {
+                inventory.uncertain(&path, Some(id), format!("runtime_unreadable: {error}"))
             }
         }
     }
@@ -913,6 +929,38 @@ mod tests {
             inventory.uncertainties
         );
         assert!(path.exists(), "census is read-only; GC belongs to #5384");
+    }
+
+    #[test]
+    fn all_sidecars_are_read_before_the_liveness_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        save_runtime(&sessions, temp.path(), temp.path(), "first", None);
+        save_runtime(
+            &sessions,
+            temp.path(),
+            temp.path(),
+            "later",
+            Some((201, 20)),
+        );
+        let later = gwt_agent::runtime_state_path_for_pid(&sessions, 100, "later");
+        let mut inventory = SessionInventory::default();
+        let candidates =
+            read_candidates_with_liveness(None, &sessions, None, &mut inventory, |_, runtime| {
+                if runtime.child_pid.is_none() {
+                    // Model publication after the first liveness observation.
+                    // The later sidecar must already have been captured.
+                    std::fs::write(&later, b"changed after observation").unwrap();
+                }
+                runtime.child_pid == Some(201)
+            });
+        assert!(
+            inventory.uncertainties.is_empty(),
+            "{:?}",
+            inventory.uncertainties
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].session.id, "later");
     }
 
     #[test]
