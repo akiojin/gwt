@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use gwt::agent_maintenance::{
-    latest_version, run_maintenance, update_available, version_is_current, MaintenanceAction,
-    MaintenanceResult,
+    latest_version, run_maintenance, supports_updates, update_available, version_is_current,
+    MaintenanceAction, MaintenanceResult,
 };
 
 use super::{
@@ -278,9 +278,7 @@ impl AppRuntime {
                             .filter(|agent| {
                                 agent.installed
                                     && gwt_agent::builtin_agent_descriptor_for_command(&agent.id)
-                                        .is_some_and(|descriptor| {
-                                            descriptor.distribution.npm_package().is_some()
-                                        })
+                                        .is_some_and(|descriptor| supports_updates(descriptor))
                             })
                             .map(|agent| (agent.id, MaintenanceAction::Update))
                             .collect()

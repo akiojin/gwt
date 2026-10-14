@@ -122,8 +122,8 @@ const fs = require('node:fs'), path = require('node:path'), readline = require('
 const bin = __dirname, home = path.dirname(bin), command = path.basename(process.argv[1]).replace(/\.cjs$/, '');
 const args = process.argv.slice(2), statePath = path.join(home, 'agent-versions.json');
 const versions = () => JSON.parse(fs.readFileSync(statePath, 'utf8'));
-const packages = {'@anthropic-ai/claude-code':'claude','@openai/codex':'codex','@xai-official/grok':'grok','opencode-ai':'opencode','openclaw':'openclaw'};
-const latest = {claude:'2.1.0',codex:'1.0.0',grok:'2.0.0',opencode:'1.0.0',openclaw:'1.0.0'};
+const packages = {'@openai/codex':'codex','@xai-official/grok':'grok','opencode-ai':'opencode','openclaw':'openclaw'};
+const latest = {codex:'1.0.0',grok:'2.0.0',agy:'1.3.5',opencode:'1.0.0',openclaw:'1.0.0'};
 const log = (name, value) => fs.appendFileSync(path.join(home, name), JSON.stringify(value) + '\n');
 const refuse = () => { log('rejected-operations.jsonl', {command,args}); console.error('Unsupported fixture operation: ' + command + ' ' + args.join(' ')); process.exit(64); };
 if (command === 'npm') {
@@ -136,12 +136,12 @@ if (command === 'npm') {
       fs.writeFileSync(marker, 'started');
       console.error('Fixture Codex metadata unavailable'); process.exit(8);
     }
-    if (id === 'claude') {
+    if (id === 'openclaw') {
       // A sequential catalog cannot reach Codex while this query is waiting.
       const deadline = Date.now() + 10_000;
       while (!fs.existsSync(marker)) {
         if (Date.now() >= deadline) {
-          console.error('Codex metadata did not start while Claude was waiting'); process.exit(9);
+          console.error('Codex metadata did not start while OpenClaw was waiting'); process.exit(9);
         }
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
       }
@@ -167,12 +167,33 @@ if (command === 'npm') {
   }
   refuse();
 }
-if (command === 'curl' || command === 'npx' || command === 'bunx') refuse();
+if (command === 'curl') {
+  log('curl-argv.jsonl', args);
+  const manifest = /^https:\/\/antigravity-cli-auto-updater-974169037036\.us-central1\.run\.app\/manifests\/(?:(?:darwin|windows)_(?:amd64|arm64)|linux_(?:amd64|arm64)(?:_musl)?)\.json$/;
+  if (!manifest.test(args.at(-1))) refuse();
+  const flags = ['--fail','--silent','--show-error','--location','--proto','=https','--proto-redir','=https','--connect-timeout','5','--max-time','10'];
+  if (JSON.stringify(args.slice(0, -1)) !== JSON.stringify(flags)) refuse();
+  if (fs.existsSync(path.join(home, 'non-npm-metadata-unavailable'))) {
+    console.error('Fixture Antigravity metadata unavailable'); process.exit(8);
+  }
+  log('metadata-events.jsonl', {id:'agy',stage:'finished',pid:process.pid});
+  console.log(JSON.stringify({version:latest.agy,url:'https://storage.googleapis.com/antigravity-public/fixture/agy',sha512:'a'.repeat(128)})); process.exit(0);
+}
+if (command === 'npx' || command === 'bunx') refuse();
 if (command === 'gh') {
-  if ((args.length === 1 && args[0] === '--version') || (args.length === 2 && args[0] === 'copilot' && args[1] === '--version')) {
+  log('gh-argv.jsonl', args);
+  if (args.length === 1 && args[0] === '--version') {
     console.log('gh version 2.80.0'); process.exit(0);
   }
+  if (args.length === 2 && args[0] === 'copilot' && args[1] === '--version') {
+    console.log('gh copilot version ' + versions().gh); process.exit(0);
+  }
   refuse();
+}
+if (command === 'agy' && args.length === 1 && args[0] === 'update') {
+  log('native-update-argv.jsonl', {command,args});
+  const state = versions(); state.agy = latest.agy; fs.writeFileSync(statePath, JSON.stringify(state));
+  console.log('Updated fixture Antigravity CLI ' + state.agy); process.exit(0);
 }
 if (args.length === 1 && ['--version','-V'].includes(args[0])) {
   const version = versions()[command];
@@ -247,7 +268,7 @@ try {
         ? `#!${home}/nonexistent-interpreter\n`
         : `#!${process.execPath}\nrequire("./fixture.cjs");\n`, { mode: 0o755 });
     }
-    await writeFile(join(home, "agent-versions.json"), JSON.stringify({ claude: "2.1.0", codex: null, grok: "1.0.0", agy: "1.0.0", opencode: null, openclaw: null, hermes: "1.0.0" }));
+    await writeFile(join(home, "agent-versions.json"), JSON.stringify({ claude: "2.1.0", codex: null, grok: "1.0.0", agy: "1.0.0", opencode: null, openclaw: null, hermes: "1.0.0", gh: "1.0.0" }));
     await writeFile(join(home, "provider-argv.jsonl"), "");
     await writeFile(join(home, "npm-argv.jsonl"), "");
     await writeFile(join(home, ".gwt/config.toml"), `[profiles]\nactive = "Host"\n[[profiles.profiles]]\nname = "Host"\ndescription = "Isolated supported-agent fixture"\n[profiles.profiles.env_vars]\nPATH = ${JSON.stringify(fixturePath)}\n`);

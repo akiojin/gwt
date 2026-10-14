@@ -71,7 +71,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
   panel.appendChild(automaticLabel);
   const help = document.createElement("p");
   help.className = "settings-help";
-  help.textContent = "At the next app startup, update installed npm agents with a known newer version. "
+  help.textContent = "At the next app startup, update installed agents with a verified update route and a known newer version. "
     + "Updates require no open agent windows or pending launches, including the Project Manager. "
     + "Nothing is installed automatically. Manual installs and updates are refused while agent windows are running; "
     + "close them and retry. Update failures leave launches available.";
