@@ -1,5 +1,5 @@
 const SURFACES = { issues: "Issues", agents: "Agents", board: "Board", settings: "Settings" };
-const PRESETS = { issues: "issue", board: "board", settings: "settings" };
+const PRESETS = { issues: "settings", board: "board", settings: "settings" };
 
 // A client-local layout: move live views, never clone terminals or persist
 // split dimensions as canvas geometry. The canvas remains the single-view
@@ -69,6 +69,7 @@ export function createSplitSurfaces({
     }
     for (const [index, pane] of panes.entries()) {
       const surface = selections[index];
+      const changedSurface = pane.dataset.surface !== surface;
       pane.dataset.surface = surface;
       for (const option of pane.querySelectorAll("option")) {
         option.selected = option.value === surface;
@@ -89,7 +90,12 @@ export function createSplitSurfaces({
       }
       if (data) {
         const element = getElement(data.id);
-        if (element) desired.set(data.id, { element, index });
+        if (element) {
+          if (surface === "issues" && (changedSurface || element.parentElement !== pane.querySelector(".split-pane__body"))) {
+            element.querySelector('[data-settings-tab="issues"]')?.click();
+          }
+          desired.set(data.id, { element, index });
+        }
       }
     }
     const agentPanes = panes.filter((_, index) => selections[index] === "agents");
@@ -128,6 +134,9 @@ export function createSplitSurfaces({
     selections[index] = surface;
     active = index;
     sync();
+    if (surface === "issues") {
+      panes[index].querySelector('[data-settings-tab="issues"]')?.click();
+    }
     return true;
   }
 

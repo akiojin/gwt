@@ -77,7 +77,7 @@ test.describe("Surface rail", () => {
     await clearMessages(page);
     await page.getByRole("button", { name: "Close split", exact: true }).click();
     await expect(page.locator("#split-surfaces")).toBeHidden();
-    await expect(page.locator("#canvas-stage > .workspace-window")).toHaveCount(6);
+    await expect(page.locator("#canvas-stage > .workspace-window")).toHaveCount(5);
     expect((await sentMessages(page)).filter((message) => message.kind === "close_window")).toEqual([]);
     expect(errors).toEqual([]);
   });
@@ -95,7 +95,7 @@ test.describe("Surface rail", () => {
     for (const surface of ["board", "issues", "settings"]) {
       await left.getByRole("combobox", { name: "Left pane surface" }).selectOption(surface);
       await right.getByRole("combobox", { name: "Right pane surface" }).selectOption(surface);
-      const preset = surface === "issues" ? "issue" : surface;
+      const preset = surface === "issues" ? "settings" : surface;
       const view = `.workspace-window[data-preset='${preset}']`;
       await expect(left.locator(view)).toBeVisible();
       await expect(right.locator(view)).toBeVisible();
@@ -103,6 +103,7 @@ test.describe("Surface rail", () => {
       await expect(right).toHaveAttribute("data-active", "true");
     }
     for (const pane of [left, right]) {
+      await pane.getByRole("tab", { name: "System", exact: true }).click();
       const language = pane.getByLabel("Output Language", { exact: true });
       await expect(language).toBeVisible();
       expect(await language.evaluate(node => node.closest(".split-pane")?.getAttribute("aria-label")))
@@ -110,10 +111,10 @@ test.describe("Surface rail", () => {
       await pane.getByRole("tab", { name: "Custom Agents", exact: true }).click();
       await expect(pane.getByRole("tab", { name: "Custom Agents", exact: true })).toHaveAttribute("aria-selected", "true");
     }
-    expect((await sentMessages(page)).filter(message => message.kind === "create_window").length).toBe(4);
+    expect((await sentMessages(page)).filter(message => message.kind === "create_window").length).toBe(2);
     await clearMessages(page);
     await page.getByRole("button", { name: "Close split", exact: true }).click();
-    await expect(page.locator("#canvas-stage > .workspace-window")).toHaveCount(9);
+    await expect(page.locator("#canvas-stage > .workspace-window")).toHaveCount(7);
     expect((await sentMessages(page)).filter(message => message.kind === "close_window")).toEqual([]);
     expect(errors).toEqual([]);
   });
@@ -340,9 +341,12 @@ test.describe("Surface rail", () => {
     await expect(windowById(page, "board-window")).toBeVisible();
     await clearMessages(page);
     await page.getByRole("button", { name: "Split view", exact: true }).click();
-    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("settings");
-    await expect(page.locator(".split-pane[data-surface='board'] [data-id='board-window']")).toBeVisible();
+    // Keep the other Settings view in the right pane while selecting the
+    // inactive grouped view, then show its Board peer beside it.
+    await page.getByRole("combobox", { name: "Left pane surface" }).selectOption("settings");
+    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("board");
     await expect(page.locator(".split-pane[data-surface='settings'] [data-id='settings-grouped']")).toBeVisible();
+    await expect(page.locator(".split-pane[data-surface='board'] [data-id='board-window']")).toBeVisible();
     expect((await sentMessages(page)).filter((message) => message.kind === "activate_window_tab")).toEqual([]);
     await page.getByRole("button", { name: "Close split", exact: true }).click();
     await expect(windowById(page, "settings-grouped")).toBeHidden();
@@ -424,17 +428,19 @@ test.describe("Surface rail", () => {
     await windowById(page, "pm-window").locator(".titlebar").click();
     await expect.poll(() => pressedSurfaces(page)).toEqual(["pm"]);
 
-    // Issues focuses the existing Issue window instead of spawning another.
+    // Issues opens its section in the migrated Settings view, keeping its ID.
     await clearMessages(page);
     await entry("issues").click();
     await expect.poll(() => focusTargets(page)).toContain("issue-window");
     await expect.poll(() => pressedSurfaces(page)).toEqual(["issues"]);
+    await expect(windowById(page, "issue-window").getByRole("tab", { name: "Issues", exact: true })).toHaveAttribute("aria-selected", "true");
     expect(await createdPresets(page)).toEqual([]);
 
-    // Settings has no window yet, so the rail asks the backend for one.
+    // Settings reuses that same view without creating a second host.
     await clearMessages(page);
     await entry("settings").click();
-    await expect.poll(() => createdPresets(page)).toEqual(["settings"]);
+    await expect.poll(() => focusTargets(page)).toContain("issue-window");
+    expect(await createdPresets(page)).toEqual([]);
 
     // Every entry explains itself on hover.
     for (const surface of ["issues", "agents", "board", "settings"]) {
@@ -558,8 +564,8 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
         z_index: 2,
       }),
       canvasWindow("issue-window", {
-        title: "Issues",
-        preset: "issue",
+        title: "Settings",
+        preset: "settings",
         geometry: { x: 80, y: 80, width: 640, height: 420 },
         z_index: 10,
       }),

@@ -1291,7 +1291,7 @@ mod tests {
     #[test]
     fn placing_agent_window_in_issue_preview_sets_off_canvas_placement() {
         let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
-        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let issue = workspace.add_window(WindowPreset::Settings, arrange_bounds());
         let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
 
         assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn docking_agent_window_back_to_issue_returns_it_to_the_preview() {
         let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
-        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let issue = workspace.add_window(WindowPreset::Settings, arrange_bounds());
         let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
         assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3885));
         assert!(workspace.undock_agent_window(&agent.id, None));
@@ -1502,8 +1502,8 @@ mod tests {
     #[test]
     fn closing_issue_window_releases_its_previews_to_the_canvas() {
         let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
-        let issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
-        let other_issue = workspace.add_window(WindowPreset::Issue, arrange_bounds());
+        let issue = workspace.add_window(WindowPreset::Settings, arrange_bounds());
+        let other_issue = workspace.add_window(WindowPreset::Settings, arrange_bounds());
         let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
         let kept = workspace.add_window(WindowPreset::Agent, arrange_bounds());
         assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));

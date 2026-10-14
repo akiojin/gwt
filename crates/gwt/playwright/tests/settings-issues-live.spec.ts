@@ -16,21 +16,56 @@ const BACKENDS: Record<string, Backend> = JSON.parse(process.env.GWT_ISSUE_5322_
 const readPreferences = async (project: Project) => JSON.parse(await readFile(project.preferences, "utf8"));
 const themeFor = (info: TestInfo) => info.project.name.endsWith("light") ? "light" : "dark";
 const settings = (page: Page) => page.locator('.workspace-window[data-preset="settings"]');
-const panel = (page: Page, section: string) => settings(page).locator(`[data-settings-panel="${section}"]`);
+const panel = (page: Page, section: string) => section === "agents"
+  ? settings(page).locator("[data-settings-candidates]")
+  : settings(page).locator(`[data-settings-panel="${section}"]`);
+const autonomous = (page: Page) => panel(page, "issues").locator('[data-action="monitor-autonomous"]');
 
 async function openSettings(page: Page, section: string): Promise<void> {
   await page.bringToFront();
+  // The disposable Normal Git fixture may restore this unrelated focus trap.
+  // Release it before the first Settings disclosure pointer action.
+  await closeFixtureMigrationDrawer(page);
   await page.evaluate(section => document.dispatchEvent(new CustomEvent("settings:open", {
     detail: { section },
   })), section);
   await expect(settings(page)).toBeVisible();
-  await expect(settings(page).locator(`[data-settings-tab="${section}"]`)).toHaveAttribute("aria-selected", "true");
+  const selectedSection = section === "agents" ? "issues" : section;
+  await expect(settings(page).locator(`[data-settings-tab="${selectedSection}"]`)).toHaveAttribute("aria-selected", "true");
+  if (selectedSection === "issues") {
+    const options = panel(page, "issues").locator(".settings-issues-options");
+    if (!await options.evaluate(element => (element as HTMLDetailsElement).open)) await options.locator(":scope > summary").click();
+  }
   await expect(panel(page, section)).toBeVisible();
 }
 
 async function editNumber(control: Locator, value: string): Promise<void> {
   await control.fill(value);
   await control.press("Tab");
+}
+
+async function toggleMonitor(page: Page, enabled: boolean): Promise<void> {
+  const before = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+  await panel(page, "issues").locator('[data-action="monitor-toggle"]').click();
+  // Daemon authorizing controls publish asynchronously; wait for this
+  // project's new authoritative response before asserting its durable write.
+  await page.waitForFunction(({ before, enabled }) => ((window as any).__gwtPlaywrightMessages ?? [])
+    .some(({ sequence, payload }: any) => sequence > before
+      && payload.kind === "issue_monitor_status" && payload.status.enabled === enabled),
+  { before, enabled }, { timeout: 30_000 });
+}
+
+async function selectCapacityMode(page: Page, mode: "auto" | "manual"): Promise<void> {
+  const control = panel(page, "issues").getByLabel("Max active mode", { exact: true });
+  // Match native dropdown interaction so status echoes retain the editing control.
+  await control.focus();
+  await expect(control).toBeFocused();
+  const before = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+  await control.selectOption(mode);
+  await page.waitForFunction(({ before, mode }) => ((window as any).__gwtPlaywrightMessages ?? [])
+    .some(({ sequence, payload }: any) => sequence > before && payload.kind === "issue_monitor_status"
+      && (payload.status.max_active_agents_override == null ? "auto" : "manual") === mode),
+  { before, mode }, { timeout: 30_000 });
 }
 
 async function closeFixtureMigrationDrawer(page: Page): Promise<void> {
@@ -50,7 +85,7 @@ async function closeFixtureMigrationDrawer(page: Page): Promise<void> {
 
 async function screenshot(page: Page, section: string, info: TestInfo): Promise<void> {
   await openSettings(page, section);
-  await panel(page, section).locator("h3").first().scrollIntoViewIfNeeded();
+  await panel(page, section).scrollIntoViewIfNeeded();
   const name = `settings-${section}-${themeFor(info)}`;
   await info.attach(name, { body: await settings(page).screenshot(), contentType: "image/png" });
   if (process.env.GWT_L3_SCREENSHOT_DIR) {
@@ -78,7 +113,8 @@ test.describe("Issue #5322 Settings", () => {
           socket.on("framesent", ({ payload }) => {
             try {
               const frame = JSON.parse(String(payload));
-              if (["create_window", "focus_window", "frontend_ready"].includes(frame.kind)) {
+              if (["create_window", "focus_window", "frontend_ready"].includes(frame.kind)
+                || frame.kind.startsWith("set_issue_monitor_")) {
                 workspaceFrames.push({ project: index ? "B" : "A", direction: "sent", frame });
               }
             } catch { /* unrelated non-JSON frames */ }
@@ -100,15 +136,14 @@ test.describe("Issue #5322 Settings", () => {
           await current.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
             .some(({ payload }: any) => payload.kind === "workspace_state"));
           await openSettings(current, "issues");
-          await closeFixtureMigrationDrawer(current);
-          await expect(panel(current, "issues").getByLabel("Autonomous", { exact: true })).toBeEnabled();
+          await expect(autonomous(current)).toBeEnabled();
           await expect(panel(current, "issues")).toContainText(project.root);
         }
         expect(page.url()).not.toBe(pageB.url());
         const originalB = await readPreferences(b);
         const issues = panel(page, "issues");
         const issuesB = panel(pageB, "issues");
-        await expect(issuesB.getByLabel("Autonomous", { exact: true })).not.toBeChecked();
+        await expect(autonomous(pageB)).toHaveAttribute("aria-checked", "false");
         await expect(issuesB.getByLabel("Max active", { exact: true })).toHaveValue("2");
         await expect(issuesB.getByLabel("Allowed labels", { exact: true })).toHaveValue("project-b");
 
@@ -119,42 +154,50 @@ test.describe("Issue #5322 Settings", () => {
         await openSettings(page, "agents");
         await panel(page, "agents").getByRole("button", { name: "Add candidate", exact: true }).scrollIntoViewIfNeeded();
         await page.locator('[data-surface="issues"]').click();
-        await expect(page.locator('.workspace-window[data-preset="issue"]')).toBeVisible();
-        await expect(settings(page)).not.toHaveClass(/focused/);
+        await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
+        await expect(settings(page)).toHaveClass(/focused/);
         await openSettings(page, "issues");
         await expect(settings(page)).toHaveCount(1);
         expect(await settings(page).getAttribute("data-id")).toBe(originalWindow);
         await expect(settings(page)).toHaveClass(/focused/);
         await expect(issues).toBeFocused();
-        await expect(issues.getByLabel("Autonomous", { exact: true })).toBeInViewport();
+        await expect(autonomous(page)).toBeInViewport();
         await page.locator('[data-surface="issues"]').click();
         const gear = page.locator('[data-action="monitor-settings"]');
         await expect(gear).toBeVisible();
+        const options = issues.locator(".settings-issues-options");
+        if (await options.evaluate(element => (element as HTMLDetailsElement).open)) await gear.click();
         await gear.click();
         await expect(settings(page).locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-        await expect(issues).toBeFocused();
+        await expect(options).toHaveAttribute("open", "");
+        await expect(gear).toHaveAttribute("aria-expanded", "true");
+        await expect(gear).toBeFocused();
         await expect(settings(page)).toHaveCount(1);
 
         // AC-1/5: a no-remote project with Autonomous and PM disabled can
         // persist Start/Stop without dispatching implementation work.
-        await expect(issues.locator('[data-action="settings-monitor-stop"]')).toHaveText("Start");
-        await expect(issues.locator('[data-action="settings-monitor-stop"]')).toBeEnabled();
-        await issues.locator('[data-action="settings-monitor-stop"]').click();
+        await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Start");
+        await expect(issues.locator('[data-action="monitor-toggle"]')).toBeEnabled();
+        await toggleMonitor(page, true);
         await expect.poll(async () => (await readPreferences(a)).enabled).toBe(true);
-        await expect(issues.locator('[data-action="settings-monitor-stop"]')).toHaveText("Stop");
-        await issues.locator('[data-action="settings-monitor-stop"]').click();
+        await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
+        await toggleMonitor(page, false);
         await expect.poll(async () => (await readPreferences(a)).enabled).toBe(false);
-        await expect(issues.locator('[data-action="settings-monitor-stop"]')).toHaveText("Start");
+        await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Start");
 
         // Edit the remaining project-local controls while Monitor is stopped.
-        await issues.getByLabel("Autonomous", { exact: true }).check();
+        await autonomous(page).click();
         await expect.poll(async () => (await readPreferences(a)).autonomous_mode).toBe(true);
+        const maxMode = issues.getByLabel("Max active mode", { exact: true });
+        await selectCapacityMode(page, "manual");
         await editNumber(issues.getByLabel("Max active", { exact: true }), "6");
         await expect.poll(async () => (await readPreferences(a)).max_active_agents).toBe(6);
-        await expect(issues.getByLabel("Max active", { exact: true }).locator("..")).toContainText("Manual");
-        await issues.getByRole("button", { name: "Use Auto", exact: true }).click();
+        await expect(maxMode).toHaveValue("manual");
+        await selectCapacityMode(page, "auto");
         await expect.poll(async () => (await readPreferences(a)).max_active_agents_mode).toBe("auto");
-        await expect(issues.getByLabel("Max active", { exact: true }).locator("..")).toContainText("Auto");
+        await expect(issues.getByLabel("Max active", { exact: true })).toBeDisabled();
+        await selectCapacityMode(page, "manual");
+        await expect(issues.getByLabel("Max active", { exact: true })).toBeEnabled();
         await editNumber(issues.getByLabel("Max active", { exact: true }), "4");
         await expect.poll(async () => (await readPreferences(a)).max_active_agents).toBe(4);
         await issues.getByLabel("Auto-refill", { exact: true }).check();
@@ -164,7 +207,7 @@ test.describe("Issue #5322 Settings", () => {
         await issues.getByLabel("Allowed labels", { exact: true }).fill("auto-merge, bug");
         await issues.getByLabel("Allowed labels", { exact: true }).press("Tab");
         await expect.poll(async () => (await readPreferences(a)).allowed_labels).toEqual(["auto-merge", "bug"]);
-        await expect(issuesB.getByLabel("Autonomous", { exact: true })).not.toBeChecked();
+        await expect(autonomous(pageB)).toHaveAttribute("aria-checked", "false");
         await expect(issuesB.getByLabel("Max active", { exact: true })).toHaveValue("2");
         await expect(issuesB.getByLabel("Allowed labels", { exact: true })).toHaveValue("project-b");
 
@@ -217,17 +260,19 @@ test.describe("Issue #5322 Settings", () => {
         await expect.poll(async () => (await readPreferences(a)).launch_profiles.map((profile: any) => profile.agent_id)).toEqual(["claude", "codex"]);
         await expect(agentsB.getByLabel("Model codex", { exact: true })).toHaveValue("project-b-model");
 
-        // AC-6/7: System is application-scoped and refreshes the other open
-        // project without changing either project's Issue Monitor settings.
+        // PM ruling: the single global update toggle lives in System and
+        // refreshes the other project without changing its project settings.
         await openSettings(page, "system");
         await openSettings(pageB, "system");
         const updates = panel(page, "system").getByLabel("Auto-apply updates", { exact: true });
         const updatesB = panel(pageB, "system").getByLabel("Auto-apply updates", { exact: true });
+        await expect(settings(page).getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
+        await expect(issues.getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
         await expect(updates).toBeEnabled();
         await expect(updates).not.toBeChecked();
         await updates.check();
         await expect(updatesB).toBeChecked();
-        await expect(panel(page, "system")).toContainText("Application settings");
+        await expect(updates.locator("..")).toContainText("Auto-apply updates");
         await expect(panel(page, "system")).toContainText(/at least one open project.*Autonomous/);
 
         await expect(panel(page, "system")).toContainText("Saved: On · Effective: On");
@@ -289,17 +334,16 @@ test.describe("Issue #5322 Settings", () => {
             .some(({ payload }: any) => payload.kind === "workspace_state"));
           await expect(settings(current)).toHaveCount(1);
           await openSettings(current, "system");
-          await closeFixtureMigrationDrawer(current);
           await expect(panel(current, "system").getByLabel("Auto-apply updates", { exact: true })).toBeChecked();
           await expect(current.locator("html")).toHaveAttribute("data-theme", themeFor(info));
         }
         await openSettings(page, "issues");
-        await expect(issues.getByLabel("Autonomous", { exact: true })).toBeChecked();
+        await expect(autonomous(page)).toHaveAttribute("aria-checked", "true");
         await expect(issues.getByLabel("Max active", { exact: true })).toHaveValue("4");
         await expect(issues.getByLabel("Auto-refill", { exact: true })).toBeChecked();
         await expect(issues.getByLabel("Refill limit", { exact: true })).toHaveValue("5");
         await expect(issues.getByLabel("Allowed labels", { exact: true })).toHaveValue("auto-merge, bug");
-        await expect(issues.locator('[data-action="settings-monitor-stop"]')).toHaveText("Start");
+        await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Start");
         await openSettings(page, "agents");
         await expect(agents.locator("fieldset[data-agent-id]").first()).toHaveAttribute("data-agent-id", "claude");
         await expect(agents.getByLabel("Model codex", { exact: true })).toHaveValue("gpt-6-sol");
@@ -308,7 +352,7 @@ test.describe("Issue #5322 Settings", () => {
         await expect(agents.getByLabel("Runtime codex", { exact: true })).toHaveValue("Docker");
         await expect(agents.getByLabel("Docker service codex", { exact: true })).toHaveValue("fixture-service");
         await openSettings(pageB, "issues");
-        await expect(issuesB.getByLabel("Autonomous", { exact: true })).not.toBeChecked();
+        await expect(autonomous(pageB)).toHaveAttribute("aria-checked", "false");
         await expect(issuesB.getByLabel("Max active", { exact: true })).toHaveValue("2");
         await expect(issuesB.getByLabel("Allowed labels", { exact: true })).toHaveValue("project-b");
         const finalA = await readPreferences(a), finalB = await readPreferences(b);

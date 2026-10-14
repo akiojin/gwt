@@ -433,9 +433,9 @@ Common windows include:
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
   Application settings and project settings are labeled separately. Open
   `Issues` for Autonomous, Max active, queue refill and allowed labels, or
-  `Agents` to edit launch profiles and candidate order/preferences. Each
-  project section names its target project; the Issue window's ⚙ opens its
-  `Issues` section. `System > Auto-apply updates` applies across all projects
+  the same Issues section to edit launch profiles and candidate order/preferences.
+  Settings has grouped Application/Project navigation and names the target project.
+  `System > Auto-apply updates` applies across all projects
   when at least one open project has Autonomous enabled. Legacy project
   values migrate once: any enabled value enables the application setting.
   System shows the saved and effective values and pending-update blockers.
@@ -460,7 +460,7 @@ Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
 ## Issue surface and Issue Monitor
 
-Open `Issue` from Add Window to browse cached GitHub Issues in four columns:
+Open **Settings → Project → Issues**, or use the **Issues** rail shortcut, to browse cached GitHub Issues in four columns:
 Backlog, Queued, Active, and Done. Each row preserves its execution state and
 actions. Drag Backlog items into Queued to schedule them, drag them back to remove
 them, or reorder items within Queued. Selecting multiple items sends one queue
@@ -471,8 +471,9 @@ Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
 a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
 appear red; error details and history stay in the notification center. Use ⚙ to
-open and focus **Settings → Issues** for Max active, Auto-refill, its limit and
-Allowed labels; candidate profiles live in **Settings → Agents**. Auto-refill is
+expand the settings rows in the same pane for Max active, Auto-refill, its limit,
+Allowed labels and candidate profiles. Auto-apply updates is in **System**. Select **Manual** to edit
+Max active; **Auto** displays the calculated value without editing. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
 

@@ -394,7 +394,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
   Work Item view を開きます。Issue Monitor の自動起動はキャンバスにウィンドウを
-  開かず、Issue ウィンドウの右ペインに読み取り専用でミラー表示されます。入力
+  開かず、Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
   したいときは `Windowize` で通常のウィンドウにできます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
@@ -408,10 +408,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   バック)。設定はグローバルで `~/.gwt/config.toml` の `[ai].language` に保存
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
   アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
-  Autonomous、Max active、キュー補充、許可ラベルを、`Agents` では起動
-  プロファイルと候補の順序・優先条件を編集できます。プロジェクト欄には
-  編集対象の名前を表示し、Issue ウィンドウの ⚙ からその `Issues` 欄を
-  開けます。`System > Auto-apply updates` は全プロジェクト共通で、開いて
+  Autonomous、Max active、キュー補充、許可ラベル、起動プロファイルと候補の
+  順序・優先条件を同じ欄で編集できます。Settings は Application / Project の
+  左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
+  `System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
   System には保存値・有効値と、更新の保留理由も表示します。変更は GUI から
@@ -434,7 +434,7 @@ Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
 ## Issue サーフェスと Issue Monitor
 
-Add Window から `Issue` を開くと、キャッシュ済み GitHub Issue を Backlog / Queued /
+**Settings → Project → Issues**、または左ナビの **Issues** から、キャッシュ済み GitHub Issue を Backlog / Queued /
 Active / Done の 4 列で表示します。各行の実行状態と操作はそのまま利用できます。
 Backlog から Queued へドラッグすると実行対象に追加され、逆方向でキューから外れます。
 Queued 内では順序を変更でき、複数選択の移動は 1 回のキュー操作で送信されます。
@@ -444,9 +444,9 @@ Queued には `auto-refill` などの追加元も表示されます。
 検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
-エラーの詳細と履歴は通知センターで確認できます。⚙ で **Settings → Issues** を開いて
-フォーカスを移し、Max active、Auto-refill と上限、Allowed labels を設定します。
-候補プロファイルは **Settings → Agents** にあります。Auto-refill は**既定で OFF**です。
+エラーの詳細と履歴は通知センターで確認できます。⚙ で同じペインの設定行を展開し、
+Max active、Auto-refill と上限、Allowed labels、候補プロファイルを設定します。Auto-apply updates は **System** で設定します。
+Max active は **Manual** に切り替えると数値を編集でき、**Auto** では計算値を表示します。Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
 空のキューから新しい作業は起動せず、実行中の作業は継続します。
 

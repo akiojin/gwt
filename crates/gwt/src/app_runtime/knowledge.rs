@@ -1575,11 +1575,9 @@ impl AppRuntime {
         let Some(tab) = self.tab(&address.tab_id) else {
             return;
         };
-        if !tab
-            .workspace
-            .window(&address.raw_id)
-            .is_some_and(|window| window.preset == WindowPreset::Issue)
-        {
+        if !tab.workspace.window(&address.raw_id).is_some_and(|window| {
+            knowledge_kind_for_preset(window.preset) == Some(KnowledgeKind::Issue)
+        }) {
             return;
         }
         let message = format!("Issue window {stage} failed: {message}");

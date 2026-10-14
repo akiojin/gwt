@@ -4750,13 +4750,24 @@ button.workspace-board-ref:focus-visible {
 
 :root[data-theme] .settings-tabs {
   display: flex;
-  flex: 1 1 260px;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: var(--space-2);
-  justify-content: flex-end;
-  margin-left: auto;
   min-width: 0;
-  max-width: 100%;
+  padding: var(--space-3);
+  overflow-y: auto;
+  border-right: 1px solid var(--color-border);
+}
+
+:root[data-theme] .settings-layout {
+  display: grid;
+  grid-template-columns: minmax(140px, 190px) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+:root[data-theme] .settings-tabs .settings-label {
+  margin-top: var(--space-3);
+  overflow-wrap: anywhere;
 }
 
 :root[data-theme] .settings-tab {
@@ -4794,6 +4805,8 @@ button.workspace-board-ref:focus-visible {
 
 :root[data-theme] .settings-body {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
   padding: var(--space-4);
 }
@@ -4894,9 +4907,43 @@ button.workspace-board-ref:focus-visible {
 }
 
 :root[data-theme] .settings-field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) auto minmax(0, 2fr);
+  align-items: center;
+  gap: var(--space-3);
+}
+
+:root[data-theme] .settings-field > :last-child {
+  grid-column: 3;
+  min-width: 0;
+}
+
+:root[data-theme] .settings-issues-panel,
+:root[data-theme] .settings-issues-host {
+  height: 100%;
+  min-height: 0;
+}
+
+:root[data-theme] .settings-issues-host {
+  position: relative;
+}
+
+:root[data-theme] .settings-issues-options {
+  flex: 0 0 auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+}
+
+:root[data-theme] .settings-issues-options[open] {
+  max-height: 45%;
+  overflow: auto;
+}
+
+:root[data-theme] .settings-issues-options > summary {
+  cursor: pointer;
+  font-size: var(--type-xs);
+  color: var(--color-text-secondary);
 }
 
 :root[data-theme] .settings-input {

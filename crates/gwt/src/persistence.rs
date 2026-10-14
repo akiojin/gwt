@@ -429,6 +429,15 @@ fn normalize_loaded_workspace_state(state: &mut PersistedWindowCanvasState) {
     state
         .windows
         .retain(|window| !window.preset.is_removed_legacy());
+    for window in &mut state.windows {
+        let canonical = window.preset.canonical_surface_preset();
+        if window.preset != canonical {
+            // Keep the window identity: IssuePreview placements reference it,
+            // and distinct Settings views remain valid for split panes.
+            window.preset = canonical;
+            window.title = canonical.title().to_string();
+        }
+    }
     let next_z_index = state
         .windows
         .iter()
@@ -927,9 +936,9 @@ mod tests {
                     is_pm: false,
                 },
                 PersistedWindowState {
-                    id: "branches-1".to_string(),
-                    title: "Branches".to_string(),
-                    preset: WindowPreset::Branches,
+                    id: "settings-1".to_string(),
+                    title: "Settings".to_string(),
+                    preset: WindowPreset::Settings,
                     geometry: WindowGeometry {
                         x: 36.0,
                         y: 48.0,
@@ -1259,6 +1268,64 @@ mod tests {
                 issue_number: 3671,
             }
         );
+    }
+
+    #[test]
+    fn load_workspace_state_migrates_issue_hosts_to_settings_preserving_preview_links() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let template = default_workspace_state().windows.remove(0);
+        let mut state = empty_workspace_state();
+        for preset in [
+            WindowPreset::Settings,
+            WindowPreset::Issue,
+            WindowPreset::IssueMonitor,
+            WindowPreset::Spec,
+            WindowPreset::Work,
+            WindowPreset::Branches,
+        ] {
+            let mut host = template.clone();
+            host.id = preset.id_prefix().to_string();
+            host.title = preset.title().to_string();
+            host.preset = preset;
+            state.windows.push(host);
+        }
+        let mut agent = template;
+        agent.id = "agent-1".to_string();
+        agent.preset = WindowPreset::Agent;
+        agent.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "issue".to_string(),
+            issue_number: 5321,
+        };
+        state.windows.push(agent);
+        save_workspace_state(&path, &state).expect("save legacy workspace");
+
+        let loaded = load_workspace_state(&path).expect("restore legacy workspace");
+        assert_eq!(
+            loaded.windows.len(),
+            7,
+            "distinct Settings views are preserved"
+        );
+        for (index, id) in [
+            "settings",
+            "issue",
+            "issue-monitor",
+            "spec",
+            "work",
+            "branches",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(loaded.windows[index].id, id);
+            assert_eq!(loaded.windows[index].preset, WindowPreset::Settings);
+            assert_eq!(loaded.windows[index].title, "Settings");
+            assert_eq!(
+                loaded.windows[index].geometry,
+                state.windows[index].geometry
+            );
+        }
+        assert_eq!(loaded.windows[6].placement, state.windows[6].placement);
     }
 
     #[test]
