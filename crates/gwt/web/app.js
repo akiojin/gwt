@@ -4844,6 +4844,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
         scheduleKnowledgeRelatedWorkRefresh,
+        resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
@@ -4900,6 +4901,9 @@ import { createUiStateStore } from "/ui-state-store.js";
         // projection that is already broadcast, and reuses the Work surface's own
         // derivations and action paths rather than re-deriving them.
         getActiveWorkProjection: () => activeWorkProjection,
+        isKnowledgeWindowVisible: (id) => !document.hidden &&
+          !workspaceWindowById(id)?.minimized &&
+          !windowMap.get(id)?.hidden && Boolean(windowMap.get(id)?.getClientRects().length),
         workAttentionFor: attentionForWorkspace,
         renderOtherWork: (parent, windowId, options) =>
           workspaceOverviewSurface.renderInto(parent, windowId, options),
@@ -5098,7 +5102,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           });
         }
         if (isStrongContinueWorkSuccess(exact)) {
-          scheduleKnowledgeRelatedWorkRefresh();
+          scheduleKnowledgeRelatedWorkRefresh(true);
         }
       }
 
@@ -6242,6 +6246,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // Subscribers may mount runtimes: publish only after removal, creation
         // and focus have settled, never with the previous membership.
         publishWindowCatalog();
+        resumeKnowledgeEventRefresh();
         return result;
       }
 
@@ -6774,7 +6779,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                   dismissible: true,
                   timeoutMs: 0,
                 });
-                scheduleKnowledgeRelatedWorkRefresh();
+                scheduleKnowledgeRelatedWorkRefresh(true);
               }
             }
             break;
@@ -6783,7 +6788,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "workspace_resume_agent_started":
             workspaceResumePicker.handleStarted(event);
             launchPending.settleAck(event);
-            scheduleKnowledgeRelatedWorkRefresh();
+            scheduleKnowledgeRelatedWorkRefresh(true);
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
@@ -7866,6 +7871,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         rearmVisibleTerminalViewportRefreshes();
+        resumeKnowledgeEventRefresh();
       });
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {

@@ -576,7 +576,7 @@ test("Knowledge detail surfaces related Work and Session traces with Focus or Re
   );
   assert.match(
     knowledgeSurfaceSource.slice(relatedRefreshStart, relatedRefreshEnd),
-    /requestKnowledgeBridge\(windowId,\s*knowledgeKind,\s*false\)/,
+    /requestKnowledgeBridge\(windowId,\s*state.kind,\s*false\)/,
     "Related Work outcome refreshes must remain cache-first",
   );
   assert.match(
@@ -586,7 +586,7 @@ test("Knowledge detail surfaces related Work and Session traces with Focus or Re
   );
   assert.match(
     appSource,
-    /case "workspace_resume_agent_started":[\s\S]{0,500}?scheduleKnowledgeRelatedWorkRefresh\(\)/,
+    /case "workspace_resume_agent_started":[\s\S]{0,500}?scheduleKnowledgeRelatedWorkRefresh\(true\)/,
     "Resume/Launch acks should refresh Knowledge related Session traces",
   );
   assert.match(
