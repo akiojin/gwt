@@ -55,7 +55,8 @@ test.describe("Agent-prioritized focus cycling", () => {
     // A live runtime update moves this earlier workspace entry into the active
     // bucket. Its next neighbor is now running, rather than stopped.
     await page.evaluate(() => (window as any).__emitAgentFocusCycleFutureState("running"));
-    await expect(agentTile(page, "agent-live-future").locator(".agent-tile__header span")).toHaveText("Interactive");
+    await expect(windowById(page, "agent-live-future").locator(".status-chip"))
+      .toHaveAttribute("aria-label", /^Running: .*focus-cycle runtime running$/);
     await pressFocusCycle(page, "ArrowRight", "Control");
     await expectAgentTabFocus(page, "agent-running");
     await expect.poll(() => focusTargets(page)).toEqual([
@@ -317,13 +318,18 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
       },
     });
     (window as any).__agentFocusCycleActivationReleased = false;
-    (window as any).__emitAgentFocusCycleFutureState = (status = "future-state") => {
-      return socket?.emit({
+    (window as any).__emitAgentFocusCycleFutureState = async (status = "future-state") => {
+      const target = windows.find(windowData => windowData.id === "agent-live-future")!;
+      target.status = status;
+      await socket?.emit({
         kind: "terminal_status",
         id: "agent-live-future",
         status,
-        detail: "future runtime fixture",
+        detail: `focus-cycle runtime ${status}`,
       });
+      // Focus echoes must agree with this runtime update, including when the
+      // receive dispatcher coalesces an earlier workspace snapshot.
+      return socket?.emit(workspaceState());
     };
     (window as any).__releaseAgentFocusCycleActivation = () => {
       (window as any).__agentFocusCycleActivationReleased = true;
