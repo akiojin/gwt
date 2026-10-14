@@ -30,6 +30,8 @@ use gwt_core::work_events_intake::{
     rebuild_work_events_with_shared_loader, work_events_intake_group_of, SharedWorkEventsSource,
     WorkEventsIntakeStore,
 };
+
+use crate::app_runtime::ProjectContext;
 #[cfg(test)]
 use gwt_core::work_events_intake::{
     ingest_work_events_content, load_work_events_intake_state, save_work_events_intake_state,
@@ -54,7 +56,7 @@ const EVENTS_TREE_DIR: &str = ".gwt/work/events";
 /// One worker and one coalesced follow-up per project, including forced opens.
 #[derive(Default)]
 pub(crate) struct WorkEventsIngestQueue {
-    pending: Mutex<HashMap<gwt_core::repo_hash::ProjectKey, bool>>,
+    pending: Mutex<HashMap<gwt_core::repo_hash::ProjectKey, Option<ProjectContext>>>,
 }
 
 pub(crate) struct WorkEventsIngestWorker {
@@ -66,17 +68,18 @@ pub(crate) struct WorkEventsIngestWorker {
 impl WorkEventsIngestQueue {
     pub(crate) fn request(
         self: &Arc<Self>,
-        project: gwt_core::repo_hash::ProjectKey,
+        context: ProjectContext,
     ) -> Option<WorkEventsIngestWorker> {
+        let project = context.project_key.clone();
         let mut pending = self
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(requested) = pending.get_mut(&project) {
-            *requested = true;
+            *requested = Some(context);
             return None;
         }
-        pending.insert(project.clone(), false);
+        pending.insert(project.clone(), None);
         Some(WorkEventsIngestWorker {
             queue: Arc::clone(self),
             project,
@@ -86,19 +89,18 @@ impl WorkEventsIngestQueue {
 }
 
 impl WorkEventsIngestWorker {
-    pub(crate) fn finish_pass(&mut self) -> bool {
+    pub(crate) fn finish_pass(&mut self) -> Option<ProjectContext> {
         let mut pending = self
             .queue
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if pending.get(&self.project) == Some(&true) {
-            pending.insert(self.project.clone(), false);
-            true
+        if let Some(context) = pending.get_mut(&self.project).and_then(Option::take) {
+            Some(context)
         } else {
             pending.remove(&self.project);
             self.active = false;
-            false
+            None
         }
     }
 }
@@ -1569,27 +1571,45 @@ mod tests {
         let queue = Arc::new(WorkEventsIngestQueue::default());
         let project = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
         let other = gwt_core::repo_hash::ProjectKey::parse("fedcba9876543210").unwrap();
-        let mut worker = queue.request(project.clone()).expect("first worker");
-        for _ in 0..100 {
-            assert!(queue.request(project.clone()).is_none());
+        let context = |project: &gwt_core::repo_hash::ProjectKey, generation| {
+            crate::app_runtime::ProjectContext {
+                tab_id: format!("tab-{generation}"),
+                project_key: project.clone(),
+                generation,
+                project_root: PathBuf::from(format!("root-{generation}")),
+            }
+        };
+        let mut worker = queue.request(context(&project, 0)).expect("first worker");
+        for generation in 1..=100 {
+            assert!(queue.request(context(&project, generation)).is_none());
         }
-        let independent = queue.request(other).expect("independent project");
-        assert!(
+        let independent = queue
+            .request(context(&other, 0))
+            .expect("independent project");
+        assert_eq!(
             worker.finish_pass(),
-            "one coalesced follow-up for the burst"
+            Some(context(&project, 100)),
+            "one follow-up preserves the latest reopened tab, root and generation"
         );
-        assert!(!worker.finish_pass(), "the burst never becomes 100 workers");
-        let replacement = queue.request(project.clone()).expect("completed admission");
+        assert!(
+            worker.finish_pass().is_none(),
+            "the burst never becomes 100 workers"
+        );
+        let replacement = queue
+            .request(context(&project, 101))
+            .expect("completed admission");
         drop(worker);
         assert!(
-            queue.request(project.clone()).is_none(),
+            queue.request(context(&project, 102)).is_none(),
             "old guard cannot release replacement"
         );
         drop(replacement);
-        let failed = queue.request(project.clone()).expect("new admission");
+        let failed = queue
+            .request(context(&project, 103))
+            .expect("new admission");
         drop(failed);
         assert!(
-            queue.request(project).is_some(),
+            queue.request(context(&project, 104)).is_some(),
             "failure releases admission"
         );
         drop(independent);

@@ -4507,10 +4507,10 @@ impl AppRuntime {
         let Some(context) = self.project_context_for_root(&project_root) else {
             return;
         };
-        let Some(mut worker) = self.work_events_ingest_queue.request(project_key.clone()) else {
+        let Some(mut worker) = self.work_events_ingest_queue.request(context.clone()) else {
             return;
         };
-        let proxy = self.proxy.for_project(context);
+        let proxy = self.proxy.clone();
         // Resolve the home-projection paths on the calling thread: HOME is
         // process-global and parallel unit tests scope it per test
         // (ScopedEnvVar, #3022) — a late resolution inside the worker would
@@ -4519,6 +4519,8 @@ impl AppRuntime {
         let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key);
         let projection_path = gwt_core::paths::gwt_workspace_projection_path(&project_key);
         thread::spawn(move || {
+            let mut context = context;
+            let mut project_root = project_root;
             let mut inventory = worktree_inventory;
             loop {
                 if let Some(event) = Self::prepare_work_events_ingest(
@@ -4528,11 +4530,15 @@ impl AppRuntime {
                     &projection_path,
                     inventory.as_deref().map(Vec::as_slice),
                 ) {
-                    proxy.send(event);
+                    proxy.for_project(context.clone()).send(event);
                 }
-                if !worker.finish_pass() {
+                let Some(next_context) = worker.finish_pass() else {
                     break;
-                }
+                };
+                // Only the next pass takes a reopened project's context. Old
+                // results retain their generation and are rejected as stale.
+                project_root = next_context.project_root.clone();
+                context = next_context;
                 // A coalesced request may have followed a new launch or shard.
                 // Re-enumerate instead of reusing the first pass's inventory.
                 inventory = None;

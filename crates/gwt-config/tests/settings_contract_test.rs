@@ -6,7 +6,7 @@
 //! and the global config path layout. The real `~/.gwt/config.toml` is
 //! never touched.
 
-use std::{num::NonZeroU16, path::Path};
+use std::num::NonZeroU16;
 
 use gwt_config::{ConfigError, Settings};
 
@@ -194,7 +194,7 @@ fn persist_embedded_port_preserves_unknown_keys_comments_and_minimal_shape() {
 #[cfg(unix)]
 #[test]
 fn persist_embedded_port_updates_symlink_target_without_replacing_link() {
-    use std::os::unix::fs::symlink;
+    use std::{os::unix::fs::symlink, path::Path};
 
     let dir = tempfile::tempdir().expect("tempdir");
     let managed_dir = dir.path().join("managed");
