@@ -12224,12 +12224,27 @@ mod tests {
         // Issue #4334 AC-5: execute the shipped JSON verbatim without the
         // launch env, including the decoder used by bootstrap scripts.
         for runtime in [".claude", ".codex"] {
-            let guidance = std::fs::read_to_string(
-                tmp.path()
-                    .join(runtime)
-                    .join("skills/gwt-coordination/SKILL.md"),
-            )
-            .expect("generated skill");
+            let skill_dir = tmp.path().join(runtime).join("skills/gwt-coordination");
+            let router =
+                std::fs::read_to_string(skill_dir.join("SKILL.md")).expect("generated router");
+            assert!(
+                router.contains("](references/board.md)"),
+                "{runtime}: router must link to the Board declaration/clear workflow"
+            );
+            let mut guidance = router.clone();
+            for link in router.split("](references/").skip(1) {
+                let relative = link.split(')').next().expect("reference target");
+                let reference = skill_dir.join("references").join(relative);
+                guidance.push('\n');
+                guidance.push_str(
+                    &std::fs::read_to_string(&reference).unwrap_or_else(|error| {
+                        panic!(
+                            "{runtime}: linked reference {} must ship: {error}",
+                            reference.display()
+                        )
+                    }),
+                );
+            }
             let examples: Vec<_> = guidance
                 .lines()
                 .map(str::trim)
