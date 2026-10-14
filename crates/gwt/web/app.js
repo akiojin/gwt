@@ -642,6 +642,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           appendRenderKeyPart(parts, windowData?.purpose_title || "");
           appendRenderKeyPart(parts, "agent_id");
           appendRenderKeyPart(parts, windowData?.agent_id || "");
+          appendRenderKeyPart(parts, "agent_name");
+          appendRenderKeyPart(parts, windowData?.agent_name || "");
           appendRenderKeyPart(parts, "session_id");
           appendRenderKeyPart(parts, windowData?.session_id || "");
           appendRenderKeyPart(parts, "is_pm");
@@ -718,6 +720,8 @@ import { createUiStateStore } from "/ui-state-store.js";
         appendRenderKeyPart(parts, windowData.purpose_title || "");
         appendRenderKeyPart(parts, "agent_id");
         appendRenderKeyPart(parts, windowData.agent_id || "");
+        appendRenderKeyPart(parts, "agent_name");
+        appendRenderKeyPart(parts, windowData.agent_name || "");
         appendRenderKeyPart(parts, "agent_color");
         appendRenderKeyPart(parts, windowData.agent_color || "");
         appendRenderKeyPart(parts, "worktree_form");
@@ -775,6 +779,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           appendRenderKeyPart(parts, tab.purpose_title || "");
           appendRenderKeyPart(parts, "agent_id");
           appendRenderKeyPart(parts, tab.agent_id || "");
+          appendRenderKeyPart(parts, "agent_name");
+          appendRenderKeyPart(parts, tab.agent_name || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, tab.agent_color || "");
           appendRenderKeyPart(parts, "worktree_form");
@@ -1856,6 +1862,11 @@ import { createUiStateStore } from "/ui-state-store.js";
           return focus && focus !== PM_WINDOW_TITLE
             ? `${PM_WINDOW_TITLE} — ${focus}`
             : PM_WINDOW_TITLE;
+        }
+        if (isAgentWindowPreset(windowData?.preset)) {
+          const name = String(windowData?.agent_name || "").trim() || "Naming…";
+          const purpose = String(windowData?.dynamic_title || windowData?.purpose_title || "").trim();
+          return purpose ? `${name} — ${purpose}` : name;
         }
         for (const value of candidates) {
           const title = String(value || "").trim();
@@ -7736,6 +7747,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       agentsSurface = createAgentsSurface({
         document,
         windowCatalogModel,
+        windowDisplayTitle,
         getWindows: catalog => catalogActiveWindows(catalog).map(data => ({
           ...data, status: catalog.runtimeStates[data.id] ?? data.status,
         })),

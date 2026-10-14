@@ -2043,6 +2043,7 @@ fn active_work_agent_view_from_summary(
         session_id: agent.session_id.clone(),
         window_id: agent.window_id.clone(),
         agent_id: agent.agent_id.clone(),
+        agent_name: None,
         display_name: agent.display_name.clone(),
         affiliation_status: affiliation_status.to_string(),
         workspace_id: agent.workspace_id.clone(),
@@ -2809,6 +2810,7 @@ fn paused_work_agent_view_from_history(
         session_id: agent.session_id.clone(),
         window_id: None,
         agent_id: agent.agent_id.clone().unwrap_or_default(),
+        agent_name: None,
         display_name: agent.display_name.clone().unwrap_or_default(),
         affiliation_status: "assigned".to_string(),
         workspace_id: None,
@@ -3134,6 +3136,7 @@ fn prepare_active_work_projection(
             &input.issue_link_cache_dir,
         ),
     );
+    attach_agent_names(&mut view, &agent_names_for_tab(&input.tab));
     let projection_ms = projection_started.elapsed().as_millis() as u64;
     let clone_started = Instant::now();
     let event = BackendEvent::ActiveWorkProjection {
@@ -3213,6 +3216,7 @@ fn bounded_active_work_agent_snapshot(
         session_id: cached.session_id.clone(),
         window_id: cached.window_id.clone(),
         agent_id: cached.agent_id.clone(),
+        agent_name: cached.agent_name.clone(),
         display_name: cached.display_name.clone(),
         affiliation_status: cached.affiliation_status.clone(),
         workspace_id: cached.workspace_id.clone(),
@@ -3828,8 +3832,11 @@ impl AppRuntime {
         if sessions.is_empty() {
             return empty_active_work_projection_view(tab_id, tab);
         }
-        active_work_projection_from_live_sessions(tab_id, &tab.title, &sessions, None)
-            .unwrap_or_else(|| empty_active_work_projection_view(tab_id, tab))
+        let mut view =
+            active_work_projection_from_live_sessions(tab_id, &tab.title, &sessions, None)
+                .unwrap_or_else(|| empty_active_work_projection_view(tab_id, tab));
+        attach_agent_names(&mut view, &agent_names_for_tab(tab));
+        view
     }
 
     fn dispatch_cached_active_work_projection(
@@ -3972,6 +3979,27 @@ impl AppRuntime {
                 },
             )));
         }
+    }
+
+    /// Naming changes the Window-owned projection input, including in-flight snapshots.
+    pub(crate) fn refresh_agent_name_projection(&self, tab_id: &str) {
+        let Some(tab) = self.tab(tab_id) else { return };
+        let names = agent_names_for_tab(tab);
+        if let Some(state) = self.project_state_for_tab(tab_id) {
+            if let Some(view) = state
+                .active_work_projection_cache
+                .borrow_mut()
+                .get_mut(tab_id)
+            {
+                attach_agent_names(view, &names);
+            }
+            state
+                .active_work_projection_payload_cache
+                .borrow_mut()
+                .remove(tab_id);
+        }
+        self.invalidate_workspace_projection_patch(tab_id);
+        self.schedule_active_work_projection_refresh(&tab.project_root, None);
     }
 
     fn schedule_active_work_projection_refresh(
@@ -4338,6 +4366,9 @@ impl AppRuntime {
             );
             cache.insert(tab_id.clone(), projection);
         }
+        if let (Some(view), Some(tab)) = (cache.get_mut(&tab_id), self.tab(&tab_id)) {
+            attach_agent_names(view, &agent_names_for_tab(tab));
+        }
         drop(cache);
         // The prepared payload is an immutable serialization of the previous
         // structured snapshot. Keep the two caches coherent: until the latest
@@ -4485,10 +4516,19 @@ impl AppRuntime {
         if let Some(error) = load_error {
             return self.handle_workspace_state_load_failed(&context.project_root, error);
         }
+        let mut view = view;
+        if let (Some(view), Some(tab)) = (view.as_mut(), self.tab(&tab_id)) {
+            attach_agent_names(view, &agent_names_for_tab(tab));
+        }
         self.recheck_workspace_state_after_projection(&context.project_root);
         let mut events = Vec::new();
         {
             self.invalidate_workspace_projection_patch(&tab_id);
+            self.project_state_for_tab(&tab_id)
+                .expect("open project state")
+                .active_work_projection_payload_cache
+                .borrow_mut()
+                .remove(&tab_id);
             let mut cache = self
                 .project_state_for_tab(&tab_id)
                 .expect("open project state")
@@ -4654,6 +4694,7 @@ impl AppRuntime {
             context: self.project_context(tab_id).expect("open project context"),
             tab_id: tab_id.to_string(),
             tab_title: tab.title.clone(),
+            agent_names: agent_names_for_tab(tab),
             project_root: tab.project_root.clone(),
             sessions: self
                 .active_agent_sessions
@@ -4729,6 +4770,10 @@ impl AppRuntime {
             fresh: Box::new(projection.clone()),
             sessions: self.active_agent_sessions.values().cloned().collect(),
             windows,
+            agent_names: self
+                .tab(&context.tab_id)
+                .map(agent_names_for_tab)
+                .unwrap_or_default(),
             window_generations: self
                 .window_lifecycle_generations
                 .lock()
@@ -4844,6 +4889,7 @@ pub(crate) struct ActiveWorkProjectionJob {
     pub(crate) tab_id: String,
     pub(crate) project_root: PathBuf,
     tab_title: String,
+    agent_names: HashMap<String, String>,
     sessions: Vec<ActiveAgentSession>,
     /// Window ids whose PTY is running — the Shell Work status derivation
     /// (SPEC-2359 US-80) that used to read `window_pty_statuses` directly.
@@ -5070,6 +5116,7 @@ fn build_active_work_projection(
                 &job.issue_link_cache_dir,
             ),
         );
+        attach_agent_names(&mut view, &job.agent_names);
         return Ok(Some(view));
     }
 
@@ -5109,6 +5156,9 @@ fn build_active_work_projection(
             &hook_failures,
         );
     }
+    if let Some(view) = view.as_mut() {
+        attach_agent_names(view, &job.agent_names);
+    }
     Ok(view)
 }
 
@@ -5143,6 +5193,38 @@ pub(super) fn active_work_projection_shared_loads() -> [usize; 3] {
         ACTIVE_WORK_PROJECTION_JOURNAL_LOADS.with(std::cell::Cell::get),
         ACTIVE_WORK_PROJECTION_SESSION_LEDGER_LOADS.with(std::cell::Cell::get),
     ]
+}
+
+/// Project the Window-owned identity without changing provider or Work grouping.
+pub(super) fn attach_agent_names(
+    view: &mut gwt::ActiveWorkProjectionView,
+    names: &HashMap<String, String>,
+) {
+    for agent in view
+        .agents
+        .iter_mut()
+        .chain(view.unassigned_agents.iter_mut())
+    {
+        agent.agent_name = names.get(&agent.session_id).cloned();
+    }
+    for work in &mut view.active_works {
+        for agent in work.agents.iter_mut().chain(
+            work.works
+                .iter_mut()
+                .flat_map(|child| child.agents.iter_mut()),
+        ) {
+            agent.agent_name = names.get(&agent.session_id).cloned();
+        }
+    }
+}
+
+fn agent_names_for_tab(tab: &ProjectTabRuntime) -> HashMap<String, String> {
+    tab.workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter_map(|window| Some((window.session_id.clone()?, window.agent_name.clone()?)))
+        .collect()
 }
 
 #[cfg(test)]

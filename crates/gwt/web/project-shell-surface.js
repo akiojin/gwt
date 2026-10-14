@@ -160,6 +160,8 @@ export function createProjectShellSurface({
           appendRenderKeyPart(parts, entry?.purpose_title || "");
           appendRenderKeyPart(parts, "agent_id");
           appendRenderKeyPart(parts, entry?.agent_id || "");
+          appendRenderKeyPart(parts, "agent_name");
+          appendRenderKeyPart(parts, entry?.agent_name || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, entry?.agent_color || "");
           appendRenderKeyPart(parts, "worktree_form");

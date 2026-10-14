@@ -306,12 +306,14 @@ export function createAgentKanbanSurface({
     titleWrap.className = "agent-kanban-card-title-wrap";
     const title = document.createElement("div");
     title.className = "agent-kanban-card-title";
-    title.textContent =
-      windowDisplayTitle?.(windowData) || windowData.title || windowData.id;
+    title.textContent = windowData.is_pm
+      ? windowDisplayTitle?.(windowData) || "Project Manager"
+      : String(windowData.agent_name || "").trim() || "Naming…";
     const meta = document.createElement("div");
     meta.className = "agent-kanban-card-meta";
-    meta.textContent =
-      windowRoleBadgeLabel?.(windowData) || windowData.agent_id || "Agent";
+    const provider = windowRoleBadgeLabel?.(windowData) || windowData.agent_id || "Agent";
+    const purpose = windowData.dynamic_title || windowData.purpose_title || windowData.title || "";
+    meta.textContent = purpose ? `${provider} — ${purpose}` : provider;
     titleWrap.append(title, meta);
 
     const actions = document.createElement("div");

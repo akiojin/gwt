@@ -241,6 +241,19 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     );
     let coordination_body =
         std::fs::read_to_string(&claude_coordination).expect("read coordination skill");
+    assert_eq!(
+        coordination_body,
+        gwt_skills::coordination_guidance::render_skill_md()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&codex_coordination).expect("read Codex coordination skill"),
+        coordination_body
+    );
+    assert!(
+        coordination_body
+            .contains(r#""operation":"pane.name","params":{"candidate":"<your candidate>"}"#),
+        "materialized guidance must require the Agent's own AI-generated candidate"
+    );
     assert!(
         coordination_body.contains("\"operation\":\"workspace.update\""),
         "coordination skill must contain canonical workspace.update JSON operation"

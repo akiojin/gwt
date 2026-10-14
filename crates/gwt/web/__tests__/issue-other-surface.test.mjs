@@ -363,6 +363,19 @@ test("Workspace Overview keeps unassigned agents in an explicit queue outside Wo
   );
 });
 
+test("Active Work agents show assigned names with provider as secondary context", () => {
+  const fixture = createFixture();
+  const projection = sampleProjection();
+  projection.unassigned_agents[0].agent_name = "Lumen";
+  const surface = createSurface(fixture, projection);
+  surface.renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelector(".workspace-overview-agent-name").textContent, "Lumen");
+  assert.match(fixture.body.querySelector(".workspace-overview-agent-meta").textContent, /Codex/);
+  projection.unassigned_agents[0].agent_name = null;
+  surface.renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelector(".workspace-overview-agent-name").textContent, "Naming…");
+});
+
 test("Workspace Overview renders Active Works from active_works and keeps Unassigned Agents separate", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, {

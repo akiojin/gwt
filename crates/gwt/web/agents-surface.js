@@ -2,7 +2,7 @@ import { surfaceForWindow } from "./surface-rail.js";
 
 // The grid owns presentation only. Sessions and terminal runtimes remain shared
 // with the existing window model; column changes never persist canvas geometry.
-export function createAgentsSurface({ document, windowCatalogModel, getWindows,
+export function createAgentsSurface({ document, windowCatalogModel, getWindows, windowDisplayTitle,
   isMounted = () => true, mountTerminal, mountPreview, onLayout,
   onFocus = () => {}, onPreviewFocus = onFocus }) {
   const element = document.createElement("section");
@@ -202,7 +202,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
         addTab(data.id, "");
         changed = true;
       }
-      const title = data.dynamic_title || data.title || data.id;
+      const title = windowDisplayTitle(data);
       const open = tile.querySelector(".agent-tile__open");
       tile.querySelector("h3").textContent = title;
       open.setAttribute("aria-label", `Open ${title} tab`);

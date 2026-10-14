@@ -152,6 +152,9 @@ pub struct PersistedWindowState {
     /// window では launch wizard 起動時に設定される。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Assigned memorable identity, independent of provider and Work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     /// Wire-only color hint sent to the WebView. 送信直前に backend が
     /// `agent_id` フィールド (または `preset` のフォールバック) から計算する。
     /// disk には書かない (`skip_deserializing` + skip_serializing_if で
@@ -362,6 +365,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title: None,
                 dynamic_title_detail: None,
                 agent_id: None,
+                agent_name: None,
                 agent_color: None,
                 worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
@@ -390,6 +394,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title: None,
                 dynamic_title_detail: None,
                 agent_id: None,
+                agent_name: None,
                 agent_color: None,
                 worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
@@ -926,6 +931,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -954,6 +960,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -1533,6 +1540,7 @@ mod tests {
                 dynamic_title: None,
                 dynamic_title_detail: None,
                 agent_id: Some("claude".into()),
+                agent_name: None,
                 agent_color: None,
                 worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
@@ -1635,6 +1643,7 @@ mod tests {
             dynamic_title: None,
             dynamic_title_detail: None,
             agent_id: Some("claude".into()),
+            agent_name: None,
             agent_color: Some(AgentColor::Yellow),
             worktree_form: WindowWorktreeForm::Unknown,
             tab_group_id: None,
@@ -1711,6 +1720,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -1739,6 +1749,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -1957,6 +1968,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -1985,6 +1997,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -2077,5 +2090,28 @@ mod tests {
                 "legacy {legacy} should map to Starting",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_name_tests {
+    use super::*;
+
+    #[test]
+    fn agent_name_survives_persistence_roundtrip_and_legacy_state() {
+        let legacy = serde_json::to_value(default_workspace_state()).unwrap();
+        let legacy_state: PersistedWindowCanvasState =
+            serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(
+            legacy_state.windows.len(),
+            legacy["windows"].as_array().unwrap().len()
+        );
+        let mut named = legacy;
+        named["windows"][0]["agent_name"] = "Falcon".into();
+        let state: PersistedWindowCanvasState = serde_json::from_value(named).unwrap();
+        assert_eq!(
+            serde_json::to_value(&state).unwrap()["windows"][0]["agent_name"],
+            "Falcon"
+        );
     }
 }
