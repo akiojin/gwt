@@ -211,17 +211,22 @@ fn runtime_gc_never_follows_namespace_or_sidecar_links() {
 #[cfg(windows)]
 #[test]
 fn runtime_gc_never_follows_namespace_junctions() {
+    use gwt_core::process::{resolved_command, ProcessPlanRequest};
+
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     fs::create_dir(root.path().join("runtime")).unwrap();
     fs::write(outside.path().join("proof.json"), "keep").unwrap();
     let junction = root.path().join("runtime").join("1");
-    let status = std::process::Command::new("cmd.exe")
-        .args(["/c", "mklink", "/J"])
-        .arg(&junction)
-        .arg(outside.path())
-        .output()
-        .unwrap();
+    let status = resolved_command(
+        ProcessPlanRequest::new("cmd.exe")
+            .args(["/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(outside.path()),
+    )
+    .unwrap()
+    .output()
+    .unwrap();
     assert!(status.status.success(), "junction creation: {:?}", status);
     let report =
         collect_stale_runtime_namespaces(root.path(), SystemTime::now(), AGE, |_| Some(false))
