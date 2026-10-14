@@ -45,7 +45,7 @@
 
 ## Step 4: Produce Diagnosis Report
 
-Output MUST use this exact structure:
+Include the blocking verdict, evidence, and next action; this structure is an example:
 
 ```text
 ## Diagnosis Report: PR #<number>
