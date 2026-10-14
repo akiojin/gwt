@@ -107,7 +107,7 @@ test.describe("Issue #5381 runtime memory budget (live backend)", () => {
         observation_started_at: observationStarted ? new Date(observationStarted).toISOString() : null,
         requested_duration_seconds: duration, budget_bytes: BUDGET, pane_ids: panes,
         workload: "8 custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls",
-        limitations: "Eight deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project (nine Projects total). This is a GUI regression budget, not AC-2 proof for a same-project implementation/model fleet; provider inference, hooks and builds are not covered.",
+        limitations: "Eight deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project (nine Projects total). This covers #5381's fixture RSS budget; the actual implementation/model fleet 60-minute observation belongs to #5385. Provider inference, hooks and builds are not covered.",
         user_verification_result: "n/a (autonomous)", agent_visual_check: passed ? "pass" : "fail",
         initial_producers: initial, final_producers: final, rss_samples: samples, browser_errors: errors,
       };
@@ -130,7 +130,13 @@ function sampleRss(elapsed_ms: number): Sample {
 async function liveReceipts(): Promise<Receipt[]> {
   const directory = join(HOME, "workload");
   const receipts = await Promise.all((await readdir(directory)).filter(name => name.endsWith(".json"))
-    .map(name => readFile(join(directory, name), "utf8").then(JSON.parse))) as Receipt[];
+    .map(async name => {
+      const receipt = JSON.parse(await readFile(join(directory, name), "utf8"));
+      const heartbeats = await readFile(join(directory, name + ".heartbeat"), "utf8");
+      // Only a complete appended record is observable during a concurrent write.
+      const latest = heartbeats.slice(0, heartbeats.lastIndexOf("\n")).split("\n").at(-1);
+      return latest ? { ...receipt, ...JSON.parse(latest) } : receipt;
+    })) as Receipt[];
   const ids = [...new Set(receipts.map(receipt => receipt.pid))];
   if (ids.length === 0) return [];
   expect(ids.every(id => Number.isInteger(id) && id > 0), "owned workload PID receipts").toBe(true);

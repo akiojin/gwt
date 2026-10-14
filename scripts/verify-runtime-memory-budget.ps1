@@ -1,6 +1,7 @@
 # #5381: owned Windows checkout, fresh HOME, eight deterministic real Agent PTYs.
 # Build first: cargo build -p gwt --bin gwt --bin gwtd
-# Set GWT_PLAYWRIGHT_MEMORY_SECONDS=3600 for the one-hour GUI regression budget observation.
+# Set GWT_PLAYWRIGHT_MEMORY_SECONDS=600 for the GUI regression budget observation.
+# The actual agent fleet one-hour observation belongs to #5385.
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -12,7 +13,10 @@ foreach ($binary in @($checkoutGwt, $checkoutGwtd)) {
   if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Build this checkout gwt/gwtd first.' }
 }
 $node = (Get-Command node -CommandType Application).Source
-$checkHome = Join-Path ([IO.Path]::GetTempPath()) ('gwt-runtime-memory-' + [guid]::NewGuid())
+# verify.run gives each command a disposable TEMP. Keep owned evidence and
+# the pinned shared dependency cache outside that disposable command folder.
+$artifactRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Temp'
+$checkHome = Join-Path $artifactRoot ('gwt-runtime-memory-' + [guid]::NewGuid())
 foreach ($relative in @('.gwt', '.codex', 'workload', 'tmp')) {
   [void](New-Item -ItemType Directory -Path (Join-Path $checkHome $relative) -Force)
 }
@@ -27,12 +31,14 @@ const path = require('node:path');
 const directory = process.env.GWT_MEMORY_WORKLOAD_DIR;
 if (!directory || !process.env.GWT_SESSION_ID) throw new Error('isolated Agent launch required');
 const identity = {pid:process.pid, started_at:Date.now()-process.uptime()*1000, session:process.env.GWT_SESSION_ID};
+const file = path.join(directory, `${process.pid}.json`);
+fs.writeFileSync(file, JSON.stringify({...identity,tick:0,observed_at:new Date().toISOString()}));
 let tick = 0;
 setInterval(() => {
   tick += 1;
-  const file = path.join(directory, `${process.pid}.json`);
-  fs.writeFileSync(file+'.tmp', JSON.stringify({...identity,tick,observed_at:new Date().toISOString()}));
-  fs.renameSync(file+'.tmp', file);
+  // Windows readers may hold the receipt open: keep identity immutable and
+  // append heartbeats instead of replacing a file being sampled.
+  fs.appendFileSync(file+'.heartbeat', JSON.stringify({tick,observed_at:new Date().toISOString()})+'\n');
   process.stdout.write(`GWT_MEMORY_TICK ${process.pid} ${tick} ${'x'.repeat(512)}\n`);
 }, 1000);
 process.stdin.resume();
@@ -175,7 +181,7 @@ try {
   Assert-HookHealth ($health.output | ConvertFrom-Json)
   [IO.File]::WriteAllText("$checkHome/hook-health.json", $health.output)
   $version = [IO.File]::ReadAllText((Join-Path $repoRoot 'scripts/playwright-version.txt')).Trim()
-  $deps = Join-Path ([IO.Path]::GetTempPath()) "gwt-playwright-$version"
+  $deps = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path $artifactRoot "gwt-playwright-$version" }
   $cli = Join-Path $deps 'node_modules/playwright/cli.js'
   $resolvePlaywright = Join-Path $deps 'resolve-playwright.cjs'
   if (-not (Test-Path -LiteralPath $cli) -or -not (Test-Path -LiteralPath $resolvePlaywright)) { throw "Pinned Playwright $version missing; run scripts/run-visual-tests.sh --list first." }
