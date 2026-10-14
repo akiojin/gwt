@@ -424,6 +424,11 @@ Agent が status、decision、handoff、request を外部化する coordination 
 Work Item Knowledge Bridge は frontend から GitHub API response を直接描画せず、
 ローカル Issue cache と semantic index を使います。
 
+作業 Agent は起動時に短く覚えやすい固有名を選び、バッジ・ウィンドウタイトル・
+Fleet・Kanban カードに表示します。候補が重複すると数字の接尾辞が付きます。
+名前は復元・その場での再起動をまたいで維持され、確定前のバッジは `Naming…` です。
+常駐 PM は独自の固定表示を維持します。
+
 Windows の Host 起動では、Launch Agent で Command Prompt、Windows PowerShell、
 PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ内のシェルを使います。
 

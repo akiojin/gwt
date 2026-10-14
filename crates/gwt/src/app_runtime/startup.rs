@@ -1738,6 +1738,21 @@ impl AppRuntime {
         // nobody asked for, so a terminal predecessor generation is left
         // alone instead of being continued into a new Active generation.
         config.automatic_restore = origin == RestoreOrigin::Automatic;
+        let agent_name = self.tab(tab_id).and_then(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| {
+                    crate::runtime_support::window_is_agent_pane(window)
+                        && matches!(
+                            window.status,
+                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                        )
+                        && window.session_id.as_deref() == Some(session.id.as_str())
+                })
+                .and_then(|window| window.agent_name.clone())
+        });
         let geometry = self
             .remove_stale_paused_agent_window(tab_id, &session.id, None)
             .unwrap_or(fallback_geometry);
@@ -1756,13 +1771,32 @@ impl AppRuntime {
             geometry,
             workspace_resume_context,
         ) {
-            Ok(events) => {
+            Ok(mut events) => {
                 if let Some(window_id) = self
                     .window_lookup
                     .keys()
                     .find(|window_id| !existing_windows.contains(*window_id))
                     .cloned()
                 {
+                    if let Some(name) = agent_name {
+                        if let Some(address) = self.window_lookup.get(&window_id).cloned() {
+                            if let Some(tab) = self.tab_mut(&address.tab_id) {
+                                tab.workspace.set_agent_name(&address.raw_id, Some(name));
+                            }
+                            if let Some(context) = self.project_context(&address.tab_id) {
+                                let named_state = self.workspace_state_broadcast(&context);
+                                for event in &mut events {
+                                    if matches!(
+                                        event.event,
+                                        gwt::BackendEvent::WindowCanvasState { .. }
+                                    ) {
+                                        *event = named_state.clone();
+                                    }
+                                }
+                            }
+                            let _ = self.persist();
+                        }
+                    }
                     // Issue #4143 (AC-3): mark the in-flight automatic restore
                     // so a failure before PTY start closes the empty pane
                     // instead of persisting it into the next generation. A
@@ -2082,7 +2116,10 @@ impl AppRuntime {
             .iter()
             .find(|w| {
                 crate::runtime_support::window_is_agent_pane(w)
-                    && w.status == WindowProcessStatus::Stopped
+                    && matches!(
+                        w.status,
+                        WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                    )
                     && w.session_id.as_deref() == Some(session_id)
                     && window_id.is_none_or(|id| combined_window_id(tab_id, &w.id) == id)
             })

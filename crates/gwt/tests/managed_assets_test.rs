@@ -260,11 +260,24 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         codex_coordination.exists(),
         "Codex gwt-coordination SKILL.md not generated at {codex_coordination:?}"
     );
+    assert_eq!(
+        std::fs::read_to_string(&claude_coordination).expect("read coordination skill"),
+        gwt_skills::coordination_guidance::render_skill_md(ManagedAssetTarget::ClaudeCode)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&codex_coordination).expect("read Codex coordination skill"),
+        gwt_skills::coordination_guidance::render_skill_md(ManagedAssetTarget::Codex)
+    );
     let coordination_body = read_skill_contract(&claude_coordination);
     assert_eq!(
         coordination_body,
         read_skill_contract(&codex_coordination),
         "Claude and Codex must receive byte-identical coordination contracts"
+    );
+    assert!(
+        coordination_body
+            .contains(r#""operation":"pane.name","params":{"candidate":"<your candidate>"}"#),
+        "materialized guidance must require the Agent's own AI-generated candidate"
     );
     assert!(
         coordination_body.contains("\"operation\":\"workspace.update\""),

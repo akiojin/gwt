@@ -1498,6 +1498,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pane.list" => CliCommand::Pane(PaneCommand::List),
+        "pane.name" => {
+            reject_unknown_params(params, &["candidate"], "pane.name")?;
+            CliCommand::Pane(PaneCommand::Name {
+                candidate: required_string(params, "candidate")?,
+            })
+        }
         "pane.read" => CliCommand::Pane(PaneCommand::Read {
             id: required_string(params, "id")?,
             lines: optional_usize(params, "lines")?.unwrap_or(200),
@@ -7616,6 +7622,110 @@ mod tests {
             err("workflow.bypass", json!({"mode": "Release"})),
             CliParseError::InvalidValue { flag: "mode", .. }
         ));
+    }
+
+    #[test]
+    fn pane_name_parses_only_an_ai_candidate() {
+        let command = ok("pane.name", json!({"candidate": "Aster"}));
+        assert!(matches!(command,
+            CliCommand::Pane(PaneCommand::Name { candidate }) if candidate == "Aster"
+        ));
+        assert!(matches!(
+            err("pane.name", json!({})),
+            CliParseError::MissingFlag("candidate")
+        ));
+        for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
+            let mut params = json!({"candidate": "Aster"});
+            params[forbidden] = json!("foreign");
+            assert!(
+                matches!(err("pane.name", params), CliParseError::InvalidJson(_)),
+                "pane.name must not accept caller-supplied {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_name_waits_for_its_exact_assigned_result_without_a_target_claim() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let command = ok("pane.name", json!({"candidate": "Aster"}));
+        let CliCommand::Pane(command) = command else {
+            panic!("self-naming must be a pane operation");
+        };
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let runtime_path =
+            gwt_core::paths::gwt_sessions_dir().join("runtime/123/name-session.json");
+        std::fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_path, "{}").unwrap();
+        let _runtime_path = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            &runtime_path,
+        );
+        let _token = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "name-capability",
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let (stream, _) =
+                    tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, listener.accept())
+                        .await
+                        .expect("pane.name mock connection")
+                        .unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    panic!("name request must be JSON")
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(request["kind"], "pane_name");
+                assert_eq!(request["candidate"], "Aster");
+                assert_eq!(request.as_object().unwrap().len(), 3);
+                let request_id = request["request_id"].as_str().unwrap();
+                assert!(uuid::Uuid::parse_str(request_id).is_ok());
+                for (correlation, name) in [("foreign-request", "Wrong"), (request_id, "Aster2")] {
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "kind": "pane_name_result", "request_id": correlation,
+                                "ok": true, "agent_name": name, "error": null,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            });
+        });
+        let _ws_url = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let project = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(project.path().to_path_buf());
+        let mut output = String::new();
+        let result = crate::cli::pane::run(&mut env, command, &mut output);
+        assert!(
+            result.is_ok(),
+            "pane.name CLI failed before its result: {result:?}"
+        );
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(output.trim(), "Aster2");
     }
 
     #[test]

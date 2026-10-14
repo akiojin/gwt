@@ -11753,6 +11753,7 @@ impl AppRuntime {
             FrontendEvent::LoadPmReports { id } => {
                 self.load_pm_reports_events(context, client_id, &id)
             }
+            FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
@@ -12955,6 +12956,91 @@ impl AppRuntime {
                         responder: None,
                     },
                 )
+            }
+            AgentFrontendRequest::Name {
+                candidate,
+                request_id,
+            } => {
+                let assignment = (|| {
+                    let window_id = self.agent_principal_session_window(&principal)?;
+                    let address = self
+                        .window_lookup
+                        .get(&window_id)
+                        .cloned()
+                        .ok_or_else(|| "Agent window is missing".to_string())?;
+                    let tab = self
+                        .tab(&address.tab_id)
+                        .ok_or_else(|| "Project is closed".to_string())?;
+                    let window = tab
+                        .workspace
+                        .window(&address.raw_id)
+                        .ok_or_else(|| "Agent window is missing".to_string())?;
+                    if self
+                        .pm_session_for_root(&tab.project_root)
+                        .is_some_and(|pm| pm == principal.session_id())
+                        || window.is_pm
+                    {
+                        return Err("PM windows keep their fixed identity".to_string());
+                    }
+                    let already_named = window.agent_name.is_some();
+                    let reserved = self
+                        .tabs
+                        .iter()
+                        .flat_map(|tab| {
+                            let pm = self.pm_session_for_root(&tab.project_root);
+                            tab.workspace
+                                .persisted()
+                                .windows
+                                .iter()
+                                .filter(move |window| {
+                                    crate::runtime_support::window_is_agent_pane(window)
+                                        && !window.is_pm
+                                        && !pm.is_some_and(|pm| {
+                                            window.session_id.as_ref() == Some(pm)
+                                        })
+                                })
+                                .filter_map(|window| window.agent_name.clone())
+                        })
+                        .collect::<HashSet<_>>();
+                    let assigned = self
+                        .tab_mut(&address.tab_id)
+                        .ok_or_else(|| "Project is closed".to_string())?
+                        .workspace
+                        .assign_agent_name(&address.raw_id, &candidate, &reserved)?;
+                    Ok((assigned, address.tab_id, already_named))
+                })();
+                match assignment {
+                    Ok((assigned, tab_id, already_named)) => {
+                        let mut events = vec![OutboundEvent::reply(
+                            client_id,
+                            BackendEvent::PaneNameResult {
+                                request_id,
+                                ok: true,
+                                agent_name: Some(assigned),
+                                error: None,
+                            },
+                        )];
+                        if !already_named {
+                            if let Err(error) = self.persist() {
+                                tracing::warn!(%error, "failed to persist Agent identity");
+                            }
+                            if let Some(context) = self.project_context(&tab_id) {
+                                events.push(self.workspace_state_broadcast(&context));
+                                self.refresh_agent_name_projection(&tab_id);
+                            }
+                        }
+                        events
+                    }
+                    Err(error) => vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::PaneNameResult {
+                            request_id,
+                            ok: false,
+                            agent_name: None,
+                            error: Some(error),
+                        },
+                    )],
+                }
             }
             AgentFrontendRequest::SendInput { text } => {
                 let window_id = match self.agent_principal_session_window(&principal) {

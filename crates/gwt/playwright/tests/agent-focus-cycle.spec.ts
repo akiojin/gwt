@@ -13,6 +13,11 @@ type SentMessage = {
   data?: string;
 };
 
+const agentNames: Record<string, string> = {
+  "agent-running": "Aster", "agent-waiting": "Birch", "agent-stopped-tab-peer": "Cedar",
+  "agent-live-future": "Dune", "agent-starting-hidden": "Elm",
+};
+
 test.describe("Agent-prioritized focus cycling", () => {
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
 
@@ -61,8 +66,8 @@ test.describe("Agent-prioritized focus cycling", () => {
     await expect(page.locator('.agent-tile[data-agent-id="pm-window"]')).toHaveCount(0);
     await expect(page.locator('.agent-tile[data-agent-id="shell-topmost"]')).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Close agent-running tab", exact: true }).click();
-    await expect(page.getByRole("tab", { name: "agent-running", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Close Aster tab", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "Aster", exact: true })).toHaveCount(0);
     await expect(page.getByRole("tab", { name: "All agents", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("tab", { name: "All agents", exact: true })).toBeFocused();
     await page.evaluate(() => (window as any).__agentFocusCycleSocket().emit({
@@ -159,7 +164,7 @@ function agentTile(page: Page, id: string) {
 }
 
 async function expectAgentTabFocus(page: Page, id: string): Promise<void> {
-  await expect(page.getByRole("tab", { name: id, exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: agentNames[id], exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(agentTile(page, id)).toBeVisible();
   await expect(agentTile(page, id).locator(".xterm-helper-textarea")).toBeFocused();
 }
@@ -203,7 +208,7 @@ async function settleAndClearMessages(page: Page): Promise<void> {
 }
 
 async function installFocusCycleBackend(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+  await page.addInitScript(names => {
     const canvasWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
       title: id,
@@ -220,6 +225,7 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
       dynamic_title: null,
       dynamic_title_detail: null,
       agent_id: id,
+      agent_name: names[id] || null,
       session_id: `${id}-session`,
       agent_color: "cyan",
       tab_group_id: null,
@@ -417,5 +423,5 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
     // Retain a reference so the fixture socket is not eligible for collection
     // in engines that aggressively collect detached EventTargets.
     (window as any).__agentFocusCycleSocket = () => socket;
-  });
+  }, agentNames);
 }
