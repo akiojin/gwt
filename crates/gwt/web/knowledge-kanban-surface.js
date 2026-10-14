@@ -999,6 +999,7 @@ export function createKnowledgeKanbanSurface({
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
+      const knowledgeAutoRefreshModel = createUiStateStore({ revision: 0 });
 
       function issueMonitorStateText(state) {
         switch (String(state || "")) {
@@ -1667,6 +1668,8 @@ export function createKnowledgeKanbanSurface({
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
             autoRefreshDirty: false,
+            autoRefreshChanged: false,
+            autoRefreshRevision: null,
             revisionPending: false,
             cacheRevision: null,
           });
@@ -1731,13 +1734,34 @@ export function createKnowledgeKanbanSurface({
       }
 
       function refreshVisibleKnowledgeWindows() {
+        knowledgeAutoRefreshModel.update(model => ({ revision: model.revision + 1 }));
+      }
+
+      function flushVisibleKnowledgeWindows() {
         for (const [windowId, state] of knowledgeBridgeStateMap) {
           if (!state.autoRefreshDirty || state.revisionPending || !state.refreshEnabled ||
               knowledgeAutoRefreshIsBusy(state) || !knowledgeWindowIsVisible(windowId)) continue;
           state.autoRefreshDirty = false;
+          if (state.autoRefreshChanged) {
+            state.autoRefreshChanged = false;
+            requestKnowledgeBridge(windowId, state.kind, false);
+            continue;
+          }
           state.revisionPending = true;
           send({ kind: "check_knowledge_revision", id: windowId, knowledge_kind: state.kind });
         }
+      }
+
+      function applyKnowledgeCacheRevision(event) {
+        const state = knowledgeBridgeStateMap.get(event.id);
+        if (!state || !state.revisionPending ||
+            normalizeKnowledgeKind(event.knowledge_kind) !== normalizeKnowledgeKind(state.kind)) return;
+        state.revisionPending = false;
+        if (event.revision !== null && event.revision === state.cacheRevision) return;
+        state.autoRefreshChanged = true;
+        state.autoRefreshRevision = event.revision ?? null;
+        state.autoRefreshDirty = true;
+        refreshVisibleKnowledgeWindows();
       }
 
       function readKanbanHideDonePreference() {
@@ -4900,15 +4924,7 @@ export function createKnowledgeKanbanSurface({
       function applyKnowledgeReceiveEvent(event) {
         switch (event.kind) {
           case "knowledge_revision": {
-            const state = knowledgeBridgeStateMap.get(event.id);
-            if (!state || !state.revisionPending ||
-                normalizeKnowledgeKind(event.knowledge_kind) !== normalizeKnowledgeKind(state.kind)) break;
-            state.revisionPending = false;
-            if (event.revision !== null && event.revision === state.cacheRevision) break;
-            state.autoRefreshDirty = true;
-            if (!knowledgeWindowIsVisible(event.id) || knowledgeAutoRefreshIsBusy(state)) break;
-            state.autoRefreshDirty = false;
-            requestKnowledgeBridge(event.id, state.kind, false);
+            applyKnowledgeCacheRevision(event);
             break;
           }
           case "terminal_preview": {
@@ -4962,6 +4978,11 @@ export function createKnowledgeKanbanSurface({
               incomingEntries.some((entry) => entry.number === state.selectedNumber);
             state.baseEntries = incomingEntries;
             state.cacheRevision = event.cache_revision ?? null;
+            if (state.autoRefreshChanged && state.cacheRevision !== null &&
+                state.cacheRevision === state.autoRefreshRevision) {
+              state.autoRefreshChanged = false;
+              state.autoRefreshDirty = false;
+            }
             state.baseEmptyMessage = event.empty_message || "";
             if (!queuedQuery) {
               state.entries = state.baseEntries.slice();
@@ -5269,6 +5290,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       issueMonitorModel.subscribe(model => model.status, syncIssueMonitorErrorReport);
+      knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
       issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly, focusPreview }) => {
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -5331,6 +5353,7 @@ export function createKnowledgeKanbanSurface({
         renderKanbanDrawerBody,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyKnowledgeCacheRevision,
         applyIssueMonitorStatus,
         applyIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,

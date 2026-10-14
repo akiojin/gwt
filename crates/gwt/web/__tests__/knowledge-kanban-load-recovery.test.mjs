@@ -830,6 +830,19 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
         1,
         "a changed revision loads once after visibility and semantic owners release",
       );
+      // A concurrent list response may already contain the probed change.
+      state.loading = false;
+      state.refreshing = false;
+      intervals[0].callback();
+      state.loading = true;
+      surface.applyKnowledgeCacheRevision({ kind: "knowledge_revision", id: "win-1",
+        knowledge_kind: "issue", revision: "revision-3" });
+      surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1",
+        knowledge_kind: "issue", entries: [ROW_A, ROW_B], cache_revision: "revision-3",
+        refresh_enabled: true });
+      surface.refreshVisibleKnowledgeWindows();
+      assert.equal(sent.filter(message => message.kind === "load_knowledge_bridge").length, 1,
+        "a matching concurrent list response consumes the pending revision change");
       surface.clearKnowledgeBridgeState("win-1");
     } finally {
       globalThis.document = originalDocument;

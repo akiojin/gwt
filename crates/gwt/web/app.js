@@ -1967,7 +1967,6 @@ import { createUiStateStore } from "/ui-state-store.js";
               deriveCurrentProjectWorkspaceIds(tab?.workspace || {}),
             );
             renderWindowList();
-            refreshVisibleKnowledgeWindows();
           },
         );
       }
@@ -4854,6 +4853,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         closeKanbanDrawer,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyKnowledgeCacheRevision,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
@@ -4925,6 +4925,8 @@ import { createUiStateStore } from "/ui-state-store.js";
         window.__operatorShell?.applyIssueMonitorStatus?.(status));
       issueMonitorModel.subscribe(model => model.status, status =>
         updateCtaController.handleIssueMonitorStatus(status));
+      windowCatalogModel.subscribe(model => model.catalog, () =>
+        requestAnimationFrame(refreshVisibleKnowledgeWindows));
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
       // state maps, Work-id tracking for the Board Work filter, board chat
@@ -6695,8 +6697,10 @@ import { createUiStateStore } from "/ui-state-store.js";
           }
           // SPEC-3064 Phase 3 (E6d): knowledge bridge state and rendering
           // live in the knowledge kanban surface.
-          case "knowledge_entries":
           case "knowledge_revision":
+            applyKnowledgeCacheRevision(event);
+            break;
+          case "knowledge_entries":
           case "knowledge_search_results":
           case "knowledge_detail":
           case "terminal_preview":
