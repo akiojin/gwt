@@ -4489,7 +4489,7 @@ export function createKnowledgeKanbanSurface({
         publishIssueControlExplanations(windowId, focus);
       }
 
-      function renderKnowledgeBridge(windowId) {
+      function renderKnowledgeBridge(windowId, { preserveList = false, previousNumber = null } = {}) {
         const element = windowMap.get(windowId);
         if (!element) {
           return;
@@ -4502,7 +4502,7 @@ export function createKnowledgeKanbanSurface({
         // The next successful completion must rebuild it to remove that state.
         if (state.error) state.entriesRevision = null;
         if (state.kind === "issue") {
-          issueWindowViewModel.update(() => ({ windowId }));
+          issueWindowViewModel.update(() => ({ windowId, preserveList, previousNumber }));
           return;
         }
         const board = element.querySelector(".kanban-board");
@@ -4898,6 +4898,7 @@ export function createKnowledgeKanbanSurface({
             const queuedQuery = state.query.trim();
             const previousNumber = state.selectedNumber;
             const unchangedEntries =
+              state.kind === "issue" &&
               typeof event.revision === "string" && event.revision.length > 0 &&
               event.revision === state.entriesRevision && !state.error && !state.renderError;
             // Missing revisions keep the legacy full-render path. The revision
@@ -4931,16 +4932,7 @@ export function createKnowledgeKanbanSurface({
             state.refreshedAt = Date.now();
             state.error = "";
             const renderCompletion = () => {
-              if (!unchangedEntries) {
-                renderKnowledgeBridge(event.id);
-                return;
-              }
-              const refresh = windowMap.get(event.id)?.querySelector("[data-action='refresh-knowledge']");
-              if (refresh) {
-                refresh.disabled = !state.refreshEnabled ||
-                  (state.loading && !knowledgeEntriesAreEmpty(state));
-              }
-              renderKnowledgeSelection(event.id, state, previousNumber);
+              renderKnowledgeBridge(event.id, { preserveList: unchangedEntries, previousNumber });
             };
             if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
               renderCompletion();
@@ -5235,7 +5227,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       issueMonitorModel.subscribe(model => model.status, syncIssueMonitorErrorReport);
-      issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly, focusPreview }) => {
+      issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly, focusPreview, preserveList, previousNumber }) => {
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!element || !state) return;
@@ -5246,7 +5238,14 @@ export function createKnowledgeKanbanSurface({
           }
         }
         try {
-          if (detailOnly) {
+          if (preserveList) {
+            const refresh = element.querySelector("[data-action='refresh-knowledge']");
+            if (refresh) {
+              refresh.disabled = !state.refreshEnabled ||
+                (state.loading && !knowledgeEntriesAreEmpty(state));
+            }
+            renderKnowledgeSelection(windowId, state, previousNumber);
+          } else if (detailOnly) {
             const focus = issueExplanationFocus(windowId);
             syncIssuePreviewVisibility(element, state);
             renderIssueDetailPane(windowId, state, element.querySelector(".knowledge-detail-pane"), { agentPreview: state.viewMode !== "split" });
