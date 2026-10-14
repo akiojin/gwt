@@ -1076,7 +1076,7 @@ project 固有の規約を明示的に渡すには、
 状態順（running/starting → waiting/idle → その他）に選択します。
 Issue 内に表示された Agent も含み、PM と Shell はスキップします。
 分割表示を維持し、選んだターミナルに入力フォーカスを移します。
-タブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
+選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
 再び開けます。
 
 ## Operator デザイン言語 (SPEC-2356)

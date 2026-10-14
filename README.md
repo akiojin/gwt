@@ -1152,7 +1152,7 @@ Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual
 Agent tabs by activity: running/starting first, waiting/idle next, then the
 remaining Agents. Agents shown inside Issues are included; PM and Shell
 windows are skipped. Cycling keeps the split view and focuses the selected
-terminal for input. Closing a tab returns to All agents without stopping the
+terminal for input. Closing the selected tab returns to All agents without stopping the
 agent; cycling can reopen the same terminal.
 
 ## Operator Design Language (SPEC-2356)
