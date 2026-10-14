@@ -278,7 +278,7 @@ impl AppRuntime {
                             .filter(|agent| {
                                 agent.installed
                                     && gwt_agent::builtin_agent_descriptor_for_command(&agent.id)
-                                        .is_some_and(|descriptor| supports_updates(descriptor))
+                                        .is_some_and(supports_updates)
                             })
                             .map(|agent| (agent.id, MaintenanceAction::Update))
                             .collect()
