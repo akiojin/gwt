@@ -7,6 +7,8 @@
 //! never touched.
 
 use std::num::NonZeroU16;
+#[cfg(unix)]
+use std::path::Path;
 
 use gwt_config::{ConfigError, Settings};
 
@@ -207,7 +209,7 @@ fn persist_embedded_port_updates_symlink_target_without_replacing_link() {
     .expect("write managed config target");
 
     let path = dir.path().join("config.toml");
-    let relative_target = std::path::Path::new("managed").join("config.toml");
+    let relative_target = Path::new("managed").join("config.toml");
     symlink(&relative_target, &path).expect("create relative config symlink");
 
     Settings::persist_embedded_port(
