@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.119.0] - 2026-10-14
+
+### Features
+
+- **gui:** Compact Issues summary and open preview on demand
+
+### Testing
+
+- **gui:** Wait for a complete isolated browser URL
+- **gui:** Separate hover from keyboard explanation checks
+- **gui:** Align embedded Issue contracts with Settings
+- **gui:** Retain native logs for canonical browser checks
+
 ## [9.118.0] - 2026-10-13
 
 ### Bug Fixes
