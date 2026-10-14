@@ -200,7 +200,10 @@ try {
   }
   Push-Location $repoRoot
   try {
-    & $node $cli test --config crates/gwt/playwright/playwright.config.ts --workers=1 --output "$checkHome/playwright" crates/gwt/playwright/tests/runtime-memory-budget-live.spec.ts @PlaywrightArgs
+    # Playwright uses the project timeout, not test.setTimeout(), when saving
+    # traces. The long eight-page observation needs the same budget there.
+    $projectTimeout = [int](([double]$duration + 900) * 1000)
+    & $node $cli test --config crates/gwt/playwright/playwright.config.ts --timeout $projectTimeout --workers=1 --output "$checkHome/playwright" crates/gwt/playwright/tests/runtime-memory-budget-live.spec.ts @PlaywrightArgs
     $exitCode = $LASTEXITCODE
   } finally { Pop-Location }
 } finally {
