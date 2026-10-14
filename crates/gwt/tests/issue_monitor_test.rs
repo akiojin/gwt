@@ -1389,14 +1389,14 @@ fn scan_candidates_ignores_claims_until_launch_time() {
 }
 
 #[test]
-fn agent_and_gui_status_share_the_global_auto_apply_projection() {
+fn agent_and_gui_status_omit_auto_apply_updates() {
     let temp = tempfile::tempdir().unwrap();
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-    for (saved, now) in [
-        (Some(false), "2026-07-27T10:00:29Z"),
-        (None, "2026-07-27T10:00:30Z"),
+    for (enabled, now) in [
+        (false, "2026-07-27T10:00:29Z"),
+        (true, "2026-07-27T10:00:30Z"),
     ] {
-        gwt::update_settings::set(Some(saved.unwrap_or(true))).unwrap();
+        gwt::update_settings::set(Some(enabled)).unwrap();
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig {
                 poll_interval_secs: 10,
@@ -1405,7 +1405,6 @@ fn agent_and_gui_status_share_the_global_auto_apply_projection() {
             IssueMonitorPrefs {
                 enabled: true,
                 autonomous_mode: true,
-                auto_apply_updates: saved,
                 ..IssueMonitorPrefs::default()
             },
         );
@@ -1419,16 +1418,11 @@ fn agent_and_gui_status_share_the_global_auto_apply_projection() {
             serde_json::to_value(&gui).expect("serialize GUI status")
         );
         assert_eq!(agent["last_error"], serde_json::Value::Null);
-        assert_eq!(
-            agent.get("auto_apply_updates"),
-            Some(&serde_json::json!(saved.unwrap_or(true))),
-            "every projection reads the same global setting"
-        );
-        assert_eq!(
-            agent["auto_apply_updates_effective"],
-            serde_json::json!(gui.auto_apply_updates)
-        );
-        assert_eq!(gui.auto_apply_updates, saved.unwrap_or(true));
+        let gui = serde_json::to_value(gui).expect("serialize GUI status");
+        for status in [&agent, &gui] {
+            assert!(status.get("auto_apply_updates").is_none());
+            assert!(status.get("auto_apply_updates_effective").is_none());
+        }
     }
 }
 
@@ -1469,32 +1463,47 @@ fn status_view_at_marks_scan_stalled_at_three_poll_intervals() {
     assert_eq!(status.state, "error");
     assert_eq!(
         status.last_error.as_deref(),
-        Some("Issue Monitor scan stalled; last scan at 2026-07-27T10:00:00Z")
+        Some("Issue Monitor scan stalled; last scan at 2026-07-27T10:00:00Z; previous failure: issue #42: previous launch failed")
     );
     assert_eq!(status.last_scan_at.as_deref(), Some("2026-07-27T10:00:00Z"));
 }
 
 #[test]
-fn status_view_at_preserves_explicit_error_when_scan_is_stalled() {
+fn status_view_at_names_stalled_scan_and_preserves_stage_failure_context() {
     let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
         enabled: true,
         poll_interval_secs: 10,
         ..IssueMonitorConfig::default()
     });
-    monitor.record_scan_error("2026-07-27T10:00:00Z", "GitHub API unavailable");
+    let failure = "issue monitor scan failed at merge-reconciliation stage: Git error: gh api pulls closed page 1: error connecting to api.github.com (launch_suppressed)";
+    monitor.record_scan_error("2026-07-27T10:00:00Z", failure);
+
+    assert_eq!(
+        monitor
+            .status_view_at("2026-07-27T10:00:29Z")
+            .last_error
+            .as_deref(),
+        Some(failure)
+    );
 
     let status = monitor.status_view_at("2026-07-27T10:00:30Z");
 
     assert_eq!(status.state, "error");
-    assert_eq!(status.last_error.as_deref(), Some("GitHub API unavailable"));
+    let diagnosis = format!("Issue Monitor scan stalled; last scan at 2026-07-27T10:00:00Z; previous failure: {failure}");
+    assert_eq!(status.last_error.as_deref(), Some(diagnosis.as_str()));
     assert_eq!(status.last_scan_at.as_deref(), Some("2026-07-27T10:00:00Z"));
+    assert_eq!(
+        monitor.status_view_at("2026-07-27T10:01:00Z").last_error,
+        status.last_error,
+        "the notification diagnosis stays stable across later observations"
+    );
 
     monitor.record_control_commit_error("Monitor settings commit failed");
     let status = monitor.status_view_at("2026-07-27T10:00:30Z");
     assert_eq!(status.state, "error");
     assert_eq!(
         status.last_error.as_deref(),
-        Some("Monitor settings commit failed")
+        Some("Issue Monitor scan stalled; last scan at 2026-07-27T10:00:00Z; previous failure: Monitor settings commit failed")
     );
 }
 

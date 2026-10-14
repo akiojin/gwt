@@ -650,6 +650,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 verdict_raw: required_string(params, "verdict_raw")?,
             })
         }
+        "update.settings.status" => CliCommand::Update(super::UpdateCommand::SettingsStatus {
+            project_root: optional_path(params, "project_root")?,
+        }),
         "issue.monitor.status" => CliCommand::Issue(IssueCommand::MonitorStatus {
             project_root: optional_path(params, "project_root")?,
         }),
@@ -801,6 +804,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
         }),
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
+            if lookup(params, "auto_apply_updates").is_some() {
+                return Err(CliParseError::InvalidJson(
+                    "unknown parameter auto_apply_updates; configure automatic updates in Settings > System"
+                        .to_string(),
+                ));
+            }
             let allowed_labels = match lookup(params, "allowed_labels") {
                 None | Some(Value::Null) => None,
                 Some(value) => Some(
@@ -824,7 +833,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 )),
             };
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
-            let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
             let launch_agent = optional_string(params, "launch_agent")?;
             // Issue #4037 AC-5: the non-destructive update drain.
@@ -835,12 +843,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 && max_active.is_none()
                 && !max_active_auto
                 && auto_close_merged_issues.is_none()
-                && auto_apply_updates.is_none()
                 && launch_agent.is_none()
                 && update_drain.is_none()
             {
                 return Err(CliParseError::MissingFlag(
-                    "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain",
+                    "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -859,7 +866,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 max_active,
                 max_active_auto,
                 auto_close_merged_issues,
-                auto_apply_updates,
                 launch_agent,
                 update_drain,
             })
@@ -4554,7 +4560,6 @@ mod tests {
                 max_active: Some(7),
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
@@ -4569,7 +4574,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
@@ -4587,31 +4591,67 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: Some(false),
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             }),
             "Issue #3917 AC-5: the auto-close override is settable on its own"
         );
+    }
+
+    #[test]
+    fn issue_monitor_config_set_rejects_auto_apply_updates() {
+        for operation in ["issue.monitor.config.set", "issue.monitor.config-set"] {
+            for enabled in [true, false] {
+                for params in [
+                    json!({"auto_apply_updates": enabled}),
+                    json!({"auto_apply_updates": enabled, "enabled": false}),
+                ] {
+                    let error = err(operation, params).to_string();
+                    assert!(
+                        error.contains("unknown parameter auto_apply_updates"),
+                        "{error}"
+                    );
+                    assert!(error.contains("Settings > System"), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn update_settings_status_is_read_only_and_does_not_write_config() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope("update.settings.status", json!({"project_root": repo}));
+
         assert_eq!(
-            ok(
-                "issue.monitor.config.set",
-                json!({"auto_apply_updates": true})
-            ),
-            CliCommand::Issue(IssueCommand::MonitorConfigSet {
-                allowed_labels: None,
-                project_root: None,
-                enabled: None,
-                autonomous_mode: None,
-                max_active: None,
-                max_active_auto: false,
-                auto_close_merged_issues: None,
-                auto_apply_updates: Some(true),
-                launch_agent: None,
-                update_drain: None,
-            }),
-            "Issue #3906 AC-1: the auto-apply override is settable on its own"
+            super::dispatch(&mut env, "gwtd"),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
         );
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let status: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            status,
+            json!({
+                "auto_apply_updates": null,
+                "auto_apply_updates_effective": false,
+                "update_drain": null,
+            })
+        );
+        assert!(!gwt_core::paths::gwt_config_path().exists());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "update.settings.status"
+            )
+        );
+        assert!(matches!(
+            err("update.settings.set", json!({"auto_apply_updates": false})),
+            CliParseError::UnknownSubcommand(_)
+        ));
     }
 
     #[test]
@@ -4652,7 +4692,6 @@ mod tests {
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
-                auto_apply_updates: None,
             })
         );
         assert_eq!(
@@ -4667,7 +4706,6 @@ mod tests {
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
-                auto_apply_updates: None,
             })
         );
         assert!(matches!(
@@ -4691,7 +4729,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             })
@@ -4699,7 +4736,7 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.config.set", json!({})),
             CliParseError::MissingFlag(
-                "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain"
+                "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain"
             )
         ));
     }
@@ -5184,7 +5221,6 @@ mod tests {
                 max_active: Some(3),
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })

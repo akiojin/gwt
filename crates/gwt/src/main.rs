@@ -3225,7 +3225,6 @@ mod tests {
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
-            auto_apply_updates: false,
             enabled: true,
             state: "idle".to_string(),
             queue_len: 1,
@@ -5057,11 +5056,15 @@ mod tests {
             &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
             &gwt::IssueMonitorPrefs {
                 autonomous_mode: true,
-                auto_apply_updates: Some(true),
                 ..Default::default()
             },
         )
         .unwrap();
+        let legacy_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&legacy_path).unwrap()).unwrap();
+        legacy["auto_apply_updates"] = serde_json::json!(true);
+        fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let config = gwt_core::paths::gwt_config_path();
         fs::create_dir_all(config.parent().unwrap()).unwrap();
         fs::write(config, "auto_apply_updates = false\n").unwrap();
@@ -5166,7 +5169,6 @@ mod tests {
                 &prefs_path,
                 &gwt::IssueMonitorPrefs {
                     autonomous_mode,
-                    auto_apply_updates,
                     ..Default::default()
                 },
             )

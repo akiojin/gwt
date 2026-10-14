@@ -260,35 +260,69 @@ test.describe("Issue #5322 Settings", () => {
         await expect.poll(async () => (await readPreferences(a)).launch_profiles.map((profile: any) => profile.agent_id)).toEqual(["claude", "codex"]);
         await expect(agentsB.getByLabel("Model codex", { exact: true })).toHaveValue("project-b-model");
 
-        // AC-M5: the single global update toggle lives with Issues options and
+        // PM ruling: the single global update toggle lives in System and
         // refreshes the other project without changing its project settings.
-        await openSettings(page, "issues");
-        await openSettings(pageB, "issues");
-        const updates = issues.getByLabel("Auto-apply updates", { exact: true });
-        const updatesB = issuesB.getByLabel("Auto-apply updates", { exact: true });
+        await openSettings(page, "system");
+        await openSettings(pageB, "system");
+        const updates = panel(page, "system").getByLabel("Auto-apply updates", { exact: true });
+        const updatesB = panel(pageB, "system").getByLabel("Auto-apply updates", { exact: true });
         await expect(settings(page).getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
-        await expect(panel(page, "system").getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
+        await expect(issues.getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
         await expect(updates).toBeEnabled();
         await expect(updates).not.toBeChecked();
         await updates.check();
         await expect(updatesB).toBeChecked();
         await expect(updates.locator("..")).toContainText("Auto-apply updates");
-        await expect(issues).toContainText(/at least one open project.*Autonomous/);
+        await expect(panel(page, "system")).toContainText(/at least one open project.*Autonomous/);
 
-        // The retained JSON setter must also refresh already-open Settings.
+        await expect(panel(page, "system")).toContainText("Saved: On · Effective: On");
+        await expect(panel(page, "system")).toContainText("No update pending");
+        // Update policy is GUI-only; the PM has a dedicated read-only view.
         const cliEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
           !/^(GWT_|CODEX_|CLAUDE_|GIT_)/i.test(key)
           && !["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"].includes(key.toUpperCase())));
-        const cli = spawnSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
+        const runCli = (operation: string, params: Record<string, unknown> = {}) => spawnSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
           cwd: a.root, env: { ...cliEnv, HOME: backend.home, USERPROFILE: backend.home },
-          input: JSON.stringify({ schema_version: 1, operation: "issue.monitor.config.set", params: { auto_apply_updates: false } }),
+          input: JSON.stringify({ schema_version: 1, operation, params }),
           encoding: "utf8", timeout: 30_000,
         });
-        expect(cli.status, cli.stderr).toBe(0);
-        expect(JSON.parse(cli.stdout).ok).toBe(true);
-        for (const current of [page, pageB]) await sendLiveGwtEvent(current, { kind: "list_issue_monitor" });
+        for (const enabled of [false, true]) {
+          const rejected = runCli("issue.monitor.config.set", { auto_apply_updates: enabled });
+          expect(rejected.status).not.toBe(0);
+          expect(rejected.stderr + rejected.stdout).toMatch(/unknown parameter/i);
+          expect(rejected.stderr + rejected.stdout).toContain("Settings > System");
+        }
+        const status = runCli("update.settings.status");
+        expect(status.status, status.stderr).toBe(0);
+        expect(JSON.parse(JSON.parse(status.stdout).output)).toMatchObject({
+          auto_apply_updates: true, auto_apply_updates_effective: true,
+        });
+        expect(await readPreferences(a)).not.toHaveProperty("auto_apply_updates");
+        await expect(updates).toBeChecked();
+        const configPath = join(backend.home, ".gwt/config.toml");
+        const savedConfig = await readFile(configPath, "utf8");
+        try {
+          await writeFile(configPath, "invalid = [\n");
+          await updates.evaluate((input: HTMLInputElement) => input.click());
+          await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+            .some(({ payload }: any) => payload.kind === "system_settings_error"));
+          await expect(updates).toBeChecked();
+        } finally { await writeFile(configPath, savedConfig); }
+        await updates.uncheck();
         await expect(updates).not.toBeChecked();
         await expect(updatesB).not.toBeChecked();
+        await expect(panel(page, "system")).toContainText("Saved: Off · Effective: Off");
+        // A pending update targets a future version; applied-version holds
+        // are deliberately reconciled away by the existing runtime policy.
+        const drain = runCli("issue.monitor.config.set", {
+          update_drain: { reason: "manual", version: "99.0.0", automatic: false },
+        });
+        expect(drain.status, drain.stderr).toBe(0);
+        await sendLiveGwtEvent(page, { kind: "get_update_settings" });
+        await expect(panel(page, "system")).toContainText(/Update .* pending/);
+        expect(runCli("issue.monitor.config.set", { update_drain: false }).status).toBe(0);
+        await sendLiveGwtEvent(page, { kind: "get_update_settings" });
+        await expect(panel(page, "system")).toContainText("No update pending");
         await updates.check();
         await expect(updatesB).toBeChecked();
 
@@ -299,8 +333,8 @@ test.describe("Issue #5322 Settings", () => {
           await current.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
             .some(({ payload }: any) => payload.kind === "workspace_state"));
           await expect(settings(current)).toHaveCount(1);
-          await openSettings(current, "issues");
-          await expect(panel(current, "issues").getByLabel("Auto-apply updates", { exact: true })).toBeChecked();
+          await openSettings(current, "system");
+          await expect(panel(current, "system").getByLabel("Auto-apply updates", { exact: true })).toBeChecked();
           await expect(current.locator("html")).toHaveAttribute("data-theme", themeFor(info));
         }
         await openSettings(page, "issues");

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
-function load(name) {
+function load(name, bindings = {}) {
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing ${name}`);
   const open = source.indexOf("{", source.indexOf(")", start));
@@ -14,7 +14,7 @@ function load(name) {
     if (source[end] === "}") depth--;
     end++;
   }
-  return Function(`return (${source.slice(start, end)})`)();
+  return Function(...Object.keys(bindings), `return (${source.slice(start, end)})`)(...Object.values(bindings));
 }
 
 test("Issues Settings keeps labels and values together and sends existing project controls", () => {
@@ -144,6 +144,44 @@ test("Settings declares app/project scope and the global update condition using 
   assert.match(source, /Application settings/);
   assert.match(source, /Auto-apply updates/);
   assert.match(source, /at least one open project.*Autonomous/);
-  assert.match(source, /set_issue_monitor_auto_apply_updates/);
+  assert.match(source, /set_auto_apply_updates/);
+  assert.doesNotMatch(source, /set_issue_monitor_auto_apply_updates/);
   assert.doesNotMatch(source, /style\.cssText\s*=/);
+});
+
+test("System update settings show saved and effective values and the blocking drain", () => {
+  const { document } = parseHTML('<html><body><section></section></body></html>');
+  const panel = document.querySelector("section");
+  const render = load("renderUpdateSettingsStatus");
+  render(panel, { auto_apply_updates: null, auto_apply_updates_effective: false,
+    update_drain: { version: "9.120.0", blocking: [
+      { kind: "active_pane", label: "Fix #4271", state: "Running" },
+      { kind: "pending_acquire_claim", issue_number: 12 },
+      { kind: "active_execution", worktree: "/work/issue-13" },
+      { kind: "held_verification_lease", lease_id: "verification-14" },
+    ] } });
+  assert.match(panel.textContent, /Saved: Default \(Off\).*Effective: Off/);
+  assert.match(panel.textContent, /Update 9\.120\.0 pending/);
+  assert.equal(panel.querySelectorAll("li").length, 4);
+  for (const expected of ["Fix #4271", "#12", "/work/issue-13", "verification-14"]) {
+    assert.ok(panel.textContent.includes(expected), expected);
+  }
+  render(panel, { auto_apply_updates: true, auto_apply_updates_effective: true, update_drain: null });
+  assert.match(panel.textContent, /Saved: On.*Effective: On.*No update pending/);
+  assert.equal(panel.querySelectorAll("li").length, 0);
+});
+
+test("failed update preference save restores the last authoritative toggle value", () => {
+  let state = { auto_apply_updates: true, auto_apply_updates_effective: true, loaded: true, drains: {} };
+  const { document } = parseHTML('<input type="checkbox">');
+  const toggle = document.querySelector("input");
+  toggle.checked = false;
+  const globalUpdateModel = { update(reducer) {
+    state = reducer(state);
+    toggle.checked = state.auto_apply_updates_effective;
+  } };
+  load("applyGlobalUpdateSettings", { globalUpdateModel })({ kind: "system_settings_error" });
+  assert.equal(toggle.checked, true, "failed OFF must not look saved");
+  assert.equal(state.auto_apply_updates, true);
+  assert.match(readFileSync(new URL("../app.js", import.meta.url), "utf8"), /case "system_settings_error":\s*applyGlobalUpdateSettings\(event\)/);
 });

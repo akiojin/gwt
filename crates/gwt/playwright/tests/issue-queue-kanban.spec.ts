@@ -224,7 +224,8 @@ test("Issue #5321 Settings integrates Issues at 1280px without duplicate surface
   await mode.selectOption("auto");
   await expect(max).toBeDisabled();
   await expect(settings.getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
-  await expect(settings.locator('[data-settings-panel="system"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
+  await expect(settings.locator('[data-settings-panel="system"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
+  await expect(settings.locator('[data-settings-panel="issues"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
   await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
   await expect(candidates).toBeVisible();
@@ -257,6 +258,8 @@ test("Issue #5321 Settings integrates Issues at 1280px without duplicate surface
 test("Issue #5321 preview keyboard focus opens and returns with Escape", async ({ page }) => {
   const select = row(page, 1).locator(".knowledge-row-select");
   const detail = page.locator(".knowledge-detail-pane");
+  // Keep native hover from opening a tooltip that consumes the first Escape.
+  await page.mouse.move(1590, 1090);
   await select.focus();
   await select.press("Enter");
   await expect(detail).toBeFocused();
@@ -596,9 +599,11 @@ test("T-7b.2b.2: Running tier uses exact live window and clears stale explanatio
   await select.focus();
   await expect(popup).toContainText("Acknowledged launch tier 0 (zero-based tiers)");
   await expect(select).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await page.screenshot({path: test.info().outputPath("running-tier-reported.png")});
+  // Establish the tier anchor after capture: native pointer hit-testing during
+  // a screenshot can enter another card before the runtime invalidation.
   await chip.hover();
   await expect(popup).toHaveText("Acknowledged launch tier 0 (zero-based tiers); the matching agent window currently reports running.");
-  await page.screenshot({path: test.info().outputPath("running-tier-reported.png")});
   const before = await page.evaluate(() => (window as any).__queueMessages.length);
   // The persisted window remains running: only the actual runtime event changes.
   await page.evaluate(() => (window as any).__queueAgentState("stopped"));

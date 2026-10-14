@@ -27,6 +27,38 @@ import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
 import { createUiStateStore } from "./ui-state-store.js";
 
+export function renderUpdateSettingsStatus(panel, status) {
+  const document = panel.ownerDocument;
+  panel.replaceChildren();
+  const values = document.createElement("p");
+  values.className = "settings-help";
+  const configured = status.auto_apply_updates;
+  values.textContent = `Saved: ${configured == null ? "Default (Off)" : configured ? "On" : "Off"} · Effective: ${status.auto_apply_updates_effective ? "On" : "Off"}`;
+  panel.appendChild(values);
+  const drain = status.update_drain;
+  const pending = document.createElement("p");
+  pending.className = "settings-help";
+  pending.textContent = drain ? `Update ${drain.version} pending · ${drain.reason || "waiting"}` : "No update pending";
+  panel.appendChild(pending);
+  if (!drain) return;
+  const list = document.createElement("ul");
+  list.className = "settings-help";
+  list.setAttribute("aria-label", "Update blockers");
+  for (const blocker of drain.blocking || []) {
+    const item = document.createElement("li");
+    switch (blocker.kind) {
+      case "active_pane": item.textContent = `Agent: ${blocker.label} (${blocker.state})`; break;
+      case "pending_acquire_claim": item.textContent = `Pending claim: #${blocker.issue_number}`; break;
+      case "active_execution": item.textContent = `Active execution: ${blocker.worktree}`; break;
+      case "held_verification_lease": item.textContent = `Verification: ${blocker.lease_id}`; break;
+      default: item.textContent = blocker.kind || "Waiting for work to finish";
+    }
+    list.appendChild(item);
+  }
+  if (!list.children.length) pending.textContent += " · waiting for quiet observations";
+  panel.appendChild(list);
+}
+
 function settingsTabId(windowId, tabId) {
   return `settings-${windowId}-tab-${tabId}`;
 }
@@ -643,19 +675,29 @@ export function createSettingsSurface({
       const settingsWindowBodies = new Set();
       let nextProfilesRequest = 0;
       const issueSettingsModel = createUiStateStore({});
-      const globalUpdateModel = createUiStateStore({ enabled: false, loaded: false });
+      const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} });
       globalUpdateModel.subscribe(state => state, state => {
         purgeDetachedSettingsBodies();
         for (const body of settingsWindowBodies) {
           const toggle = body.querySelector('[aria-label="Auto-apply updates"]');
           if (toggle) {
-            toggle.checked = state.enabled;
+            toggle.checked = state.auto_apply_updates_effective;
             toggle.disabled = !state.loaded;
           }
+          const panel = body.querySelector('[data-update-settings-status]');
+          if (panel && state.loaded) renderUpdateSettingsStatus(panel, {
+            ...state, update_drain: state.drains[body.dataset.settingsProjectRoot] || null,
+          });
         }
       });
       function applyGlobalUpdateSettings(event) {
-        globalUpdateModel.update(() => ({ enabled: event.auto_apply_updates === true, loaded: true }));
+        if (!event.status) {
+          globalUpdateModel.update(state => ({ ...state }));
+          return;
+        }
+        globalUpdateModel.update(state => ({ ...state, ...event.status, loaded: true,
+          drains: { ...state.drains, [event.project_root || ""]: event.status.update_drain },
+        }));
       }
       function projectSettingsSnapshot(body) {
         const root = body.dataset.settingsProjectRoot || "";
@@ -699,8 +741,8 @@ export function createSettingsSurface({
         }
       }
       function applyIssueSettingsStatus(status, projectRoot) {
-        if (typeof status.auto_apply_updates === "boolean") applyGlobalUpdateSettings(status);
         if (!projectRoot) return;
+        globalUpdateModel.update(state => ({ ...state, drains: { ...state.drains, [projectRoot]: status.update_drain } }));
         issueSettingsModel.update(state => ({ ...state, [projectRoot]: { ...state[projectRoot], status } }));
       }
       function applyIssueMonitorProfiles(event) {
@@ -871,6 +913,24 @@ export function createSettingsSurface({
         panelSystem.dataset.settingsPanel = "system";
         linkSettingsPanel(panelSystem, windowData.id, "system");
         panelSystem.appendChild(createNode("h3", "settings-section-heading", "Application settings"));
+        const updateSection = createDiv("settings-section");
+        const updateLabel = createNode("label", "settings-checkbox-label");
+        const updateToggle = document.createElement("input");
+        updateToggle.type = "checkbox";
+        updateToggle.className = "settings-checkbox";
+        updateToggle.setAttribute("aria-label", "Auto-apply updates");
+        updateToggle.checked = globalUpdateModel.read().auto_apply_updates_effective;
+        updateToggle.disabled = !globalUpdateModel.read().loaded;
+        updateToggle.addEventListener("change", () => send({ kind: "set_auto_apply_updates", enabled: updateToggle.checked }));
+        updateLabel.appendChild(updateToggle);
+        updateLabel.appendChild(document.createTextNode("Auto-apply updates"));
+        updateSection.appendChild(updateLabel);
+        updateSection.appendChild(createNode("p", "settings-help", "Applies across all projects when at least one open project has Autonomous enabled. Updates wait until agents finish."));
+        const updateStatus = createDiv();
+        updateStatus.dataset.updateSettingsStatus = "";
+        updateStatus.setAttribute("role", "status");
+        updateSection.appendChild(updateStatus);
+        panelSystem.appendChild(updateSection);
         const systemContent = createDiv();
         systemContent.id = `${panelSystem.id}-content`;
         systemContent.dataset.systemSettingsContent = "";
@@ -941,20 +1001,6 @@ export function createSettingsSurface({
         const controls = createDiv();
         controls.dataset.settingsIssuesControls = "";
         issuesOptions.appendChild(controls);
-        const updateSection = createDiv("settings-section");
-        const updateLabel = createNode("label", "settings-checkbox-label");
-        const updateToggle = document.createElement("input");
-        updateToggle.type = "checkbox";
-        updateToggle.className = "settings-checkbox";
-        updateToggle.setAttribute("aria-label", "Auto-apply updates");
-        updateToggle.checked = globalUpdateModel.read().enabled;
-        updateToggle.disabled = !globalUpdateModel.read().loaded;
-        updateToggle.addEventListener("change", () => send({ kind: "set_issue_monitor_auto_apply_updates", enabled: updateToggle.checked }));
-        updateLabel.appendChild(updateToggle);
-        updateLabel.appendChild(document.createTextNode("Auto-apply updates"));
-        updateSection.appendChild(updateLabel);
-        updateSection.appendChild(createNode("p", "settings-help", "Applies across all projects when at least one open project has Autonomous enabled. Updates wait until agents finish."));
-        issuesOptions.appendChild(updateSection);
         const candidates = createDiv();
         candidates.dataset.settingsCandidates = "";
         issuesOptions.appendChild(candidates);
@@ -1002,6 +1048,7 @@ export function createSettingsSurface({
         // reflects the on-disk config, even if the user changed it from a
         // different gwt instance.
         send({ kind: "get_system_settings" });
+        send({ kind: "get_update_settings" });
         // SPEC-2963: also fetch remote Board provider sign-in state.
         send({ kind: "get_board_auth_status" });
         send({ kind: "get_autostart_status" });

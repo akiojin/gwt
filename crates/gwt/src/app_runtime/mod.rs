@@ -1387,6 +1387,9 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) issue_monitor_claim_renewals_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Latest published read model; capacity refreshes preserve scan/queue authority.
     pub(crate) issue_monitor_status_cache: std::cell::RefCell<Option<gwt::IssueMonitorStatusView>>,
+    /// One actionable notice shared by PM preparation and Monitor snapshots.
+    pub(crate) project_attention_notice:
+        std::cell::RefCell<Option<(String, chrono::DateTime<chrono::Utc>)>>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
@@ -1487,6 +1490,7 @@ pub(crate) fn initial_project_states(
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
+                    project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
                         gwt_core::workspace_projection::WorkItemsCache::new(),
@@ -3572,13 +3576,161 @@ const ISSUE_MONITOR_SCAN_BUDGET: std::time::Duration = std::time::Duration::from
 /// everything it had just learned and the monitor never advanced.
 const ISSUE_MONITOR_COMMIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Issue #3934: run the generation reaper on the Issue Monitor scan cadence.
+/// Recovery is independent of scan frequency, with no queued catch-up jobs.
+const SCAN_GENERATION_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Default)]
+struct ScanGenerationReaperState {
+    running: bool,
+    last_started: Option<Instant>,
+}
+
+impl ScanGenerationReaperState {
+    fn try_reserve(&mut self, now: Instant) -> bool {
+        if self.running
+            || self.last_started.is_some_and(|last| {
+                now.saturating_duration_since(last) < SCAN_GENERATION_REAPER_INTERVAL
+            })
+        {
+            return false;
+        }
+        self.running = true;
+        self.last_started = Some(now);
+        true
+    }
+}
+
+fn scan_generation_reapers() -> &'static Mutex<HashMap<PathBuf, ScanGenerationReaperState>> {
+    static REAPERS: std::sync::OnceLock<Mutex<HashMap<PathBuf, ScanGenerationReaperState>>> =
+        std::sync::OnceLock::new();
+    REAPERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct ScanGenerationReaperFlight(PathBuf);
+
+impl Drop for ScanGenerationReaperFlight {
+    fn drop(&mut self) {
+        if let Some(state) = scan_generation_reapers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&self.0)
+        {
+            state.running = false;
+        }
+        #[cfg(test)]
+        scan_generation_reaper_completed().notify_all();
+    }
+}
+
+/// The prefs path already identifies the canonical project store, so linked
+/// worktrees and duplicate tabs share one reservation without another Git probe.
+fn enqueue_scan_generation_reaper(project_root: &Path, prefs_path: &Path) {
+    if !scan_generation_reapers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(prefs_path.to_path_buf())
+        .or_default()
+        .try_reserve(Instant::now())
+    {
+        return;
+    }
+    // Captured before spawn: even an OS spawn failure drops the reservation.
+    // Unwinding the worker releases it as well, without queuing another worker.
+    let flight = ScanGenerationReaperFlight(prefs_path.to_path_buf());
+    let project_root = project_root.to_path_buf();
+    #[cfg(test)]
+    let user_home = gwt_config::home::user_home().expect("test user home");
+    if let Err(error) = std::thread::Builder::new()
+        .name("gwt-generation-reaper".to_string())
+        .spawn(move || {
+            let _flight = flight;
+            // The recovery can outlive the scan fixture's process-global HOME.
+            #[cfg(test)]
+            let _home = gwt_core::test_support::ScopedGwtHome::set(user_home);
+            reap_scan_defunct_active_generations(&project_root);
+        })
+    {
+        tracing::warn!(%error, "could not schedule scan Active generation recovery");
+    }
+}
+
+#[cfg(test)]
+fn scan_generation_reaper_completed() -> &'static std::sync::Condvar {
+    static COMPLETED: std::sync::Condvar = std::sync::Condvar::new();
+    &COMPLETED
+}
+
+#[cfg(test)]
+fn wait_scan_generation_reaper(prefs_path: &Path) {
+    let states = scan_generation_reapers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (states, _) = scan_generation_reaper_completed()
+        .wait_timeout_while(states, std::time::Duration::from_secs(30), |states| {
+            states.get(prefs_path).is_some_and(|state| state.running)
+        })
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        !states.get(prefs_path).is_some_and(|state| state.running),
+        "generation recovery did not finish"
+    );
+}
+
+#[cfg(test)]
+type ScanGenerationReaperTestHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+fn scan_generation_reaper_test_hooks(
+) -> &'static Mutex<HashMap<PathBuf, ScanGenerationReaperTestHook>> {
+    static HOOKS: std::sync::OnceLock<Mutex<HashMap<PathBuf, ScanGenerationReaperTestHook>>> =
+        std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+struct ScopedScanGenerationReaperTestHook(PathBuf);
+
+#[cfg(test)]
+impl ScopedScanGenerationReaperTestHook {
+    fn set(prefs_path: &Path, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        assert!(scan_generation_reaper_test_hooks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(prefs_path.to_path_buf(), Arc::new(hook))
+            .is_none());
+        Self(prefs_path.to_path_buf())
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedScanGenerationReaperTestHook {
+    fn drop(&mut self) {
+        scan_generation_reaper_test_hooks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+/// Issue #3934: recover generations after startup without changing the exact
+/// liveness checks and execution leases used by startup recovery.
 ///
 /// The scan worker has no `AppRuntime`, so it protects nothing by identity;
 /// it does not need to. Startup's protection list exists only for sessions it
 /// is about to restore, and every window this process already owns publishes a
 /// live runtime sidecar that the exact revalidation reads as `Live`.
 fn reap_scan_defunct_active_generations(project_root: &Path) {
+    #[cfg(test)]
+    {
+        let hook = scan_generation_reaper_test_hooks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
+            .cloned();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     let worktrees = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
         Ok(entries) => entries
             .into_iter()
@@ -3649,19 +3801,12 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path)
         .map_err(|error| format!("load Issue Monitor prefs failed: {error}"))?;
-    // Issue #3934: reclaim the execution generations of holders that are gone
-    // before this tick decides what it may launch. The startup reaper used to
-    // be the only one, so a holder Session that died between GUI restarts kept
-    // its owner permanently unlaunchable and the only recovery left was
-    // registering the same work under a fresh Issue number.
-    //
-    // Issue #3964 AC-1: this runs before the authority probe on purpose. The
-    // reaper is local recovery under its own leases, not a scan effect, and a
-    // live daemon — which owns scan authority in production and has no reaper
-    // of its own — used to make this worker defer before it ever got here, so
-    // the scan-cadence recovery never ran after startup.
+    // Issue #4975 AC-A3: worktree inventory and recovery have their own worker
+    // so a slow holder inspection cannot delay this Monitor tick. Reserve
+    // before the authority probe (#3964): daemon-owned scans still need local
+    // recovery, which retains its exact liveness revalidation and own leases.
     if prefs.enabled {
-        reap_scan_defunct_active_generations(project_root);
+        enqueue_scan_generation_reaper(project_root, &prefs_path);
     }
 
     // Cheap authority probe before any remote I/O. The lease is intentionally
@@ -3999,6 +4144,7 @@ impl AppRuntime {
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
+                    project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
                         gwt_core::workspace_projection::WorkItemsCache::new(),
@@ -7352,9 +7498,36 @@ impl AppRuntime {
 
     /// RuntimeHook records arrival immediately, then resolves and publishes the
     /// heartbeat outside the GUI callback. A replaced pane cannot use its queued job.
-    pub(crate) fn schedule_runtime_hook_heartbeat(&mut self, project_root: &Path, window_id: &str) {
+    pub(crate) fn schedule_runtime_hook_heartbeat(
+        &mut self,
+        project_root: &Path,
+        window_id: &str,
+        gwt_session_id: Option<&str>,
+        source_event: &str,
+        occurred_at: &str,
+    ) {
+        let observe = {
+            let gwt_session_id = gwt_session_id.unwrap_or_default().to_owned();
+            let source_event = source_event.to_owned();
+            let occurred_at = occurred_at.to_owned();
+            let window_id = window_id.to_owned();
+            move |outcome: &'static str, issue_number: Option<u64>| {
+                tracing::info!(
+                    target: "gwt.hook.delivery",
+                    stage = "heartbeat",
+                    outcome,
+                    gwt_session_id,
+                    source_event,
+                    occurred_at,
+                    window_id,
+                    issue_number = ?issue_number,
+                    "runtime hook delivery"
+                );
+            }
+        };
         let now_instant = chrono::Utc::now();
         if !self.take_issue_monitor_heartbeat_slot(window_id, now_instant) {
+            observe("throttled", None);
             return;
         }
         let issue_number_hint = self
@@ -7370,6 +7543,7 @@ impl AppRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(window_id)
             .copied();
+        let worker_observe = observe.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             let is_current = || {
                 generations
@@ -7380,6 +7554,7 @@ impl AppRuntime {
                     == expected_generation
             };
             if !is_current() {
+                worker_observe("stale", issue_number_hint);
                 return;
             }
             let issue_number = issue_number_hint.or_else(|| {
@@ -7389,13 +7564,15 @@ impl AppRuntime {
                     .launched_window_issue(&worker_window_id)
             });
             if !is_current() {
+                worker_observe("stale", issue_number);
                 return;
             }
             let Some(issue_number) = issue_number else {
+                worker_observe("unbound", None);
                 return;
             };
             let now = now_instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            if let Err(error) = Self::publish_issue_monitor_control_owned(
+            match Self::publish_issue_monitor_control_owned(
                 &project_root,
                 serde_json::json!({
                     "heartbeat": {
@@ -7405,13 +7582,19 @@ impl AppRuntime {
                     },
                 }),
             ) {
-                tracing::debug!(
-                    error = %error,
-                    window_id = worker_window_id,
-                    "issue monitor heartbeat daemon publish failed (non-fatal)"
-                );
+                // Control success is the daemon's receipt after durable commit.
+                Ok(()) => worker_observe("committed_ack", Some(issue_number)),
+                Err(error) => {
+                    worker_observe("publish_unconfirmed", Some(issue_number));
+                    tracing::debug!(
+                        error = %error,
+                        window_id = worker_window_id,
+                        "issue monitor heartbeat daemon publish failed (non-fatal)"
+                    );
+                }
             }
         }) {
+            observe("enqueue_failed", issue_number_hint);
             tracing::debug!(
                 error = %error,
                 window_id,
@@ -8438,7 +8621,6 @@ impl AppRuntime {
                         .gui_status
                         .map(|mut status| {
                             self.retain_missing_issue_monitor_capacity(project_root, &mut status);
-                            status.auto_apply_updates = gwt::update_settings::enabled();
                             self.remember_issue_monitor_status(Some(project_root), &status);
                             vec![OutboundEvent::reply(
                                 client_id,
@@ -9587,6 +9769,32 @@ impl AppRuntime {
         events
     }
 
+    fn enrich_update_drain_blockers(&self, drain: &mut gwt::IssueMonitorUpdateDrain) {
+        drain.blocking.retain(|blocker| {
+            !matches!(blocker, gwt::update_drain::UpdateBlocker::ActivePane { .. })
+        });
+        if let Some(host_blockers) = &self.update_drain_host_blockers {
+            drain.blocking.retain(|blocker| {
+                !matches!(
+                    blocker,
+                    gwt::update_drain::UpdateBlocker::ActiveExecution { .. }
+                        | gwt::update_drain::UpdateBlocker::HeldVerificationLease { .. }
+                )
+            });
+            drain.blocking.extend(host_blockers.iter().cloned());
+        }
+        let (panes, _) = self.capture_update_quiescence_inputs();
+        let snapshot = gwt::update_drain::UpdateQuiescenceSnapshot {
+            panes,
+            ..Default::default()
+        };
+        let mut blocking = gwt::update_drain::update_quiescence(&snapshot)
+            .err()
+            .unwrap_or_default();
+        blocking.append(&mut drain.blocking);
+        drain.blocking = blocking;
+    }
+
     pub(crate) fn issue_monitor_daemon_status_events(
         &self,
         project_root: &Path,
@@ -9594,39 +9802,87 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.retain_missing_issue_monitor_capacity(project_root, &mut status);
         if let Some(drain) = status.update_drain.as_mut() {
-            drain.blocking.retain(|blocker| {
-                !matches!(blocker, gwt::update_drain::UpdateBlocker::ActivePane { .. })
-            });
-            if let Some(host_blockers) = &self.update_drain_host_blockers {
-                drain.blocking.retain(|blocker| {
-                    !matches!(
-                        blocker,
-                        gwt::update_drain::UpdateBlocker::ActiveExecution { .. }
-                            | gwt::update_drain::UpdateBlocker::HeldVerificationLease { .. }
-                    )
-                });
-                drain.blocking.extend(host_blockers.iter().cloned());
-            }
-            let (panes, _) = self.capture_update_quiescence_inputs();
-            let snapshot = gwt::update_drain::UpdateQuiescenceSnapshot {
-                panes,
-                ..Default::default()
-            };
-            let mut blocking = gwt::update_drain::update_quiescence(&snapshot)
-                .err()
-                .unwrap_or_default();
-            blocking.append(&mut drain.blocking);
-            drain.blocking = blocking;
+            self.enrich_update_drain_blockers(drain);
         }
         self.replace_knowledge_terminal_queue(project_root, &status.terminal_queue);
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
         };
         self.remember_issue_monitor_status(Some(project_root), &status);
-        vec![OutboundEvent::project(
+        let mut events = self.project_attention_events(
+            project_root,
+            status.last_error.as_deref(),
+            status.last_scan_at.as_deref(),
+        );
+        events.push(OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::IssueMonitorStatus { status },
-        )]
+        ));
+        events
+    }
+
+    /// Read-only projection: the worker supplied the diagnosis; the GUI does
+    /// no Git discovery or metadata I/O while deduplicating the notice.
+    fn project_attention_events(
+        &self,
+        project_root: &Path,
+        error: Option<&str>,
+        validated_scan_at: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let Some(state) = self.project_state_for_root(project_root) else {
+            return Vec::new();
+        };
+        let Some(error) = error else {
+            let validated =
+                validated_scan_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok());
+            if state
+                .project_attention_notice
+                .borrow()
+                .as_ref()
+                .is_some_and(|(_, since)| validated.is_some_and(|at| at > *since))
+            {
+                state.project_attention_notice.take();
+            }
+            return Vec::new();
+        };
+        let start = if let Some(start) = error.find("Git needs attention") {
+            start
+        } else if error.starts_with("Issue Monitor authority recovery is blocked")
+            || error.starts_with("Issue Monitor scan stalled")
+        {
+            0
+        } else {
+            return Vec::new();
+        };
+        let diagnosis = &error[start..];
+        if state
+            .project_attention_notice
+            .borrow()
+            .as_ref()
+            .is_some_and(|(previous, _)| {
+                previous == diagnosis
+                    || (previous.starts_with("Git needs attention")
+                        && diagnosis.starts_with("Git needs attention"))
+            })
+        {
+            return Vec::new();
+        }
+        state
+            .project_attention_notice
+            .replace(Some((diagnosis.to_string(), chrono::Utc::now())));
+        let Some(context) = self.project_context_for_root(project_root) else {
+            return Vec::new();
+        };
+        vec![OutboundEvent::project(
+            context.project_key,
+            BackendEvent::IssueMonitorToast {
+                notification_transition: None,
+                level: "error".to_string(),
+                message: diagnosis.to_string(),
+                issue_number: None,
+            },
+        )
+        .with_error_project_root(&context.project_root)]
     }
 
     /// A daemon frame without capacity fields has no provenance for an Auto
@@ -9753,13 +10009,22 @@ impl AppRuntime {
         self.apply_issue_monitor_launch_profile_status(&mut status, project_root);
         self.fill_update_drain_blocking(&mut status, &monitor);
         self.remember_issue_monitor_status(project_root, &status);
+        let mut attention_events = project_root
+            .map(|root| {
+                self.project_attention_events(
+                    root,
+                    status.last_error.as_deref(),
+                    status.last_scan_at.as_deref(),
+                )
+            })
+            .unwrap_or_default();
         let status_event = BackendEvent::IssueMonitorStatus {
             status: Box::new(status),
         };
         let inbox_event = BackendEvent::IssueMonitorInbox {
             items: monitor.inbox_view_at(&chrono::Utc::now().to_rfc3339()),
         };
-        match client_id {
+        let mut events = match client_id {
             Some(client_id) => vec![
                 OutboundEvent::reply(client_id.to_string(), status_event),
                 OutboundEvent::reply(client_id.to_string(), inbox_event),
@@ -9772,7 +10037,9 @@ impl AppRuntime {
                     ]
                 })
                 .unwrap_or_default(),
-        }
+        };
+        attention_events.append(&mut events);
+        attention_events
     }
 
     fn apply_issue_monitor_launch_profile_status(
@@ -10358,12 +10625,7 @@ impl AppRuntime {
                     .iter()
                     .filter_map(|context| self.project_auto_update_drain(context))
                     .filter(|(_, drain)| drain.version == *version)
-                    .all(|(prefs, drain)| {
-                        drain
-                            .automatic
-                            .or(prefs.auto_apply_updates)
-                            .unwrap_or(prefs.autonomous_mode)
-                    });
+                    .all(|(prefs, drain)| drain.automatic.unwrap_or(prefs.autonomous_mode));
                 self.proxy.send(UserEvent::ApplyUpdateDrained {
                     version: version.clone(),
                     automatic,
@@ -10385,12 +10647,7 @@ impl AppRuntime {
             }
             return Vec::new();
         };
-        if drain
-            .automatic
-            .or(prefs.auto_apply_updates)
-            .unwrap_or(prefs.autonomous_mode)
-            && !self.automatic_updates_enabled()
-        {
+        if drain.automatic.unwrap_or(prefs.autonomous_mode) && !self.automatic_updates_enabled() {
             return self.release_update_auto_apply_for_project(context, &drain.version);
         }
         let outcome = gwt::update_drain::update_quiescence(&observation.snapshot);
@@ -11033,7 +11290,7 @@ impl AppRuntime {
                 self.apply_update_restart_now_events(&client_id)
             }
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
-            FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+            FrontendEvent::SetAutoApplyUpdates { enabled } => {
                 self.set_global_auto_apply_updates_events(&client_id, enabled)
             }
             FrontendEvent::OpenUpdateLog { log_path } => {
@@ -11101,6 +11358,12 @@ impl AppRuntime {
             } => {
                 self.spawn_agent_backend_connection_probe(client_id, agent, base_url, api_key);
                 Vec::new()
+            }
+            FrontendEvent::GetUpdateSettings => {
+                vec![OutboundEvent::reply(
+                    &client_id,
+                    self.update_settings_event(None),
+                )]
             }
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
@@ -11970,7 +12233,7 @@ impl AppRuntime {
                     },
                 )
             }
-            FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+            FrontendEvent::SetAutoApplyUpdates { enabled } => {
                 self.set_global_auto_apply_updates_events(&client_id, enabled)
             }
             FrontendEvent::SetIssueMonitorAllowedLabels {
@@ -12271,6 +12534,10 @@ impl AppRuntime {
             FrontendEvent::StartMigration { tab_id } => self.start_migration_events(&tab_id),
             FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
             FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),
+            FrontendEvent::GetUpdateSettings => vec![OutboundEvent::reply(
+                &client_id,
+                self.update_settings_event(Some(&context.project_root)),
+            )],
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
             FrontendEvent::BoardProviderSignIn { provider } => {

@@ -208,6 +208,20 @@ test("closing agent tabs preserves the live grid and reopens the same terminal",
   assert.equal(document.querySelectorAll('[aria-label="Close All agents tab"]').length, 0);
 });
 
+test("external tab selection reopens the same terminal and reports whether the agent exists", async () => {
+  const { surface, setWindows, document, focused } = await fixture();
+  setWindows(agents);
+  const terminal = document.querySelector('[data-agent-id="two"] textarea');
+  document.querySelector('[aria-label="Close Two tab"]').click();
+  assert.equal(surface.openTab("two"), true);
+  assert.equal(document.getElementById("agents-tab-two").getAttribute("aria-selected"), "true");
+  assert.equal(document.querySelector('[data-agent-id="two"] textarea'), terminal);
+  assert.equal(focused.at(-1), "two");
+  assert.equal(surface.openTab("pm"), false);
+  assert.equal(surface.openTab("missing"), false);
+  assert.equal(document.getElementById("agents-tab-two").getAttribute("aria-selected"), "true");
+});
+
 test("the grid uses Operator tokens and contains the terminal inside each tile", () => {
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
   const surface = css.slice(css.indexOf("/* Issue 4777 T-4:"));

@@ -4,6 +4,7 @@
 // protocol enum contract so Rust-side renames propagate mechanically.
 
 import { WINDOW_RUNTIME_STATES } from "./protocol-enums.js";
+import { surfaceForWindow } from "./surface-rail.js";
 
 function capitalizeRuntimeState(state) {
   return state.charAt(0).toUpperCase() + state.slice(1);
@@ -39,18 +40,6 @@ export function presetSupportsWaitingStatus(preset) {
   return preset === "agent" || preset === "claude" || preset === "codex";
 }
 
-function isCanvasAgentFocusCandidate(windowData) {
-  const placementKind = windowData?.placement?.kind;
-  if (placementKind && placementKind !== "canvas") {
-    return false;
-  }
-  const agentId = String(windowData?.agent_id || "").trim();
-  return Boolean(
-    windowData?.id &&
-      (agentId || presetSupportsWaitingStatus(windowData?.preset)),
-  );
-}
-
 function agentFocusPriority(windowData, runtimeStateForWindow) {
   const resolvedRuntimeState =
     typeof runtimeStateForWindow === "function"
@@ -73,8 +62,8 @@ function agentFocusPriority(windowData, runtimeStateForWindow) {
 }
 
 // Issue #3551 — focus navigation uses a deterministic Agent-only projection
-// of the Canvas workspace. Hidden tab members stay in the projection so the
-// caller can activate them before framing. Sorting by the original index after
+// of the Agents view, including off-canvas and hidden saved-group members.
+// Sorting by the original index after
 // the runtime bucket makes the order independent of z-index and render state.
 export function selectNextAgentFocusWindowId(
   windows,
@@ -84,7 +73,7 @@ export function selectNextAgentFocusWindowId(
 ) {
   const candidates = (windows || [])
     .map((windowData, index) => ({ windowData, index }))
-    .filter(({ windowData }) => isCanvasAgentFocusCandidate(windowData))
+    .filter(({ windowData }) => windowData?.id && surfaceForWindow(windowData) === "agents")
     .map((candidate) => ({
       ...candidate,
       priority: agentFocusPriority(
