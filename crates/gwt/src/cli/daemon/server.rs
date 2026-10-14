@@ -14389,6 +14389,7 @@ exit 0
                 state: crate::issue_monitor::IssueCompletionState::Completed,
                 issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
                 evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                released_reason: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
