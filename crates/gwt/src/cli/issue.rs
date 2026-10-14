@@ -2663,9 +2663,9 @@ fn run_monitor_requeue<E: CliEnv>(
     let blocked_by_claim = projection
         .as_ref()
         .and_then(|status| agent_status_blocked_by_claim(status, number));
-    let stranded_launch = projection
+    let launched_row = projection
         .as_ref()
-        .is_some_and(|status| agent_status_launch_is_stranded(status, number));
+        .is_some_and(|status| agent_status_has_launched_row(status, number));
     // Issue #4161 AC-5: a Prepared successor/takeover fences the owner's
     // execution generation and refuses every launch, and nothing clears it on
     // its own. Releasing the failure hold here would answer `requeued` and let
@@ -2727,17 +2727,18 @@ fn run_monitor_requeue<E: CliEnv>(
         // running agent" apart from "there was nothing to recover" instead of
         // retrying blindly.
         crate::IssueMonitorRequeueOutcome::LaunchLive => {
-            out.push_str(
-                &serde_json::json!({
-                    "number": number,
-                    "status": "refused",
-                    "refusal": "launch_live",
-                    "detail": "a launch still owns this issue — use issue.monitor.stop or issue.monitor.failover, which verify the exact live launch identity",
-                })
-                .to_string(),
+            // Issue #4383: a persisted slot may outlive its window. The same
+            // operator recovery still fails closed unless the authenticated
+            // canvas and worktree-process observations prove it is gone.
+            return run_monitor_release_stranded_launch(
+                &prefs_path,
+                &project_root,
+                number,
+                reason,
+                &now,
+                projection.as_ref(),
+                out,
             );
-            out.push('\n');
-            return Ok(1);
         }
         crate::IssueMonitorRequeueOutcome::NotHeld => {
             if let Some(released_hold) = released_hold {
@@ -2796,13 +2797,14 @@ fn run_monitor_requeue<E: CliEnv>(
             // the failure gate above is right that nothing failed. Both
             // refusals were correct and the combination left the PM with no
             // way back to the queue at all.
-            if stranded_launch {
+            if launched_row {
                 return run_monitor_release_stranded_launch(
                     &prefs_path,
                     &project_root,
                     number,
                     reason,
                     &now,
+                    projection.as_ref(),
                     out,
                 );
             }
@@ -2938,25 +2940,13 @@ fn monitor_status_projection(
     serde_json::from_value::<crate::IssueMonitorAgentStatus>(status).ok()
 }
 
-/// Issue #3992 AC-5: whether this issue's row still reads `launched` while no
-/// launch owns it.
-///
-/// Both facts that make the row unrecoverable are in one snapshot: the label
-/// the scan preserves across cycles, and the absent slot. A row still holding a
-/// slot belongs to a live launch and is `issue.monitor.stop`'s business, not
-/// this one's.
-///
-/// The row's own `launched_window_id` is deliberately not consulted. It is a
-/// display leftover the scan carries forward when the binding is gone, so the
-/// two reported shapes — the window unbound by a settled delivery, and the
-/// window id retained after its launch stopped being tracked — differ only in
-/// that field while being the same unrecoverable state. `launched_windows` is a
-/// subset of the active slots, so "no slot" already means "no binding".
-fn agent_status_launch_is_stranded(status: &crate::IssueMonitorAgentStatus, number: u64) -> bool {
-    !status.active_launches.contains(&number)
-        && status.inbox.iter().any(|row| {
-            row.issue_number == number && row.state == crate::MonitorInboxState::Launched
-        })
+/// A launched row is a recovery candidate, including a slot retained after
+/// restart. The operator release separately proves an occupied window absent.
+fn agent_status_has_launched_row(status: &crate::IssueMonitorAgentStatus, number: u64) -> bool {
+    status
+        .inbox
+        .iter()
+        .any(|row| row.issue_number == number && row.state == crate::MonitorInboxState::Launched)
 }
 
 fn agent_status_blocked_by_claim(
@@ -3074,13 +3064,76 @@ fn run_monitor_release_stranded_launch(
     number: u64,
     reason: &str,
     now: &str,
+    projection: Option<&crate::IssueMonitorAgentStatus>,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    // Window snapshots are transient driver state, not preferences. Obtain a
+    // fresh authenticated list before taking the prefs lock; an unavailable
+    // canvas never authorizes release of a slot.
+    let live_windows = crate::cli::pane::live_windows(project_root).ok();
+    let observations =
+        crate::issue_monitor_worker::read_execution_observations(project_root, &[number]);
     let (prefs, outcome) = crate::try_mutate_issue_monitor_prefs(prefs_path, |prefs| {
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
+        // The driver may still count a slot its durable prefs no longer hold.
+        // That shape caused stop=unknown_issue plus requeue=not_held. Require
+        // current positive canvas evidence before releasing its projected slot.
+        if projection.is_some_and(|status| status.active_launches.contains(&number))
+            && monitor.launched_window_id(number).is_none()
+        {
+            let bound = projection.and_then(|status| {
+                status
+                    .inbox
+                    .iter()
+                    .find(|row| row.issue_number == number)
+                    .and_then(|row| row.launched_window_id.as_deref())
+            });
+            let missing = bound
+                .zip(live_windows.as_ref())
+                .is_some_and(|(bound, windows)| {
+                    bound
+                        .split_once("::")
+                        .is_some_and(|(tab, raw)| !tab.is_empty() && !raw.is_empty())
+                        && !windows.iter().any(|window| {
+                            window.id == bound || window.linked_issue_number == Some(number)
+                        })
+                });
+            if !missing {
+                return Ok(crate::IssueMonitorRequeueOutcome::LaunchLive);
+            }
+        }
+        monitor.set_process_held_issues(
+            observations
+                .iter()
+                .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
+                .collect(),
+        );
+        if let (Some(bound), Some(windows)) = (monitor.launched_window_id(number), &live_windows) {
+            if let Some((tab, _)) = bound
+                .split_once("::")
+                .filter(|(tab, raw)| !tab.is_empty() && !raw.is_empty())
+            {
+                monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+                    project_tab_id: tab.to_string(),
+                    observed_at: now.to_string(),
+                    windows: windows
+                        .iter()
+                        .map(|window| crate::IssueMonitorWindowObservation {
+                            monitor_owned: false,
+                            window_id: window.id.clone(),
+                            issue_number: window.linked_issue_number,
+                            status: window.status,
+                            review_dispatch: false,
+                            hold_reason: None,
+                            last_output_at: None,
+                        })
+                        .collect(),
+                });
+            }
+        }
         let outcome = monitor.release_stranded_launch(number, reason, now);
         if matches!(outcome, crate::IssueMonitorRequeueOutcome::Requeued { .. }) {
             monitor.terminal_queue_push(&[number], "operator", now);
@@ -6042,10 +6095,10 @@ mod tests {
     /// Issue #3992 AC-5 / AC-7: the stranded-row probe reads the same wire
     /// format, and matches both reported shapes — the window unbound by a
     /// settled delivery (#4086) and the window id retained after the launch
-    /// stopped being tracked (#3864) — while leaving a row that still holds a
-    /// slot to `issue.monitor.stop`.
+    /// stopped being tracked (#3864). Issue #4383 also nominates an occupied
+    /// slot, whose window must separately be proven absent before release.
     #[test]
-    fn agent_status_probe_matches_only_a_launched_row_no_launch_owns() {
+    fn agent_status_probe_matches_launched_recovery_candidates_including_occupied_slots() {
         let status: crate::IssueMonitorAgentStatus = serde_json::from_value(serde_json::json!({
             "queue": [],
             "active_launches": [4133],
@@ -6065,19 +6118,19 @@ mod tests {
         .expect("projection wire format deserializes");
 
         assert!(
-            agent_status_launch_is_stranded(&status, 4086),
+            agent_status_has_launched_row(&status, 4086),
             "the settled-delivery shape has no recovery path"
         );
         assert!(
-            agent_status_launch_is_stranded(&status, 3864),
+            agent_status_has_launched_row(&status, 3864),
             "so does the same row with a stale window id left on it"
         );
         assert!(
-            !agent_status_launch_is_stranded(&status, 4133),
-            "an active slot means a live launch owns the row"
+            agent_status_has_launched_row(&status, 4133),
+            "an active slot alone does not prove its window exists"
         );
-        assert!(!agent_status_launch_is_stranded(&status, 7));
-        assert!(!agent_status_launch_is_stranded(&status, 99));
+        assert!(!agent_status_has_launched_row(&status, 7));
+        assert!(!agent_status_has_launched_row(&status, 99));
     }
 
     /// Issue #3992 AC-3: a refusal has to carry the identity it disagreed with,
@@ -6107,6 +6160,17 @@ mod tests {
             .as_str()
             .expect("detail text")
             .contains("claim_id"));
+
+        let unknown = issue_monitor_stop_refusal(
+            4383,
+            crate::IssueMonitorStopMismatch::UnknownIssue,
+            &crate::IssueMonitorLaunchIdentity::default(),
+        );
+        assert_eq!(unknown["mismatch"], "unknown_issue");
+        assert!(unknown["detail"]
+            .as_str()
+            .unwrap()
+            .contains("issue.monitor.requeue"));
     }
 
     /// Issue #4594 AC-5: a run recorded before #4566 carries no `outcome`
@@ -6172,6 +6236,7 @@ mod tests {
             4086,
             "operator recovery",
             "2026-09-09T04:57:00Z",
+            None,
             &mut out,
         )
         .expect("release runs");
@@ -6210,6 +6275,7 @@ mod tests {
             4086,
             "operator recovery",
             "2026-09-09T04:57:00Z",
+            None,
             &mut out,
         )
         .expect("release runs");
