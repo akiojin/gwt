@@ -599,6 +599,7 @@ export function createKnowledgeKanbanSurface({
   windowMap,
   workspaceWindowById,
   getWorkspaceWindows,
+  windowCatalogModel,
   pendingIndexOpenTargetsByPreset,
   knowledgeKindForPreset,
   focusWindowLocally,
@@ -840,8 +841,28 @@ export function createKnowledgeKanbanSurface({
       function issueTierChips(issueNumber) {
         const facts = issueMonitorModel.read().status.tier_facts?.find(item => item.issue_number === issueNumber);
         const isTier = value => Number.isInteger(value) && value >= 0;
-        if (!facts || (!isTier(facts.recorded_launch_tier) && !isTier(facts.recorded_landing_tier))) return [];
+        if (!facts) return [];
         const chips = [];
+        const confirmed = facts.confirmed_launch;
+        const catalog = windowCatalogModel?.read().catalog;
+        if (isTier(confirmed?.tier) && confirmed.tier <= 255
+            && typeof confirmed.window_id === "string" && confirmed.window_id.trim()
+            && typeof confirmed.delivery_id === "string" && confirmed.delivery_id.trim()) {
+          const agent = catalog?.appState.tabs.flatMap(tab => tab.workspace?.windows || [])
+            .find(windowData => windowData.id === confirmed.window_id);
+          const linkedIssue = agent?.placement?.kind === "issue_preview"
+            ? agent.placement.issue_number : agent?.linked_issue_number;
+          const runtime = Object.hasOwn(catalog?.runtimeStates || {}, confirmed.window_id)
+            ? catalog.runtimeStates[confirmed.window_id] : agent?.status;
+          // Display normalization maps unknown to running; evidence must use the raw state.
+          if (agent && Number(linkedIssue) === issueNumber
+              && (agent.linked_issue_number == null || Number(agent.linked_issue_number) === issueNumber)
+              && runtime === "running") {
+            chips.push({ kind: "tier", key: "tier-running", label: `Running tier ${confirmed.tier}`,
+              explanation: `Acknowledged launch tier ${confirmed.tier} (zero-based tiers); the matching agent window currently reports running.` });
+          }
+        }
+        if (!isTier(facts.recorded_launch_tier) && !isTier(facts.recorded_landing_tier)) return chips;
         if (isTier(facts.minimum_tier_override)) {
           chips.push({ kind: "tier", key: "tier-minimum", label: `Min tier ${facts.minimum_tier_override}`,
             explanation: `Explicit minimum tier ${facts.minimum_tier_override} (tiers are zero-based). This minimum is not a profile lock; availability can select a higher tier. Recorded launch attempts describe history.` });
@@ -1078,12 +1099,15 @@ export function createKnowledgeKanbanSurface({
         const override = status.max_active_agents_override;
         const manual = Number.isInteger(override) && override > 0;
         const manualEffective = manual && status.max_active_agents === override;
+        const autoRetained = !manual && Number.isInteger(status.max_active_agents) && status.max_active_agents > 0;
         const excess = manual ? override - capacity.recommended_worker_limit : 0;
         const incomplete = !capacity.measurement_complete;
         const attention = incomplete || excess > 0;
         const message = incomplete
           ? manualEffective
             ? `Capacity pending. Manual limit ${override}; no action needed.`
+            : autoRetained
+              ? `Capacity pending. Auto limit ${status.max_active_agents} retained while measurements refresh.`
             : "Capacity pending. Wait or set Max active manually."
           : excess > 0
             ? `${excess} over recommended. Lower Max active if slow.`
@@ -1109,7 +1133,7 @@ export function createKnowledgeKanbanSurface({
         if (attention) lines.push("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
         return {
           key: ISSUE_MONITOR_CAPACITY_KEY, title: "Issue Monitor capacity",
-          level: manualEffective || !attention ? "info" : "warn", message,
+          level: manualEffective || (incomplete && autoRetained) || !attention ? "info" : "warn", message,
           details: lines.filter(Boolean).join("\n"), attention,
           badge: incomplete ? "Capacity pending · Details"
             : excess > 0 ? "Over recommended · Details" : `Capacity ${capacity.recommended_worker_limit} · Details`,
@@ -4730,6 +4754,16 @@ export function createKnowledgeKanbanSurface({
                 if (mounted) renderKnowledgeBridge(windowData.id);
               }),
             ];
+            if (windowCatalogModel && state.kind === "issue") {
+              state.monitorSubscriptions.push(windowCatalogModel.subscribe(model =>
+                JSON.stringify(model.catalog.appState.tabs.flatMap(tab => tab.workspace?.windows || [])
+                  .map(windowData => [windowData.id, windowData.linked_issue_number,
+                    windowData.placement?.kind === "issue_preview" ? windowData.placement.issue_number : null,
+                    Object.hasOwn(model.catalog.runtimeStates, windowData.id)
+                      ? model.catalog.runtimeStates[windowData.id] : windowData.status])), () => {
+                if (mounted) renderKnowledgeBridge(windowData.id);
+              }));
+            }
             mounted = true;
           }
           const laneFilter = body.querySelector("[data-issue-lane-filter]");

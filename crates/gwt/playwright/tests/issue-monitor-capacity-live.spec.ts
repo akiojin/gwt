@@ -72,6 +72,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         geometry: { x: 60, y: 50, width: 720, height: 420 }, cols: 80, rows: 24,
       });
       const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const createdSettings = !(await settings.count());
       const issues = settings.locator('[data-settings-panel="issues"]');
       const input = issues.getByLabel("Max active", { exact: true });
       const mode = issues.getByLabel("Max active mode", { exact: true });
@@ -244,7 +245,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         await showIssues();
         await expect(warning).toHaveText(/Capacity \d+ · Details/);
         await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")))
-          .toMatchObject({ max_active_agents_mode: "auto", max_active_agents: 1 });
+          .toMatchObject({ max_active_agents_mode: "auto", max_active_agents: restored.max_active_agents });
         await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
@@ -256,6 +257,10 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       } finally {
         await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: before.max_active_agents_override });
         await expectOverride(page, before.max_active_agents_override);
+        if (createdSettings && !page.isClosed()) {
+          const settingsId = await settings.getAttribute("data-id");
+          if (settingsId) await sendLiveGwtEvent(page, { kind: "close_window", id: settingsId });
+        }
         if (created && !page.isClosed()) await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       }
       expect(errors, "zero console/page errors").toEqual([]);
@@ -377,6 +382,16 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       await expect(summary).toHaveText("Over recommended · Details");
       await expect(notice.locator(".notification-center__message")).toHaveText("4 over recommended. Lower Max active if slow.");
       await assertSingleLine();
+      await apply({ ...status, max_active_agents: 5, max_active_agents_override: null });
+      await expect(summary).toHaveAttribute("data-tone", "info");
+      await expect(notice).toHaveAttribute("data-level", "info");
+      await expect(notice.locator(".notification-center__message")).toContainText("Auto limit 5 retained");
+      await summary.click();
+      await expect(drawer).toBeVisible();
+      await testInfo.attach(`capacity-retained-${testInfo.project.name}`, {
+        body: await page.screenshot({ animations: "disabled" }), contentType: "image/png",
+      });
+      await page.getByRole("button", { name: "Close notifications", exact: true }).click();
       await apply({ ...status, max_active_agents: 0, max_active_agents_override: null });
       await expect(summary).toHaveAttribute("data-tone", "warning");
       await expect(notice).toHaveAttribute("data-level", "warn");

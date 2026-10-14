@@ -4882,6 +4882,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           allProjectWindowIds()
             .map((windowId) => workspaceWindowById(windowId))
             .filter(Boolean),
+        windowCatalogModel,
         pendingIndexOpenTargetsByPreset,
         knowledgeKindForPreset,
         focusWindowLocally,

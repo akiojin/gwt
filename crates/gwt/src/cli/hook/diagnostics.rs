@@ -142,6 +142,11 @@ fn normalized_status(value: &str) -> &'static str {
     match value {
         "ok" => "ok",
         "error" => "error",
+        "timeout" => "timeout",
+        "deadline" => "deadline",
+        "provider-error" => "provider-error",
+        "disconnected" => "disconnected",
+        "partial" => "partial",
         _ => "unknown",
     }
 }

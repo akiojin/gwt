@@ -2742,13 +2742,121 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
     }
 }
 
-// SPEC-2359 W-17 (FR-398, Issue #3034): a second spawn for the same Work
-// while the first launch is still materializing (window registered, agent
-// session not yet live) must focus the pending window, not spawn a duplicate.
+#[test]
+fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_scan() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let drain_root = temp.path().join("drain");
+    let target_root = temp.path().join("target");
+    fs::create_dir_all(&drain_root).unwrap();
+    fs::create_dir_all(&target_root).unwrap();
+    init_repo(&drain_root);
+    init_repo(&target_root);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
+    let tabs = vec![
+        sample_project_tab("drain", "drain", drain_root, ProjectKind::Git, &[]),
+        sample_project_tab("target", "target", target_root, ProjectKind::Git, &[]),
+    ];
+    for version in [env!("CARGO_PKG_VERSION"), "0.1.0"] {
+        let mut prefs = gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: version.into(),
+                since: "2026-10-13T00:00:00Z".into(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut runtime = sample_runtime(temp.path(), tabs.clone(), Some("target"));
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/issue-5351-test")
+            .build();
+        runtime
+            .spawn_agent_window("target", config, canvas_bounds(), None)
+            .expect("an applied drain must not hold another project's launch");
+        prefs.update_drain = None;
+        assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+
+        // Next-scan reconciliation also works without a resume marker or daemon.
+        prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+            version: version.into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Manual,
+            automatic: None,
+            blocking: Vec::new(),
+        });
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let context = runtime.project_context("drain").unwrap();
+        assert!(AppRuntime::read_project_auto_update_drain(&context).is_none());
+        assert!(gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .update_drain
+            .is_none());
+    }
+}
+
+fn stage_host_drain_update(temp: &Path, version: &str) {
+    let payload = temp.join("staged-gwt");
+    fs::write(&payload, b"staged payload").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: version.into(),
+        asset_url: "https://example.invalid/update".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: "2026-10-13T00:00:00Z".into(),
+        origin: gwt_core::update::PendingUpdateOrigin::Automatic,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+}
+
+#[test]
+fn issue_5351_update_drain_host_hold_requires_pending_update_and_supports_host_wide_release() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("drain");
+    fs::create_dir_all(&project).unwrap();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+    let prefs = gwt::IssueMonitorPrefs {
+        update_drain: Some(gwt::IssueMonitorUpdateDrain {
+            version: "99.0.0".into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
+            blocking: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "drain",
+            "drain",
+            project,
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("drain"),
+    );
+    assert!(runtime.host_update_drain_launch_hold().unwrap().is_none());
+    assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+    stage_host_drain_update(temp.path(), "99.0.0");
+    let hold = runtime.host_update_drain_launch_hold().unwrap().unwrap();
+    assert!(
+        hold.contains("release.update.defer {\"version\":\"99.0.0\"}"),
+        "{hold}"
+    );
+    gwt_core::update::defer_pending_update("99.0.0").unwrap();
+    assert!(runtime.host_update_drain_launch_hold().unwrap().is_none());
+}
+
 #[test]
 fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
+    stage_host_drain_update(temp.path(), "99.0.0");
     let drain_root = temp.path().join("drain");
     let target_root = temp.path().join("target");
     fs::create_dir_all(&drain_root).expect("drain project");
@@ -2757,7 +2865,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     init_repo(&target_root);
     let mut prefs = gwt::IssueMonitorPrefs {
         update_drain: Some(gwt::IssueMonitorUpdateDrain {
-            version: "9.110.0".to_string(),
+            version: "99.0.0".to_string(),
             since: "2026-10-10T08:21:17Z".to_string(),
             reason: gwt::IssueMonitorUpdateDrainReason::Auto,
             automatic: None,
@@ -2813,6 +2921,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
 fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
+    stage_host_drain_update(temp.path(), "99.0.0");
     let drain_root = temp.path().join("drain");
     let target_root = temp.path().join("target");
     fs::create_dir_all(&drain_root).unwrap();
@@ -2823,7 +2932,7 @@ fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
         &gwt::issue_monitor_prefs_path_for_repo_path(&drain_root),
         &gwt::IssueMonitorPrefs {
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: "9.110.0".into(),
+                version: "99.0.0".into(),
                 since: "2026-10-10T08:21:17Z".into(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,

@@ -484,6 +484,10 @@ test("Issue #5284: capacity uses one keyed notice with unique center-only diagno
   assert.equal(notices.length, 1, "identical broadcasts do not report another occurrence");
   badge.click();
   assert.equal(opened.at(-1), "issue-monitor:capacity");
+  surface.applyIssueMonitorStatus({ ...status, max_active_agents_override: null, max_active_agents: 9 });
+  assert.equal(badge.dataset.tone, "info");
+  assert.equal(notices.at(-1).level, "info");
+  assert.match(notices.at(-1).message, /Auto limit 9 retained/);
   surface.applyIssueMonitorStatus({ ...status, max_active_agents_override: null, max_active_agents: 0 });
   assert.equal(badge.dataset.tone, "warning");
   assert.equal(notices.at(-1).key, notices[0].key);

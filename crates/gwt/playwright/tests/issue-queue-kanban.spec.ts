@@ -24,7 +24,7 @@ test.beforeEach(async ({ page }, info) => {
   await installBackend(page, {
     narrowSettings,
     inboxFirst: info.title.startsWith("Issue #5287"),
-    includeAgent: info.title.startsWith("T-7a:"),
+    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:"),
     observeSkipped: info.title.startsWith("four columns preserve"),
   });
   await page.goto(liveUrl || APP_URL);
@@ -490,11 +490,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await page.keyboard.press("Enter");
   // Wait for the fixture's authoritative detail, not the immediate local
   // selection preview, before testing dismissal across a later refresh.
-  await expect(page.locator(".knowledge-detail-pane")).toContainText("Description for #4");
+  await expect(page.locator(".knowledge-detail-pane").getByText("Description for #4", {exact:true})).toBeVisible();
   const source = page.locator(".issue-detail-provenance");
   await source.focus();
   await expect(source).toBeFocused();
   await expect(popup).toBeVisible();
+  await expect(source).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
   await expect(popup).toContainText("Auto-refill added this issue");
   await page.keyboard.press("Escape");
   await expect(popup).not.toBeVisible();
@@ -569,6 +570,65 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
   const controls = await page.evaluate(before => (window as any).__queueMessages.slice(before).filter((message: any) =>
     /^(set_|issue_monitor_queue_|update_viewport|input$)/.test(message.kind)), before);
   expect(controls, "reading and dismissing facts sends no controls").toEqual([]);
+});
+
+test("T-7b.2b.2: Running tier uses exact live window and clears stale explanations", async ({page}) => {
+  const facts = [{ issue_number: 5, recorded_launch_tier: 2,
+    confirmed_launch: { tier: 0, window_id: "tab-queue::agent-5", delivery_id: "delivery-5" } }];
+  await confirm(page, [3, 4], { tier_facts: facts });
+  const chip = row(page, 5).locator('[data-key="tier-running"]');
+  const select = row(page, 5).locator(".knowledge-row-select");
+  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  await expect(chip).toHaveText("Running tier 0");
+  await expect(select.locator('[tabindex="0"]')).toHaveCount(0);
+  // Settle the existing preview's initial agent uptime projection before pressing a row.
+  await page.evaluate(() => (window as any).__queueFocusResponse());
+  await select.hover();
+  const pressedRow = await select.elementHandle();
+  await page.mouse.down();
+  await page.evaluate(() => (window as any).__queueFocusResponse());
+  expect(await pressedRow!.evaluate(node => node.isConnected), "focus response preserves the pressed row").toBe(true);
+  await page.mouse.up();
+  const detail = page.locator(".knowledge-detail-pane");
+  await expect(detail.getByText("Description for #5", {exact:true})).toBeVisible();
+  await detail.locator('[data-action="close-issue-preview"]').click();
+  await page.mouse.move(1590, 1090);
+  await select.focus();
+  await expect(popup).toContainText("Acknowledged launch tier 0 (zero-based tiers)");
+  await expect(select).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await chip.hover();
+  await expect(popup).toHaveText("Acknowledged launch tier 0 (zero-based tiers); the matching agent window currently reports running.");
+  await page.screenshot({path: test.info().outputPath("running-tier-reported.png")});
+  const before = await page.evaluate(() => (window as any).__queueMessages.length);
+  // The persisted window remains running: only the actual runtime event changes.
+  await page.evaluate(() => (window as any).__queueAgentState("stopped"));
+  await expect(chip).toHaveCount(0);
+  await expect(popup).not.toBeVisible();
+  await expect(select).not.toHaveAttribute("aria-description", /Acknowledged/);
+  await page.locator(".knowledge-search").focus();
+  await select.focus();
+  await expect(popup).toBeVisible();
+  await expect(popup).not.toContainText("Acknowledged launch tier");
+  await page.screenshot({path: test.info().outputPath("running-tier-cleared.png")});
+  await page.evaluate(() => (window as any).__queueAgentState("running"));
+  await expect(chip).toHaveText("Running tier 0");
+  await page.evaluate(() => (window as any).__queueAgentWindow({id:"other-agent"}));
+  await expect(chip).toHaveCount(0);
+  await page.evaluate(() => (window as any).__queueAgentWindow({id:"tab-queue::agent-5",placement:{kind:"canvas"},linked_issue_number:5}));
+  await expect(chip).toHaveText("Running tier 0");
+  await page.evaluate(() => (window as any).__queueOmitTierFacts());
+  await expect(chip).toHaveCount(0);
+  await confirm(page, [3, 4], { tier_facts: facts });
+  await expect(chip).toHaveText("Running tier 0");
+  await page.evaluate(() => (window as any).__queueStatus({tier_facts:[{issue_number:5,recorded_launch_tier:2}]}));
+  await expect(chip).toHaveCount(0);
+  await confirm(page, [3, 4], { tier_facts: facts });
+  await expect(chip).toHaveText("Running tier 0");
+  await page.evaluate(() => (window as any).__queueAgentWindow(null));
+  await expect(chip).toHaveCount(0);
+  const controls = await page.evaluate(before => (window as any).__queueMessages.slice(before).filter((message: any) =>
+    /^(set_|issue_monitor_queue_|input$|stop_window$|close_window$)/.test(message.kind)), before);
+  expect(controls, "observing launch facts sends no controls").toEqual([]);
 });
 
 test("card selection keeps issue body, acceptance and provenance beside switchable output", async ({page}) => {
@@ -743,6 +803,20 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       }; fixture.__queueOmitTierFacts=()=>{
         delete status.tier_facts;
         this.emit({kind:"issue_monitor_status",status});
+      }; fixture.__queueAgentState=(state:string)=>{
+        this.emit({kind:"terminal_status",id:"tab-queue::agent-5",status:state});
+      }; fixture.__queueFocusResponse=()=>{
+        const workspace=fixture.__queueWorkspace;
+        const issue=workspace.tabs[0].workspace.windows.find((item:any)=>item.id==="tab-queue::issue-1");
+        issue.z_index+=1;
+        this.dispatchEvent(new MessageEvent("message",{data:JSON.stringify({kind:"workspace_state",workspace})}));
+      }; fixture.__queueAgentWindow=(extra:any)=>{
+        const workspace=fixture.__queueWorkspace;
+        const windows=workspace.tabs[0].workspace.windows;
+        const agent=windows.find((item:any)=>item.preset==="agent");
+        if(extra===null) workspace.tabs[0].workspace.windows=windows.filter((item:any)=>item!==agent);
+        else Object.assign(agent,extra);
+        this.emit({kind:"workspace_state",workspace});
       }; fixture.__queueAddForeground=()=>{
         const workspace=fixture.__queueWorkspace;
         workspace.tabs[0].workspace.windows.push({id:"tab-queue::console",title:"Console",preset:"console",

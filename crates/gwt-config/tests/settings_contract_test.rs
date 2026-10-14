@@ -6,7 +6,9 @@
 //! and the global config path layout. The real `~/.gwt/config.toml` is
 //! never touched.
 
-use std::{num::NonZeroU16, path::Path};
+use std::num::NonZeroU16;
+#[cfg(unix)]
+use std::path::Path;
 
 use gwt_config::{ConfigError, Settings};
 
