@@ -148,6 +148,8 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
 test("Issue #5321 preview keyboard focus opens and returns with Escape", async ({ page }) => {
   const select = row(page, 1).locator(".knowledge-row-select");
   const detail = page.locator(".knowledge-detail-pane");
+  // Keep native hover from opening a tooltip that consumes the first Escape.
+  await page.mouse.move(1590, 1090);
   await select.focus();
   await select.press("Enter");
   await expect(detail).toBeFocused();
