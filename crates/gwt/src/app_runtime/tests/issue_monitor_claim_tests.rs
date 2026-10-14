@@ -4522,7 +4522,11 @@ fn issue_monitor_ack_preserves_failed_window_runtime_installed_after_enqueue() {
     assert_ack_preserves_failed_window_replacement(temp.path(), true);
 }
 
-fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
+fn assert_expired_launch_ack_cleanup(
+    preserve_successor: bool,
+    conflicting_owner: bool,
+    startup_timeout: bool,
+) {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     init_repo_with_initial_commit(temp.path());
@@ -4570,16 +4574,21 @@ fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
     let mut feedback = issue_monitor_feedback(42);
     feedback.issue_monitor_delivery_id = Some(delivery_id.into());
     feedback.issue_monitor_project_root = Some(temp.path().into());
+    let startup_feedback = feedback.clone();
     runtime
         .pending_launch_feedback_contexts
         .insert(window_id.clone(), feedback);
     runtime.handle_launch_complete(window_id.clone(), result);
 
     // Advance Monitor time while the queued preparation has not created a PTY.
-    assert_eq!(
-        monitor.expire_stale_unbound_launches_with("2026-07-02T00:02:00Z", |_| true,),
-        vec![42]
-    );
+    if conflicting_owner {
+        monitor.complete_active_launch(43, &window_id);
+    } else if !startup_timeout {
+        assert_eq!(
+            monitor.expire_stale_unbound_launches_with("2026-07-02T00:02:00Z", |_| true,),
+            vec![42]
+        );
+    }
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
     drain_queued_blocking_tasks(&tasks);
     runtime.handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
@@ -4609,6 +4618,12 @@ fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
             crate::app_runtime::next_window_runtime_incarnation();
     }
     runtime.handle_issue_monitor_launch_delivery_ack(ack);
+    if startup_timeout {
+        let generation = runtime
+            .arm_issue_monitor_startup(&window_id, &startup_feedback)
+            .unwrap();
+        runtime.handle_issue_monitor_startup_timeout(&window_id, generation);
+    }
     drain_queued_blocking_tasks(&tasks);
     let window_remains = runtime.tracked_window_exists(&window_id);
     let runtime_remains = runtime.runtimes.contains_key(&window_id);
@@ -4618,21 +4633,55 @@ fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
     // Clean up even on RED, after capturing the actual ACK outcome.
     runtime.close_window_after_issue_monitor_finalize_events(&window_id);
     drain_queued_blocking_tasks(&tasks);
+    let should_remain = preserve_successor || conflicting_owner;
+    assert_eq!(window_remains, should_remain, "expired ACK window cleanup");
+    assert_eq!(runtime_remains, should_remain, "expired ACK PTY cleanup");
     assert_eq!(
-        window_remains, preserve_successor,
-        "expired ACK window cleanup"
-    );
-    assert_eq!(
-        runtime_remains, preserve_successor,
-        "expired ACK PTY cleanup"
-    );
-    assert_eq!(
-        session_remains, preserve_successor,
+        session_remains, should_remain,
         "expired ACK Session cleanup"
     );
+    if conflicting_owner {
+        assert_eq!(
+            prefs.pending_launch_deliveries.len(),
+            1,
+            "refusal keeps the unconsumed delivery"
+        );
+        assert!(prefs
+            .launched_issues
+            .iter()
+            .any(|entry| entry.issue_number == 43 && entry.window_id == window_id));
+        return;
+    }
     if !preserve_successor {
         assert_eq!(finalized.status, gwt_agent::AgentStatus::Stopped);
         assert!(!finalized.restore_window_on_startup);
+    }
+    if startup_timeout {
+        let mut restored =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        restored.record_candidate(gwt::IssueMonitorIssue {
+            number: 42,
+            title: "Delayed launch".into(),
+            labels: Vec::new(),
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        });
+        assert_eq!(restored.attempt_count(42), 0);
+        assert_eq!(
+            restored.inbox_item(42).unwrap().state,
+            gwt::MonitorInboxState::Queued
+        );
+        assert!(restored
+            .inbox_item(42)
+            .unwrap()
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("startup timed out after 180s"));
+        return;
     }
     assert!(prefs.pending_launch_deliveries.is_empty());
     let expired = monitor.prefs();
@@ -4645,12 +4694,22 @@ fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
 
 #[test]
 fn issue_5289_expired_launch_ack_closes_late_window_and_session() {
-    assert_expired_launch_ack_cleanup(false);
+    assert_expired_launch_ack_cleanup(false, false, false);
 }
 
 #[test]
 fn issue_5289_expired_launch_ack_preserves_successor_runtime() {
-    assert_expired_launch_ack_cleanup(true);
+    assert_expired_launch_ack_cleanup(true, false, false);
+}
+
+#[test]
+fn issue_5415_refused_duplicate_ack_preserves_the_bound_window() {
+    assert_expired_launch_ack_cleanup(false, true, false);
+}
+
+#[test]
+fn issue_5415_post_ack_startup_timeout_requeues_the_exact_window_without_reusing_delivery_id() {
+    assert_expired_launch_ack_cleanup(false, false, true);
 }
 
 #[test]

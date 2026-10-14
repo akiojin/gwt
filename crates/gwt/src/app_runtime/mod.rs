@@ -1767,6 +1767,8 @@ pub struct AppRuntime {
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
     pub(crate) pending_launch_delivery_acks:
         HashMap<String, issue_monitor_delivery_ack::PendingLaunchDeliveryAck>,
+    pub(crate) pending_monitor_startups:
+        HashMap<String, issue_monitor_delivery_ack::MonitorStartupWatch>,
     pub(crate) pending_launch_completions: HashMap<String, launch::PendingLaunchCompletion>,
     /// SPEC #3200 FR-052: daemon launch requests are at-least-once deliveries.
     /// Remember materialization and terminal ACK state by delivery id so a
@@ -4469,6 +4471,7 @@ impl AppRuntime {
             pending_update_resume_notice: None,
             pending_launch_feedback_contexts: HashMap::new(),
             pending_launch_delivery_acks: HashMap::new(),
+            pending_monitor_startups: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: HashSet::new(),
@@ -5872,15 +5875,11 @@ impl AppRuntime {
             message.to_string()
         };
         if let Some(delivery_id) = delivery_id {
-            let fresh_execution = (!retryable)
-                .then(|| {
-                    self.failed_fresh_execution_monitor_candidate(
-                        project_root,
-                        issue_number,
-                        delivery_id,
-                    )
-                })
-                .flatten();
+            let fresh_execution = self.failed_fresh_execution_monitor_candidate(
+                project_root,
+                issue_number,
+                delivery_id,
+            );
             self.issue_monitor_launch_deliveries.insert(
                 delivery_id.to_string(),
                 IssueMonitorLaunchDeliveryState::LaunchFailed {
@@ -5941,9 +5940,7 @@ impl AppRuntime {
         delivery_id: &str,
     ) -> Option<(String, Box<gwt_agent::SessionExecutionIdentity>, u64)> {
         if let Some(IssueMonitorLaunchDeliveryState::LaunchFailed {
-            retryable: false,
-            fresh_execution,
-            ..
+            fresh_execution, ..
         }) = self.issue_monitor_launch_deliveries.get(delivery_id)
         {
             return fresh_execution.clone();
@@ -6180,7 +6177,7 @@ impl AppRuntime {
             retryable,
             monitor,
             committed,
-            retain_delivery: retain_delivery || (!retryable && error.is_some()),
+            retain_delivery: retain_delivery || error.is_some(),
             error,
             status: None,
             defer_wake: false,
@@ -6303,7 +6300,7 @@ impl AppRuntime {
         } else if let Some(delivery_id) = delivery_id {
             if !retain_delivery {
                 self.issue_monitor_launch_deliveries.remove(delivery_id);
-            } else if !retryable {
+            } else {
                 let fresh_execution = self.failed_fresh_execution_monitor_candidate(
                     project_root,
                     issue_number,
@@ -6314,7 +6311,7 @@ impl AppRuntime {
                     IssueMonitorLaunchDeliveryState::LaunchFailed {
                         message: message.to_string(),
                         session_mode: gwt_agent::SessionMode::Normal,
-                        retryable: false,
+                        retryable,
                         fresh_execution,
                     },
                 );
@@ -6372,10 +6369,16 @@ impl AppRuntime {
         };
         !prefs.pending_launch_deliveries.iter().any(|delivery| {
             delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
-        }) && prefs
+        }) && (prefs
             .failed_issues
             .iter()
             .any(|failed| failed.issue_number == issue_number && failed.message == message)
+            || prefs.autonomous_records.iter().any(|record| {
+                record.issue_number == issue_number
+                    && record.retry_not_before.is_some()
+                    && record.phase == gwt::AutonomousPhase::Idle
+                    && record.last_failure_message.as_deref() == Some(message)
+            }))
     }
 
     #[cfg(test)]
@@ -14173,6 +14176,7 @@ impl AppRuntime {
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.forget_pm_agent_idle_window(window_id);
         self.invalidate_launch_delivery_ack(window_id);
+        self.pending_monitor_startups.remove(window_id);
         self.pending_launch_completions.remove(window_id);
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);

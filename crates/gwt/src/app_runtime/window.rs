@@ -111,6 +111,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, runtime_hook_agent_failures_in_flight);
         $visit!($runtime, $id, pending_launch_completions);
         $visit!($runtime, $id, pending_launch_delivery_acks);
+        $visit!($runtime, $id, pending_monitor_startups);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
         $visit!($runtime, $id, pending_fresh_execution_finalizations);
