@@ -19215,6 +19215,47 @@ impl IssueMonitorState {
         reason: &str,
         now: &str,
     ) -> IssueMonitorRequeueOutcome {
+        // A slot is not proof that its window survived a GUI restart. Reuse
+        // the scan's freshness, launch-ordering and registration-grace checks,
+        // while retaining any live or uncertain worktree process.
+        if self.process_held_issues.contains(&issue_number) {
+            return IssueMonitorRequeueOutcome::LaunchLive;
+        }
+        if self.active_launches.contains(&issue_number)
+            || self.launched_windows.contains_key(&issue_number)
+        {
+            let missing = self
+                .classify_idle_windows(&BTreeMap::new(), now)
+                .iter()
+                .any(|idle| {
+                    idle.issue_number == Some(issue_number)
+                        && idle.idle_kind == IssueMonitorIdleKind::BindingDead
+                        && !idle.pane_present
+                });
+            let pane_present = self.fresh_window_snapshot(now).is_some_and(|snapshot| {
+                snapshot.windows.iter().any(|window| {
+                    self.launched_windows
+                        .get(&issue_number)
+                        .is_some_and(|bound| {
+                            issue_monitor_window_ids_match(bound, &window.window_id)
+                        })
+                        || (window.issue_number == Some(issue_number)
+                            && idle_window_is_alive(window.status))
+                })
+            });
+            if !missing
+                || pane_present
+                || self
+                    .pending_launch_deliveries
+                    .iter()
+                    .any(|delivery| delivery.issue_number == issue_number)
+            {
+                return IssueMonitorRequeueOutcome::LaunchLive;
+            }
+            self.clear_active_tracking(issue_number);
+            self.launch_bindings
+                .retain(|_, owner| *owner != issue_number);
+        }
         self.publish_operator_release(
             issue_number,
             reason,
@@ -28456,6 +28497,96 @@ mod tests {
             IssueMonitorRequeueOutcome::LaunchLive
         );
         assert_eq!(monitor.active_count(), 1);
+    }
+
+    #[test]
+    fn issue_4383_requeue_recovers_a_missing_window_that_still_holds_a_slot() {
+        let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
+        monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(
+            monitor.requeue_failed_issue(43, "restart recovery", IDLE_NOW),
+            IssueMonitorRequeueOutcome::LaunchLive
+        );
+
+        assert!(matches!(
+            monitor.release_stranded_launch(43, "restart recovery", IDLE_NOW),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        assert_eq!(monitor.active_count(), 0);
+        assert!(monitor.queued_issue_numbers().contains(&43));
+        assert!(monitor.prefs().launched_issues.is_empty());
+        assert_eq!(monitor.prefs().requeue_audit.len(), 1);
+    }
+
+    #[test]
+    fn issue_4383_requeue_keeps_a_missing_pane_with_a_live_worktree_process() {
+        let mut monitor = autonomous_launched_cohort(&[(43, "tab-1::dead-43")]);
+        monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+        monitor.set_process_held_issues(BTreeSet::from([43]));
+        let before = monitor.prefs();
+
+        assert_eq!(
+            monitor.release_stranded_launch(43, "restart recovery", IDLE_NOW),
+            IssueMonitorRequeueOutcome::LaunchLive
+        );
+        assert_eq!(monitor.prefs(), before, "live work must not be released");
+
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::restored",
+                Some(43),
+                WindowState::Running,
+                false,
+            )],
+        ));
+        assert_eq!(
+            monitor.release_stranded_launch(43, "restart recovery", IDLE_NOW),
+            IssueMonitorRequeueOutcome::LaunchLive,
+            "a replacement pane for the same Issue must retain the slot"
+        );
+        assert_eq!(monitor.prefs(), before);
+    }
+
+    #[test]
+    fn issue_4383_first_restart_scan_requeues_three_windows_without_spending_attempts() {
+        let monitor = autonomous_launched_cohort(&[
+            (4373, "tab-1::agent-1"),
+            (4376, "tab-1::agent-2"),
+            (4377, "tab-1::agent-3"),
+        ]);
+        let mut restarted =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        for number in [4373, 4376, 4377] {
+            restarted.record_candidate(issue(number));
+        }
+        restarted.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
+        let outcome = restarted.reconcile_idle_windows(
+            &settlements(&[
+                (4373, IssueMonitorExecutionSettlement::Interrupted),
+                (4376, IssueMonitorExecutionSettlement::Interrupted),
+                (4377, IssueMonitorExecutionSettlement::Interrupted),
+            ]),
+            IDLE_NOW,
+        );
+
+        assert_eq!(outcome.released, vec![4373, 4376, 4377]);
+        assert_eq!(outcome.requeued, vec![4373, 4376, 4377]);
+        assert_eq!(restarted.active_count(), 0);
+        for number in [4373, 4376, 4377] {
+            assert_eq!(
+                restarted.attempt_count(number),
+                monitor.attempt_count(number)
+            );
+            assert!(restarted.queued_issue_numbers().contains(&number));
+            assert!(restarted
+                .autonomous_record(number)
+                .unwrap()
+                .retry_not_before
+                .is_none());
+        }
     }
 
     /// Issue #3992 AC-6: a `launched` row with a null window and no live launch
