@@ -21,6 +21,9 @@ let output = "";
 test.beforeAll(async () => {
   test.setTimeout(120_000);
   expect(checkout, "the runner must identify this checkout").toBeTruthy();
+  const localHook = /(^|[/\\])target[/\\](?:[^/\\]+[/\\])*(debug|release)[/\\]gwtd(\.exe)?$|[/\\]verification-drivers[/\\]/i;
+  const hookBin = [process.env.GWT_HOOK_BIN, process.env.GWT_BIN_PATH]
+    .find(candidate => candidate && (candidate === "gwtd" || (!localHook.test(candidate) && existsSync(candidate)))) ?? "gwtd";
   const home = mkdtempSync(join(tmpdir(), "gwt-startup-tray-"));
   for (const directory of [".gwt", ".codex", ".claude", "tmp"]) {
     mkdirSync(join(home, directory), { recursive: true });
@@ -37,7 +40,7 @@ test.beforeAll(async () => {
   Object.assign(environment, {
     HOME: home, USERPROFILE: home, TEMP: join(home, "tmp"), TMP: join(home, "tmp"),
     APPDATA: join(home, "AppData/Roaming"), LOCALAPPDATA: join(home, "AppData/Local"),
-    GWT_HOOK_BIN: "gwtd", GWT_DISABLE_BACKGROUND_INDEX: "1",
+    GWT_HOOK_BIN: hookBin, GWT_DISABLE_BACKGROUND_INDEX: "1",
     GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
     GWT_BROWSER_URL_FILE: join(home, "url"),
   });
@@ -57,7 +60,7 @@ test.beforeAll(async () => {
   writeFileSync(join(home, ".gwt/session.json"), JSON.stringify({
     tabs: [{ id: "startup", title: "Startup", project_root: checkout, kind: "git" }], recent_projects: [],
   }));
-  const hookParams = { expected_hook_bin: "gwtd", runtime_state_path: join(home, ".gwt/missing-runtime.json") };
+  const hookParams = { expected_hook_bin: hookBin, runtime_state_path: join(home, ".gwt/missing-runtime.json") };
   expect(daemon("hook.doctor", { ...hookParams, repair: true }).ok).toBe(true);
   child = spawn(join(checkout, `target/debug/gwt${extension}`), ["--no-tray", "--no-open"], {
     cwd: checkout, env: environment, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
