@@ -11504,6 +11504,14 @@ impl IssueMonitorState {
             .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
     }
 
+    fn clear_recovered_issue_failure(&mut self, issue_number: u64) {
+        if let Some(reason) = self.failed_issues.remove(&issue_number) {
+            if self.last_error.as_deref() == Some(&format!("issue #{issue_number}: {reason}")) {
+                self.last_error = self.first_failed_issue_banner();
+            }
+        }
+    }
+
     fn is_stop_only_error_banner(&self, error: &str) -> bool {
         self.failed_issues.iter().any(|(issue_number, reason)| {
             reason.starts_with(STOP_ONLY_REASON_PREFIX)
@@ -12240,6 +12248,15 @@ impl IssueMonitorState {
                     .cloned()
             })
             .or_else(|| self.first_failed_issue_banner());
+        // Issue #5321 AC-3: Issue failures remain diagnostic history, while
+        // only a current monitor fault makes the whole monitor read as Error.
+        let has_current_error = self.last_prefs_reset.is_some()
+            || (!self.launch_auth_required
+                && self.last_error.as_ref().is_some_and(|error| {
+                    !self.failed_issues.iter().any(|(issue_number, reason)| {
+                        error == &format!("issue #{issue_number}: {reason}")
+                    })
+                }));
         let host = crate::process::current_hostname();
         let local_entries = self.terminal_queues.get(&host).map(|queue| {
             queue
@@ -12274,7 +12291,7 @@ impl IssueMonitorState {
             enabled: self.config.enabled,
             state: if !self.config.enabled {
                 "disabled".to_string()
-            } else if last_error.is_some() {
+            } else if has_current_error {
                 "error".to_string()
             } else if self.launch_auth_required {
                 "auth_required".to_string()
@@ -12997,12 +13014,12 @@ impl IssueMonitorState {
     /// caller-supplied clock so daemon publication and tests stay deterministic.
     pub fn status_view_at(&self, now: &str) -> IssueMonitorStatusView {
         let mut status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
-        // Issue #3628 (AC-5): set before the `last_error` early return below. A
+        // Issue #3628 (AC-5): set before the current-error early return below. A
         // total outage always leaves a failure in `last_error`, so anything
         // reported after that guard is unreachable in exactly the situation it
         // exists for.
         status.agent_blackout = self.agent_blackout_at(now);
-        if !status.enabled || status.last_error.is_some() {
+        if !status.enabled || matches!(status.state.as_str(), "error" | "auth_required") {
             return status;
         }
         let Some(last_scan_at) = status.last_scan_at.as_deref() else {
@@ -16724,7 +16741,7 @@ impl IssueMonitorState {
             );
         }
         self.merged_issues.remove(&issue_number);
-        self.failed_issues.remove(&issue_number);
+        self.clear_recovered_issue_failure(issue_number);
         self.failed_windows.remove(&issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
@@ -18571,7 +18588,7 @@ impl IssueMonitorState {
         record.review_dispatch_hold = None;
         // The return is not a failure, so any earlier failure marker for this
         // issue must not survive to hold it out of the queue.
-        self.failed_issues.remove(&issue_number);
+        self.clear_recovered_issue_failure(issue_number);
         self.failed_windows.remove(&issue_number);
         self.set_inbox_state(issue_number, MonitorInboxState::Queued);
         if let Some(item) = self
@@ -28113,6 +28130,21 @@ mod tests {
             monitor.first_failed_issue_banner().as_deref(),
             Some("issue #99: agent launch failed")
         );
+        assert_eq!(
+            monitor.status_view().state,
+            "idle",
+            "a historical Issue failure remains diagnostic, not a current monitor error"
+        );
+        monitor.last_error = monitor.first_failed_issue_banner();
+        assert_eq!(monitor.status_view().state, "idle");
+        scan_queued_candidates(&mut monitor, &[], "2026-08-07T00:00:02Z");
+        assert_eq!(
+            monitor.status_view().last_error.as_deref(),
+            Some("issue #99: agent launch failed"),
+            "a successful scan retains the Issue diagnostic for notifications"
+        );
+        assert_eq!(monitor.status_view().state, "idle");
+        monitor.last_error = Some("issue #42: stopped: operator pause".to_string());
         monitor.failed_issues.remove(&99);
         assert_eq!(monitor.status_view().last_error, None);
         assert_ne!(monitor.status_view().state, "error");
@@ -36931,8 +36963,18 @@ mod tests {
 
         // A successful (re)launch clears any retained stale window.
         let mut relaunch = launched_monitor(43, "old::agent-43");
+        relaunch.config.enabled = true;
         relaunch.record_agent_window_failed("old::agent-43", "boom");
         relaunch.complete_active_launch(43, "new::agent-43");
+        assert_eq!(relaunch.status_view().state, "active");
+        assert_eq!(relaunch.status_view().last_error, None);
+        relaunch.record_control_commit_error("current settings commit failed");
+        relaunch.complete_active_launch(43, "new::agent-43");
+        assert_eq!(relaunch.status_view().state, "error");
+        assert_eq!(
+            relaunch.status_view().last_error.as_deref(),
+            Some("current settings commit failed")
+        );
         assert_eq!(
             relaunch.take_failed_window(43),
             None,

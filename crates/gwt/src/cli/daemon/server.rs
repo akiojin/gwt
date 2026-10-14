@@ -10407,7 +10407,7 @@ exit 0
 
         assert!(should_scan);
         assert_eq!(monitor.active_count(), 0);
-        assert_eq!(monitor.status_view().state, "error");
+        assert_eq!(monitor.status_view().state, "idle");
         assert_eq!(
             monitor.status_view().last_error.as_deref(),
             Some("issue #42: Stop-block hit an error")

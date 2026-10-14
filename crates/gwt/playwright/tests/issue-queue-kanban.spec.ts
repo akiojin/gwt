@@ -1,5 +1,6 @@
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { join } from "node:path";
 
 // #4499: real Chromium and checkout assets, deterministic protocol projections.
 // This suite proves the queue UI contract, not a real agent launch.
@@ -43,6 +44,117 @@ async function confirm(page: Page, numbers: number[], extra = {}) {
 async function drag(page: Page, number: number, target: Locator) {
   await row(page, number).dragTo(target);
 }
+async function titleMetrics(title: Locator) {
+  return title.evaluate(element => {
+    const oneLine = element.cloneNode(false) as HTMLElement;
+    oneLine.textContent = "M";
+    Object.assign(oneLine.style, { position: "absolute", visibility: "hidden", width: `${element.clientWidth}px`, height: "auto" });
+    element.parentElement!.appendChild(oneLine);
+    const lineHeight = oneLine.getBoundingClientRect().height;
+    oneLine.remove();
+    return { height: element.getBoundingClientRect().height, lineHeight,
+      fits: element.scrollHeight <= element.clientHeight && element.scrollWidth <= element.clientWidth };
+  });
+}
+
+test("Issue #5321 responsive summary and on-demand preview", async ({ page }, info) => {
+  const before = process.env.GWT_ISSUE_5321_PHASE === "before";
+  const phase = before ? "before" : "after";
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const root = page.locator(".issue-bridge-root");
+  const pane = root.locator(".knowledge-list-pane");
+  const detail = root.locator(".knowledge-detail-pane");
+  const capture = async (name: string) => {
+    const path = process.env.GWT_ISSUE_5321_EVIDENCE
+      ? join(process.env.GWT_ISSUE_5321_EVIDENCE, `${phase}-${theme}-${name}.png`)
+      : info.outputPath(`${phase}-${theme}-${name}.png`);
+    await page.screenshot({ path });
+    await info.attach(`${phase}-${theme}-${name}`, { path, contentType: "image/png" });
+  };
+  for (const width of [900, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.locator(".workspace-window").evaluate((element, width) => {
+      // The fixture's initial wide window auto-fits the canvas. Use physical
+      // CSS pixels for the responsive acceptance instead of camera scaling.
+      document.getElementById("canvas-stage")!.style.transform = "none";
+      Object.assign((element as HTMLElement).style, { left: "8px", top: "8px", width: `${width - 80}px`, height: "860px" });
+    }, width);
+    await capture(`${width}-default`);
+    if (before) continue;
+    await expect(root).toHaveAttribute("data-preview-hidden", "true");
+    await expect(detail).not.toBeVisible();
+    const paneBox = (await pane.boundingBox())!;
+    const shellBox = (await root.locator(".issue-list-shell").boundingBox())!;
+    expect(Math.abs(paneBox.width - shellBox.width), "default Kanban uses the full list width").toBeLessThan(2);
+    const statusBox = (await root.getByRole("group", { name: "Monitor status", exact: true }).boundingBox())!;
+    const controlsBox = (await root.getByRole("group", { name: "Monitor controls", exact: true }).boundingBox())!;
+    expect(Math.abs(statusBox.y + statusBox.height / 2 - controlsBox.y - controlsBox.height / 2), "summary status and controls share one row").toBeLessThan(2);
+    expect(controlsBox.x - statusBox.x - statusBox.width, "summary has no large central gap").toBeLessThan(40);
+    expect((await root.locator(".knowledge-monitor-bar").boundingBox())!.height, "summary stays compact").toBeLessThan(60);
+    const title = "First backlog issue with a long descriptive title that preserves every word in the preview while each Kanban card stays compact and readable across both viewport sizes";
+    await page.evaluate(title => (window as any).__queueTitle(1, title), title);
+    const cardTitle = row(page, 1).locator(".knowledge-row-title");
+    await expect(cardTitle).toHaveText(title);
+    const cardMetrics = await titleMetrics(cardTitle);
+    expect(cardMetrics.height, "long card title is at most two lines").toBeLessThanOrEqual(cardMetrics.lineHeight * 2 + 1);
+    await row(page, 1).locator(".knowledge-row-select").click();
+    await expect(root).toHaveAttribute("data-preview-hidden", "false");
+    await expect(detail).toBeVisible();
+    const previewTitle = detail.locator(".knowledge-detail-title");
+    await expect(previewTitle).toHaveText(title);
+    const previewMetrics = await titleMetrics(previewTitle);
+    expect(previewMetrics.fits, "preview shows the complete title without clipping").toBe(true);
+    expect(previewMetrics.height, "preview title wraps naturally").toBeGreaterThan(previewMetrics.lineHeight * 2);
+    if (width === 900) {
+      const openPaneBox = (await pane.boundingBox())!;
+      expect(Math.abs(openPaneBox.width - paneBox.width), "narrow preview overlays the full width board").toBeLessThan(2);
+    } else {
+      expect((await pane.boundingBox())!.width, "wide preview shares the list shell").toBeLessThan(paneBox.width - 100);
+    }
+    await capture(`${width}-preview`);
+    await detail.locator('[data-action="close-issue-preview"]').click();
+    await expect(root).toHaveAttribute("data-preview-hidden", "true");
+    expect(Math.abs((await pane.boundingBox())!.width - shellBox.width), "closing preview restores full width").toBeLessThan(2);
+    await page.evaluate(() => (window as any).__queueTitle(1, "First backlog issue"));
+  }
+  if (before) return;
+  const statusPill = root.locator(".knowledge-monitor-pill");
+  for (const [extra, label, tone] of [
+    [{ enabled: false, state: "disabled", active_count: 0 }, "Stopped", "idle"],
+    [{ enabled: true, state: "idle", active_count: 0, queue_len: 0 }, "Waiting · Empty", "idle"],
+    [{ enabled: true, state: "active", active_count: 1, max_active_agents: 2, queue_len: 2 }, "Running", "active"],
+    [{ enabled: true, state: "active", active_count: 2, max_active_agents: 2, queue_len: 2 }, "Waiting · Full", "idle"],
+    [{ enabled: true, state: "error", active_count: 0, last_error: "Fixture current failure" }, "⚠ Error", "blocked"],
+  ] as const) {
+    await page.evaluate(extra => (window as any).__queueStatus({ last_error: null, quota_hold: null, ...extra }), extra);
+    await expect(statusPill).toHaveText(label);
+    await expect(statusPill).toHaveAttribute("data-tone", tone);
+  }
+  await statusPill.click();
+  await expect(page.locator('[data-error-key="issue-monitor:last_error"]')).toContainText("Fixture current failure");
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  await page.evaluate(() => (window as any).__queueStatus({ state: "idle", last_error: null, active_count: 0, queue_len: 0 }));
+  await expect(statusPill).toHaveText("Waiting · Empty");
+  await expect(statusPill).toHaveAttribute("data-tone", "idle");
+  await page.setViewportSize({ width: 900, height: 1000 });
+  await page.locator(".workspace-window").evaluate(element => { (element as HTMLElement).style.width = "820px"; });
+  await root.getByRole("button", { name: "Split", exact: true }).click();
+  await expect(root).toHaveAttribute("data-view-mode", "split");
+  const splitList = (await pane.boundingBox())!;
+  const splitDetail = (await detail.boundingBox())!;
+  expect(splitList.x + splitList.width, "narrow Split keeps its interactive list beside the detail pane").toBeLessThanOrEqual(splitDetail.x + 1);
+});
+
+test("Issue #5321 preview keyboard focus opens and returns with Escape", async ({ page }) => {
+  const select = row(page, 1).locator(".knowledge-row-select");
+  const detail = page.locator(".knowledge-detail-pane");
+  await select.focus();
+  await select.press("Enter");
+  await expect(detail).toBeFocused();
+  await detail.press("Escape");
+  await expect(detail).not.toBeVisible();
+  await expect(select).toBeFocused();
+});
 
 test("pending SessionStart diagnosis clears when late readiness arrives", async ({page}) => {
   const diagnosis = "SessionStart readiness pending: hooks.json missing; check hook discovery and works.lock contention";
@@ -139,20 +251,22 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
   const searchBox=await page.locator(".knowledge-search").boundingBox();
   const modeBox=await page.locator(".knowledge-view-mode").boundingBox();
   expect(Math.abs(searchBox!.y-modeBox!.y), "search and view mode share one filter row").toBeLessThan(2);
-  await expect(page.locator('[data-action="monitor-settings"]')).toHaveText("⚙ Settings");
+  await expect(page.locator('[data-action="monitor-settings"]')).toHaveAttribute("aria-label", "Issues settings");
   await expect(page.locator('[data-action="refresh-knowledge"]')).toHaveText("↻ Refresh");
   await expect(page.getByRole("group",{name:"Monitor status",exact:true})).toBeVisible();
   await expect(page.getByRole("group",{name:"Monitor controls",exact:true})).toBeVisible();
   const pane=page.locator(".issue-bridge-root .knowledge-list-pane");
+  await expect(page.locator(".issue-bridge-root")).toHaveAttribute("data-preview-hidden","true");
+  const fullWidth=(await pane.boundingBox())!.width;
+  await row(page,3).locator(".knowledge-row-select").click();
   const visibleWidth=(await pane.boundingBox())!.width;
-  await page.getByRole("button",{name:"Hide preview",exact:true}).click();
+  expect(fullWidth).toBeGreaterThan(visibleWidth+100);
+  await page.locator('.knowledge-detail-pane [data-action="close-issue-preview"]').click();
   await expect(page.locator(".issue-bridge-root")).toHaveAttribute("data-preview-hidden","true");
   const hiddenWidth=(await pane.boundingBox())!.width;
   expect(hiddenWidth).toBeGreaterThan(visibleWidth+100);
   expect(Math.abs(hiddenWidth-(await page.locator(".issue-list-shell").boundingBox())!.width), "hidden preview gives the board full width").toBeLessThan(2);
   await expect(page.locator(".knowledge-detail-pane")).not.toBeVisible();
-  await page.getByRole("button",{name:"Show preview",exact:true}).click();
-  await expect(page.locator(".issue-bridge-root")).toHaveAttribute("data-preview-hidden","false");
   await page.locator(".workspace-window").evaluate(element => { (element as HTMLElement).style.width="850px"; });
   for (const phase of ["backlog","queued","active","done"]) {
     expect((await column(page,phase).boundingBox())!.width).toBeGreaterThanOrEqual(262);
@@ -240,10 +354,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await expect(popup).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(popup).not.toBeVisible();
+  // Leave the hover target before checking keyboard-only focus explanations.
+  await page.mouse.move(1590, 1090);
   for (const selector of [
     '.knowledge-monitor-pill', '[data-metric="active"]', '[data-metric="queue"]',
-    '[data-action="monitor-auto-refill"]', '[data-action="monitor-auto-apply"]',
-    '[data-action="toggle-issue-preview"]',
+    '[data-action="monitor-settings"]', '[data-action="monitor-toggle"]',
+    '[data-action="monitor-autonomous"]',
   ]) {
     const target = page.locator(selector);
     await target.focus();
@@ -266,8 +382,6 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await expect(source).toBeFocused();
   await expect(popup).not.toBeVisible();
   await expect(popup).toContainText("Auto-refill added this issue");
-  await page.keyboard.press("Escape");
-  await expect(popup).not.toBeVisible();
   await page.locator(".knowledge-search").focus();
   await row(page, 4).locator(".knowledge-row-badge").hover();
   await expect(popup).toBeVisible();
@@ -414,18 +528,20 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
 });
 
 test("auto-refill starts off and toggle and limit use server-confirmed values", async ({ page }) => {
-  const toggle=page.getByRole("switch",{name:"Auto-refill queue",exact:true});
-  await expect(toggle).toHaveAttribute("aria-checked","false");
+  await page.getByRole("button", {name:"Issues settings",exact:true}).click();
+  const issues = page.locator('[data-settings-panel="issues"]');
+  await expect(issues).toBeFocused();
+  const toggle=issues.getByLabel("Auto-refill",{exact:true});
+  await expect(toggle).not.toBeChecked();
   await toggle.click();
   await expect.poll(()=>messages(page)).toEqual([{kind:"set_issue_monitor_auto_refill",enabled:true,limit:3}]);
-  await expect(toggle).toHaveAttribute("aria-checked","false");
   await confirm(page,[3,4],{terminal_queue_auto_refill:true});
-  await expect(toggle).toHaveAttribute("aria-checked","true");
-  await page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true}).fill("5");
-  await page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true}).press("Tab");
+  await expect(toggle).toBeChecked();
+  await issues.getByLabel("Refill limit",{exact:true}).fill("5");
+  await issues.getByLabel("Refill limit",{exact:true}).press("Tab");
   await expect.poll(async()=>(await messages(page)).at(-1)).toEqual({kind:"set_issue_monitor_auto_refill",enabled:true,limit:5});
   await confirm(page,[3,4],{terminal_queue_auto_refill_limit:5});
-  await expect(page.getByRole("spinbutton",{name:"Auto-refill queue limit",exact:true})).toHaveValue("5");
+  await expect(issues.getByLabel("Refill limit",{exact:true})).toHaveValue("5");
 });
 
 test("live launched state survives stale cache and retains full queue positions", async ({ page }) => {
@@ -494,6 +610,13 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
         fixture.__queueConfirm=(numbers:number[],extra:any)=>{
         Object.assign(status,{terminal_queue:numbers.map(number=>({number,queued_by:number===4?"auto-refill":"operator"})),queue_len:numbers.length},extra);
         this.emit({kind:"issue_monitor_status",status});
+      }; fixture.__queueStatus=(extra:any)=>{
+        Object.assign(status,extra);
+        this.emit({kind:"issue_monitor_status",status});
+      }; fixture.__queueTitle=(number:number,title:string)=>{
+        const entry=entries.find(entry=>entry.number===number);
+        if(entry) entry.title=title;
+        this.emit({kind:"knowledge_entries",...fixture.__queueLoad,entries,selected_number:null,refresh_enabled:true});
       }; fixture.__queueOmitTierFacts=()=>{
         delete status.tier_facts;
         this.emit({kind:"issue_monitor_status",status});
@@ -518,6 +641,12 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
               geometry:{x:80,y:80,width:900,height:600},z_index:2,status:"running",persist:true,minimized:false,maximized:false,
               placement:{kind:"issue_preview",issue_window_id:"tab-queue::issue-1",issue_number:5}}] : [])]} }],active_tab_id:"tab-queue",recent_projects:[]};
           this.emit({kind:"workspace_state",workspace:fixture.__queueWorkspace}); }
+        else if(message.kind==="create_window" && message.preset==="settings") {
+          const workspace=fixture.__queueWorkspace;
+          workspace.tabs[0].workspace.windows.push({id:"tab-queue::settings",title:"Settings",preset:"settings",
+            geometry:{x:100,y:80,width:700,height:800},z_index:3,status:"running",persist:true,minimized:false,maximized:false});
+          this.emit({kind:"workspace_state",workspace});
+        }
         else if(message.kind==="list_issue_monitor") {
           this.emit({kind:"issue_monitor_status",status});
           if (inboxFirst) this.emit({kind:"issue_monitor_inbox",items:entries.map(issue=>({issue,
