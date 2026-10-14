@@ -17,7 +17,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !worktree.is_dir() {
         return Err(format!("live PM worktree missing: {}", worktree.display()).into());
     }
+    let project_root = gwt_git::worktree::main_worktree_root(&repo)?;
     let mut session = Session::new(&worktree, "", AgentId::Codex);
+    // Managed PM sessions bind this at launch; legacy root discovery must not
+    // consume the prompt deadline in this disposable diagnostic Session.
+    session.project_state_root = Some(project_root);
     session.display_name = "PM Board probe".into();
     let cursor = reminders_dir(&worktree).join(format!("{}.json", session.id));
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
