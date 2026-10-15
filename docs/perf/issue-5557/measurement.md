@@ -91,7 +91,8 @@ and human visual confirmation are outside these backend measurements.
 ## Verification contract
 
 The acceptance matrix includes the Issue #5557 regressions, existing worker and
-Monitor configuration tests, test hygiene, formatting, and changed-crate clippy.
+Monitor configuration tests, the independent daemon-supervision contract,
+test hygiene, formatting, and workspace clippy.
 Canonical pre-PR verification delegates the full platform and coverage matrix to
 the repository's required CI checks; delivery requires those checks and a merge
 into develop. Local workspace coverage is not measured.
