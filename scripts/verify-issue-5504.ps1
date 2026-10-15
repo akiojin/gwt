@@ -1,3 +1,4 @@
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [ValidateSet('baseline', 'after')][string]$Phase = 'after',
     [string]$EvidenceDirectory,
