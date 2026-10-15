@@ -48,6 +48,8 @@ const BOARD_NOTICE_AFTER: Duration = POLL;
 /// Keep its recovery facts typed all the way to the JSON envelope (#5085).
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct Deferral {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_notification: Option<String>,
     pub waited_secs: u64,
     pub budget_secs: u64,
     pub cleanup_secs: u64,
@@ -78,6 +80,7 @@ impl Deferral {
             None => "rerun `verify.run` to recheck admission when the reported blocker clears".to_string(),
         };
         Self {
+            resume_notification: None,
             waited_secs: waited.as_secs(),
             budget_secs: budget.as_secs(),
             cleanup_secs: cleanup.as_secs(),
@@ -96,9 +99,10 @@ impl std::fmt::Display for Deferral {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "verify: deferred — admission waited {}s (budget {}s; cleanup {}s; total {}s): {}; {} — a deferral is not a failure and there is no attempt cap: keep rerunning `verify.run` while the holder makes progress{}",
+            "verify: deferred — admission waited {}s (budget {}s; cleanup {}s; total {}s): {}; {} — a deferral is not a failure and there is no attempt cap: keep rerunning `verify.run` while the holder makes progress; retry the identical full matrix or declare `issue.monitor.wait` with the explicit owner number; do not finish the task or use execution.blocked for admission contention{}{}",
             self.waited_secs, self.budget_secs, self.cleanup_secs, self.elapsed_secs,
             self.reason, self.recovery, self.output_suffix,
+            self.resume_notification.as_ref().map(|note| format!("; resume_notification: {note}")).unwrap_or_default(),
         )
     }
 }
@@ -208,7 +212,6 @@ impl Admission {
         Some(&self.lease_id)
     }
 
-    #[cfg(test)]
     pub(crate) fn waited(&self) -> Duration {
         self.waited
     }
@@ -507,7 +510,7 @@ impl BoardNotice {
         let body = format!(
             "現在の状態: verify.run は host 排他待ちです（{}s 経過、上限 {}s）。\n\n\
              理由: {reason}\n\n\
-             次: 上限まで待って開始します。超過した場合は deferred で返し、agent が再実行します。",
+             次: この tool が動いている間は結果を待ちます。deferred 後は同じ全 matrix を再投入するか、owner number を明示して issue.monitor.wait を宣言してください。watchdog は pool の空きと本人 pane の idle を確認して再開を一度通知します。待機を理由に作業を完了・blocked にしないでください。",
             started.elapsed().as_secs(),
             max_wait.as_secs()
         );
