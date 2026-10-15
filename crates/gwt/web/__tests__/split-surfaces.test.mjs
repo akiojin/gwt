@@ -14,6 +14,8 @@ test("the title bar offers a reversible split and the split uses Operator tokens
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
   assert.match(css, /\.split-pane\[data-active="true"\][\s\S]*?var\(--color-focus-ring\)/);
   assert.match(css, /\.split-pane \.resize-handle\s*\{\s*display: none !important;/);
+  assert.match(css, /\.split-pane\[hidden\][\s\S]*?display: none !important;/);
+  assert.match(css, /\.split-surfaces\[data-split="false"\] \.split-pane__header/);
 });
 
 async function fixture() {
@@ -59,7 +61,7 @@ async function fixture() {
   return { controller, model, document, window, stage, windows, elements, opened, agents, agentHosts };
 }
 
-test("two panes select independently, preserve live nodes and restore canvas geometry", async () => {
+test("two panes select independently and release restores canvas geometry", async () => {
   const { controller, document, stage, elements } = await fixture();
   controller.open("issues");
   const panes = document.querySelectorAll(".split-pane");
@@ -183,6 +185,56 @@ test("a missing surface requests the existing launcher once and mounts the arriv
   windows.push({ id: "settings", preset: "settings" });
   controller.sync();
   assert.equal(controller.containsWindow("settings"), true);
+});
+
+test("rail surfaces share a single fixed host before and after splitting", async () => {
+  const { controller, document, elements, stage } = await fixture();
+  controller.show("board");
+  assert.equal(controller.hasLayout, true);
+  assert.equal(controller.isOpen(), false);
+  assert.equal(document.getElementById("split-surfaces").hidden, false);
+  let panes = [...document.querySelectorAll(".split-pane")].filter(p => !p.hidden);
+  assert.equal(panes.length, 1);
+  assert.equal(elements.get("board").closest(".split-pane"), panes[0]);
+  controller.open();
+  assert.equal(controller.isOpen(), true);
+  controller.select("settings", 1);
+  const selected = [...document.querySelectorAll(".split-pane")][1].querySelector(".workspace-window");
+  controller.collapse();
+  assert.equal(controller.hasLayout, true);
+  assert.equal(controller.isOpen(), false);
+  assert.equal(controller.activeSurface(), "settings");
+  panes = [...document.querySelectorAll(".split-pane")].filter(p => !p.hidden);
+  assert.equal(panes.length, 1);
+  assert.equal(selected.closest(".split-pane"), panes[0]);
+  assert.equal(elements.get("board").parentElement, stage);
+  controller.show("board");
+  assert.equal(elements.get("board").closest(".split-pane"), panes[0]);
+  controller.close();
+  assert.equal(controller.hasLayout, false);
+  assert.equal(document.getElementById("split-surfaces").hidden, true);
+  assert.equal(elements.get("board").parentElement, stage);
+});
+
+test("collapse retains the active same-surface live view and single Agents host", async () => {
+  const { controller, document, elements, agentHosts, agents } = await fixture();
+  controller.open("settings");
+  controller.select("settings", 1);
+  const panes = [...document.querySelectorAll(".split-pane")];
+  const inactiveView = panes[0].querySelector(".workspace-window");
+  const activeView = panes[1].querySelector(".workspace-window");
+  controller.collapse();
+  assert.equal(controller.containsWindow(activeView.dataset.id), true);
+  assert.equal(controller.containsWindow(inactiveView.dataset.id), false);
+  assert.equal(elements.get(activeView.dataset.id), activeView);
+  controller.show("agents");
+  assert.equal(agents.closest(".split-pane").hidden, false);
+  assert.equal(agentHosts.at(-1)[1], null);
+  controller.open();
+  controller.select("agents", 0);
+  controller.collapse();
+  assert.equal(agents.closest(".split-pane").hidden, false);
+  assert.equal(agentHosts.at(-1)[1], null);
 });
 
 test("Issues and Settings select their canonical views, not legacy windows sharing a rail category", async () => {

@@ -601,7 +601,9 @@ body::after {
   background: var(--color-border-strong);
 }
 .split-surfaces[hidden],
-.canvas-area.is-split > :not(.split-surfaces) {
+.split-pane[hidden],
+.split-surfaces[data-split="false"] .split-pane__header,
+.canvas-area.has-surface-layout > :not(.split-surfaces) {
   display: none !important;
 }
 .split-pane {
