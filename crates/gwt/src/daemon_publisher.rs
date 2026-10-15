@@ -564,12 +564,20 @@ pub fn publish_issue_monitor_window_snapshot(
 pub fn read_issue_monitor_status(
     project_root: &Path,
 ) -> Result<Option<Value>, IssueMonitorControlPublishError> {
+    read_issue_monitor_status_with_timeout(project_root, DEFAULT_TIMEOUT)
+}
+
+/// CLI operations may wait beyond the GUI hot-path budget for an atomic snapshot.
+pub(crate) fn read_issue_monitor_status_with_timeout(
+    project_root: &Path,
+    timeout: Duration,
+) -> Result<Option<Value>, IssueMonitorControlPublishError> {
     let started = std::time::Instant::now();
     let Some(endpoint) = resolve_issue_monitor_endpoint_with_liveness(project_root, &is_alive)?
     else {
         return Ok(None);
     };
-    read_issue_monitor_status_from_endpoint(endpoint, DEFAULT_TIMEOUT, started).map(Some)
+    read_issue_monitor_status_from_endpoint(endpoint, timeout, started).map(Some)
 }
 
 fn read_issue_monitor_status_from_endpoint(

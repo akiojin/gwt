@@ -1,0 +1,15 @@
+{
+  "observed_at": "2026-10-15T07:27:20.5375529Z",
+  "probe": "C:\\Users\\AKIOJI~1\\AppData\\Local\\Temp\\gwt-census-probe-5385.exe",
+  "probe_sha256": "2d83e6d5c610a2630d24956f374a3176911d08f085d483b00d4012aeef0e9f34",
+  "library_checkout": "E:/gwt/work/issue-5385",
+  "profile": "dev (unoptimized library; existing Issue #5385 probe binary)",
+  "sessions_dir": "C:\\Users\\AkioJinsenji秦泉寺章夫/.gwt/sessions",
+  "roots": [
+    "E:/gwt",
+    "E:/160-Idina",
+    "E:/KeibaSuite",
+    "E:/unity-cli",
+    "E:/llmlb"
+  ]
+}

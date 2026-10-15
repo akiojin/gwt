@@ -2465,6 +2465,8 @@ fn startup_reaper_heals_a_lost_worktree_publication_before_judging_the_holder() 
 /// SPEC-2359 W-37 / Issue #3735: restore selection completes before the
 /// generation reaper. The selected exact holder remains Active while another
 /// stale owner in the same repository is audited Blocked in the same batch.
+/// Issue #5510 AC-3: a terminal Work needs a fresh Session, so its unfinished
+/// Active generation must reach the reaper instead of an unbound restore.
 #[test]
 fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
     let _env_lock = env_test_lock()
@@ -2487,6 +2489,7 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
         .join("protected-unknown-restore");
     let stale_worktree = temp.path().join("worktrees").join("stale-owner");
     let second_stale_worktree = temp.path().join("worktrees").join("second-stale-owner");
+    let terminal_worktree = temp.path().join("worktrees").join("terminal-restore");
     for (branch, worktree) in [
         ("work/protected-restore", &protected_worktree),
         (
@@ -2495,6 +2498,7 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
         ),
         ("work/stale-owner", &stale_worktree),
         ("work/second-stale-owner", &second_stale_worktree),
+        ("work/terminal-restore", &terminal_worktree),
     ] {
         run_git(
             &repo,
@@ -2507,8 +2511,14 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
             ],
         );
     }
-    let tab = sample_project_tab("tab-repo", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let tab = restore_fixture_tab(
+        "tab-repo",
+        &repo,
+        &[("agent-terminal".into(), "startup-terminal-holder".into())],
+    );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    // The real snapshot reads launch provenance from the canonical Session store.
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let protected_owner = gwt::cli::execution_state::ExecutionOwnerKey {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         number: 3735,
@@ -2525,6 +2535,13 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         number: 3738,
     };
+    let terminal_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 5510,
+    };
+    runtime.tabs[0]
+        .workspace
+        .set_linked_issue_number("agent-terminal", Some(terminal_owner.number));
 
     for (owner, session_id, worktree, branch, selected_for_restore, exact_binding) in [
         (
@@ -2559,6 +2576,14 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
             false,
             true,
         ),
+        (
+            terminal_owner,
+            "startup-terminal-holder",
+            terminal_worktree.as_path(),
+            "work/terminal-restore",
+            true,
+            true,
+        ),
     ] {
         gwt::cli::execution_state::materialize_at_launch(
             worktree,
@@ -2582,6 +2607,9 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
         session.id = session_id.to_string();
         session.agent_session_id = Some(format!("native-{session_id}"));
         session.linked_issue_number = Some(owner.number);
+        if owner == terminal_owner {
+            session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        }
         session.restore_window_on_startup = selected_for_restore;
         session.record_hook_event("Stop");
         session.record_completed_stop();
@@ -2606,8 +2634,58 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
             .expect("save startup holder Session");
     }
 
+    let terminal_agent = ActiveAgentSession {
+        session_id: "startup-terminal-holder".into(),
+        branch_name: "work/terminal-restore".into(),
+        worktree_path: terminal_worktree.clone(),
+        agent_project_root: terminal_worktree.display().to_string(),
+        ..sample_active_agent_session("tab-repo", "agent-terminal")
+    };
+    save_workspace_launch_projection(
+        &repo,
+        &terminal_agent,
+        Some("origin/develop"),
+        Some(terminal_owner.number),
+        Some(terminal_owner),
+        None,
+        WorkspaceLaunchProjectionKind::StartWork,
+        Some(&HashSet::from([terminal_agent.session_id.clone()])),
+    )
+    .expect("publish terminal holder Work");
+    gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
+        &repo,
+        &terminal_worktree,
+        |work, _, _| {
+            Ok((
+                (),
+                vec![gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Done,
+                    work.id.clone(),
+                    Utc::now(),
+                )],
+            ))
+        },
+    )
+    .expect("mark Work done before delivery verification");
+
     runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 2);
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        2,
+        "terminal Work must remain paused for fresh launch recovery"
+    );
+    assert!(runtime
+        .pending_startup_restore_log
+        .as_ref()
+        .unwrap()
+        .reasons()
+        .contains("fresh_session_required=1"));
+    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+    assert!(
+        gwt_agent::Session::load(&runtime.sessions_dir.join("startup-terminal-holder.toml"))
+            .unwrap()
+            .restore_window_on_startup
+    );
     let startup_worktrees = gwt::worktree_inventory::enumerate_worktrees(&repo, None)
         .expect("startup worktree inventory")
         .into_iter()
@@ -2634,7 +2712,7 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
     });
     let summary = summary.expect("startup reaper summary");
 
-    assert_eq!(summary.reaped, 2);
+    assert_eq!(summary.reaped, 3);
     assert_eq!(summary.protected, 2);
     assert_eq!(summary.failures, 1);
     assert!(logs.iter().any(|event| {
@@ -2675,6 +2753,46 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
             .unwrap()
             .status,
         gwt::cli::execution_state::ExecutionControlStatus::Blocked
+    );
+    let observations =
+        gwt::issue_monitor_worker::read_execution_observations(&repo, &[terminal_owner.number]);
+    assert_eq!(
+        observations[&terminal_owner.number].settlement,
+        gwt::IssueMonitorExecutionSettlement::Interrupted,
+        "unfinished delivery must reach the existing Monitor fresh-launch recovery"
+    );
+    let mut monitor = gwt::IssueMonitorState::new(Default::default());
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: terminal_owner.number,
+        title: "Interrupted update delivery".into(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::Ready,
+        updated_at: None,
+    });
+    monitor.complete_active_launch_at(
+        terminal_owner.number,
+        "tab-repo::agent-terminal",
+        "2026-10-15T00:00:00Z",
+    );
+    let now = "2026-10-15T00:05:00Z";
+    let snapshot = runtime
+        .issue_monitor_window_snapshot_for_tab("tab-repo", now)
+        .unwrap();
+    assert_eq!(
+        snapshot.windows[0].issue_number,
+        Some(terminal_owner.number)
+    );
+    assert_eq!(snapshot.windows[0].status, WindowProcessStatus::Stopped);
+    assert!(snapshot.windows[0].monitor_owned);
+    monitor.record_window_snapshot(snapshot);
+    let recovered = monitor.reconcile_idle_windows(&observations, now);
+    assert_eq!(recovered.requeued, vec![terminal_owner.number]);
+    assert_eq!(
+        monitor.inbox_item(terminal_owner.number).unwrap().state,
+        gwt::MonitorInboxState::Queued
     );
 }
 

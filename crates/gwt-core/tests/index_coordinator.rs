@@ -2949,10 +2949,14 @@ fn refresh_broker_status_excludes_killed_owner_and_preserves_latest_request() {
         recovered,
         "scan persists recovery"
     );
-    let claim = broker
-        .claim_next()
-        .unwrap()
-        .expect("recover latest request");
+    // Parallel helper forks can briefly retain the host flock until exec.
+    // Reaping this owner does not make every inherited descriptor disappear.
+    let mut claim = None;
+    poll_until(Duration::from_secs(10), || {
+        claim = broker.claim_next().expect("claim recovered request");
+        claim.is_some()
+    });
+    let claim = claim.expect("recover latest request");
     assert_eq!(claim.intent().desired_epoch, 2);
     assert_eq!(claim.intent().desired_snapshot, "snapshot-2");
     claim.complete().unwrap();
@@ -3141,10 +3145,14 @@ fn refresh_broker_sustained_background_work_occupies_half_the_observation_window
         broker
             .submit(dirty_refresh_intent(target, epoch))
             .expect("submit required work");
-        let claim = broker
-            .claim_next()
-            .expect("claim")
-            .expect("work admitted after rest");
+        // Parallel helper forks can briefly retain a flock descriptor until
+        // exec. Observe admission without advancing the broker's manual clock.
+        let mut claim = None;
+        poll_until(Duration::from_secs(10), || {
+            claim = broker.claim_next().expect("claim");
+            claim.is_some()
+        });
+        let claim = claim.expect("work admitted after rest");
         clock.advance(Duration::from_secs(30));
         active_millis += 30_000;
         claim.complete().expect("complete quantum");

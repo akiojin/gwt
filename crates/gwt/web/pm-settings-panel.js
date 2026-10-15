@@ -418,7 +418,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     const CustomEventCtor = entryDocument.defaultView?.CustomEvent || CustomEvent;
     entryDocument.dispatchEvent(
       new CustomEventCtor("settings:open", {
-        detail: { target: "project-manager" },
+        detail: { target: "project-manager", surface_owner: "pm" },
       }),
     );
   }

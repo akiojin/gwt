@@ -77,6 +77,7 @@ pub mod spec_tasks;
 pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
+pub mod update_control;
 pub mod update_drain;
 pub mod update_settings;
 pub mod web_protocol_enums;
@@ -105,7 +106,8 @@ pub use agent_project_state::{
     apply_authenticated_workspace_update,
     apply_bound_authenticated_blocked_build_abort_terminalization,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
-    apply_bound_authenticated_workspace_update_with_operation_id, continue_authenticated_execution,
+    apply_bound_authenticated_workspace_update_with_operation_id,
+    continuation_requires_new_session, continue_authenticated_execution,
     describe_authenticated_host_contract, observe_agent_runtime,
     prepare_resume_producing_authority, probe_authenticated_execution_binding,
     probe_authenticated_prepared_execution_binding, probe_bound_authenticated_work_materialization,
@@ -167,8 +169,8 @@ pub use issue_monitor::{
     acknowledge_autonomous_handoff_user_prompt_submit_from_prefs,
     append_issue_monitor_requeue_reason, bind_autonomous_handoff_delivery_target_from_prefs,
     clear_issue_monitor_authority_fence, clear_wait_on_record, decide_merged_issue_settlement,
-    declare_wait_on_record, delegation_recorded, establish_issue_monitor_authority_fence,
-    invalidate_wait_on_record, is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
+    declare_wait_on_record, establish_issue_monitor_authority_fence, invalidate_wait_on_record,
+    is_auto_improve_candidate, is_legacy_git_launch_failure_for_project,
     issue_monitor_authority_fence_path, issue_monitor_launch_delivery_requeue_reason,
     issue_monitor_launch_plan, issue_monitor_launch_profile_pool_summary,
     issue_monitor_launch_profile_summary, issue_monitor_launch_prompt,
@@ -260,7 +262,7 @@ pub use persistence::{
     save_workspace_state, save_workspace_state_durable, workspace_state_path, AgentKanbanLane,
     CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
     PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowPlacement,
-    WindowProcessStatus, WindowState, WindowWorktreeForm,
+    WindowProcessStatus, WindowState, WindowSurfaceOwner, WindowWorktreeForm,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,

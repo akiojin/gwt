@@ -652,6 +652,7 @@ impl Drop for EventLoopDispatchTimer {
 }
 
 const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
+const UPDATE_CONTROL_CLIENT_ID: &str = "update-control";
 
 /// Issue #3633: how often the GUI re-checks that a runtime daemon is serving
 /// each enabled project, and therefore the worst-case gap after one dies.
@@ -800,11 +801,12 @@ fn spawn_update_apply_resolution(
     stage: &'static str,
     log_stage: &'static str,
 ) {
+    let pending_dir = gwt_core::update::pending_update_dir();
     std::thread::spawn(move || {
         let log_path = gwt_core::update::update_log_path()
             .to_string_lossy()
             .to_string();
-        let resolved = match gwt_core::update::load_pending_update_manifest() {
+        let resolved = match gwt_core::update::load_pending_update_manifest_in(&pending_dir) {
             Some(manifest)
                 if matches!(
                     &state, gwt_core::update::UpdateState::Available { latest, .. }
@@ -813,6 +815,10 @@ fn spawn_update_apply_resolution(
             {
                 Ok(manifest)
             }
+            _ if client_id == UPDATE_CONTROL_CLIENT_ID => Err(
+                "The staged update changed; use the update button or retry the CLI update."
+                    .to_string(),
+            ),
             _ => update_front_door::prepare_and_persist_pending_update(state),
         };
         match resolved {
@@ -830,17 +836,18 @@ fn spawn_update_apply_resolution(
                     "fail",
                     &[("stage", log_stage), ("reason", &message)],
                 );
-                let _ = proxy.send_event(UserEvent::UpdateApplyResolutionFailed(
-                    OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::UpdateApplyError {
-                            message: Some(message.clone()),
-                            stage: Some(stage.to_string()),
-                            reason: Some(message),
-                            log_path: Some(log_path),
-                        },
-                    ),
-                ));
+                let failure = BackendEvent::UpdateApplyError {
+                    message: Some(message.clone()),
+                    stage: Some(stage.to_string()),
+                    reason: Some(message),
+                    log_path: Some(log_path),
+                };
+                let failure = if client_id == UPDATE_CONTROL_CLIENT_ID {
+                    OutboundEvent::broadcast(failure)
+                } else {
+                    OutboundEvent::reply(client_id, failure)
+                };
+                let _ = proxy.send_event(UserEvent::UpdateApplyResolutionFailed(failure));
             }
         }
     });
@@ -2487,6 +2494,26 @@ mod tests {
     }
 
     #[test]
+    fn pending_bootstrap_apply_requires_both_singleton_locks() {
+        let source = include_str!("main.rs");
+        let startup = source
+            .rsplit_once("fn main() -> std::io::Result<()> {")
+            .unwrap()
+            .1;
+        let apply = startup
+            .find("if update_front_door::try_apply_pending_update_at_bootstrap()")
+            .unwrap();
+        assert!(
+            startup
+                .find("gwt::gui_single_instance::acquire_instance_lock(")
+                .unwrap()
+                < apply
+        );
+        assert!(startup.find("let mut tray_lock_handle = match").unwrap() < apply,
+            "a second launch must not apply a pending update while the resident owns its tray guard");
+    }
+
+    #[test]
     fn app_delivery_closes_at_actual_exit_before_runtime_shutdown() {
         let source = include_str!("main.rs");
         let event_loop = source
@@ -2577,7 +2604,8 @@ mod tests {
             "&tray_open,",
             "&tray_copy_url,",
             "&tray_projects,",
-            "&tray_about,",
+            "&tray_open_project,",
+            "&tray_clone,",
             "&tray_quit,",
         ];
         let positions: Vec<_> = ordered
@@ -3837,6 +3865,7 @@ mod tests {
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         }
     }
@@ -5071,6 +5100,35 @@ mod tests {
     }
 
     #[test]
+    fn cli_update_resolution_refuses_changed_staging_without_download() {
+        let home = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (proxy, events) = AppEventProxy::stub();
+        super::spawn_update_apply_resolution(
+            proxy,
+            gwt_core::update::UpdateState::Available {
+                current: "1.0.0".into(),
+                latest: "2.0.0".into(),
+                release_url: String::new(),
+                asset_url: None,
+                checked_at: Utc::now(),
+            },
+            super::UPDATE_CONTROL_CLIENT_ID.into(),
+            "Restart now",
+            "restart_now",
+        );
+        wait_for_recorded_event("CLI staging refusal", &events, |events| !events.is_empty());
+        let mut events = events.lock().unwrap();
+        assert!(
+            matches!(events.pop(), Some(UserEvent::UpdateApplyResolutionFailed(
+            OutboundEvent {target: DispatchTarget::All,
+                event: BackendEvent::UpdateApplyError {reason: Some(reason), ..}, ..}
+        )) if reason.contains("staged update changed")),
+            "an accepted CLI request must fail visibly when its staged payload changes"
+        );
+    }
+
+    #[test]
     fn automatic_update_global_off_blocks_queued_download_and_commit() {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
@@ -5481,6 +5539,85 @@ mod tests {
     }
 
     #[test]
+    fn autostart_status_queues_os_probe_without_blocking_frontend() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+
+        let dispatch_started = Instant::now();
+        let events = runtime
+            .handle_frontend_event("settings".into(), gwt::FrontendEvent::GetAutostartStatus);
+        let dispatch_elapsed = dispatch_started.elapsed();
+
+        assert!(events.is_empty(), "OS status must arrive from a worker");
+        assert_eq!(tasks.lock().unwrap().len(), 1, "queue the OS probe");
+        let settings =
+            runtime.handle_frontend_event("settings".into(), gwt::FrontendEvent::GetSystemSettings);
+        assert!(matches!(
+            settings[0].event,
+            gwt::BackendEvent::SystemSettings { .. }
+        ));
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "status remains pending"
+        );
+
+        // Model the old synchronous path and the new worker with the same
+        // 200ms probe latency. Assert ordering/routing rather than a flaky
+        // sub-30ms wall-clock deadline on a saturated CI host.
+        let synchronous_started = Instant::now();
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = gwt::cli::tray::autostart::AutostartManager::status();
+        let synchronous_elapsed = synchronous_started.elapsed();
+        let task = tasks.lock().unwrap().pop().unwrap();
+        let worker_elapsed = std::thread::spawn(move || {
+            let started = Instant::now();
+            std::thread::sleep(Duration::from_millis(200));
+            task();
+            started.elapsed()
+        })
+        .join()
+        .unwrap();
+        let recorded = recorded.lock().unwrap();
+        let UserEvent::Dispatch(replies) = &recorded[0] else {
+            panic!("expected worker dispatch");
+        };
+        assert_eq!(replies[0].target, DispatchTarget::Client("settings".into()));
+        assert!(matches!(
+            replies[0].event,
+            gwt::BackendEvent::AutostartStatus { .. } | gwt::BackendEvent::AutostartError { .. }
+        ));
+        eprintln!(
+            "autostart_dispatch_ms synchronous_model={:.3} worker_dispatch={:.3} worker_probe={:.3} gui_event_loop_stall_before={} gui_event_loop_stall_after={}",
+            synchronous_elapsed.as_secs_f64() * 1000.0,
+            dispatch_elapsed.as_secs_f64() * 1000.0,
+            worker_elapsed.as_secs_f64() * 1000.0,
+            gui_event_loop_stall_warning("GetAutostartStatus", synchronous_elapsed.as_millis() as u64).is_some(),
+            gui_event_loop_stall_warning("GetAutostartStatus", dispatch_elapsed.as_millis() as u64).is_some(),
+        );
+    }
+
+    #[test]
+    fn autostart_update_queues_os_mutation_without_running_it_on_frontend() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+
+        let events = runtime.handle_frontend_event(
+            "settings".into(),
+            gwt::FrontendEvent::UpdateAutostart { enabled: true },
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(tasks.lock().unwrap().len(), 1);
+        // Deliberately drop the queued task: tests must not change OS login settings.
+    }
+
+    #[test]
     fn agent_maintenance_interlock_refuses_prepared_app_update_and_keeps_it_retryable() {
         let temp = tempdir().unwrap();
         let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -5777,7 +5914,8 @@ mod tests {
                 .create_window_events(
                     &runtime.test_context(),
                     WindowPreset::Branches,
-                    bounds.clone()
+                    bounds.clone(),
+                    None
                 )
                 .len(),
             3
@@ -5787,7 +5925,8 @@ mod tests {
                 .create_window_events(
                     &runtime.test_context(),
                     WindowPreset::FileTree,
-                    bounds.clone()
+                    bounds.clone(),
+                    None
                 )
                 .len(),
             3
@@ -5966,7 +6105,7 @@ mod tests {
         ] {
             assert_eq!(
                 runtime
-                    .create_window_events(&runtime.test_context(), preset, bounds.clone())
+                    .create_window_events(&runtime.test_context(), preset, bounds.clone(), None)
                     .len(),
                 3,
                 "{preset:?} should create through the normal window path",
@@ -6004,7 +6143,12 @@ mod tests {
             .z_index;
         assert_eq!(
             runtime
-                .create_window_events(&runtime.test_context(), WindowPreset::Work, bounds.clone())
+                .create_window_events(
+                    &runtime.test_context(),
+                    WindowPreset::Work,
+                    bounds.clone(),
+                    None
+                )
                 .len(),
             1,
             "Work must focus the existing Settings surface",
@@ -6942,6 +7086,7 @@ mod tests {
                     gwt::FrontendEvent::CreateWindow {
                         preset: WindowPreset::Settings,
                         bounds: bounds.clone(),
+                        surface_owner: None,
                     },
                 )
                 .len(),
@@ -10458,16 +10603,6 @@ fn main() -> std::io::Result<()> {
         tracing::warn!(%error, "automatic-update preference migration failed; runtime auto-apply remains disabled");
     }
 
-    // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
-    // update manifest (via the post-click modal's Later flow, or because the
-    // user killed gwt before clicking Restart now), hand off to the helper
-    // subprocess so the new version takes over before any GUI surfaces.
-    // Returns true only when an apply was attempted and exit(0) was already
-    // called inside; false continues the regular launch.
-    if update_front_door::try_apply_pending_update_at_bootstrap() {
-        return Ok(());
-    }
-
     // SPEC #2920: `gwt serve` is removed, so `main()` only ever reaches
     // this point on the GUI route. Phase 3 will rework the kind taxonomy
     // entirely to `(gwt_home, "tray", user_id)`; until then keep the
@@ -10523,6 +10658,12 @@ fn main() -> std::io::Result<()> {
             1,
         ),
     };
+
+    // Only the singleton owner may bootstrap a staged update. A duplicate
+    // launch must never install while another GUI still owns running panes.
+    if update_front_door::try_apply_pending_update_at_bootstrap() {
+        return Ok(());
+    }
 
     let runtime = {
         let _phase =
@@ -10796,15 +10937,15 @@ fn main() -> std::io::Result<()> {
     if let Err(error) = std::thread::Builder::new()
         .name("gwt-agent-capacity".into())
         .spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(gwt::agent_capacity::CAPACITY_TICK_INTERVAL);
             let roots = capacity_roots
                 .read()
                 .map(|projects| projects.clone())
                 .unwrap_or_default();
+            if let Err(error) = gwt::agent_capacity::refresh_machine_capacity_for_projects(&roots) {
+                tracing::warn!(%error, "agent capacity observation failed");
+            }
             for root in roots {
-                if let Err(error) = gwt::agent_capacity::refresh_machine_capacity(&root) {
-                    tracing::warn!(%error, project_root = %root.display(), "agent capacity observation failed");
-                }
                 // Failed observations must also publish expiry instead of leaving
                 // an old positive Auto limit on a stopped Monitor.
                 if capacity_proxy
@@ -10853,7 +10994,7 @@ fn main() -> std::io::Result<()> {
 
     // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
     // native WebView path is removed; instead we build a tray-icon menu
-    // with `[Open] / About / [Quit]` and rely on the existing
+    // with Hub / project intake / Projects / Copy URL / Quit and rely on the existing
     // `EmbeddedServer` + browser UI for the actual GUI surface. The tao
     // event_loop is still used to keep the OS runloop alive (NSApp on
     // macOS, MS message pump on Windows, GTK main loop on Linux). The
@@ -10873,7 +11014,18 @@ fn main() -> std::io::Result<()> {
         true,
         None,
     );
-    let tray_about = MenuItem::with_id(gwt::cli::tray::menu::ids::ABOUT, "About GWT", true, None);
+    let tray_open_project = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::OPEN_PROJECT,
+        "Open Project…",
+        true,
+        None,
+    );
+    let tray_clone = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::CLONE,
+        "Clone from GitHub…",
+        true,
+        None,
+    );
     let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
     let tray_projects = Submenu::new("Projects", false);
     let mut tray_generation = gwt::cli::tray::menu::TrayMenuGeneration::new(
@@ -10887,7 +11039,8 @@ fn main() -> std::io::Result<()> {
             &tray_copy_url,
             &tray_projects,
             &PredefinedMenuItem::separator(),
-            &tray_about,
+            &tray_open_project,
+            &tray_clone,
             &PredefinedMenuItem::separator(),
             &tray_quit,
         ])
@@ -12174,6 +12327,20 @@ fn main() -> std::io::Result<()> {
                 if !update_apply_admission.begin_resolution() {
                     return;
                 }
+                if client_id == UPDATE_CONTROL_CLIENT_ID {
+                    if let gwt_core::update::UpdateState::Available { latest, .. } = &state {
+                        clients.dispatch(vec![
+                            OutboundEvent::global_update_notice("info", format!(
+                                "Update v{latest} requested. Restarting gwt; open panes will be restored."
+                            )),
+                            OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                                version: latest.clone(),
+                                phase: gwt::protocol::UpdateAutoApplyPhase::Applying,
+                                grace_secs: None,
+                            }),
+                        ]);
+                    }
+                }
                 gwt_core::update::log_update_event("restart_now_requested", &[]);
                 // SPEC-2041 Phase 19 (T-130/T-133) + Issue #4038 (AC-2):
                 // consume the persisted manifest if it exists so we don't
@@ -12250,20 +12417,23 @@ fn main() -> std::io::Result<()> {
                         // Issue #3906 AC-12: the failure is recorded in the
                         // notification center for every client, not only the
                         // one that clicked (the automatic path has none).
+                        let failure = BackendEvent::UpdateApplyError {
+                            message: Some(message.clone()),
+                            stage: Some("Restart now".to_string()),
+                            reason: Some(message.clone()),
+                            log_path: Some(log_path),
+                        };
+                        let failure = if client_id == UPDATE_CONTROL_CLIENT_ID {
+                            OutboundEvent::broadcast(failure)
+                        } else {
+                            OutboundEvent::reply(client_id, failure)
+                        };
                         clients.dispatch(vec![
                             OutboundEvent::global_update_notice(
                                 "error",
                                 format!("Update v{} could not be applied: {message}", marker.to_version),
                             ),
-                            OutboundEvent::reply(
-                                client_id,
-                                BackendEvent::UpdateApplyError {
-                                    message: Some(message.clone()),
-                                    stage: Some("Restart now".to_string()),
-                                    reason: Some(message),
-                                    log_path: Some(log_path),
-                                },
-                            ),
+                            failure,
                         ]);
                     }
                 }
@@ -12312,18 +12482,19 @@ fn main() -> std::io::Result<()> {
                 )]);
             }
             // SPEC #2920 Phase 4: the tray menu event handler is now
-            // cross-platform. The tray icon menu (Open / About / Quit) is the
+            // cross-platform. The tray icon menu is the
             // only producer; the legacy macOS native menubar
             // (NativeMenuCommand) was removed alongside the wry
             // WebView.
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
                 use gwt::cli::tray::menu::MenuAction;
                 match MenuAction::from_id(event.id.as_ref()) {
-                    Some(MenuAction::Open) => {
+                    Some(action @ (MenuAction::Open | MenuAction::OpenProject | MenuAction::Clone)) => {
+                        let target_url = action.browser_url(&browser_url).expect("browser-opening menu action");
                         // Best-effort browser open. Failure is logged
                         // but does not interrupt the tray loop —
                         // `gwt open` from the CLI is a fallback.
-                        request_tray_browser_launch(&runtime, &browser_url, "Open");
+                        request_tray_browser_launch(&runtime, &target_url, "Open");
                         tracing::info!(target: "gwt_tray", "tray Open browser launch requested");
                     }
                     Some(MenuAction::CopyUrl) => {
@@ -12343,11 +12514,6 @@ fn main() -> std::io::Result<()> {
                         let _ = proxy.send_event(UserEvent::QuitApp {
                             reason: GuiShutdownReason::QuitApp,
                         });
-                    }
-                    Some(MenuAction::About) => {
-                        let about_url =
-                            gwt::cli::tray::menu::about_url_for_browser_url(&browser_url);
-                        request_tray_browser_launch(&runtime, &about_url, "About");
                     }
                     None => {
                         if let Some(action) = tray_generation.resolve(event.id.as_ref()) {

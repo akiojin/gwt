@@ -215,12 +215,12 @@ test('Reports and raw terminal share one immutable version without replaying ter
 });
 
 test('Execution log toggle retains Reports; stale sessions and native transcript cannot replace reports', () => {
-  const { root, model, update, visibility } = fixture();
+  const { root, model, view, update, visibility } = fixture();
   update([report()]);
   const buttons = root.querySelectorAll('.pm-chat__toolbar button');
   buttons[1].click();
   assert.equal(visibility.at(-1), true);
-  buttons[0].click();
+  view.showReports();
   assert.equal(visibility.at(-1), false);
   assert.equal(root.querySelectorAll('article').length, 1);
   const previous = model.readPmWindowState().windows.pm;

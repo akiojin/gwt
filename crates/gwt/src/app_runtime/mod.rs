@@ -118,6 +118,9 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
         | UserEvent::PmConversationLoaded { .. }
         | UserEvent::MenuEvent(_)
         | UserEvent::QuitApp { .. }
+        | UserEvent::ApplyUpdateRestartNow { .. }
+        | UserEvent::ApplyUpdateGraceful { .. }
+        | UserEvent::UpdateApplyResolutionFailed(_)
         | UserEvent::StartupReady
         | UserEvent::StartupStopped => AppEventPriority::Foreground,
         _ => AppEventPriority::Background,
@@ -10062,6 +10065,9 @@ impl AppRuntime {
             // Initial List owns the full read model; do not invent queue data.
             return Vec::new();
         };
+        let mut previous_capacity = status.agent_capacity.clone();
+        let previous_fresh = previous_capacity.is_fresh();
+        let previous_limits = (status.max_active_agents, status.max_active_agents_override);
         // An older live daemon can omit override provenance. Durable prefs,
         // not that omission, own the Manual choice, just as in CLI status.
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
@@ -10085,6 +10091,17 @@ impl AppRuntime {
         status.max_active_agents_override = capacity.max_active_agents_override();
         status.max_active_agents = capacity.effective_max_active_agents();
         self.remember_issue_monitor_status(Some(project_root), &status);
+        // Retain renewed sensor timestamps locally without rebroadcasting the
+        // entire queue for an otherwise identical capacity projection.
+        let freshness_changed = previous_fresh != status.agent_capacity.is_fresh();
+        previous_capacity.observed_at = status.agent_capacity.observed_at;
+        previous_capacity.expires_at = status.agent_capacity.expires_at;
+        if !freshness_changed
+            && previous_capacity == status.agent_capacity
+            && previous_limits == (status.max_active_agents, status.max_active_agents_override)
+        {
+            return Vec::new();
+        }
         vec![OutboundEvent::project(
             context.project_key,
             BackendEvent::IssueMonitorStatus {
@@ -11770,9 +11787,11 @@ impl AppRuntime {
                     &ClientScope::Project(context.project_key.clone()),
                 )
                 .unwrap_or_default(),
-            FrontendEvent::CreateWindow { preset, bounds } => {
-                self.create_window_events(context, preset, bounds)
-            }
+            FrontendEvent::CreateWindow {
+                preset,
+                bounds,
+                surface_owner,
+            } => self.create_window_events(context, preset, bounds, surface_owner),
             FrontendEvent::LoadProcessConsole { id } => {
                 // SPEC-2809 Phase F2 — Console window mount asks for the
                 // current ring buffer. Use the global hub installed by

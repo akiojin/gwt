@@ -1395,7 +1395,7 @@ export function createKnowledgeKanbanSurface({
           settings.title = lines.join("\n");
           explainIssueControl(settings, settings.title);
         }
-        const toggle = bar.querySelector('[data-action="monitor-toggle"]');
+        const toggle = element.querySelector('[data-action="monitor-toggle"]');
         if (toggle) {
           const enabled = Boolean(issueMonitorModel.read().status.enabled);
           toggle.textContent = enabled ? "Stop" : "Start";
@@ -1406,7 +1406,7 @@ export function createKnowledgeKanbanSurface({
         // names the setting and whose aria-checked + state word carry the
         // current value. It renders only what the server status says — the
         // click handler never writes a local optimistic value.
-        const autonomous = bar.querySelector('[data-action="monitor-autonomous"]');
+        const autonomous = element.querySelector('[data-action="monitor-autonomous"]');
         if (autonomous) {
           const enabled = Boolean(issueMonitorModel.read().status.autonomous_mode);
           autonomous.setAttribute("aria-checked", enabled ? "true" : "false");

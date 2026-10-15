@@ -32,6 +32,10 @@ const wizardSource = readFileSync(
 
 const wizardModuleSource = wizardSource
   .replace(
+    'from "/ui-state-store.js"',
+    `from "${pathToFileURL(resolve(here, "../ui-state-store.js")).href}"`,
+  )
+  .replace(
     'from "/interaction-guard.js"',
     `from "${pathToFileURL(resolve(here, "../interaction-guard.js")).href}"`,
   )

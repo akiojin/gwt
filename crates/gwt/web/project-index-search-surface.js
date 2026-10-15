@@ -20,6 +20,7 @@ import {
 // - makeEl / clearChildren: DOM helpers owned by app.js.
 // - focusOrSpawnPreset / knowledgeKindForPreset / requestKnowledgeDetail:
 //   knowledge-window integration owned by app.js.
+// - openReports(): focus the PM's existing Reports view.
 // - renderIndexPanelInAllSettingsWindows / refreshProjectTabStateCues: status
 //   fan-out hooks owned by app.js (Settings panel + project tab state cues).
 // - requestFullIndexStatusRefresh(): Health tab refresh request owned by
@@ -32,6 +33,7 @@ export function createProjectIndexSearchSurface({
   makeEl,
   clearChildren,
   focusOrSpawnPreset,
+  openReports,
   knowledgeKindForPreset,
   requestKnowledgeDetail,
   renderIndexPanelInAllSettingsWindows,
@@ -70,6 +72,7 @@ export function createProjectIndexSearchSurface({
         // SPEC-2359 US-80: past Work (incl. completed/discarded) is searchable
         // so similar prior work can be found before starting duplicate work.
         { id: "works", label: "Work" },
+        { id: "reports", label: "Reports" },
         { id: "files", label: "Files" },
         { id: "files-docs", label: "Docs" },
         { id: "memory", label: "Memory" },
@@ -80,6 +83,7 @@ export function createProjectIndexSearchSurface({
         "board",
         "discussions",
         "works",
+        "reports",
         "memory",
       ]);
       function ensureIndexSearchState(windowId) {
@@ -627,6 +631,9 @@ export function createProjectIndexSearchSurface({
             return;
           case "board":
             focusOrSpawnPreset("board");
+            return;
+          case "report":
+            openReports();
             return;
           case "file":
             focusOrSpawnPreset("file_tree");

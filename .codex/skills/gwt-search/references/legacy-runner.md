@@ -16,7 +16,7 @@ $PYTHON $RUNNER \
 ```
 
 Scope actions: `search-specs` / `search-issues` / `search-files` /
-`search-files-docs` / `search-memory`. `search-specs`, `search-files`, and
+`search-files-docs` / `search-memory` / `search-reports`. `search-specs`, `search-files`, and
 `search-files-docs` additionally take `--worktree-hash "$GWT_WORKTREE_HASH"`.
 `--match-mode all_terms` is accepted by every search action.
 
@@ -27,7 +27,7 @@ environment did not export them), the runner derives them from
 and no dependency on `sha256sum` (absent on stock macOS).
 
 The fallback returns legacy per-scope shapes (`specResults` / `issueResults` /
-`results` / `memoryResults`) instead of the unified `results` array, and
+`results` / `memoryResults` / `reportResults`) instead of the unified `results` array, and
 emits NDJSON auto-build progress on stderr. Pass `--no-auto-build` to disable
 inline index builds; the runner then returns
 `{"ok": false, "error_code": "INDEX_MISSING", ...}`.

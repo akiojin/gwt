@@ -338,7 +338,7 @@ fn embedded_web_issue_monitor_allowed_labels_reuses_operator_controls() {
         "Settings must edit allowed labels while Issues retains server exclusion evidence"
     );
     assert!(
-        settings_js.contains(r#"field("Allowed labels", "text""#)
+        settings_js.contains(r#"field(group("Target"), "Allowed labels", "text""#)
             && settings_js.contains("settings-field")
             && settings_js.contains("settings-input")
             && !surface_js
@@ -3179,7 +3179,7 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     // delegate. A null tombstone must not clear an open-error modal
     // during reconnect.
     let wizard_state = regex::Regex::new(
-        r#"function applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]*?wizardInteractionGuard\.defer\([\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        r#"function applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]*?wizardInteractionGuard\.defer\([\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*publishLaunchWizardVisibility\(\);\s*renderLaunchWizard\(\);"#,
     )
     .expect("valid regex");
     let wizard_state_delegate = regex::Regex::new(
@@ -3395,7 +3395,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     // receive() case arms are thin delegates into them. A null
     // tombstone must not clear an open-error modal during reconnect.
     let wizard_event = regex::Regex::new(
-        r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?if\s*\(shouldClearLaunchWizardPendingAction\(event\.wizard\)\)\s*\{\s*clearLaunchWizardPendingAction\(\);\s*\}\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*publishLaunchWizardVisibility\(\);\s*renderLaunchWizard\(\);"#,
     )
     .expect("valid regex");
     let wizard_event_delegate = regex::Regex::new(

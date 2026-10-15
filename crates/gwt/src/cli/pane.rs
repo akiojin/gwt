@@ -247,6 +247,32 @@ pub(super) fn live_windows(
     runtime.block_on(request_window_list(&ws_url, &project_root))
 }
 
+/// Admission companions use the existing self-only authenticated route. A
+/// busy pane is left alone; an ambiguous send is never retried automatically.
+pub(super) fn notify_verification_resume(
+    worktree: &Path,
+    session: &str,
+    text: &str,
+    still_current: impl Fn() -> bool,
+) -> Result<bool, String> {
+    if std::env::var(GWT_SESSION_ID_ENV).ok().as_deref() != Some(session) {
+        return Err("verification resume Session changed".to_string());
+    }
+    let ws_url = pane_websocket_url_from_env()?;
+    let project_root = project_root_for_pane(worktree);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        send_pane_input_guarded(&ws_url, &project_root, None, text, &|window| {
+            window.status == WindowState::Idle && still_current()
+        })
+        .await
+        .map(|sent| sent.is_some())
+    })
+}
+
 async fn run_async(
     ws_url: &str,
     project_root: &str,
@@ -440,6 +466,18 @@ async fn send_pane_input(
     requested_id: Option<&str>,
     text: &str,
 ) -> Result<String, String> {
+    send_pane_input_guarded(ws_url, project_root, requested_id, text, &|_| true)
+        .await?
+        .ok_or_else(|| "pane send was withheld".to_string())
+}
+
+async fn send_pane_input_guarded(
+    ws_url: &str,
+    project_root: &str,
+    requested_id: Option<&str>,
+    text: &str,
+    can_send: &dyn Fn(&PersistedWindowState) -> bool,
+) -> Result<Option<String>, String> {
     let session_id = std::env::var(GWT_SESSION_ID_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -460,6 +498,12 @@ async fn send_pane_input(
     if scoped_window_id != window_id {
         return Err("pane send target changed while establishing the authenticated scope".into());
     }
+    if !scoped_windows
+        .iter()
+        .any(|window| window.id == scoped_window_id && can_send(window))
+    {
+        return Ok(None);
+    }
     send_frontend_event(
         &mut socket,
         json!({ "kind": "pane_send_input", "session_id": session_id, "text": line }),
@@ -472,10 +516,10 @@ async fn send_pane_input(
             continue;
         };
         return if reply.ok {
-            Ok(format!(
+            Ok(Some(format!(
                 "sent input to {}\n",
                 reply.window_id.unwrap_or(window_id)
-            ))
+            )))
         } else {
             Err(format!(
                 "pane send rejected: {}",
@@ -1890,6 +1934,7 @@ mod tests {
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         }
     }

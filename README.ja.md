@@ -191,8 +191,8 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
 - **Projects**: 開いているプロジェクト、Recent の順に表示し、選んだプロジェクトの
   URL を開きます。実行中・エラー件数を表示し、開いているプロジェクトに
   エージェントのエラーがある間はトレイアイコンにエラーバッジが付きます。
-- **About GWT**: 起動中の tray プロセスのブラウザ版 About / Version 画面を
-  開きます。
+- **Open Project…**: Hub を開き、フォルダ選択を直接開始します。
+- **Clone from GitHub…**: Clone Project ダイアログを開いた状態で Hub を表示します。
 - **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
 
 プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
@@ -208,7 +208,7 @@ GitHub、Recent projects、開いているプロジェクトの一覧を表示�
 プロジェクト URL を開いた複数のブラウザタブではワークスペースが同期します。
 プロジェクト URL をブックマークやタブ復元で開くと、Recent のプロジェクトは自動で
 開き直され、未知のプロジェクト URL は Hub へのリンク付きの「Project not found」を
-表示します。プロジェクトのヘッダーにある **Hub** リンクは Hub を新しいタブで開きます。
+表示します。Hub はトレイの **Open in browser**、または引数なしの `gwt open` で開けます。
 
 Autostart は **Settings > System > Launch GWT at login** で切り替えます。
 有効にすると `auto-launch` crate 経由で macOS LaunchAgent / Windows HKCU
@@ -454,7 +454,9 @@ Queued には `auto-refill` などの追加元も表示されます。
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
 エラーの詳細と履歴は通知センターで確認できます。⚙ で同じペインの設定行を展開し、
-Max active、Auto-refill と上限、Allowed labels、候補プロファイルを設定します。Auto-apply updates は **System** で設定します。
+**Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
+**Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
+設定を閉じると Autonomous と Start / Stop は要約帯に戻ります。Auto-apply updates は **System** で設定します。
 Max active は **Manual** に切り替えると数値を編集でき、**Auto** では計算値を表示します。Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
 空のキューから新しい作業は起動せず、実行中の作業は継続します。
@@ -493,6 +495,10 @@ open な GitHub Issue は、明示的な追加、有効な Auto-refill、また�
 準備状態・claim・同時実行数のチェックは引き続き適用されます。行の `Launch now` は
 起動フローを開き、起動時に `work/issue-N` のブランチ/worktree を作成して
 `gwt-execute #N` でエージェントを開始します。起動失敗は Issue 行に残ります。
+live な claim/window の識別情報が失われた場合も、operator は `issue.monitor.stop` に
+`params.number` と `params.reason` を渡して失敗した launch を停止できます。
+保存済みの失敗 window は同じ Issue の所有である場合だけ使用し、永続的な停止状態と
+閉じる対象の pane を返します。
 
 `urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
@@ -637,15 +643,23 @@ SPEC [#3200](https://github.com/akiojin/gwt/issues/3200) を参照してくだ�
 
 work ブランチが `develop` に merge されると、monitor は delivered な Issue を
 自分で決着させます（`Closes #N` は default branch でしか発火しません）。
-受け入れ基準がすべてチェック済みか、PR 本文 / Issue コメントに残りの基準を
-別 Issue に委譲した記録（`残 AC は別 Issue に委譲`）があれば、PR 番号と merge
+受け入れ基準がすべてチェック済みなら、PR 番号と merge
 SHA を含むコメントを投稿して Issue を close します。未達の基準が残る場合は
 `merge 済み・未達 AC あり` コメントを残して `NeedsHuman` にし、`gwt-spec` Issue は
-全 Phase の tasks が完了したときだけ close します。auto-close は既定で
+全 Phase の tasks が完了したときだけ close します。残りの基準を別 Issue に
+委譲しても、未チェックの項目があれば close しません。auto-close は既定で
 `Autonomous` トグルに連動し、`issue.monitor.config.set` の
 `auto_close_merged_issues=true|false` で上書きできます（off のときは
 `merge 済み・close 待ち` コメントの記録のみ）。人間が reopen した Issue を同じ
 merge で再度 close することはありません。
+
+完了として close 済みでも未チェックの受け入れ基準が残る Issue は、
+この checkout で `node scripts/audit-closed-acceptance.mjs OWNER/REPOSITORY` を
+実行すると列挙できます。読み取り専用の監査が `gh` で閉じた Issue の全ページを
+取得し、Issue 番号・URL・未チェック基準の JSON 一覧を出力します。PR と
+「対応しない」として閉じた Issue は除外します。コメント保存の SPEC は参照先の
+`spec` コメント（分割 section を含む）を読み、読めない section は黙って飛ばさず
+エラーとして報告します。
 
 無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
 NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
@@ -714,11 +728,14 @@ gwt は project knowledge を Agent workspace の近くに置きます。
 - JSON operations `issue.view` と `issue.comments` は gwt CLI surface から
   cache-backed Issue access を提供します。
 - `gwt-search` は共有 ChromaDB runtime を通じて SPEC、Issue、source files、
-  docs を検索します。index が無い場合は必要に応じて build され、desktop app は
+  docs、PM Reports を検索します。index が無い場合は必要に応じて build され、desktop app は
   管理対象 Python search runtime を修復できます。
   Issue index の再構築中も直前に公開された世代を検索できます。複数 scope の検索は
   利用可能な結果を返し、除外した scope と理由を通知します。JSON 応答には
   `partial` と `unavailable_scopes` が含まれます。
+  `reports` scope では保存済みの digest と Q&A の質問・回答・Issue 参照を検索できます。
+  Index window は report の kind・日時・関連 Issue を表示し、**Open** で PM の
+  Reports view へ戻れます。
 - Work Item Knowledge Bridge は plain Issue と `gwt-spec` label 付き Issue の
   cache-backed list/detail、semantic ranking、exact match priority、match percentage
   を組み合わせます。
@@ -1503,6 +1520,14 @@ JSON
 所有する command tree を停止します。runner が終了した場合も予約 TTL を待たずに解放します。
 中断は PASS やテスト失敗とは区別し、同じ行列を再実行すると新しい試行を開始します。
 最初のコマンド開始前に取り消した場合は、以前の検証記録を保持します。
+
+検証の子プロセスでは既定で Git の端末プロンプトと Git Credential Manager の対話を無効にします。
+GUI や端末での認証入力が必要になった場合、入力を待たずにエラーを返します。
+キャッシュ済みの認証情報は引き続き使用できます。
+
+同一プロジェクトの holder が回収候補として報告された場合は、`verify.lease.release` に
+`params.lease_id` と空でない `params.reason` を渡します。作業が残っていないことを
+再確認してから回収します。実行中の workload は保護されるため、自分の試行は上記の取消を使います。
 
 初回の `cargo build -p gwt --bin gwtd`、通常の Cargo build、TDD テスト、
 lint、coverage、直接の headed browser 確認、pre-push 確認は verification
