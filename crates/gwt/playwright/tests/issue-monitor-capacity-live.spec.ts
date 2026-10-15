@@ -1,6 +1,7 @@
 /* Issue #3620 — machine-aware capacity and manual override through the real
  * checkout backend. Run headed in both themes against browser-check's fresh
- * HOME. CHECK_HOME/issue-3620-isolated.json contains {project, repo_hash, url};
+ * HOME. CHECK_HOME/issue-3620-isolated.json (or issue-5500-isolated.json)
+ * contains {project, repo_hash, url};
  * CHECK_HOME/url identifies the served checkout process. No agents are launched.
  */
 import { readFile, realpath } from "node:fs/promises";
@@ -19,7 +20,14 @@ async function isolatedPreferences() {
   const home = await realpath(CHECK_HOME);
   const project = await realpath(PROJECT);
   expect(home).not.toBe(await realpath(homedir()));
-  const marker = JSON.parse(await readFile(join(home, "issue-3620-isolated.json"), "utf8"));
+  let markerJson: string;
+  try {
+    markerJson = await readFile(join(home, "issue-5500-isolated.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    markerJson = await readFile(join(home, "issue-3620-isolated.json"), "utf8");
+  }
+  const marker = JSON.parse(markerJson);
   expect(await realpath(marker.project)).toBe(project);
   expect(marker.repo_hash).toMatch(/^[a-zA-Z0-9_-]+$/);
   const url = (await readFile(join(home, "url"), "utf8")).trim();
