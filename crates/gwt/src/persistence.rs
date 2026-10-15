@@ -446,7 +446,14 @@ pub fn pause_process_windows_for_restore(state: &mut PersistedWindowCanvasState)
 fn normalize_loaded_workspace_state(state: &mut PersistedWindowCanvasState) {
     state
         .windows
-        .retain(|window| !window.preset.is_removed_legacy());
+        .retain(|window| {
+            if window.preset.is_removed_legacy() {
+                tracing::info!(id = %window.id, preset = ?window.preset, "Dropping retired legacy surface during workspace restore");
+                false
+            } else {
+                true
+            }
+        });
     for window in &mut state.windows {
         let canonical = window.preset.canonical_surface_preset();
         if window.preset != canonical {
@@ -1404,6 +1411,45 @@ mod tests {
                 collapsed: true,
             }
         );
+    }
+
+    #[test]
+    fn load_workspace_state_drops_retired_surfaces_and_preserves_other_windows() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let presets = ["board", "file_tree", "console", "pr", "logs", "shell"];
+        let windows: Vec<_> = presets
+            .iter()
+            .enumerate()
+            .map(|(index, preset)| {
+                serde_json::json!({
+                    "id": preset,
+                    "title": preset,
+                    "preset": preset,
+                    "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
+                    "z_index": index + 1,
+                    "status": "running",
+                    "persist": true
+                })
+            })
+            .collect();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({ "windows": windows, "next_z_index": 7 }))
+                .expect("serialize workspace"),
+        )
+        .expect("write legacy workspace");
+
+        let loaded = load_workspace_state(&path).expect("retired surfaces must not fail restore");
+        assert_eq!(
+            loaded
+                .windows
+                .iter()
+                .map(|window| window.id.as_str())
+                .collect::<Vec<_>>(),
+            ["board", "logs", "shell"]
+        );
+        assert_eq!(loaded.next_z_index, 7);
     }
 
     #[test]
