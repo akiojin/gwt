@@ -218,7 +218,7 @@ export function mountProjectManagerSettingsPanel(
 }
 
 export function renderIssuesSettingsPanel(panel, options) {
-  const { project, status, send } = options;
+  const { project, status, send, launchControls = [] } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
   const heading = document.createElement("h3");
@@ -226,33 +226,49 @@ export function renderIssuesSettingsPanel(panel, options) {
   heading.textContent = `Project settings · ${project?.name || project?.project_root || "No project"}`;
   panel.appendChild(heading);
   const description = document.createElement("p");
-  description.className = "settings-help";
+  description.className = "settings-help settings-issues-description";
   description.textContent = project?.project_root || "Open a project to configure Issues.";
+  description.title = description.textContent;
   panel.appendChild(description);
-  const section = document.createElement("fieldset");
-  section.className = "settings-section";
-  section.disabled = !status;
-  const legend = document.createElement("legend");
-  legend.textContent = "Issues";
-  section.appendChild(legend);
-  panel.appendChild(section);
-  const field = (name, type, value) => {
+  const group = name => {
+    const section = document.createElement("fieldset");
+    section.className = "settings-section";
+    section.disabled = !status;
+    const legend = document.createElement("legend");
+    legend.textContent = name;
+    section.appendChild(legend);
+    panel.appendChild(section);
+    return section;
+  };
+  const row = (section, name, control) => {
     const label = document.createElement("label");
     label.className = "settings-field";
     const caption = document.createElement("span");
     caption.textContent = name;
     label.appendChild(caption);
+    label.appendChild(control);
+    section.appendChild(label);
+    return label;
+  };
+  const field = (section, name, type, value) => {
     const input = document.createElement("input");
     input.type = type;
     input.className = type === "checkbox" ? "settings-checkbox" : "settings-input";
     input.setAttribute("aria-label", name);
     if (type === "checkbox") input.checked = value === true;
     else input.value = String(value ?? "");
-    label.appendChild(input);
-    section.appendChild(label);
+    row(section, name, input);
     return input;
   };
-  const max = field("Max active", "number", status?.max_active_agents ?? 0);
+  const launch = group("Launch control");
+  for (const [action, name] of [["monitor-autonomous", "Autonomous"], ["monitor-toggle", "Monitoring"]]) {
+    const slot = document.createElement("span");
+    const control = launchControls.find(control => control.dataset.action === action);
+    if (control) slot.appendChild(control);
+    row(launch, name, slot).dataset.settingsLaunchAction = action;
+  }
+  const max = field(launch, "Max active", "number", status?.max_active_agents ?? 0);
+  launch.insertBefore(max.closest("label"), launch.querySelector('[data-settings-launch-action="monitor-toggle"]'));
   max.min = "1";
   max.step = "1";
   const mode = document.createElement("select");
@@ -266,7 +282,10 @@ export function renderIssuesSettingsPanel(panel, options) {
     mode.appendChild(option);
   }
   max.disabled = status?.max_active_agents_override == null;
-  max.closest("label").insertBefore(mode, max);
+  const capacity = document.createElement("span");
+  capacity.className = "settings-issues-capacity";
+  max.replaceWith(capacity);
+  capacity.append(mode, max);
   mode.addEventListener("change", () => {
     max.disabled = mode.value === "auto";
     if (!max.disabled && !(Number.isInteger(Number(max.value)) && Number(max.value) > 0)) max.value = "1";
@@ -277,8 +296,9 @@ export function renderIssuesSettingsPanel(panel, options) {
     const value = Number(max.value);
     if (!max.disabled && Number.isInteger(value) && value > 0) send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: value });
   });
-  const refill = field("Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
-  const limit = field("Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
+  const replenishment = group("Refill");
+  const refill = field(replenishment, "Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
+  const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
   limit.min = "0";
   limit.step = "1";
   const saveRefill = () => {
@@ -287,8 +307,21 @@ export function renderIssuesSettingsPanel(panel, options) {
   };
   refill.addEventListener("change", saveRefill);
   limit.addEventListener("change", saveRefill);
-  const labels = field("Allowed labels", "text", (status?.allowed_labels || []).join(", "));
+  const labels = field(group("Target"), "Allowed labels", "text", (status?.allowed_labels || []).join(", "));
+  labels.title = "Comma-separated labels. Only matching issues enter the launch queue.";
   labels.addEventListener("change", () => send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: [...new Set(labels.value.split(",").map(v => v.trim()).filter(Boolean))] }));
+}
+
+function positionIssuesLaunchControls(body) {
+  const open = body.querySelector(".settings-issues-options")?.hasAttribute("open");
+  const summary = body.querySelector(".knowledge-monitor-controls");
+  for (const action of ["monitor-autonomous", "monitor-toggle"]) {
+    const control = body.querySelector(`[data-action="${action}"]`);
+    const slot = body.querySelector(`[data-settings-launch-action="${action}"] > :last-child`);
+    if (!control) continue;
+    if (open) slot?.appendChild(control);
+    else summary?.insertBefore(control, summary.querySelector('[data-action="monitor-settings"]'));
+  }
 }
 
 export function renderAgentsSettingsPanel(panel, options) {
@@ -707,6 +740,8 @@ export function createSettingsSurface({
         const root = body.dataset.settingsProjectRoot || "";
         const current = projectSettingsSnapshot(body);
         const project = { project_root: root, name: body.dataset.settingsProjectName };
+        const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+        const focusedLaunchControl = launchControls.find(control => control === document.activeElement);
         const agentsPanel = body.querySelector("[data-settings-candidates]");
         if (current.profilesRequestId != null
           && Number(agentsPanel?.dataset.pendingRequest) === current.profilesRequestId && agentsPanel?.dataset.saving === "true") {
@@ -736,9 +771,11 @@ export function createSettingsSurface({
             && document.activeElement?.matches("input:not([type=checkbox]), select, textarea");
           if (editing && section === "issues") body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
-            project, status: current.status, profiles: current.profiles, send: dispatch,
+            project, status: current.status, profiles: current.profiles, send: dispatch, launchControls,
           });
         }
+        positionIssuesLaunchControls(body);
+        focusedLaunchControl?.focus({ preventScroll: true });
       }
       function applyIssueSettingsStatus(status, projectRoot) {
         if (!projectRoot) return;
@@ -1007,7 +1044,10 @@ export function createSettingsSurface({
         issuesRoot.querySelector(".knowledge-monitor-bar").after(issuesOptions);
         const gear = issuesRoot.querySelector('[data-action="monitor-settings"]');
         gear.setAttribute("aria-expanded", "false");
-        issuesOptions.addEventListener("toggle", () => gear.setAttribute("aria-expanded", String(issuesOptions.open)));
+        issuesOptions.addEventListener("toggle", () => {
+          gear.setAttribute("aria-expanded", String(issuesOptions.open));
+          positionIssuesLaunchControls(body);
+        });
         gear.addEventListener("click", () => { issuesOptions.open = !issuesOptions.open; });
 
         tabs.addEventListener("click", (e) => {

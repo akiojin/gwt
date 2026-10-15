@@ -28,6 +28,12 @@ test("Issues Settings keeps labels and values together and sends existing projec
     send: message => sent.push(message),
   });
   assert.match(panel.textContent, /Project settings.*Project A/);
+  assert.deepEqual([...panel.querySelectorAll("legend")].map(el => el.textContent), ["Launch control", "Refill", "Target"]);
+  assert.equal(panel.firstElementChild.tagName, "H3", "project identity precedes settings groups");
+  assert.equal(panel.querySelector('[aria-label="Max active"]').closest("fieldset").querySelector("legend").textContent, "Launch control");
+  assert.equal(panel.querySelector('[aria-label="Auto-refill"]').closest("fieldset").querySelector("legend").textContent, "Refill");
+  assert.equal(panel.querySelector('[aria-label="Allowed labels"]').closest("fieldset").querySelector("legend").textContent, "Target");
+  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Autonomous", "Max active", "Monitoring"]);
   const change = (name, value) => {
     const control = panel.querySelector(`[aria-label="${name}"]`);
     assert.ok(control, name);
@@ -51,6 +57,33 @@ test("Issues Settings keeps labels and values together and sends existing projec
     { kind: "set_issue_monitor_allowed_labels", allowed_labels: ["auto-merge", "bug"] },
   ]);
   assert.equal(panel.querySelector('[aria-label="Autonomous"]'), null, "the summary owns Autonomous once");
+});
+
+test("Issues disclosure reuses authoritative launch controls and returns them to the compact summary", () => {
+  const { document } = parseHTML('<div class="settings-root"><div class="knowledge-monitor-controls"><button data-action="monitor-autonomous">Autonomous</button><button data-action="monitor-toggle">Start</button><button data-action="monitor-settings">⚙</button></div><details class="settings-issues-options"><section></section></details></div>');
+  const body = document.querySelector(".settings-root");
+  const panel = body.querySelector("section");
+  const disclosure = body.querySelector("details");
+  const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+  let clicked = 0;
+  launchControls[1].addEventListener("click", () => clicked++);
+  const render = load("renderIssuesSettingsPanel");
+  const position = load("positionIssuesLaunchControls");
+  disclosure.setAttribute("open", "");
+  for (let i = 0; i < 2; i++) {
+    render(panel, { project: { name: "A" }, status: {}, send: () => {}, launchControls });
+    position(body);
+    assert.equal(panel.querySelector('[data-settings-launch-action="monitor-toggle"] > :last-child').firstElementChild === launchControls[1], true);
+    assert.equal(panel.querySelector('[data-action="monitor-autonomous"]').closest("fieldset").querySelector("legend").textContent, "Launch control");
+    launchControls[1].click();
+  }
+  disclosure.removeAttribute("open");
+  position(body);
+  assert.equal(body.querySelector(".knowledge-monitor-controls").firstElementChild, launchControls[0]);
+  assert.equal(body.querySelectorAll('[data-action="monitor-toggle"]').length, 1);
+  assert.equal(clicked, 2, "original listeners survive status rerenders");
+  const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
+  assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
 
 test("Auto capacity is read-only until Manual is selected", () => {

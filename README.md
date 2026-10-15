@@ -477,8 +477,10 @@ Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
 a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
 appear red; error details and history stay in the notification center. Use ⚙ to
-expand the settings rows in the same pane for Max active, Auto-refill, its limit,
-Allowed labels and candidate profiles. Auto-apply updates is in **System**. Select **Manual** to edit
+expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
+(Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
+profiles. Autonomous and Start / Stop return to the summary when collapsed.
+Auto-apply updates is in **System**. Select **Manual** to edit
 Max active; **Auto** displays the calculated value without editing. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.

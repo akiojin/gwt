@@ -86,6 +86,7 @@ async function closeFixtureMigrationDrawer(page: Page): Promise<void> {
 async function screenshot(page: Page, section: string, info: TestInfo): Promise<void> {
   await openSettings(page, section);
   await panel(page, section).scrollIntoViewIfNeeded();
+  if (section === "issues") await panel(page, section).locator("[data-settings-issues-controls]").evaluate(element => element.scrollIntoView({ block: "start" }));
   const name = `settings-${section}-${themeFor(info)}`;
   await info.attach(name, { body: await settings(page).screenshot(), contentType: "image/png" });
   if (process.env.GWT_L3_SCREENSHOT_DIR) {
@@ -93,10 +94,40 @@ async function screenshot(page: Page, section: string, info: TestInfo): Promise<
   }
 }
 
+async function assertIssuesLayout(page: Page): Promise<void> {
+  const controls = panel(page, "issues").locator("[data-settings-issues-controls]");
+  await controls.scrollIntoViewIfNeeded();
+  await expect(controls.locator("legend")).toHaveText(["Launch control", "Refill", "Target"]);
+  await expect(controls.locator(":scope > :first-child")).toContainText("Project settings");
+  const rows = controls.locator(".settings-field");
+  await expect(rows).toHaveCount(6);
+  const bounds = await rows.evaluateAll(elements => elements.map(element => {
+    const row = element.getBoundingClientRect();
+    const label = element.firstElementChild!.getBoundingClientRect();
+    const value = element.lastElementChild!.getBoundingClientRect();
+    return { top: row.top, bottom: row.bottom, label: label.width, value: value.left, right: row.right };
+  }));
+  const visible = await panel(page, "issues").locator(".settings-issues-options").boundingBox();
+  expect(visible).not.toBeNull();
+  expect(new Set(bounds.map(row => Math.round(row.label))).size).toBe(1);
+  expect(new Set(bounds.map(row => Math.round(row.value))).size).toBe(1);
+  for (const row of bounds) {
+    expect(row.top).toBeGreaterThanOrEqual(0);
+    expect(row.bottom).toBeLessThanOrEqual(page.viewportSize()!.height);
+    expect(row.right).toBeLessThanOrEqual(page.viewportSize()!.width);
+    expect(row.top).toBeGreaterThanOrEqual(visible!.y);
+    expect(row.bottom).toBeLessThanOrEqual(visible!.y + visible!.height);
+  }
+  for (const name of ["Autonomous mode", "Max active", "Max active mode", "Auto-refill", "Refill limit", "Allowed labels"]) {
+    await expect(controls.getByLabel(name, { exact: true })).toBeInViewport({ ratio: 1 });
+  }
+  await expect(controls.locator('[data-action="monitor-toggle"]')).toBeInViewport({ ratio: 1 });
+}
+
 test.describe("Issue #5322 Settings", () => {
   test.skip(Object.keys(BACKENDS).length === 0, "requires verify-issue-5322.mjs isolated backends");
   test.setTimeout(180_000);
-  test.use({ viewport: { width: 1500, height: 1100 }, actionTimeout: 15_000 });
+  test.use({ viewport: { width: 1280, height: 900 }, actionTimeout: 15_000 });
 
   test("routes Issues, persists project controls and full profiles, and shares application settings", async ({ page, context }, info) => {
     const backend = BACKENDS[themeFor(info)];
@@ -136,6 +167,10 @@ test.describe("Issue #5322 Settings", () => {
           await current.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
             .some(({ payload }: any) => payload.kind === "workspace_state"));
           await openSettings(current, "issues");
+          await sendLiveGwtEvent(current, { kind: "update_window_geometry",
+            id: await settings(current).getAttribute("data-id"),
+            geometry: { x: 20, y: 20, width: 1200, height: 820 }, cols: 0, rows: 0 });
+          await expect(settings(current)).toHaveCSS("height", "820px");
           await expect(autonomous(current)).toBeEnabled();
           await expect(panel(current, "issues")).toContainText(project.root);
         }
@@ -153,7 +188,7 @@ test.describe("Issue #5322 Settings", () => {
         expect(originalWindow).toBeTruthy();
         await openSettings(page, "agents");
         await panel(page, "agents").getByRole("button", { name: "Add candidate", exact: true }).scrollIntoViewIfNeeded();
-        await page.locator('[data-surface="issues"]').click();
+        await page.locator('button[data-surface="issues"]').click();
         await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
         await expect(settings(page)).toHaveClass(/focused/);
         await openSettings(page, "issues");
@@ -162,7 +197,7 @@ test.describe("Issue #5322 Settings", () => {
         await expect(settings(page)).toHaveClass(/focused/);
         await expect(issues).toBeFocused();
         await expect(autonomous(page)).toBeInViewport();
-        await page.locator('[data-surface="issues"]').click();
+        await page.locator('button[data-surface="issues"]').click();
         const gear = page.locator('[data-action="monitor-settings"]');
         await expect(gear).toBeVisible();
         const options = issues.locator(".settings-issues-options");
@@ -173,12 +208,15 @@ test.describe("Issue #5322 Settings", () => {
         await expect(gear).toHaveAttribute("aria-expanded", "true");
         await expect(gear).toBeFocused();
         await expect(settings(page)).toHaveCount(1);
+        await screenshot(page, "issues", info);
+        await assertIssuesLayout(page);
 
         // AC-1/5: a no-remote project with Autonomous and PM disabled can
         // persist Start/Stop without dispatching implementation work.
         await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Start");
         await expect(issues.locator('[data-action="monitor-toggle"]')).toBeEnabled();
         await toggleMonitor(page, true);
+        await expect(issues.locator('[data-action="monitor-toggle"]')).toBeFocused();
         await expect.poll(async () => (await readPreferences(a)).enabled).toBe(true);
         await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
         await toggleMonitor(page, false);
@@ -188,6 +226,7 @@ test.describe("Issue #5322 Settings", () => {
         // Edit the remaining project-local controls while Monitor is stopped.
         await autonomous(page).click();
         await expect.poll(async () => (await readPreferences(a)).autonomous_mode).toBe(true);
+        await expect(autonomous(page)).toBeFocused();
         const maxMode = issues.getByLabel("Max active mode", { exact: true });
         await selectCapacityMode(page, "manual");
         await editNumber(issues.getByLabel("Max active", { exact: true }), "6");
