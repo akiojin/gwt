@@ -1215,6 +1215,10 @@ windows are skipped. Cycling keeps the split view and focuses the selected
 terminal for input. Closing the selected tab returns to All agents without stopping the
 agent; cycling can reopen the same terminal.
 
+Agent card and tab titles stay on one line with the name fixed at the start.
+Scroll the purpose horizontally, or hover or keyboard-focus the title to read it in full.
+Issue and Project Manager settings also explain their controls on hover and keyboard focus.
+
 ## Operator Design Language (SPEC-2356)
 
 Starting with the Operator Design System update, gwt is themed as a single

@@ -82,6 +82,7 @@ const ROOT_MODULES = new Set([
   "interaction-guard.js",
   // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Kanban) window surface.
   "knowledge-kanban-surface.js",
+  "control-explanations.js",
   "migration-modal.js",
   "operator-shell.js",
   "project-clone-modal.js",

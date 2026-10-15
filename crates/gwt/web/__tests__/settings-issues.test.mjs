@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
+import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
 function load(name, bindings = {}) {
+  bindings = { setControlExplanation, ...bindings };
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing ${name}`);
   const open = source.indexOf("{", source.indexOf(")", start));
@@ -130,6 +132,47 @@ test("Auto capacity is read-only until Manual is selected", () => {
   mode.querySelector('[value="manual"]').selected = true;
   mode.dispatchEvent(new Event("change"));
   assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 4 }]);
+});
+
+test("AC-6: Issues Settings exposes explanations for capacity, refill and targeting", t => {
+  const { document } = parseHTML("<html><body><section></section></body></html>");
+  const panel = document.querySelector("section"), sent = [];
+  const explanations = bindControlExplanations({ document, root: panel, id: "settings-explanation" });
+  t.after(() => explanations.dispose());
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
+  for (const [name, meaning] of [
+    ["Max active", /maximum.*agents/i], ["Max active mode", /automatic.*manual/i],
+    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*disables/i],
+    ["Allowed labels", /matching issues/i],
+  ]) {
+    const control = panel.querySelector(`[aria-label="${name}"]`);
+    assert.match(control.getAttribute("aria-description") || "", meaning, name);
+    assert.equal(control.dataset.issueExplanation, control.getAttribute("aria-description"));
+    assert.ok(control.dataset.issueExplanationKey, "status redraw can find the replacement control");
+    if (!control.disabled) {
+      control.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+      assert.equal(document.getElementById("settings-explanation").textContent, control.getAttribute("aria-description"));
+      assert.equal(explanations.visible, true);
+      control.dispatchEvent(new document.defaultView.Event("focusout", { bubbles: true }));
+    }
+    control.dispatchEvent(new document.defaultView.Event("mouseover", { bubbles: true }));
+    assert.equal(document.getElementById("settings-explanation").textContent, control.getAttribute("aria-description"));
+    assert.equal(explanations.visible, true);
+    control.dispatchEvent(new document.defaultView.Event("mouseout", { bubbles: true }));
+  }
+  const capacity = panel.querySelector(".settings-issues-capacity");
+  assert.equal(capacity.getAttribute("tabindex"), "0", "Auto's disabled value has a keyboard reachable explanation");
+  assert.match(capacity.getAttribute("aria-description"), /maximum.*agents/i);
+  capacity.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 5, max_active_agents_override: null }, send: message => sent.push(message) });
+  panel.dispatchEvent(new document.defaultView.Event("control-explanations:refresh"));
+  assert.equal(explanations.visible, true, "a Settings redraw keeps a focused explanation readable");
+  const replacement = panel.querySelector(".settings-issues-capacity");
+  assert.equal(replacement.getAttribute("aria-describedby"), "settings-explanation");
+  assert.equal(document.getElementById("settings-explanation").textContent, replacement.getAttribute("aria-description"));
+  assert.deepEqual(sent, [], "registering explanations does not change settings");
 });
 
 test("Manual starts at one when Auto has no available capacity", () => {
