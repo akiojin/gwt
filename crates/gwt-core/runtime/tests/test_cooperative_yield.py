@@ -633,6 +633,16 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
             model = runner._get_embedding_model(runner.FILE_INDEX_V2_MODEL_REVISION)
             batches = []
 
+            def load_model(_revision):
+                progress = json.loads(
+                    (self.coordinator_root / "heavy.progress.json").read_text()
+                )
+                self.assertEqual(progress["model_state"], "warming")
+                runner._MODEL_CACHE = model
+                runner._MODEL_CACHE_REVISION = _revision
+                runner._MODEL_LOAD_MS = 16_000
+                return mock.Mock(encode=encode)
+
             def encode(inputs):
                 batches.append(len(inputs))
                 # Arrival is causally inside the non-interruptible encode,
@@ -640,13 +650,20 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
                 _write_pending_claimant(self.coordinator_root, "interactive-search")
                 return model.encode(inputs)
 
-            with mock.patch.object(runner, "_get_embedding_model") as get_model:
-                get_model.return_value.encode.side_effect = encode
+            with mock.patch.object(runner, "_MODEL_CACHE", None), \
+                    mock.patch.object(runner, "_MODEL_CACHE_REVISION", None), \
+                    mock.patch.object(runner, "_MODEL_LOAD_MS", 0), \
+                    mock.patch.object(runner, "_get_embedding_model", side_effect=load_model):
                 result = runner.action_index_files_v2(
                     str(self.project_root), V2_REPO_HASH, V2_WORKTREE_HASH,
                     mode="full", db_root=self.db_root, qos="background",
                     file_index_protocol="v2",
                 )
+                progress = json.loads(
+                    (self.coordinator_root / "heavy.progress.json").read_text()
+                )
+                self.assertEqual(progress["model_state"], "warm")
+                self.assertEqual(progress["model_load_ms"], 16_000)
         self.assertTrue(result.get("yielded"), result)
         self.assertEqual(batches, [1], "a pending search must not wait for 16 encodes")
         self.assertEqual(result.get("computed_embeddings"), 1, result)

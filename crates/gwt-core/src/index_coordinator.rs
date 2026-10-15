@@ -427,6 +427,9 @@ pub struct HeavyLeaseStatus {
     /// Best-effort wait estimate: `remaining_batches × batch_ms`, or the TTL
     /// remainder for a verification holder that has not finished a command.
     pub estimated_remaining_ms: Option<u64>,
+    /// Current runner model readiness, attributed only to this live lease.
+    pub model_state: Option<String>,
+    pub model_load_ms: Option<u64>,
     /// Issue #4470 AC-2: whether the ticket owner's process still exists.
     /// `None` when no ticket describes the lock.
     pub holder_alive: Option<bool>,
@@ -771,6 +774,11 @@ pub struct HeavyProgress {
     /// Wall-clock milliseconds of the most recent batch.
     pub batch_ms: u64,
     pub updated_at_ms: u64,
+    /// Optional for older runners and verification progress records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_load_ms: Option<u64>,
 }
 
 impl HeavyProgress {
@@ -1214,6 +1222,8 @@ impl IndexCoordinator {
                 holder_context: ticket.holder_context,
                 remaining_batches: None,
                 estimated_remaining_ms: None,
+                model_state: None,
+                model_load_ms: None,
                 holder_alive,
                 holder_job_status,
                 holder_stale,
@@ -1265,6 +1275,15 @@ impl IndexCoordinator {
             holder_context: ticket.holder_context,
             remaining_batches,
             estimated_remaining_ms,
+            model_state: progress.as_ref().and_then(|progress| {
+                progress
+                    .model_state
+                    .clone()
+                    .filter(|state| matches!(state.as_str(), "warming" | "warm"))
+            }),
+            model_load_ms: progress
+                .as_ref()
+                .and_then(|progress| progress.model_load_ms),
             holder_alive,
             holder_job_status,
             holder_stale,
@@ -2252,6 +2271,8 @@ impl HeavyLease {
                 batch_size: 1,
                 batch_ms: unit_ms,
                 updated_at_ms: now_ms(),
+                model_state: None,
+                model_load_ms: None,
             },
         )?;
         Ok(())
@@ -5262,12 +5283,16 @@ mod tests {
                 batch_size: 16,
                 batch_ms: 2_000,
                 updated_at_ms: now_ms(),
+                model_state: Some("warming".into()),
+                model_load_ms: Some(0),
             })
             .unwrap();
         let status = coordinator.heavy_lease_status().unwrap();
         // ceil(90 / 16) = 6 batches × 2 s each.
         assert_eq!(status.remaining_batches, Some(6));
         assert_eq!(status.estimated_remaining_ms, Some(12_000));
+        assert_eq!(status.model_state.as_deref(), Some("warming"));
+        assert_eq!(status.model_load_ms, Some(0));
 
         // Progress written for another target is not attributed to this holder.
         coordinator
@@ -5278,11 +5303,15 @@ mod tests {
                 batch_size: 16,
                 batch_ms: 9_000,
                 updated_at_ms: now_ms(),
+                model_state: Some("warm".into()),
+                model_load_ms: Some(16_000),
             })
             .unwrap();
         let status = coordinator.heavy_lease_status().unwrap();
         assert_eq!(status.remaining_batches, None);
         assert_eq!(status.estimated_remaining_ms, None);
+        assert_eq!(status.model_state, None);
+        assert_eq!(status.model_load_ms, None);
         drop(heavy);
         index.complete(JobOutcome::Completed).unwrap();
 
