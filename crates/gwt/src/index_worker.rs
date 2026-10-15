@@ -2248,9 +2248,9 @@ pub fn poll_registered_project_index_sources(broker: &RefreshBroker) -> Result<(
                     REFRESH_FILE_SCOPES,
                 );
                 let previous = broker.inspect().map_err(|error| error.to_string())?;
-                if !previous
+                if previous
                     .target(&target)
-                    .is_some_and(|old| old.desired_snapshot() == snapshot)
+                    .is_none_or(|old| old.desired_snapshot() != snapshot)
                 {
                     let desired_epoch = unix_millis_now().max(
                         previous
