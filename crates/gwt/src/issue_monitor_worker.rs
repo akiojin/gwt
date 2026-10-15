@@ -560,6 +560,7 @@ pub(crate) fn read_execution_observations_from_inventory(
                 crate::issue_monitor::IssueMonitorExecutionObservation {
                     settlement,
                     process_held,
+                    holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead"),
                 },
             )
         })
@@ -1176,6 +1177,9 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
     expected_project_tab_id: Option<&str>,
     now: &str,
 ) -> IssueMonitorScanSummary {
+    // Candidate repair may requeue displaced bindings. First retire exact
+    // dead terminal holders using the existing execution-aware release path.
+    reconcile_issue_monitor_windows(monitor, repo_path, now);
     // Reconcile local credentials before this scan plans claims. No network
     // request is made here; Claude credential access remains opt-in.
     let usage_config = gwt_config::Settings::load().unwrap_or_default().usage;
@@ -4151,6 +4155,366 @@ mod tests {
                 .current_effective_status(),
             Some(ExecutionControlStatus::Active)
         );
+    }
+
+    #[test]
+    fn issue_4446_blocked_execution_with_dead_host_releases_capacity_without_requeue() {
+        use crate::cli::execution_state::{
+            self, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
+            ExecutionSettlement, LegacyActiveDisposition, SettleResult,
+        };
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 4446,
+        };
+        let session_id = "blocked-dead-host-holder";
+        execution_state::materialize_at_launch(
+            worktree.path(),
+            owner.kind,
+            owner.number,
+            session_id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::ensure_generation_ledger(
+            worktree.path(),
+            owner,
+            LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let binding = execution_state::current_execution_binding(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session = gwt_agent::Session::new(
+            worktree.path(),
+            "work/issue-4446",
+            gwt_agent::AgentId::Codex,
+        );
+        session.id = session_id.to_string();
+        session.linked_issue_number = Some(owner.number);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: owner.kind.as_str().to_string(),
+            owner_number: owner.number,
+            identity: binding,
+            capability_generation: 1,
+        });
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session.save(&sessions_dir).unwrap();
+        assert!(matches!(
+            execution_state::settle(
+                worktree.path(),
+                session_id,
+                ExecutionSettlement::Blocked {
+                    reason: "the holder deliberately stopped this execution".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap(),
+            SettleResult::Settled(_)
+        ));
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let dead_host_pid = i32::MAX as u32;
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            1,
+            1,
+            dead_host_pid,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &sessions_dir,
+            dead_host_pid,
+            session_id,
+        ))
+        .unwrap();
+        let diagnosis = execution_state::diagnose_owner(worktree.path(), owner);
+        assert_eq!(diagnosis.ecr_status, Some(ExecutionControlStatus::Blocked));
+        assert_eq!(diagnosis.holder_runtime.as_deref(), Some("host_dead"));
+        assert!(!diagnosis.ecr_settled_by_host_reaper);
+        let observations = read_execution_observations(worktree.path(), &[owner.number]);
+        assert_eq!(
+            observations[&owner.number].settlement,
+            IssueMonitorExecutionSettlement::Blocked
+        );
+        assert!(!observations[&owner.number].process_held);
+
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.terminal_queue_push(&[owner.number], "test", "2026-10-13T00:00:00Z");
+        monitor.record_candidate(issue(owner.number));
+        monitor.complete_active_launch_at(owner.number, "tab-1::dead", "2026-10-13T00:00:00Z");
+        assert_eq!(monitor.effective_max_active_agents(), 1);
+        assert_eq!(monitor.active_count(), 1);
+        let now = "2026-10-13T00:10:00Z";
+        monitor.record_monitor_runtime_windows(
+            dead_host_pid,
+            1,
+            BTreeMap::from([(owner.number, 1)]),
+            BTreeMap::from([("tab-1::dead".to_string(), owner.number)]),
+            now,
+        );
+        let base = monitor.clone();
+        let running_snapshot = crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: now.to_string(),
+            // The last canvas still calls the exact dead holder Running.
+            windows: vec![crate::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: "tab-1::dead".to_string(),
+                issue_number: Some(owner.number),
+                status: crate::WindowState::Running,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: None,
+            }],
+        };
+        monitor.record_window_snapshot_from_host(
+            running_snapshot.clone(),
+            dead_host_pid,
+            1,
+            Default::default(),
+        );
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(worktree.path());
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let prefs_before_status = std::fs::read(&prefs_path).unwrap();
+        let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
+        let (code, output) = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Issue(crate::cli::IssueCommand::MonitorStatus {
+                project_root: Some(worktree.path().to_path_buf()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        let status: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        let execution = &status["execution_generations"]["4446"];
+        assert_eq!(execution["ecr_status"], "blocked");
+        assert_eq!(execution["holder_runtime"], "host_dead");
+        assert_eq!(
+            execution["generation_id"],
+            serde_json::json!(diagnosis.generation_id)
+        );
+        assert_eq!(
+            execution["settlement"],
+            serde_json::json!(diagnosis.settlement)
+        );
+        assert_eq!(
+            execution["settlement_severity"],
+            serde_json::json!(diagnosis.settlement_severity)
+        );
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), prefs_before_status);
+
+        // A live or uncertain successor still owns capacity despite the dead holder.
+        let mut held = observations.clone();
+        held.get_mut(&owner.number).unwrap().process_held = true;
+        for state in [crate::WindowState::Running, crate::WindowState::Idle] {
+            let mut snapshot = running_snapshot.clone();
+            snapshot.windows[0].status = state;
+            monitor.record_window_snapshot(snapshot);
+            let protected = monitor.reconcile_idle_windows(&held, now);
+            assert!(protected.released.is_empty(), "{state:?}");
+            assert_eq!(monitor.active_count(), 1);
+            assert_eq!(monitor.agent_status_at(now).occupied_slot_count, Some(1));
+        }
+
+        for (case, snapshot) in [
+            ("no canvas", None),
+            (
+                "stale Running canvas",
+                Some(crate::IssueMonitorWindowSnapshot {
+                    observed_at: "2026-10-13T00:00:00Z".to_string(),
+                    ..running_snapshot.clone()
+                }),
+            ),
+            ("fresh Running canvas", Some(running_snapshot.clone())),
+        ] {
+            let mut candidate = base.clone();
+            if let Some(snapshot) = snapshot {
+                candidate.record_window_snapshot_from_host(
+                    snapshot,
+                    dead_host_pid,
+                    1,
+                    Default::default(),
+                );
+            }
+            let outcome = reconcile_issue_monitor_windows(&mut candidate, worktree.path(), now);
+            assert_eq!(outcome.released, vec![owner.number], "{case}");
+            assert!(outcome.requeued.is_empty(), "{case}");
+            assert_eq!(candidate.active_count(), 0, "{case}");
+            assert_eq!(
+                candidate.agent_status_at(now).occupied_slot_count,
+                Some(0),
+                "{case}"
+            );
+            assert!(candidate.queued_issue_numbers().is_empty(), "{case}");
+            let mut stale_observer = base.clone();
+            stale_observer.rebase_gui_observer_prefs(&candidate.prefs());
+            assert!(
+                stale_observer
+                    .prefs()
+                    .monitor_runtime_counts
+                    .values()
+                    .all(|census| !census.counts.contains_key(&owner.number)),
+                "{case}"
+            );
+            assert_eq!(
+                candidate.inbox_item(owner.number).unwrap().state,
+                MonitorInboxState::Launched,
+                "{case}"
+            );
+            if case == "fresh Running canvas" {
+                // A read-only cache projection can show Queued after release,
+                // while the same terminal generation still needs diagnosis.
+                let cache_root =
+                    crate::issue_cache::issue_cache_root_for_repo_path_or_detached(worktree.path());
+                Cache::new(cache_root)
+                    .write_snapshot(&github_issue(owner.number))
+                    .unwrap();
+                crate::save_issue_monitor_prefs(&prefs_path, &candidate.prefs()).unwrap();
+                let prefs_before_status = std::fs::read(&prefs_path).unwrap();
+                let (code, output) = crate::cli::run_collect(
+                    &mut env,
+                    crate::cli::CliCommand::Issue(crate::cli::IssueCommand::MonitorStatus {
+                        project_root: Some(worktree.path().to_path_buf()),
+                    }),
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{output}");
+                let status: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+                assert_eq!(status["source"], "degraded_cache");
+                let row = status["inbox"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["issue_number"] == owner.number)
+                    .unwrap();
+                assert_eq!(row["state"], "queued");
+                let execution = &status["execution_generations"]["4446"];
+                assert_eq!(execution["ecr_status"], "blocked");
+                assert_eq!(execution["holder_runtime"], "host_dead");
+                assert_eq!(
+                    execution["generation_id"],
+                    serde_json::json!(diagnosis.generation_id)
+                );
+                assert_eq!(std::fs::read(&prefs_path).unwrap(), prefs_before_status);
+            }
+        }
+
+        // A reused window id belongs to its new owner, including legacy bare aliases.
+        let new_owner = 4447;
+        for (old_window, new_window, tab) in [
+            ("tab-1::dead", "tab-1::dead", "tab-1"),
+            ("dead", "tab-new::dead", "tab-new"),
+        ] {
+            let mut prefs = base.prefs();
+            prefs.monitor_runtime_counts.clear();
+            prefs.launched_issues[0].window_id = old_window.to_string();
+            prefs.launch_bindings.clear();
+            prefs
+                .launch_bindings
+                .insert(old_window.to_string(), owner.number);
+            prefs
+                .launch_confirmations
+                .get_mut(&owner.number)
+                .unwrap()
+                .window_id = old_window.to_string();
+            let mut reused = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+            reused.record_candidate(issue(owner.number));
+            reused.record_candidate(issue(new_owner));
+            // Legacy prefs can contain two owners for a reused ID. Current
+            // ACKs correctly reject that conflict, so restore it explicitly.
+            let mut prefs = reused.prefs();
+            let mut new_launch = prefs.launched_issues[0].clone();
+            new_launch.issue_number = new_owner;
+            new_launch.window_id = new_window.to_string();
+            prefs.launched_issues.push(new_launch);
+            prefs
+                .launch_bindings
+                .insert(new_window.to_string(), new_owner);
+            reused = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+            reused.record_candidate(issue(owner.number));
+            reused.record_candidate(issue(new_owner));
+            let mut snapshot = running_snapshot.clone();
+            snapshot.project_tab_id = tab.to_string();
+            snapshot.windows[0].window_id = new_window.to_string();
+            snapshot.windows[0].issue_number = Some(new_owner);
+            reused.record_window_snapshot(snapshot);
+
+            let loaded = LoadedIssueMonitorCandidates {
+                issues: vec![issue(owner.number), issue(new_owner)],
+                source: IssueMonitorCandidateSource::Cache,
+                live_error: None,
+                readiness_failures: Vec::new(),
+                urgent_assignments: BTreeMap::new(),
+            };
+            let mut scanned = reused.clone();
+            scan_loaded_issue_monitor_candidates_for_project_tab(
+                &mut scanned,
+                &loaded,
+                worktree.path(),
+                Some(tab),
+                now,
+            );
+            assert!(scanned
+                .queued_issue_numbers()
+                .iter()
+                .all(|number| *number != owner.number));
+            assert_eq!(scanned.active_issue_numbers(), vec![new_owner]);
+            let outcome = reconcile_issue_monitor_windows(&mut reused, worktree.path(), now);
+            assert_eq!(outcome.released, vec![owner.number], "{old_window}");
+            assert!(outcome.pane_closes.is_empty(), "{old_window}");
+            assert!(
+                reused.take_pending_idle_pane_closes().is_empty(),
+                "{old_window}"
+            );
+            assert_eq!(
+                reused.active_issue_numbers(),
+                vec![new_owner],
+                "{old_window}"
+            );
+            assert_eq!(
+                reused.prefs().launch_bindings.get(new_window),
+                Some(&new_owner),
+                "{old_window}"
+            );
+            let status = reused.agent_status_at(now);
+            assert_eq!(status.occupied_slot_count, Some(1), "{old_window}");
+            assert_eq!(
+                status
+                    .inbox
+                    .iter()
+                    .find(|row| row.issue_number == new_owner)
+                    .unwrap()
+                    .pane_state,
+                Some(crate::WindowState::Running),
+                "{old_window}"
+            );
+        }
     }
 
     #[test]

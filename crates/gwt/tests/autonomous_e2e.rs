@@ -529,6 +529,7 @@ mod idle_windows {
                     IssueMonitorExecutionObservation {
                         settlement: *settlement,
                         process_held: false,
+                        holder_host_dead: false,
                     },
                 )
             })

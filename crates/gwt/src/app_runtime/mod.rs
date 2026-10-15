@@ -4038,14 +4038,10 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // Issue #4084: read every launched Issue's execution record before taking
     // the prefs lock. The classification itself is pure; only this read is
     // I/O, and an unreadable record fails closed to `stuck_unknown`.
-    let idle_settlements = window_snapshot
-        .map(|_| {
-            gwt::issue_monitor_worker::read_execution_observations(
-                project_root,
-                &monitor.execution_settlement_issue_numbers(),
-            )
-        })
-        .unwrap_or_default();
+    let idle_settlements = gwt::issue_monitor_worker::read_execution_observations(
+        project_root,
+        &monitor.execution_settlement_issue_numbers(),
+    );
 
     // A daemon may have started while the side-effect-free scan was running.
     // The second lease acquisition is the commit-time authority decision; the
@@ -4069,6 +4065,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     let prepare = |latest: &mut gwt::IssueMonitorState| {
         latest.refresh_agent_capacity(project_root);
         latest.expire_stale_unbound_launches(now);
+        // Retire exact dead terminal holders before duplicate-binding repair
+        // can mistake their displaced projections for unfinished work.
+        latest.reconcile_idle_windows(&idle_settlements, now);
         // Issue #3883 AC-2/AC-3: restore tracking for agent windows that
         // are still on the canvas, inside the transaction that persists
         // this scan. Same store, same generation as the restart restore
@@ -4112,12 +4111,6 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                     observations,
                 );
             }
-        }
-        // Issue #4084 AC-2/AC-3/AC-4: release the idle windows inside the
-        // same transaction that persists this scan, after re-adoption has
-        // restored every binding a live window still owns.
-        if window_snapshot.is_some() {
-            latest.reconcile_idle_windows(&idle_settlements, now);
         }
         record_issue_monitor_scan_failures(
             latest,

@@ -761,6 +761,40 @@ fn run_monitor_status<E: CliEnv>(
         merge_board_escalations_into_needs_human(&project_root, &mut status);
     let mut output =
         serde_json::to_value(&status).map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    // Keep released, unsettled launches observable without reading every queued
+    // owner's ledger or changing Monitor/ECR state during a status read.
+    let execution_generations = status
+        .active_launches
+        .iter()
+        .copied()
+        .chain(status.inbox.iter().filter_map(|row| {
+            matches!(
+                row.state,
+                crate::MonitorInboxState::Launched | crate::MonitorInboxState::NeedsHuman
+            )
+            .then_some(row.issue_number)
+            .or_else(|| row.last_activity_at.as_ref().map(|_| row.issue_number))
+        }))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|number| {
+            let diagnosis = crate::cli::execution_state::diagnose_owner(
+                &project_root,
+                crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number,
+                },
+            );
+            diagnosis
+                .generation_id
+                .is_some()
+                .then_some((number, diagnosis))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if !execution_generations.is_empty() {
+        output["execution_generations"] = serde_json::to_value(execution_generations)
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    }
     if !status.needs_human.is_empty() {
         output["needs_human_authority"] = needs_human_authority;
     }
