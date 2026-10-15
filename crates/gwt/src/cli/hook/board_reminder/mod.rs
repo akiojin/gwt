@@ -59,7 +59,10 @@ use super::context::HookContext;
 use super::{HookError, HookEvent, HookOutput, IntentBoundaryEvent};
 use crate::board_audience::current_session_board_scope_from_projection;
 
-const USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE: Duration = Duration::from_millis(25);
+// The former 25ms budget also expired on a bounded debug read under
+// concurrent host load. Keep a 100ms ceiling inside the 200ms prompt budget;
+// limiting decoded rows is what makes the successful read independent of size.
+const USER_PROMPT_SUBMIT_BOARD_READ_DEADLINE: Duration = Duration::from_millis(100);
 const USER_PROMPT_SUBMIT_REMINDER_WRITE_MIN_BUDGET: Duration = Duration::from_millis(100);
 
 pub use plan::{plan_reminder, ReminderInputs, ReminderPlan};
@@ -287,13 +290,30 @@ fn append_title_summary_required_context(
     let required = texts::title_summary_required_reminder(language);
     match output {
         // SPEC-2359 Phase W-11 (US-58 / FR-347): prepend so the
-        // "set a provisional purpose before responding" instruction is the
-        // first thing the agent sees, ahead of the board reminder.
+        // purpose instruction precedes the board reminder; the pane naming
+        // instruction is prepended after both.
         HookOutput::HookSpecificAdditionalContext { event, text } => {
             HookOutput::hook_specific_additional_context(event, format!("{required}\n\n{text}"))
         }
         // Inject even when there is no board reminder this turn, so a fresh
         // agent's first UserPromptSubmit always carries the title instruction.
+        HookOutput::Silent => HookOutput::hook_specific_additional_context(event, required),
+        other => other,
+    }
+}
+
+fn prepend_pane_name_first_action_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+) -> HookOutput {
+    if event == IntentBoundaryEvent::Stop {
+        return output;
+    }
+    let required = gwt_skills::coordination_guidance::PANE_NAME_FIRST_ACTION_GUIDANCE_EN;
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, format!("{required}\n{text}"))
+        }
         HookOutput::Silent => HookOutput::hook_specific_additional_context(event, required),
         other => other,
     }
@@ -559,6 +579,7 @@ fn append_memory_update_context(
 struct PromptBoardReadOutcome {
     read: PromptBoardRead,
     succeeded: bool,
+    status: &'static str,
 }
 
 /// Time one `board-reminder` substage into the opt-in hook profile.
@@ -600,12 +621,27 @@ fn load_user_prompt_board_read_with(
         Ok(Ok(read)) => PromptBoardReadOutcome {
             read,
             succeeded: true,
+            status: "ok",
         },
-        Ok(Err(_))
-        | Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => PromptBoardReadOutcome {
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "prompt Board provider read failed");
+            PromptBoardReadOutcome {
+                read: PromptBoardRead::default(),
+                succeeded: false,
+                status: if error.to_string().contains("deadline expired") {
+                    "deadline"
+                } else {
+                    "provider-error"
+                },
+            }
+        }
+        Err(error) => PromptBoardReadOutcome {
             read: PromptBoardRead::default(),
             succeeded: false,
+            status: match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => "timeout",
+                std::sync::mpsc::RecvTimeoutError::Disconnected => "disconnected",
+            },
         },
     }
 }
@@ -621,10 +657,12 @@ fn load_user_prompt_board_read_inline_with(
         Ok(read) => PromptBoardReadOutcome {
             read,
             succeeded: true,
+            status: "ok",
         },
         Err(_) => PromptBoardReadOutcome {
             read: PromptBoardRead::default(),
             succeeded: false,
+            status: "provider-error",
         },
     }
 }
@@ -693,7 +731,8 @@ pub fn compute_plan(
         )
     };
     let outcome = if intent_event == IntentBoundaryEvent::UserPromptSubmit {
-        timed_substage(event, "board-reminder/board-read", || {
+        let started = Instant::now();
+        let outcome = {
             #[cfg(test)]
             {
                 if crate::board_provider::test_provider_override::has_forced_prompt_provider() {
@@ -706,15 +745,28 @@ pub fn compute_plan(
             {
                 load_user_prompt_board_read_with(load)
             }
-        })
+        };
+        super::diagnostics::record_handler_duration(
+            event,
+            "board-reminder/board-read",
+            started.elapsed(),
+            if outcome.read.retry_from_previous_cursor {
+                "partial"
+            } else {
+                outcome.status
+            },
+        );
+        outcome
     } else {
         PromptBoardReadOutcome {
             read: load()?,
             succeeded: true,
+            status: "ok",
         }
     };
     let board_read_succeeded = outcome.succeeded;
-    if board_read_succeeded {
+    let retry_board_cursor = outcome.read.retry_from_previous_cursor;
+    if board_read_succeeded && !retry_board_cursor {
         reminders.last_own_status_checked_at = Some(now);
         reminders.last_own_status_at = [
             reminders.last_own_status_at,
@@ -762,6 +814,16 @@ pub fn compute_plan(
         plan.output = replace_with_terminal_settlement_reminder(plan.output, intent_event);
     } else if is_resident_pm {
         plan.output = replace_with_pm_reminder(plan.output);
+    }
+    if intent_event != IntentBoundaryEvent::Stop {
+        if let Some(context) =
+            crate::board_read_receipts::pm_prompt_context(&session.worktree_path, &session.id)
+        {
+            if let HookOutput::HookSpecificAdditionalContext { text, .. } = &mut plan.output {
+                text.push_str("\n\n");
+                text.push_str(&context);
+            }
+        }
     }
 
     if emit_work_state_reminders {
@@ -813,6 +875,15 @@ pub fn compute_plan(
         board_read_succeeded,
         previous_last_injected_at,
     );
+    if retry_board_cursor {
+        plan.next_reminders.last_injected_at = previous_last_injected_at;
+    }
+    if emit_work_state_reminders {
+        // Naming is idempotent and the assigned name belongs to the window,
+        // not this Session snapshot. Only live producing sessions can call it;
+        // keep it ahead of the Work purpose reminder without nagging settled ones.
+        plan.output = prepend_pane_name_first_action_context(plan.output, intent_event);
+    }
 
     Ok(Some(plan))
 }
@@ -930,6 +1001,61 @@ mod tests {
     }
 
     #[test]
+    fn issue_3713_registered_pm_prompt_reports_unread_kinds_without_acknowledging() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let session = make_session(&repo, "work/pm", "PM");
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: session.id.clone(),
+                    agent_id: "codex".into(),
+                    worktree_path: repo.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for kind in [BoardEntryKind::Blocked, BoardEntryKind::Handoff] {
+            post_entry(
+                &repo,
+                BoardEntry::new(
+                    AuthorKind::Agent,
+                    "Peer",
+                    kind,
+                    "Symptom: pending.\nCause: ruling.\nRequest: decide.\nResume: reply.",
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+            )
+            .unwrap();
+        }
+        let first = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(
+            additional_context(&first.output).contains("Board unread: 2"),
+            "{:?}",
+            first.output
+        );
+        assert!(additional_context(&first.output).contains("blocked=1"));
+        assert!(additional_context(&first.output).contains("handoff=1"));
+        write_reminders_state(&repo, &session.id, &first.next_reminders).unwrap();
+        let second = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(additional_context(&second.output).contains("Board unread: 2"));
+    }
+
+    #[test]
     fn pm_runtime_hook_cwd_preserves_canonical_session_project() {
         let home = tempfile::tempdir().expect("home");
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -1028,6 +1154,45 @@ mod tests {
         e
     }
 
+    #[test]
+    fn ordinary_agents_are_told_to_name_themselves_before_work() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session = make_session(&repo, "work", "Codex");
+        save_projection(
+            &repo,
+            vec![WorkspaceAgentSummary {
+                title_summary: None,
+                ..workspace_agent(
+                    &session.id,
+                    Some("workspace-current"),
+                    WorkspaceAgentAffiliationStatus::Assigned,
+                )
+            }],
+        );
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            let plan = compute_plan(event, &session, Utc::now())
+                .expect("plan")
+                .expect("some plan");
+            let text = additional_context(&plan.output);
+            assert!(
+                text.contains(r#""operation":"pane.name""#),
+                "{event}: {text}"
+            );
+            assert!(text.contains("one-word ASCII English proper-name candidate"));
+            assert!(text.contains("already assigned"));
+            assert!(text
+                .contains(gwt_skills::coordination_guidance::PANE_NAME_FIRST_ACTION_GUIDANCE_EN));
+            assert!(
+                text.find(r#""operation":"pane.name""#)
+                    < text.find(r#""operation":"workspace.update""#),
+                "naming must precede the purpose update: {text}"
+            );
+        }
+    }
+
     /// SPEC-3431 FR-064: the resident PM gets no Work-state reminders.
     ///
     /// The title demand ("set title-summary as your first action, this is not
@@ -1064,6 +1229,10 @@ mod tests {
             HookOutput::HookSpecificAdditionalContext { text, .. } => text.clone(),
             other => panic!("expected additional context, got {other:?}"),
         };
+        assert!(
+            !text.contains("pane.name"),
+            "the PM must not be told to name itself:\n{text}"
+        );
         assert!(
             !text.contains("title-summary"),
             "the PM must not be told to set a work purpose:\n{text}"
@@ -1320,6 +1489,167 @@ mod tests {
     }
 
     #[test]
+    fn pm_board_context_succeeds_for_one_hundred_prompts_with_eight_writers() {
+        use gwt_core::coordination::CoordinationEvent;
+        use std::{fs::OpenOptions, io::Write, sync::mpsc};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let session = make_session(&repo, "work/pm", "PM");
+        let agents = (0..8)
+            .map(|index| {
+                workspace_agent(
+                    &format!("agent-{index}"),
+                    Some("workspace-current"),
+                    WorkspaceAgentAffiliationStatus::Assigned,
+                )
+            })
+            .collect();
+        save_projection(&repo, agents);
+        let root = gwt_core::coordination::coordination_dir(&repo);
+        let segments = root.join("events");
+        std::fs::create_dir_all(&segments).unwrap();
+        let path = segments.join("0000000000000001.jsonl");
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        let base = Utc::now() - chrono::Duration::days(1);
+        for index in 0..12_000 {
+            let event = CoordinationEvent::MessageAppended {
+                entry: entry(
+                    "Fixture",
+                    BoardEntryKind::Status,
+                    &"x".repeat(1024),
+                    "work/fixture",
+                    "fixture",
+                    base + chrono::Duration::seconds(index),
+                ),
+            };
+            serde_json::to_writer(&mut file, &event).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        file.flush().unwrap();
+        drop(file);
+        let previous = Utc::now() - chrono::Duration::seconds(1);
+        let state = RemindersState {
+            last_injected_at: Some(previous),
+            last_own_status_checked_at: Some(previous),
+            ..RemindersState::default()
+        };
+        write_reminders_state(&repo, &session.id, &state).unwrap();
+        let pending = CoordinationEvent::MessageAppended {
+            entry: entry(
+                "Agent-0",
+                BoardEntryKind::Status,
+                "pending-append",
+                "work/fixture",
+                "agent-0",
+                Utc::now(),
+            ),
+        };
+        let mut pending = serde_json::to_vec(&pending).unwrap();
+        pending.push(b'\n');
+        let split = pending.len() / 2;
+        let mut append = OpenOptions::new().append(true).open(&path).unwrap();
+        append.write_all(&pending[..split]).unwrap();
+        let partial = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial.next_reminders.last_injected_at, Some(previous));
+        assert_eq!(
+            partial.next_reminders.last_own_status_checked_at,
+            Some(previous)
+        );
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = partial.output else {
+            panic!("partial context must still be available");
+        };
+        assert!(!text.contains("Board context unavailable"), "{text}");
+        append.write_all(&pending[split..]).unwrap();
+        drop(append);
+        let file = std::sync::Arc::new(std::sync::Mutex::new(
+            OpenOptions::new().append(true).open(&path).unwrap(),
+        ));
+        let mut controls = Vec::new();
+        let (ack, done) = mpsc::channel();
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let (send, receive) = mpsc::channel();
+            controls.push(send);
+            let ack = ack.clone();
+            let file = file.clone();
+            workers.push(std::thread::spawn(move || {
+                for turn in receive {
+                    let event = CoordinationEvent::MessageAppended {
+                        entry: entry(
+                            &format!("Agent-{index}"),
+                            BoardEntryKind::Status,
+                            &format!("agent-{index}-turn-{turn}"),
+                            "work/fixture",
+                            &format!("agent-{index}"),
+                            Utc::now(),
+                        ),
+                    };
+                    let mut bytes = serde_json::to_vec(&event).unwrap();
+                    bytes.push(b'\n');
+                    file.lock().unwrap().write_all(&bytes).unwrap();
+                    ack.send(()).unwrap();
+                }
+            }));
+        }
+        let mut max_elapsed = Duration::ZERO;
+        let mut seen = std::collections::HashSet::new();
+        for turn in 0usize..100 {
+            for control in &controls {
+                control.send(turn).unwrap();
+            }
+            let started = Instant::now();
+            let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+                .unwrap()
+                .unwrap();
+            max_elapsed = max_elapsed.max(started.elapsed());
+            let HookOutput::HookSpecificAdditionalContext { text, .. } = plan.output else {
+                panic!("prompt must inject Board context");
+            };
+            assert!(
+                !text.contains("Board context unavailable"),
+                "turn {turn}: {text}"
+            );
+            if turn == 0 {
+                assert!(text.contains("pending-append"), "{text}");
+            }
+            for observed_turn in turn.saturating_sub(1)..=turn {
+                for index in 0..8 {
+                    if text.contains(&format!("agent-{index}-turn-{observed_turn}")) {
+                        seen.insert((index, observed_turn));
+                    }
+                }
+            }
+            write_reminders_state(&repo, &session.id, &plan.next_reminders).unwrap();
+            for _ in 0..8 {
+                done.recv().unwrap();
+            }
+        }
+        drop(controls);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let final_plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = final_plan.output else {
+            panic!("final pending delta must be available");
+        };
+        assert!(!text.contains("Board context unavailable"), "{text}");
+        for index in 0..8 {
+            if text.contains(&format!("agent-{index}-turn-99")) {
+                seen.insert((index, 99));
+            }
+        }
+        assert_eq!(seen.len(), 800, "every concurrent post must reach a prompt");
+        eprintln!("8 concurrent Board writers, 100 prompts: failures=0, delivered=800, max={max_elapsed:?}");
+    }
+
+    #[test]
     fn user_prompt_board_read_inherits_deadline_and_fails_open() {
         let outcome = load_user_prompt_board_read_with(|| {
             let deadline = gwt_core::operation_deadline::current()
@@ -1335,6 +1665,7 @@ mod tests {
 
         assert_eq!(outcome.read, PromptBoardRead::default());
         assert!(!outcome.succeeded);
+        assert_eq!(outcome.status, "provider-error");
     }
 
     #[test]
@@ -1347,9 +1678,10 @@ mod tests {
         });
 
         assert!(!outcome.succeeded);
+        assert_eq!(outcome.status, "timeout");
         assert!(
             started.elapsed() < std::time::Duration::from_millis(250),
-            "Board parent must not join a decoder past its 25ms child budget",
+            "Board parent must not join a decoder past its bounded child budget",
         );
     }
 

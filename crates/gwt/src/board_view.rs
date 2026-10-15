@@ -108,6 +108,7 @@ mod tests {
             dynamic_title: None,
             dynamic_title_detail: None,
             agent_id: None,
+            agent_name: None,
             agent_color: None,
             worktree_form: gwt::WindowWorktreeForm::Unknown,
             tab_group_id: None,

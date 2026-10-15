@@ -323,9 +323,14 @@ fn knowledge_and_work_presets_carry_distinguishable_window_titles() {
     assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
     assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
 
-    // SPEC-3671 FR-016 / 受け入れシナリオ 10: the Work surface stays offerable
-    // while any Work information has not moved to the Issue row.
-    assert!(WindowPreset::ALL.contains(&WindowPreset::Work));
+    // Issue #5321: persisted Work metadata remains readable, while Settings
+    // owns the current Issue-family entrypoint.
+    assert!(!WindowPreset::ALL.contains(&WindowPreset::Work));
+    assert!(WindowPreset::ALL.contains(&WindowPreset::Settings));
+    assert_eq!(
+        WindowPreset::Work.canonical_surface_preset(),
+        WindowPreset::Settings
+    );
 }
 
 #[test]

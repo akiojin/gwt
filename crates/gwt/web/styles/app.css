@@ -473,6 +473,7 @@ body {
 .workspace-window.surface-mock,
 .workspace-window.surface-work,
 .workspace-window.surface-knowledge,
+.workspace-window.surface-settings,
 .workspace-window.surface-index,
 .workspace-window.surface-profile,
 .workspace-window.surface-console {
@@ -504,6 +505,7 @@ body {
 .surface-logs .titlebar,
 .surface-mock .titlebar,
 .surface-knowledge .titlebar,
+.surface-settings .titlebar,
 .surface-index .titlebar,
 .surface-work .titlebar,
 .surface-profile .titlebar,
@@ -631,6 +633,7 @@ body {
 .surface-board .status-chip,
 .surface-logs .status-chip,
 .surface-knowledge .status-chip,
+.surface-settings .status-chip,
 .surface-index .status-chip,
 .surface-work .status-chip,
 .surface-profile .status-chip,
@@ -697,6 +700,7 @@ body {
 .surface-board .icon-button,
 .surface-logs .icon-button,
 .surface-knowledge .icon-button,
+.surface-settings .icon-button,
 .surface-index .icon-button,
 .surface-work .icon-button,
 .surface-profile .icon-button,
@@ -799,6 +803,7 @@ body {
 .surface-board .window-body,
 .surface-logs .window-body,
 .surface-knowledge .window-body,
+.surface-settings .window-body,
 .surface-index .window-body,
 .surface-work .window-body,
 .surface-console .window-body,
@@ -2098,6 +2103,12 @@ body {
 
 .knowledge-list {
   display: grid;
+}
+
+.knowledge-virtual-spacer {
+  flex: 0 0 auto;
+  pointer-events: none;
+  overflow-anchor: none;
 }
 
 .knowledge-state-filter {

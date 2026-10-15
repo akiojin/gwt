@@ -2388,9 +2388,9 @@ fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
     );
     assert!(
         html.contains(
-            "[\"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
+            "[\"settings\", \"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
         ) && html.contains("return \"issue\";"),
-        "expected legacy SPEC, Issue Monitor and Workspace presets to open the unified Issue view",
+        "expected Settings and legacy aliases to share Issue knowledge contracts",
     );
 }
 
@@ -4236,7 +4236,7 @@ fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
                 || settled_feedback.contains("event.message"))
             && settled_feedback.contains("dismissible: true")
             && settled_feedback.contains("timeoutMs: 0")
-            && settled_feedback.contains("scheduleKnowledgeRelatedWorkRefresh()"),
+            && settled_feedback.contains("scheduleKnowledgeRelatedWorkRefresh(true)"),
         "only an exactly-settled shipped Resume error may show sticky feedback and schedule a cache-first Related Work refresh",
     );
     assert_eq!(
@@ -4251,7 +4251,7 @@ fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
     );
     assert_eq!(
         error_case
-            .matches("scheduleKnowledgeRelatedWorkRefresh()")
+            .matches("scheduleKnowledgeRelatedWorkRefresh(true)")
             .count(),
         1,
         "the shipped Resume error case must not refresh outside the exact-settle guard",
@@ -4262,7 +4262,7 @@ fn embedded_web_issue_related_work_resume_is_correlated_and_recoverable() {
         .and_then(|tail| tail.split("function applyLocalKnowledgeFilter").next())
         .expect("bounded Related Work refresh scheduler");
     assert!(
-        regex::Regex::new(r"requestKnowledgeBridge\(windowId,\s*knowledgeKind,\s*false\)",)
+        regex::Regex::new(r"requestKnowledgeBridge\(windowId,\s*state\.kind,\s*false\)",)
             .expect("cache-first refresh regex")
             .is_match(related_refresh),
         "the shipped Related Work refresh scheduler must stay cache-first",

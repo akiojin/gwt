@@ -23,11 +23,12 @@ pub(super) use gh::{
     edit_or_create_repo_guard, edit_pr_via_gh, extract_pr_url, fetch_current_pr_via_gh,
     fetch_pr_checks_via_gh, fetch_pr_head_sha_via_gh, fetch_pr_quarantine_context_via_gh,
     fetch_pr_review_thread_state_via_gh, fetch_pr_review_threads_via_gh, fetch_pr_reviews_via_gh,
-    mark_pr_ready_via_gh, parse_available_fields, parse_github_remote_url as parse_pr_remote_url,
-    parse_pr_checks_items_json, parse_pr_checks_items_response, parse_pr_number_from_url,
-    probe_github_rate_limit_via_gh, reply_and_resolve_pr_review_threads_via_gh,
-    resolve_pr_fork_url_via_gh, review_thread_has_comment_body, should_reply_to_review_thread,
-    should_resolve_review_thread, update_branch_failure_is_conflict, update_pr_branch_via_gh,
+    mark_pr_ready_via_gh, number_is_issue_via_gh, parse_available_fields,
+    parse_github_remote_url as parse_pr_remote_url, parse_pr_checks_items_json,
+    parse_pr_checks_items_response, parse_pr_number_from_url, probe_github_rate_limit_via_gh,
+    reply_and_resolve_pr_review_threads_via_gh, resolve_pr_fork_url_via_gh,
+    review_thread_has_comment_body, should_reply_to_review_thread, should_resolve_review_thread,
+    update_branch_failure_is_conflict, update_pr_branch_via_gh,
 };
 
 use gwt_git::PrStatus;
@@ -897,10 +898,43 @@ pub(super) fn run<E: CliEnv>(
             if let Some(verified) = verified {
                 match env.fetch_pr_head_sha(number) {
                     Ok(Some(remote)) => {
-                        let state = if remote == verified { "matched" } else { "drift" };
-                        out.push_str(&format!("PR head comparison: verified_head={verified} remote_head={remote} classification={state}\n"));
-                        if state == "drift" {
-                            out.push_str("PR head drift detected. Record this comparison with pr.comment or issue.comment; fast-forward locally and rerun verify.plan / verify.run before claiming the current PR snapshot is verified.\n");
+                        let base = env.fetch_completion_pr(number)
+                            .ok()
+                            .map(|snapshot| snapshot.inventory.base_ref_name);
+                        let head = retained.as_ref()
+                            .map(|check| check.head_branch.as_str())
+                            .unwrap_or(&pr.head_ref_name);
+                        let check = base.and_then(|base| {
+                            env.inspect_pr_head(&base, Some(head), &verified).ok().flatten()
+                        })
+                            .filter(|check| check.remote_head == remote);
+                        let state = check.as_ref()
+                            .map(|check| check.classification.as_str())
+                            .unwrap_or_else(|| {
+                                if remote == verified {
+                                    "matched"
+                                } else if crate::cli::verification_record::preserves_verified_head(
+                                    env.repo_path(), &verified, &remote,
+                                ) {
+                                    "bookkeeping_or_base_sync"
+                                } else {
+                                    "drift"
+                                }
+                            });
+                        let local_fresh = crate::cli::verification_record::load(env.repo_path())
+                            .ok().flatten().is_some_and(|record| {
+                                record.verified_head.as_deref() == Some(verified.as_str())
+                                    && matches!(
+                                        crate::cli::verification_record::evaluate_evidence(
+                                            env.repo_path(), &record.session_id, record.owner_number,
+                                        ),
+                                        crate::cli::verification_record::EvidenceStatus::Fresh
+                                            | crate::cli::verification_record::EvidenceStatus::FreshWithQuarantine
+                                    )
+                            });
+                        out.push_str(&format!("PR head comparison: verified_head={verified} remote_head={remote} classification={state} local_verification_fresh={local_fresh}\n"));
+                        if !matches!(state, "matched" | "bookkeeping_or_base_sync") {
+                            out.push_str("PR head drift detected (classification=drift). Record this comparison with pr.comment or issue.comment; fast-forward locally and rerun verify.plan / verify.run before claiming the current PR snapshot is verified.\n");
                         }
                     }
                     result => out.push_str(&format!("PR head comparison: verified_head={verified} remote_head=unknown ({result:?})\n")),
@@ -1621,6 +1655,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
         .iter()
         .map(|item| {
             let mut row = serde_json::json!({
+                "kind": "pull_request",
                 "number": item.number,
                 "title": item.title,
                 "url": item.url,
@@ -1742,7 +1777,7 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
 }
 
 pub(super) fn render_pr(out: &mut String, pr: &PrStatus) {
-    out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
+    out.push_str(&format!("PR #{} [{}] {}\n", pr.number, pr.state, pr.title));
     out.push_str(&format!("url: {}\n", pr.url));
     // SPEC #3835 AC-1: without the head branch the PM had to list every remote
     // `work/*` ref and match commit subjects to find the PR's owner.
@@ -3536,6 +3571,30 @@ mod tests {
             crate::cli::verification_record::EvidenceStatus::Fresh
         );
 
+        // #5278: the actual PR receipt commit, rather than the old verified
+        // SHA, must also be admissible without another verification run.
+        git(&["add", "--", ".gwt/work/events"]);
+        fixture.commit("chore(work): deliver PR receipt");
+        fixture.push();
+        let receipt_head = String::from_utf8(
+            gwt_core::process::hidden_command("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&fixture.repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_ne!(
+            Some(receipt_head.as_str()),
+            verified.verified_head.as_deref()
+        );
+        env.completion_prs.get_mut(&7).unwrap().head_sha = receipt_head;
+        let admission = crate::cli::completion_pr::admit(&mut env, session_id, Some(42), &mut out);
+        assert!(admission.is_ok(), "{admission:?}: {out}");
+
         // #5216: a review Session may resume this same Work after final Done.
         // Its immutable shard must survive delivery without another commit/PR.
         let mut resume = gwt_core::workspace_projection::WorkEvent::new(
@@ -4607,6 +4666,7 @@ mod tests {
         });
         let mut out = String::new();
         render_pr(&mut out, &pr);
+        assert!(out.starts_with("PR #7 [OPEN]"), "{out}");
         assert!(out.contains("head_ref_name: work/issue-3712"), "{out}");
         assert!(
             out.contains("checks: 16 success / 0 failure / 2 skipped / 0 in_progress (of 18)"),
@@ -4675,6 +4735,7 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(env.pr_list_call_count, 1);
         let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(payload["pull_requests"][0]["kind"], "pull_request");
         assert_eq!(
             payload["pull_requests"][0]["owner_issue_source"],
             "head_branch"

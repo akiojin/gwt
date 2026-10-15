@@ -2,9 +2,70 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use gwt_agent::{Session, SessionLaunchOrigin, SessionRuntimeState};
 use serde::{Deserialize, Serialize};
+
+struct CachedRuntime {
+    modified: SystemTime,
+    size: u64,
+    value: Result<Arc<SessionRuntimeState>, String>,
+}
+
+static RUNTIME_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, CachedRuntime>>> = OnceLock::new();
+
+/// Cache decoded sidecars only. Process identity/liveness is never cached.
+fn cached_runtime(path: &Path) -> std::io::Result<Arc<SessionRuntimeState>> {
+    let mut cache = RUNTIME_CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stamp = |path| {
+        let metadata = std::fs::metadata(path)?;
+        Ok::<_, std::io::Error>((metadata.modified()?, metadata.len()))
+    };
+    let (modified, size) = match stamp(path) {
+        Ok(stamp) => stamp,
+        Err(error) => {
+            cache.remove(path);
+            return Err(error);
+        }
+    };
+    if let Some(hit) = cache
+        .get(path)
+        .filter(|hit| hit.modified == modified && hit.size == size)
+    {
+        return hit
+            .value
+            .clone()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+    }
+    let value = match SessionRuntimeState::load(path) {
+        Ok(runtime) => Ok(Arc::new(runtime)),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Err(error.to_string()),
+        Err(error) => {
+            // Retry transient I/O failures even if the file stamp is unchanged.
+            cache.remove(path);
+            return Err(error);
+        }
+    };
+    cache.remove(path);
+    // A writer may atomically replace the sidecar during the read. Never memoize
+    // that result against a stamp that no longer describes the file.
+    if stamp(path).is_ok_and(|after| after == (modified, size)) {
+        cache.insert(
+            path.to_path_buf(),
+            CachedRuntime {
+                modified,
+                size,
+                value: value.clone(),
+            },
+        );
+    }
+    value.map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionObservation {
@@ -66,7 +127,7 @@ pub fn observe_machine_sessions(sessions_dir: &Path) -> MachineSessionInventory 
         if !uncertainty.reason.starts_with("session_unreadable:") {
             return true;
         }
-        let Ok(runtime) = SessionRuntimeState::load(&uncertainty.runtime_path) else {
+        let Ok(runtime) = cached_runtime(&uncertainty.runtime_path) else {
             return true;
         };
         let Some(host_pid) = uncertainty
@@ -331,7 +392,7 @@ fn observe_live_candidates(
         .uncertainties
         .iter()
         .filter(|row| row.reason.starts_with("session_unreadable:"))
-        .filter_map(|row| SessionRuntimeState::load(&row.runtime_path).ok())
+        .filter_map(|row| cached_runtime(&row.runtime_path).ok())
         .filter_map(|runtime| runtime.child_pid)
         .collect::<Vec<_>>();
     let named = candidates
@@ -441,7 +502,18 @@ fn observe_with_processes(
     group_alive: impl Fn(u32) -> bool,
 ) -> SessionInventory {
     let mut inventory = SessionInventory::default();
-    let candidates = read_candidates(project_root, sessions_dir, None, &mut inventory);
+    let candidates = read_candidates_with_liveness(
+        Some(project_root),
+        sessions_dir,
+        None,
+        &mut inventory,
+        |host_pid, runtime| {
+            processes.contains_key(&host_pid)
+                || runtime
+                    .child_pid
+                    .is_some_and(|pid| processes.contains_key(&pid) || group_alive(pid))
+        },
+    );
     observe_candidates(
         candidates,
         processes,
@@ -457,7 +529,7 @@ struct RuntimeCandidate {
     host_pid: u32,
     path: PathBuf,
     session: Session,
-    runtime: SessionRuntimeState,
+    runtime: Arc<SessionRuntimeState>,
 }
 
 struct LegacyProcessObservation {
@@ -535,12 +607,68 @@ fn read_candidates_scope(
     session_id: Option<&str>,
     inventory: &mut SessionInventory,
 ) -> Vec<RuntimeCandidate> {
+    let mut process_evidence = None;
+    read_candidates_with_liveness(
+        project_root,
+        sessions_dir,
+        session_id,
+        inventory,
+        |host_pid, runtime| {
+            if crate::process::is_host_process_alive(host_pid)
+                || runtime.child_pid.filter(|pid| *pid > 0).is_some_and(|pid| {
+                    crate::process::is_host_process_alive(pid)
+                        || crate::process::is_process_group_alive(pid)
+                })
+            {
+                return true;
+            }
+            // A legacy orphan may have no recorded child PID. Preserve the
+            // parent-PID evidence used by missing-ledger recovery, including
+            // Windows, where a child's parent PID survives its parent's exit.
+            // All sidecars have been read before this callback. Retain live
+            // PIDs too: a Host can spawn a child and exit after the snapshot
+            // but before its direct probe. Never collect environments.
+            let (observed, pids) = process_evidence.get_or_insert_with(|| {
+                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+                let mut system = System::new();
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::nothing(),
+                );
+                (
+                    !system.processes().is_empty(),
+                    system
+                        .processes()
+                        .keys()
+                        .map(|pid| pid.as_u32())
+                        .chain(
+                            system
+                                .processes()
+                                .values()
+                                .filter_map(|process| process.parent().map(|pid| pid.as_u32())),
+                        )
+                        .collect::<BTreeSet<_>>(),
+                )
+            });
+            !*observed || pids.contains(&host_pid)
+        },
+    )
+}
+
+fn read_candidates_with_liveness(
+    project_root: Option<&Path>,
+    sessions_dir: &Path,
+    session_id: Option<&str>,
+    inventory: &mut SessionInventory,
+    mut may_be_live: impl FnMut(u32, &SessionRuntimeState) -> bool,
+) -> Vec<RuntimeCandidate> {
     let project_root = project_root.map(normalized);
     let repo_hash = project_root
         .as_deref()
         .and_then(gwt_core::repo_hash::detect_repo_identity)
         .map(|identity| identity.hash.as_str().to_string());
-    let mut candidates = Vec::new();
+    let mut runtimes = Vec::new();
     for namespace in read_paths(&sessions_dir.join("runtime"), inventory) {
         let Some(host_pid) = namespace
             .file_name()
@@ -569,36 +697,69 @@ fn read_candidates_scope(
             if session_id.is_some_and(|expected| expected != id) {
                 continue;
             }
-            let session = match Session::load(&sessions_dir.join(format!("{id}.toml"))) {
-                Ok(session) => session,
-                Err(error) => {
-                    inventory.uncertain(&path, Some(id), format!("session_unreadable: {error}"));
-                    continue;
-                }
-            };
-            let same_repo = repo_hash
-                .as_ref()
-                .is_some_and(|hash| session.repo_hash.as_ref() == Some(hash));
-            let same_root = normalized(
-                session
-                    .project_state_root
-                    .as_deref()
-                    .unwrap_or(&session.worktree_path),
-            );
-            let same_root = project_root.as_ref().is_some_and(|root| same_root == *root);
-            if project_root.is_some() && !same_repo && !same_root {
+            // Read every small sidecar before taking any process snapshot so
+            // children published during the scan are not compared with an
+            // older parent-PID inventory. No Session ledger is retained here.
+            let runtime = cached_runtime(&path);
+            runtimes.push((host_pid, path, runtime));
+        }
+    }
+    if session_id.is_none() {
+        // Full sweeps drop files that GC or a Host removed. A filtered recovery
+        // observation must not evict other Sessions' entries.
+        let root = sessions_dir.join("runtime");
+        let seen = runtimes
+            .iter()
+            .map(|(_, path, _)| path.as_path())
+            .collect::<BTreeSet<_>>();
+        if let Some(cache) = RUNTIME_CACHE.get() {
+            cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|path, _| !path.starts_with(&root) || seen.contains(path.as_path()));
+        }
+    }
+    let mut candidates = Vec::new();
+    for (host_pid, path, runtime) in runtimes {
+        let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if runtime
+            .as_ref()
+            .is_ok_and(|runtime| !may_be_live(host_pid, runtime))
+        {
+            continue;
+        }
+        // Preserve the original ledger/scope/error priority for uncertain rows.
+        let session = match Session::load(&sessions_dir.join(format!("{id}.toml"))) {
+            Ok(session) => session,
+            Err(error) => {
+                inventory.uncertain(&path, Some(id), format!("session_unreadable: {error}"));
                 continue;
             }
-            match SessionRuntimeState::load(&path) {
-                Ok(runtime) => candidates.push(RuntimeCandidate {
-                    host_pid,
-                    path,
-                    session,
-                    runtime,
-                }),
-                Err(error) => {
-                    inventory.uncertain(&path, Some(id), format!("runtime_unreadable: {error}"))
-                }
+        };
+        let same_repo = repo_hash
+            .as_ref()
+            .is_some_and(|hash| session.repo_hash.as_ref() == Some(hash));
+        let same_root = normalized(
+            session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path),
+        );
+        let same_root = project_root.as_ref().is_some_and(|root| same_root == *root);
+        if project_root.is_some() && !same_repo && !same_root {
+            continue;
+        }
+        match runtime {
+            Ok(runtime) => candidates.push(RuntimeCandidate {
+                host_pid,
+                path,
+                session,
+                runtime,
+            }),
+            Err(error) => {
+                inventory.uncertain(&path, Some(id), format!("runtime_unreadable: {error}"))
             }
         }
     }
@@ -824,6 +985,243 @@ mod tests {
     use gwt_agent::{AgentId, AgentStatus};
 
     #[test]
+    fn runtime_cache_reuses_only_matching_mtime_and_size() {
+        use std::{
+            fs,
+            sync::Arc,
+            time::{Duration, SystemTime},
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.json");
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Running);
+        runtime.save(&path).unwrap();
+        let stamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let set_modified = |stamp| {
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(stamp))
+                .unwrap();
+        };
+        set_modified(stamp);
+        let first = cached_runtime(&path).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &cached_runtime(&path).unwrap()),
+            "unchanged runtime must not be reparsed"
+        );
+
+        set_modified(stamp + Duration::from_secs(1));
+        let touched = cached_runtime(&path).unwrap();
+        assert!(
+            !Arc::ptr_eq(&first, &touched),
+            "mtime changes invalidate the cache"
+        );
+        runtime.source_event = Some("size changed".to_string());
+        runtime.save(&path).unwrap();
+        set_modified(stamp + Duration::from_secs(1));
+        let resized = cached_runtime(&path).unwrap();
+        assert_eq!(resized.source_event.as_deref(), Some("size changed"));
+        assert!(
+            !Arc::ptr_eq(&touched, &resized),
+            "size changes invalidate even with preserved mtime"
+        );
+
+        fs::write(&path, b"invalid runtime").unwrap();
+        assert!(
+            cached_runtime(&path).is_err(),
+            "malformed replacements must not reuse a success"
+        );
+        runtime.save(&path).unwrap();
+        assert_eq!(
+            cached_runtime(&path).unwrap().source_event,
+            runtime.source_event
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            cached_runtime(&path).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn cached_runtime_still_rechecks_child_and_group_liveness() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        save_runtime(
+            &sessions,
+            temp.path(),
+            temp.path(),
+            "orphan",
+            Some((201, 20)),
+        );
+        let live =
+            observe_with_processes(temp.path(), &sessions, &BTreeMap::from([(201, 20)]), |_| {
+                false
+            });
+        assert_eq!(live.sessions.len(), 1);
+        let group =
+            observe_with_processes(temp.path(), &sessions, &BTreeMap::new(), |pid| pid == 201);
+        assert_eq!(
+            group.uncertainties[0].reason,
+            "child_exited_with_live_process_group"
+        );
+        let dead = observe_with_processes(temp.path(), &sessions, &BTreeMap::new(), |_| false);
+        assert!(dead.sessions.is_empty());
+        assert!(dead.uncertainties.is_empty());
+    }
+
+    #[test]
+    fn session_inventory_691_namespaces_cpu() {
+        use std::time::Instant;
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Stopped);
+        runtime.host_started_at = Some(1);
+        runtime.source_event = Some("x".repeat(2400));
+        let json = serde_json::to_vec_pretty(&runtime).unwrap();
+        for index in 0..4047 {
+            let path = gwt_agent::runtime_state_path_for_pid(
+                &sessions,
+                2_000_000_000 + index % 691,
+                &format!("history-{index}"),
+            );
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &json).unwrap();
+        }
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        let mut cpu_ms = || {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                true,
+                ProcessRefreshKind::nothing().with_cpu(),
+            );
+            system.process(pid).unwrap().accumulated_cpu_time()
+        };
+        for pass in ["cold", "warm", "warm-repeat"] {
+            let cpu_before = cpu_ms();
+            let started = Instant::now();
+            let inventory = observe_sessions(temp.path(), &sessions);
+            let wall = started.elapsed();
+            let cpu = cpu_ms() - cpu_before;
+            assert!(inventory.sessions.is_empty());
+            assert!(inventory.uncertainties.is_empty());
+            eprintln!(
+                "691 folders / 4047 files / {} bytes: {pass} observe CPU={cpu}ms wall={wall:?}",
+                json.len() * 4047
+            );
+        }
+    }
+
+    #[test]
+    fn absent_host_and_child_skip_session_ledger_without_removing_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, 2_000_000_000, "dead");
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Stopped);
+        runtime.child_pid = Some(2_000_000_001);
+        runtime.child_started_at = Some(20);
+        runtime.save(&path).unwrap();
+        std::fs::write(sessions.join("dead.toml"), "invalid Session TOML").unwrap();
+
+        let mut inventory = SessionInventory::default();
+        let candidates = read_candidates_scope(None, &sessions, None, &mut inventory);
+
+        assert!(candidates.is_empty());
+        assert!(
+            inventory.uncertainties.is_empty(),
+            "a definitively dead namespace must not decode its Session ledger: {:?}",
+            inventory.uncertainties
+        );
+        assert!(path.exists(), "census is read-only; GC belongs to #5384");
+    }
+
+    #[test]
+    fn all_sidecars_are_read_before_the_liveness_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        save_runtime(&sessions, temp.path(), temp.path(), "first", None);
+        save_runtime(
+            &sessions,
+            temp.path(),
+            temp.path(),
+            "later",
+            Some((201, 20)),
+        );
+        let later = gwt_agent::runtime_state_path_for_pid(&sessions, 100, "later");
+        let mut inventory = SessionInventory::default();
+        let candidates =
+            read_candidates_with_liveness(None, &sessions, None, &mut inventory, |_, runtime| {
+                if runtime.child_pid.is_none() {
+                    // Model publication after the first liveness observation.
+                    // The later sidecar must already have been captured.
+                    std::fs::write(&later, b"changed after observation").unwrap();
+                }
+                runtime.child_pid == Some(201)
+            });
+        assert!(
+            inventory.uncertainties.is_empty(),
+            "{:?}",
+            inventory.uncertainties
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].session.id, "later");
+    }
+
+    #[test]
+    fn orphan_child_keeps_live_count_and_missing_identity_uncertainty() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let mut session = Session::new(temp.path(), "orphan", AgentId::Codex);
+        session.id = "orphan".to_string();
+        session.project_state_root = Some(temp.path().to_path_buf());
+        session.save(&sessions).unwrap();
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, 2_000_000_000, &session.id);
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Running);
+        runtime.child_pid = Some(std::process::id());
+        runtime.child_started_at = crate::process::host_process_start_time(std::process::id());
+        assert!(runtime.child_started_at.is_some());
+        runtime.save(&path).unwrap();
+
+        let live = observe_sessions(temp.path(), &sessions);
+        assert_eq!(live.sessions.len(), 1);
+        assert_eq!(live.sessions[0].session_id, session.id);
+        assert!(live.uncertainties.is_empty());
+
+        runtime.child_started_at = None;
+        runtime.save(&path).unwrap();
+        let uncertain = observe_sessions(temp.path(), &sessions);
+        assert!(uncertain.sessions.is_empty());
+        assert_eq!(uncertain.uncertainties.len(), 1);
+        assert_eq!(uncertain.uncertainties[0].reason, "child_identity_missing");
+    }
+
+    #[test]
+    fn orphan_process_group_remains_uncertain_after_early_filtering() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        save_runtime(
+            &sessions,
+            temp.path(),
+            temp.path(),
+            "orphan-group",
+            Some((201, 20)),
+        );
+        let inventory =
+            observe_with_processes(temp.path(), &sessions, &BTreeMap::new(), |pid| pid == 201);
+        assert!(inventory.sessions.is_empty());
+        assert_eq!(inventory.uncertainties.len(), 1);
+        assert_eq!(
+            inventory.uncertainties[0].reason,
+            "child_exited_with_live_process_group"
+        );
+    }
+
+    #[test]
     fn namespace_pid_presence_without_recorded_host_identity_is_not_live_session_proof() {
         let mut runtime = SessionRuntimeState::new(AgentStatus::Stopped);
         assert!(
@@ -948,7 +1346,18 @@ mod tests {
         resources: &MachineProcessResources,
     ) -> MachineSessionInventory {
         let mut inventory = SessionInventory::default();
-        let candidates = read_candidates_scope(None, sessions_dir, None, &mut inventory);
+        let candidates = read_candidates_with_liveness(
+            None,
+            sessions_dir,
+            None,
+            &mut inventory,
+            |host_pid, runtime| {
+                processes.contains_key(&host_pid)
+                    || runtime
+                        .child_pid
+                        .is_some_and(|pid| processes.contains_key(&pid))
+            },
+        );
         let attribution = candidate_attribution(&candidates);
         observe_candidates(
             candidates,
@@ -1223,7 +1632,13 @@ mod tests {
         }
         save_runtime(&sessions, temp.path(), temp.path(), "live", Some((201, 20)));
         let mut observed = SessionInventory::default();
-        let candidates = read_candidates(temp.path(), &sessions, None, &mut observed);
+        let candidates = read_candidates_with_liveness(
+            Some(temp.path()),
+            &sessions,
+            None,
+            &mut observed,
+            |_, _| true,
+        );
         let processes = BTreeMap::from([(100, 99), (201, 20), (202, 0)]);
         observe_candidates(
             candidates,
@@ -1258,7 +1673,13 @@ mod tests {
         runtime.host_started_at = None;
         runtime.save(&path).unwrap();
         let mut inventory = SessionInventory::default();
-        let candidates = read_candidates(temp.path(), &sessions, None, &mut inventory);
+        let candidates = read_candidates_with_liveness(
+            Some(temp.path()),
+            &sessions,
+            None,
+            &mut inventory,
+            |_, _| true,
+        );
         let processes = BTreeMap::from([(100, 10), (201, 0)]);
         observe_candidates(
             candidates,
@@ -1348,7 +1769,13 @@ mod tests {
         ]);
         let observe = |processes: &BTreeMap<u32, u64>| {
             let mut inventory = SessionInventory::default();
-            let candidates = read_candidates(temp.path(), &sessions, None, &mut inventory);
+            let candidates = read_candidates_with_liveness(
+                Some(temp.path()),
+                &sessions,
+                None,
+                &mut inventory,
+                |_, _| true,
+            );
             observe_candidates(
                 candidates,
                 processes,

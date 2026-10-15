@@ -460,6 +460,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pane.name",
+        aliases: &[],
+    },
+    Operation {
         name: "pane.read",
         aliases: &[],
     },
@@ -501,6 +505,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pm.capabilities",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.peer.send",
         aliases: &[],
     },
     Operation {
@@ -633,6 +641,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "search",
+        aliases: &[],
+    },
+    Operation {
+        name: "update.settings.status",
         aliases: &[],
     },
     Operation {

@@ -48,6 +48,68 @@ test.describe("Issue Bridge load recovery", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("Issue #5395: projection snapshots update Related Work and hidden event bursts reload once on reveal", async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { includeRelatedWork: true, theme });
+    // With browser-check, every asset is served by the fresh checkout process.
+    await page.goto(liveBase ? new URL("p/0123456789abcdef", liveBase).href : APP_URL);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const loads = () => page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "load_knowledge_bridge").length);
+    const work = { id: "related-work-1", title: "Before snapshot", status_category: "idle",
+      branch: "work/issue-related-resume", worktree_path: "/fixture/work/issue-related-resume",
+      linked_issue_numbers: [3096], active_agents: 0, blocked_agents: 0,
+      agents: [], works: [], lifecycle_state: "active", board_refs: [] };
+    const beforeAssociation = await loads();
+    await page.evaluate(work => window.__issueBridgeFixtureSocket.emit({
+      kind: "active_work_projection", projection: { active_works: [work] },
+    }), work);
+    await expect.poll(loads).toBe(beforeAssociation + 1);
+    await page.locator(".knowledge-row[data-issue-number='3096']").click();
+    await expect(page.locator(".knowledge-related-work-title")).toBeVisible();
+    const beforeStatus = await loads();
+    await page.evaluate(work => window.__issueBridgeFixtureSocket.emit({
+      kind: "active_work_projection", projection: { active_works: [{ ...work, title: "After snapshot", status_category: "active" }] },
+    }), work);
+    await expect(page.locator(".knowledge-related-work-title")).toHaveText("After snapshot");
+    expect(await loads()).toBe(beforeStatus);
+    for (const hiddenBy of ["minimized", "inactive tab"]) {
+      const beforeHidden = await loads();
+      await page.evaluate(hiddenBy => {
+        const state = window.__issueBridgeWorkspaceState;
+        const issue = state.workspace.tabs[0].workspace.windows[0];
+        issue.minimized = hiddenBy === "minimized";
+        issue.tab_group_id = hiddenBy === "inactive tab" ? "knowledge-tabs" : null;
+        issue.tab_group_active = false;
+        window.__issueBridgeFixtureSocket.emit(state);
+        for (let agent = 0; agent < 8; agent++) {
+          window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_launch_failed" });
+          window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_inbox", items: [] });
+        }
+      }, hiddenBy);
+      await page.waitForTimeout(2200); // observe the complete real two-second debounce
+      expect(await loads()).toBe(beforeHidden);
+      await page.evaluate(() => {
+        const state = window.__issueBridgeWorkspaceState;
+        const issue = state.workspace.tabs[0].workspace.windows[0];
+        issue.minimized = false;
+        issue.tab_group_active = true;
+        window.__issueBridgeFixtureSocket.emit(state);
+      });
+      await expect.poll(loads).toBe(beforeHidden + 1);
+    }
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
+    expect(errors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("knowledge-event-refresh.png") });
+  });
+
   test("renders cached issues as an Issue list instead of lifecycle Kanban", async ({
     page,
   }) => {
@@ -118,16 +180,21 @@ test.describe("Issue Bridge load recovery", () => {
     ).toContainText("Launch agent");
   });
 
-  test("Issue auto refresh stays cache-first while browsing cached issues", async ({
+  test("Issue auto refresh reads only changed visible cache revisions (#5394)", async ({
     page,
-  }) => {
-    await installEmbeddedRoutes(page);
+  }, info) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
     await installIssueBridgeBackend(page, {
       errorOnForcedRefresh: true,
       triggerAutoRefreshOnce: true,
+      theme: info.project.name.includes("light") ? "light" : "dark",
     });
 
-    await page.goto(APP_URL);
+    await page.goto(base ? new URL(new URL(APP_URL).pathname, base).toString() : APP_URL);
 
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
     await page.locator(".surface-knowledge .knowledge-row[data-issue-number='3095']").click();
@@ -137,12 +204,38 @@ test.describe("Issue Bridge load recovery", () => {
     await page.waitForFunction(
       () => typeof window.__triggerKnowledgeAutoRefresh === "function",
     );
-    await page.evaluate(() => window.__triggerKnowledgeAutoRefresh());
-    await page.waitForFunction(() =>
-      window.__knowledgeLoadMessages?.filter(
-        (message) => message.kind === "load_knowledge_bridge",
-      ).length >= 2,
-    );
+    const counts = () => page.evaluate(() => ({
+      loads: window.__knowledgeLoadMessages.filter(message => message.kind === "load_knowledge_bridge").length,
+      probes: window.__knowledgeLoadMessages.filter(message => message.kind === "check_knowledge_revision").length,
+    }));
+    const initial = await counts();
+    const settle = () => page.evaluate(() => new Promise(resolve =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const row = await page.locator(".knowledge-row").first().elementHandle();
+    for (let tick = 0; tick < 3; tick++) {
+      await page.evaluate(() => window.__triggerKnowledgeAutoRefresh());
+      await expect.poll(async () => (await counts()).probes).toBe(initial.probes + tick + 1);
+      await settle();
+    }
+    expect((await counts()).loads).toBe(initial.loads);
+    expect(await row!.evaluate(node => node.isConnected)).toBe(true);
+
+    // Repeated hidden ticks perform neither probes nor list loads. A changed
+    // revision is consumed once on restoration through the real receive path.
+    for (const mode of ["hidden", "minimized", "inactive-tab", "document"]) {
+      await page.evaluate(mode => window.__setKnowledgeVisibility(mode, false), mode);
+      await settle();
+      const before = await counts();
+      await page.evaluate(() => {
+        window.__issueCacheRevision += "-changed";
+        for (let tick = 0; tick < 3; tick++) window.__triggerKnowledgeAutoRefresh();
+      });
+      expect(await counts()).toEqual(before);
+      await page.evaluate(mode => window.__setKnowledgeVisibility(mode, true), mode);
+      await expect.poll(async () => (await counts()).loads).toBe(before.loads + 1);
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      expect((await counts()).loads).toBe(before.loads + 1);
+    }
 
     // SPEC #3885 T-032: the Issue window has no status row; nothing turns red.
     await expect(page.locator(".surface-knowledge .knowledge-status")).toHaveCount(0);
@@ -155,6 +248,9 @@ test.describe("Issue Bridge load recovery", () => {
         .map((message) => message.refresh),
     );
     expect(refreshFlags).not.toContain(true);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-auto-refresh.png") });
   });
 
   test("requests cached issues when a stale detail exists but the list is empty", async ({
@@ -169,9 +265,16 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
   });
 
-  test("manual refresh recovers a stale empty loading state", async ({ page }) => {
+  test("manual refresh recovers after an empty cache load deadline", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     await installEmbeddedRoutes(page);
-    await installIssueBridgeBackend(page, { ignoreFirstLoad: true });
+    await installIssueBridgeBackend(page, {
+      ignoreFirstLoad: true,
+      theme: testInfo.project.name.includes("light") ? "light" : "dark",
+    });
+    await page.clock.install();
 
     await page.goto(APP_URL);
 
@@ -179,9 +282,16 @@ test.describe("Issue Bridge load recovery", () => {
       ".surface-knowledge [data-action='refresh-knowledge']",
     );
     await expect(refresh).toBeEnabled();
+    // Issue #5413: a pending read owns the load until the bounded deadline.
+    // Manual retry is available after that deadline, without overlapping reads.
+    await page.clock.runFor(5100);
+    await page.clock.fastForward(55_000);
+    await expect(page.getByRole("button", { name: /^Issue load failed/ })).toBeVisible();
     await refresh.click();
 
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
+    await expect(page.getByRole("button", { name: /^Issue load failed/ })).toHaveCount(0);
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 
   // Issue #4366 AC-6 / AC-6b: a provider hold never rewrites the saved Agent
@@ -202,7 +312,7 @@ test.describe("Issue Bridge load recovery", () => {
     await installIssueBridgeBackend(page, { theme });
     await page.goto(APP_URL);
 
-    const issueSurface = page.locator(".workspace-window.surface-knowledge");
+    const issueSurface = page.locator(".surface-knowledge");
     await expect(issueSurface).toBeVisible();
     // SPEC #3885 T-032: the settings and held-fallback lines are the two lines
     // of the ⚙ tooltip.
@@ -282,7 +392,7 @@ test.describe("Issue Bridge load recovery", () => {
 
     await page.goto(APP_URL);
 
-    const issueSurface = page.locator(".workspace-window.surface-knowledge");
+    const issueSurface = page.locator(".surface-knowledge");
     await expect(issueSurface).toBeVisible();
     await expect(page.locator(".surface-issue-monitor")).toHaveCount(0);
     await expect(
@@ -394,11 +504,10 @@ test.describe("Issue Bridge load recovery", () => {
       kind: "set_issue_monitor_autonomous_mode",
       enabled: true,
     });
-    // Issue #5322: the gear opens Settings instead of the profile wizard.
-    expect(messages).toContainEqual(expect.objectContaining({
-      kind: "create_window",
-      preset: "settings",
-    }));
+    // AC-M1: the gear expands options in the existing Settings window.
+    await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(1);
+    await expect(page.locator(".settings-issues-options")).toHaveAttribute("open", "");
+    expect(messages.filter(message => message.kind === "create_window")).toEqual([]);
     expect(messages).toContainEqual({
       kind: "quick_register_issue",
       title: "Investigate flaky release gate",
@@ -428,7 +537,7 @@ test.describe("Issue Bridge load recovery", () => {
 
     await page.goto(APP_URL);
 
-    const issueSurface = page.locator(".workspace-window.surface-knowledge");
+    const issueSurface = page.locator(".surface-knowledge");
     await expect(
       issueSurface.locator('[data-issue-number="3098"] .knowledge-row-badge'),
     ).toHaveText("Agent failed");
@@ -487,7 +596,7 @@ test.describe("Issue Bridge load recovery", () => {
     await installIssueBridgeBackend(page);
     await page.goto(APP_URL);
 
-    const issueSurface = page.locator(".workspace-window.surface-knowledge");
+    const issueSurface = page.locator(".surface-knowledge");
     const root = issueSurface.locator(".issue-bridge-root");
     await expect(issueSurface.locator(".knowledge-row")).toHaveCount(5);
 
@@ -630,7 +739,7 @@ test.describe("Issue Bridge load recovery", () => {
     expect(pageErrors).toEqual([]);
   });
 
-  test("redirects a persisted issue_monitor preset to the Issue surface", async ({
+  test("renders a backend-normalized restored Issue Monitor in Settings", async ({
     page,
   }) => {
     const consoleErrors: string[] = [];
@@ -641,16 +750,28 @@ test.describe("Issue Bridge load recovery", () => {
     page.on("pageerror", (error) => pageErrors.push(String(error)));
 
     await installEmbeddedRoutes(page);
-    await installIssueBridgeBackend(page, { legacyPreset: true });
+    // Persistence normalization is covered by the Rust backend tests. The
+    // browser receives the canonical Settings preset with the durable old id.
+    const restoredWindowId = "tab-issue::issue-monitor-legacy";
+    await installIssueBridgeBackend(page, { windowId: restoredWindowId });
 
     await page.goto(APP_URL);
 
-    await expect(page.locator(".workspace-window.surface-knowledge")).toBeVisible();
+    const settings = page.locator(`.workspace-window[data-id="${restoredWindowId}"]`);
+    await expect(settings).toHaveAttribute("data-preset", "settings");
+    await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(1);
+    await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
+    await expect(page.locator(".surface-knowledge")).toBeVisible();
     await expect(page.locator(".surface-issue-monitor")).toHaveCount(0);
     await expect(page.locator(".surface-knowledge .knowledge-heading")).toHaveText(
       "Cached work items",
     );
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
+    await settings.locator('.knowledge-row[data-issue-number="3095"] .knowledge-row-select').click();
+    await expect(settings.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
+    expect(await page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "select_knowledge_bridge_entry").at(-1)))
+      .toMatchObject({ id: restoredWindowId, knowledge_kind: "issue", number: 3095 });
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
@@ -896,6 +1017,32 @@ const SELECTION_FIRST_NUMBER = 4001;
 const SELECTION_ROW_COUNT = 500;
 const SELECTION_P95_BUDGET_MS = 50;
 
+test("Issue #5401 PR Kanban retains focus across phase columns and virtual destinations", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await installEmbeddedRoutes(page);
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  await installKnowledgeSelectionBackend(page, { preset: "pr", rowCount: 201, theme });
+  await page.goto(APP_URL);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expect(page.locator(".kanban-card").first()).toBeVisible();
+  const number = SELECTION_FIRST_NUMBER + 200;
+  const card = page.locator(`.kanban-card[data-issue-number="${number}"]`);
+  const move = (phase: string) => page.evaluate(({ number, phase }) =>
+    window.__kbFixture.moveEntry(number, phase), { number, phase });
+  await move("review");
+  await expect(card).toBeVisible();
+  await card.focus();
+  for (const phase of ["backlog", "review"]) {
+    await move(phase);
+    await expect(page.locator(`.kanban-column[data-phase="${phase}"]`).locator(card)).toHaveCount(1);
+    await expect(card).toBeFocused();
+    expect(await page.locator(".kanban-card").count()).toBeLessThan(200);
+  }
+  expect(errors, "zero console/page errors").toEqual([]);
+});
+
 test.describe("SPEC #3170 immediate selection under delayed and reversed responses", () => {
   test.use({
     deviceScaleFactor: 1,
@@ -913,9 +1060,8 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
       });
 
       await page.goto(APP_URL);
-      await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(
-        SELECTION_ROW_COUNT,
-      );
+      await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       // Distinct rows, striding across the list so consecutive clicks never
       // reuse the previous row and the stale 300 ms replies keep landing on
@@ -985,9 +1131,8 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
       });
 
       await page.goto(APP_URL);
-      await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(
-        SELECTION_ROW_COUNT,
-      );
+      await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       const first = SELECTION_FIRST_NUMBER + 3;
       const second = SELECTION_FIRST_NUMBER + 21;
@@ -1022,9 +1167,8 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
       });
 
       await page.goto(APP_URL);
-      await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(
-        SELECTION_ROW_COUNT,
-      );
+      await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       await page
         .locator(".surface-knowledge .knowledge-search")
@@ -1080,9 +1224,8 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
       });
 
       await page.goto(APP_URL);
-      await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(
-        SELECTION_ROW_COUNT,
-      );
+      await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       await page
         .locator(".surface-knowledge .knowledge-search")
@@ -1157,7 +1300,7 @@ async function measureKnowledgeSelectionLatency(
     }) => {
       const probe = window.__knowledgeSelectionProbe();
       const clickAndObserve = async (number, observeMs) => {
-        const row = probe.rowFor(number);
+        const row = await probe.rowFor(number);
         if (!row) {
           throw new Error(`row ${number} is not rendered`);
         }
@@ -1216,9 +1359,8 @@ async function runReversedKnowledgeSelection(page, { first, second, observeMs })
     async ({ first: a, second: b, observeMs: window_ }) => {
       const probe = window.__knowledgeSelectionProbe();
       const observer = { expected: null, mismatchedFrames: 0, staleBodyFrames: 0, frames: 0 };
-      const rowA = probe.rowFor(a);
-      const rowB = probe.rowFor(b);
-      if (!rowA || !rowB) {
+      const rowA = await probe.rowFor(a);
+      if (!rowA) {
         throw new Error("reversed-order fixture rows are not rendered");
       }
       const started = performance.now();
@@ -1243,6 +1385,8 @@ async function runReversedKnowledgeSelection(page, { first, second, observeMs })
         }
         const elapsed = performance.now() - started;
         if (observer.expected === a && elapsed >= 32) {
+          const rowB = await probe.rowFor(b);
+          if (!rowB) throw new Error(`row ${b} is not rendered`);
           observer.expected = b;
           clickedSecondAt = performance.now();
           rowB.click();
@@ -1269,9 +1413,9 @@ async function runReversedKnowledgeSelection(page, { first, second, observeMs })
 }
 
 async function clickKnowledgeRow(page, number) {
-  return await page.evaluate((target) => {
+  return await page.evaluate(async (target) => {
     const probe = window.__knowledgeSelectionProbe();
-    const row = probe.rowFor(target);
+    const row = await probe.rowFor(target);
     if (!row) {
       throw new Error(`row ${target} is not rendered`);
     }
@@ -1387,7 +1531,7 @@ async function installKnowledgeSelectionBackend(
                   {
                     id: fixtureWindowId,
                     title: fixtureWindowTitle,
-                    preset: windowPreset,
+                    preset: windowPreset === "issue" ? "settings" : windowPreset,
                     geometry: { x: 40, y: 60, width: 1320, height: 760 },
                     z_index: 1,
                     status: "running",
@@ -1424,6 +1568,12 @@ async function installKnowledgeSelectionBackend(
         socketOpenCount: 0,
         workspaceSent: false,
         activeSocket: null,
+        moveEntry(number, phase) {
+          entries.find(entry => entry.number === number).phase = phase;
+          fixture.activeSocket.emit({ kind: "knowledge_entries", id: fixtureWindowId,
+            knowledge_kind: "pr", request_id: fixture.loadRequests.at(-1).requestId,
+            entries, selected_number: null, refresh_enabled: true });
+        },
         closeSocketSilently() {
           // No `close` event: the frontend still believes it is online, so the
           // next retry hop has to detect the dead socket through readyState.
@@ -1451,10 +1601,27 @@ async function installKnowledgeSelectionBackend(
         }
         const pane = () => root.querySelector(".knowledge-detail-pane");
         return {
-          rowFor: (number) =>
-            root.querySelector(
+          rowFor: async (number) => {
+            const findRow = () => root.querySelector(
               `.knowledge-row[data-issue-number="${number}"] .knowledge-row-select`,
-            ),
+            );
+            if (findRow()) return findRow();
+            // Scroll the 500-entry fixture before measuring the click itself.
+            // Virtual rows enter the DOM only near the viewport; measured row
+            // heights can shift the initial proportional scroll estimate.
+            const list = root.querySelector(".knowledge-list-pane");
+            list.scrollTop = (number - fixtureFirstNumber) / fixtureRowCount * list.scrollHeight;
+            for (let attempt = 0; attempt < 100; attempt += 1) {
+              await new Promise(resolve => requestAnimationFrame(resolve));
+              const row = findRow();
+              if (row) return row;
+              const first = root.querySelector(".knowledge-row");
+              if (!first) break;
+              list.scrollTop += number < Number(first.dataset.issueNumber)
+                ? -list.clientHeight : list.clientHeight;
+            }
+            return null;
+          },
           nextFrame: () =>
             new Promise((resolve) => requestAnimationFrame(() => resolve(null))),
           identity: () => {
@@ -1866,7 +2033,7 @@ async function installIssueBridgeBackend(
     errorOnForcedRefresh = false,
     includeRelatedWork = false,
     ignoreFirstLoad = false,
-    legacyPreset = false,
+    windowId = "issue-kanban",
     staleDetailBeforeWorkspace = false,
     theme = null,
     triggerAutoRefreshOnce = false,
@@ -1882,13 +2049,14 @@ async function installIssueBridgeBackend(
       errorOnForcedRefresh: shouldErrorOnForcedRefresh,
       includeRelatedWork: shouldIncludeRelatedWork,
       ignoreFirstLoad: shouldIgnoreFirstLoad,
-      legacyPreset: shouldUseLegacyPreset,
+      windowId: fixtureWindowId,
       staleDetailBeforeWorkspace: shouldSeedStaleDetail,
       theme: selectedTheme,
       triggerAutoRefreshOnce: shouldTriggerAutoRefreshOnce,
       blackedOutFleet: shouldBlackOutFleet,
     }) => {
       window.__knowledgeLoadMessages = [];
+      window.__issueCacheRevision = "revision-1";
       if (selectedTheme) {
         localStorage.setItem("gwt:ui:theme", selectedTheme);
       }
@@ -2043,9 +2211,9 @@ async function installIssueBridgeBackend(
                 viewport: { x: 0, y: 0, zoom: 1 },
                 windows: [
                   {
-                    id: "issue-kanban",
-                    title: shouldUseLegacyPreset ? "Issue Monitor" : "Issue",
-                    preset: shouldUseLegacyPreset ? "issue_monitor" : "issue",
+                    id: fixtureWindowId,
+                    title: "Settings",
+                    preset: "settings",
                     geometry: { x: 40, y: 60, width: 1320, height: 760 },
                     z_index: 1,
                     status: "running",
@@ -2070,6 +2238,23 @@ async function installIssueBridgeBackend(
         },
       };
 
+      window.__setKnowledgeVisibility = (mode, visible) => {
+        const data = workspaceState.workspace.tabs[0].workspace.windows[0];
+        if (mode === "hidden") document.querySelector(".surface-knowledge").hidden = !visible;
+        if (mode === "document") Object.defineProperty(document, "hidden", { configurable: true, value: !visible });
+        if (mode === "minimized") data.minimized = !visible;
+        if (mode === "inactive-tab") {
+          data.tab_group_id = "knowledge-tabs";
+          data.tab_group_active = visible;
+        }
+        if (mode === "minimized" || mode === "inactive-tab") {
+          window.__issueBridgeFixtureSocket.dispatchEvent(new MessageEvent("message", {
+            data: JSON.stringify(workspaceState),
+          }));
+        }
+        document.dispatchEvent(new Event("visibilitychange"));
+      };
+
       class FixtureWebSocket extends EventTarget {
         static CONNECTING = 0;
         static OPEN = 1;
@@ -2083,6 +2268,7 @@ async function installIssueBridgeBackend(
           this.url = url;
           this.readyState = FixtureWebSocket.CONNECTING;
           window.__issueBridgeFixtureSocket = this;
+          window.__issueBridgeWorkspaceState = workspaceState;
           setTimeout(() => {
             this.readyState = FixtureWebSocket.OPEN;
             this.dispatchEvent(new Event("open"));
@@ -2092,11 +2278,18 @@ async function installIssueBridgeBackend(
         send(raw) {
           const message = JSON.parse(raw);
           window.__knowledgeLoadMessages.push(message);
+          if (message.kind === "check_knowledge_revision") {
+            this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+              kind: "knowledge_revision", id: message.id,
+              knowledge_kind: message.knowledge_kind, revision: window.__issueCacheRevision,
+            }) }));
+            return;
+          }
           if (message.kind === "frontend_ready") {
             if (shouldSeedStaleDetail) {
               this.emit({
                 kind: "knowledge_detail",
-                id: "issue-kanban",
+                id: fixtureWindowId,
                 knowledge_kind: "issue",
                 request_id: 0,
                 detail: {
@@ -2163,6 +2356,7 @@ async function installIssueBridgeBackend(
             }
             this.emit({
               kind: "knowledge_entries",
+              cache_revision: window.__issueCacheRevision,
               id: message.id,
               knowledge_kind: message.knowledge_kind,
               request_id: message.request_id,
@@ -2256,7 +2450,7 @@ async function installIssueBridgeBackend(
       errorOnForcedRefresh,
       includeRelatedWork,
       ignoreFirstLoad,
-      legacyPreset,
+      windowId,
       staleDetailBeforeWorkspace,
       theme,
       triggerAutoRefreshOnce,

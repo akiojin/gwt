@@ -396,7 +396,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         .unwrap(),
         0
     );
-    assert!(out.contains("#42 [OPEN] [phase/review] SPEC: Launch agents"));
+    assert!(out.starts_with("Issue #42 [OPEN] [phase/review] SPEC: Launch agents"));
 
     env.files.insert(
         "legacy.md".to_string(),
@@ -474,7 +474,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         .unwrap(),
         0
     );
-    assert_eq!(out, "pulled #42\n");
+    assert_eq!(out, "pulled Issue #42\n");
 
     let err = run(
         &mut env,
@@ -495,7 +495,10 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
     // #4838: the old wording claimed a repair the operation never performed —
     // it only re-read the section. A fixture with well-formed markers now says
     // so explicitly, and a genuine repair names the artifacts it rewrote.
-    assert_eq!(out, "refreshed cache for #42; no artifact needed repair\n");
+    assert_eq!(
+        out,
+        "refreshed cache for Issue #42; no artifact needed repair\n"
+    );
 
     out.clear();
     assert_eq!(
@@ -765,7 +768,9 @@ fn spec_audit_reports_closed_specs_with_untracked_task_rows() {
     );
 
     assert!(
-        out.contains("#3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"),
+        out.contains(
+            "Issue #3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"
+        ),
         "untracked rows are reported with their counts: {out}"
     );
     assert!(

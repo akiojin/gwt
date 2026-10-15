@@ -1856,11 +1856,15 @@ fn app_runtime_staged_update_respects_global_off_over_legacy_project_on() {
         &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
         &gwt::IssueMonitorPrefs {
             autonomous_mode: true,
-            auto_apply_updates: Some(true),
             ..Default::default()
         },
     )
     .unwrap();
+    let legacy_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&legacy_path).unwrap()).unwrap();
+    legacy["auto_apply_updates"] = serde_json::json!(true);
+    fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
     let config = gwt_core::paths::gwt_config_path();
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(config, "auto_apply_updates = false\n").unwrap();
@@ -1885,13 +1889,12 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let seed = |auto_apply_updates: Option<bool>| {
+    let seed = || {
         gwt::save_issue_monitor_prefs(
             &prefs_path,
             &gwt::IssueMonitorPrefs {
                 enabled: true,
                 autonomous_mode: true,
-                auto_apply_updates,
                 effect_authority_epoch: 7,
                 launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                     issue_number: 42,
@@ -1903,19 +1906,19 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
         .expect("seed prefs");
     };
 
-    seed(Some(false));
+    seed();
     gwt::update_settings::set(Some(false)).unwrap();
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    assert!(runtime.update_staged_events("9.99.0").is_empty());
+    assert!(runtime.update_staged_events("99.0.0").is_empty());
     assert!(gwt::load_issue_monitor_prefs(&prefs_path)
         .expect("reload")
         .update_drain
         .is_none());
 
-    seed(None);
+    seed();
     gwt::update_settings::set(Some(true)).unwrap();
-    let events = runtime.update_staged_events("9.99.0");
+    let events = runtime.update_staged_events("99.0.0");
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -1925,14 +1928,14 @@ fn app_runtime_staged_update_raises_auto_drain_only_when_auto_apply_is_effective
         .expect("drain status broadcast");
     let drain = status.update_drain.as_ref().expect("drain raised");
     assert_eq!(drain.reason, gwt::IssueMonitorUpdateDrainReason::Auto);
-    assert_eq!(drain.version, "9.99.0");
+    assert_eq!(drain.version, "99.0.0");
     assert!(
         drain.blocking.is_empty(),
         "no agent pane, claim, execution or lease"
     );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     let persisted_drain = persisted.update_drain.expect("drain persisted");
-    assert_eq!(persisted_drain.version, "9.99.0");
+    assert_eq!(persisted_drain.version, "99.0.0");
     assert!(persisted.autonomous_mode);
     assert_eq!(
         persisted.effect_authority_epoch, 7,
@@ -1981,7 +1984,7 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
         .expect("prepare claim");
     monitor.set_update_drain(
         gwt::IssueMonitorUpdateDrainReason::Auto,
-        "9.99.0",
+        "99.0.0",
         "2026-09-06T01:00:00Z",
     );
 
@@ -2043,13 +2046,13 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
 
-    let events = runtime.update_staged_events_with("9.99.0", None);
+    let events = runtime.update_staged_events_with("99.0.0", None);
     let log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap_or_default();
     assert!(
         log.lines().any(|line| {
             let entry: serde_json::Value = serde_json::from_str(line).expect("update log JSON");
             entry["stage"] == "drain_started"
-                && entry["version"] == "9.99.0"
+                && entry["version"] == "99.0.0"
                 && serde_json::from_str::<serde_json::Value>(
                     entry["blockers"].as_str().unwrap_or("null"),
                 )
@@ -2068,7 +2071,7 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "drain start is recorded once: {toasts:?}");
     assert!(
-        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("draining"),
+        toasts[0].1.contains("99.0.0") && toasts[0].1.contains("draining"),
         "notice names the version and the drain: {}",
         toasts[0].1
     );
@@ -2112,7 +2115,7 @@ fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain()
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.rebuild_window_lookup();
-    runtime.update_staged_events_with("9.110.0", None);
+    runtime.update_staged_events_with("99.0.0", None);
     let raised = gwt_core::update::load_update_wait_observation(&repo).expect("observation");
     assert_eq!(raised.reason, "waiting for drain evaluation");
     let next = chrono::DateTime::parse_from_rfc3339(
@@ -2166,7 +2169,6 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
             &gwt::IssueMonitorPrefs {
                 enabled: true,
                 autonomous_mode: false,
-                auto_apply_updates: None,
                 effect_authority_epoch: 7,
                 launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                     issue_number: 42,
@@ -2209,7 +2211,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
     runtime.update_download_in_flight = Some("manual-client".into());
-    let events = runtime.update_staged_events_with("9.99.0", None);
+    let events = runtime.update_staged_events_with("99.0.0", None);
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -2220,7 +2222,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let drain = status.update_drain.as_ref().expect("drain raised");
     assert_eq!(drain.reason, gwt::IssueMonitorUpdateDrainReason::Auto);
     assert_eq!(drain.automatic, Some(false));
-    assert_eq!(drain.version, "9.99.0");
+    assert_eq!(drain.version, "99.0.0");
     assert_eq!(
         drain.blocking,
         vec![gwt::update_drain::UpdateBlocker::ActivePane {
@@ -2233,7 +2235,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "drain start recorded once: {toasts:?}");
     assert!(
-        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("draining"),
+        toasts[0].1.contains("99.0.0") && toasts[0].1.contains("draining"),
         "the auto path's notice is reused: {}",
         toasts[0].1
     );
@@ -2250,7 +2252,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
             .update_drain
             .as_ref()
             .map(|drain| drain.version.as_str()),
-        Some("9.99.0"),
+        Some("99.0.0"),
         "the hold is persisted for the Issue Monitor"
     );
     assert!(persisted.enabled, "the drain is a hold, not enabled:false");
@@ -2273,7 +2275,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let quiet_tab = sample_project_tab("tab-2", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut quiet = sample_runtime(temp.path(), vec![quiet_tab], Some("tab-2"));
     assert!(
-        quiet.update_staged_events_with("9.99.0", None).is_empty(),
+        quiet.update_staged_events_with("99.0.0", None).is_empty(),
         "a quiet host keeps the manual Restart now path"
     );
     assert!(
@@ -2307,9 +2309,8 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         &gwt::IssueMonitorPrefs {
             enabled: true,
             autonomous_mode: true,
-            auto_apply_updates: Some(false),
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: "9.99.0".to_string(),
+                version: "99.0.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,
@@ -2319,6 +2320,10 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
         },
     )
     .expect("seed prefs");
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&prefs_path).unwrap()).unwrap();
+    legacy["auto_apply_updates"] = serde_json::json!(false);
+    fs::write(&prefs_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
     let payload = temp.path().join("manual-update");
     fs::write(&payload, "payload").unwrap();
     gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
@@ -2400,7 +2405,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
                 version,
                 phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
                 grace_secs: Some(60),
-            } if version == "9.99.0"
+            } if version == "99.0.0"
         )),
         "the grace is announced to the CTA: {scheduled:?}"
     );
@@ -2544,7 +2549,7 @@ fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
                     enabled: true,
                     autonomous_mode: true,
                     update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                        version: "9.99.0".into(),
+                        version: "99.0.0".into(),
                         since: since.to_rfc3339(),
                         reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                         automatic: None,
@@ -2638,7 +2643,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
             enabled: true,
             autonomous_mode: true,
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: "9.99.0".to_string(),
+                version: "99.0.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,
@@ -2699,7 +2704,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("update log JSON"))
         .find(|entry| entry["stage"] == "drain_blocked")
         .expect("the bounded warning records drain blockers in the update log");
-    assert_eq!(entry["version"], "9.99.0");
+    assert_eq!(entry["version"], "99.0.0");
     let blockers: serde_json::Value =
         serde_json::from_str(entry["blockers"].as_str().expect("serialized blockers"))
             .expect("blocker JSON");
@@ -2713,7 +2718,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
         "unchanged blockers must not emit a log on every tick"
     );
     assert!(
-        toasts[0].1.contains("9.99.0") && toasts[0].1.contains("Sample"),
+        toasts[0].1.contains("99.0.0") && toasts[0].1.contains("Sample"),
         "the notice names the blocking pane: {}",
         toasts[0].1
     );
@@ -2735,7 +2740,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
                 version,
                 phase: gwt::protocol::UpdateAutoApplyPhase::Scheduled,
                 grace_secs: Some(60),
-            } if version == "9.99.0"
+            } if version == "99.0.0"
         )),
         "the grace is announced to the CTA: {scheduled:?}"
     );
@@ -2802,7 +2807,7 @@ fn app_runtime_cancel_update_auto_apply_releases_the_drain_and_stops_the_tick() 
             enabled: true,
             autonomous_mode: true,
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: "9.99.0".to_string(),
+                version: "99.0.0".to_string(),
                 since: since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,
@@ -2835,7 +2840,7 @@ fn app_runtime_cancel_update_auto_apply_releases_the_drain_and_stops_the_tick() 
                 version,
                 phase: gwt::protocol::UpdateAutoApplyPhase::Cancelled,
                 ..
-            } if version == "9.99.0"
+            } if version == "99.0.0"
         )),
         "the CTA learns about the cancellation: {events:?}"
     );
@@ -2890,15 +2895,15 @@ fn app_runtime_staged_update_falls_back_to_manual_when_auto_apply_is_refused() {
     for refusal in [
         gwt::update_drain::UpdateAutoApplyRefusal::RequiresElevation,
         gwt::update_drain::UpdateAutoApplyRefusal::PreviousFailure {
-            version: "9.99.0".to_string(),
+            version: "99.0.0".to_string(),
         },
     ] {
-        let events = runtime.update_staged_events_with("9.99.0", Some(refusal.clone()));
+        let events = runtime.update_staged_events_with("99.0.0", Some(refusal.clone()));
         let log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap_or_default();
         assert!(
             log.lines().any(|line| {
                 let entry: serde_json::Value = serde_json::from_str(line).unwrap();
-                entry["stage"] == "pending_refused" && entry["reason"] == refusal.notice("9.99.0")
+                entry["stage"] == "pending_refused" && entry["reason"] == refusal.notice("99.0.0")
             }),
             "automatic apply refusal must be in the update log: {log}"
         );
@@ -2917,7 +2922,7 @@ fn app_runtime_staged_update_falls_back_to_manual_when_auto_apply_is_refused() {
         );
         assert_eq!(toasts[0].0, "warn");
         assert!(
-            toasts[0].1.contains("9.99.0") && toasts[0].1.contains("manually"),
+            toasts[0].1.contains("99.0.0") && toasts[0].1.contains("manually"),
             "the notice names the manual fallback: {}",
             toasts[0].1
         );
@@ -3770,6 +3775,180 @@ fn local_fallback_transaction_preserves_the_background_worker_deadline() {
 }
 
 #[test]
+fn gui_scan_preparation_does_not_hold_the_prefs_lock() {
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = gwt::IssueMonitorPrefs::default();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+
+    let prepare = |proposal: &mut gwt::IssueMonitorState| {
+        // Observe a deliberately slow read phase without asserting its
+        // wall-clock duration. The lock assertion is independent of time.
+        let preparing = Instant::now();
+        thread::sleep(Duration::from_secs(1));
+        tracing::info!(
+            preparation_ms = preparing.elapsed().as_secs_f64() * 1000.0,
+            "Issue #5447 controlled scan preparation"
+        );
+        let lock = gwt_core::operation_deadline::NamedFileLock::try_acquire(
+            &prefs_path.with_extension("lock"),
+            "gui_scan_test",
+        );
+        proposal.set_enabled(true);
+        match lock {
+            Ok(lock) => {
+                lock.unlock().unwrap();
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    assert!(
+        super::super::rebase_mutate_and_persist_issue_monitor_state(
+            &prefs_path,
+            &mut monitor,
+            prepare,
+        )
+        .unwrap(),
+        "observer scan preparation must leave the writer lock available"
+    );
+    assert!(
+        super::super::prepare_and_persist_issue_monitor_scan_without_authority_fence(
+            &prefs_path,
+            &mut monitor,
+            prepare,
+        )
+        .unwrap(),
+        "fallback scan preparation must leave the writer lock available"
+    );
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap().enabled);
+}
+
+#[test]
+fn gui_scan_rejects_a_snapshot_changed_during_preparation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = gwt::IssueMonitorPrefs::default();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+
+    let error = super::super::rebase_mutate_and_persist_issue_monitor_state(
+        &prefs_path,
+        &mut monitor,
+        |proposal| {
+            gwt::try_mutate_issue_monitor_prefs(&prefs_path, |disk| {
+                disk.priority_order = vec![5447];
+                Ok(())
+            })
+            .expect("a daemon commit must be able to run during GUI preparation");
+            proposal.set_enabled(true);
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert!(!persisted.enabled);
+    assert_eq!(persisted.priority_order, vec![5447]);
+    assert_eq!(monitor.prefs(), persisted);
+}
+
+#[test]
+fn gui_scan_rechecks_daemon_authority_after_preparation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = gwt::IssueMonitorPrefs::default();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let before = fs::read(&prefs_path).unwrap();
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+
+    let error = super::super::prepare_and_persist_issue_monitor_scan_without_authority_fence(
+        &prefs_path,
+        &mut monitor,
+        |proposal| {
+            gwt::persist_issue_monitor_authority_fence(
+                &prefs_path,
+                &gwt::IssueMonitorAuthorityFence::current_process(),
+            )
+            .unwrap();
+            proposal.set_enabled(true);
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(fs::read(&prefs_path).unwrap(), before);
+    assert!(!monitor.prefs().enabled);
+}
+
+#[test]
+fn gui_scan_retries_a_concurrent_control_without_waiting_for_the_next_scan() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = gwt::IssueMonitorPrefs {
+        launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: "tab-1::agent-42".to_string(),
+        }],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let now = "2026-10-15T00:00:00Z";
+    monitor.record_window_snapshot(gwt::IssueMonitorWindowSnapshot {
+        project_tab_id: "tab-1".to_string(),
+        observed_at: now.to_string(),
+        windows: Vec::new(),
+    });
+    let mut attempts = 0;
+
+    super::super::prepare_and_persist_issue_monitor_scan_without_authority_fence(
+        &prefs_path,
+        &mut monitor,
+        |proposal| {
+            attempts += 1;
+            assert_eq!(
+                proposal.classify_idle_windows(&BTreeMap::new(), now).len(),
+                1,
+                "each attempt must retain the observed canvas for slot recovery",
+            );
+            if attempts == 1 {
+                gwt::try_mutate_issue_monitor_prefs(&prefs_path, |disk| {
+                    disk.priority_order = vec![5447];
+                    Ok(())
+                })
+                .unwrap();
+            }
+            proposal.set_enabled(true);
+        },
+    )
+    .unwrap();
+
+    assert_eq!(attempts, 2);
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert_eq!(persisted.priority_order, vec![5447]);
+    assert!(persisted.enabled);
+    assert_eq!(monitor.prefs(), persisted);
+}
+
+#[test]
 fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline() {
     let _env_lock = env_test_lock()
         .lock()
@@ -4522,7 +4701,11 @@ fn issue_monitor_ack_preserves_failed_window_runtime_installed_after_enqueue() {
     assert_ack_preserves_failed_window_replacement(temp.path(), true);
 }
 
-fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
+fn assert_expired_launch_ack_cleanup(
+    preserve_successor: bool,
+    conflicting_owner: bool,
+    startup_timeout: bool,
+) {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     init_repo_with_initial_commit(temp.path());
@@ -4570,16 +4753,21 @@ fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
     let mut feedback = issue_monitor_feedback(42);
     feedback.issue_monitor_delivery_id = Some(delivery_id.into());
     feedback.issue_monitor_project_root = Some(temp.path().into());
+    let startup_feedback = feedback.clone();
     runtime
         .pending_launch_feedback_contexts
         .insert(window_id.clone(), feedback);
     runtime.handle_launch_complete(window_id.clone(), result);
 
     // Advance Monitor time while the queued preparation has not created a PTY.
-    assert_eq!(
-        monitor.expire_stale_unbound_launches_with("2026-07-02T00:02:00Z", |_| true,),
-        vec![42]
-    );
+    if conflicting_owner {
+        monitor.complete_active_launch(43, &window_id);
+    } else if !startup_timeout {
+        assert_eq!(
+            monitor.expire_stale_unbound_launches_with("2026-07-02T00:02:00Z", |_| true,),
+            vec![42]
+        );
+    }
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
     drain_queued_blocking_tasks(&tasks);
     runtime.handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
@@ -4609,6 +4797,12 @@ fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
             crate::app_runtime::next_window_runtime_incarnation();
     }
     runtime.handle_issue_monitor_launch_delivery_ack(ack);
+    if startup_timeout {
+        let generation = runtime
+            .arm_issue_monitor_startup(&window_id, &startup_feedback)
+            .unwrap();
+        runtime.handle_issue_monitor_startup_timeout(&window_id, generation);
+    }
     drain_queued_blocking_tasks(&tasks);
     let window_remains = runtime.tracked_window_exists(&window_id);
     let runtime_remains = runtime.runtimes.contains_key(&window_id);
@@ -4618,21 +4812,55 @@ fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
     // Clean up even on RED, after capturing the actual ACK outcome.
     runtime.close_window_after_issue_monitor_finalize_events(&window_id);
     drain_queued_blocking_tasks(&tasks);
+    let should_remain = preserve_successor || conflicting_owner;
+    assert_eq!(window_remains, should_remain, "expired ACK window cleanup");
+    assert_eq!(runtime_remains, should_remain, "expired ACK PTY cleanup");
     assert_eq!(
-        window_remains, preserve_successor,
-        "expired ACK window cleanup"
-    );
-    assert_eq!(
-        runtime_remains, preserve_successor,
-        "expired ACK PTY cleanup"
-    );
-    assert_eq!(
-        session_remains, preserve_successor,
+        session_remains, should_remain,
         "expired ACK Session cleanup"
     );
+    if conflicting_owner {
+        assert_eq!(
+            prefs.pending_launch_deliveries.len(),
+            1,
+            "refusal keeps the unconsumed delivery"
+        );
+        assert!(prefs
+            .launched_issues
+            .iter()
+            .any(|entry| entry.issue_number == 43 && entry.window_id == window_id));
+        return;
+    }
     if !preserve_successor {
         assert_eq!(finalized.status, gwt_agent::AgentStatus::Stopped);
         assert!(!finalized.restore_window_on_startup);
+    }
+    if startup_timeout {
+        let mut restored =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        restored.record_candidate(gwt::IssueMonitorIssue {
+            number: 42,
+            title: "Delayed launch".into(),
+            labels: Vec::new(),
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        });
+        assert_eq!(restored.attempt_count(42), 0);
+        assert_eq!(
+            restored.inbox_item(42).unwrap().state,
+            gwt::MonitorInboxState::Queued
+        );
+        assert!(restored
+            .inbox_item(42)
+            .unwrap()
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("startup timed out after 180s"));
+        return;
     }
     assert!(prefs.pending_launch_deliveries.is_empty());
     let expired = monitor.prefs();
@@ -4645,12 +4873,22 @@ fn assert_expired_launch_ack_cleanup(preserve_successor: bool) {
 
 #[test]
 fn issue_5289_expired_launch_ack_closes_late_window_and_session() {
-    assert_expired_launch_ack_cleanup(false);
+    assert_expired_launch_ack_cleanup(false, false, false);
 }
 
 #[test]
 fn issue_5289_expired_launch_ack_preserves_successor_runtime() {
-    assert_expired_launch_ack_cleanup(true);
+    assert_expired_launch_ack_cleanup(true, false, false);
+}
+
+#[test]
+fn issue_5415_refused_duplicate_ack_preserves_the_bound_window() {
+    assert_expired_launch_ack_cleanup(false, true, false);
+}
+
+#[test]
+fn issue_5415_post_ack_startup_timeout_requeues_the_exact_window_without_reusing_delivery_id() {
+    assert_expired_launch_ack_cleanup(false, false, true);
 }
 
 #[test]
@@ -5610,7 +5848,7 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
         drain: Some((
             gwt::IssueMonitorPrefs::default(),
             gwt::IssueMonitorUpdateDrain {
-                version: "9.99.0".into(),
+                version: "99.0.0".into(),
                 since: now.to_rfc3339(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,

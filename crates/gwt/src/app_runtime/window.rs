@@ -111,6 +111,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, runtime_hook_agent_failures_in_flight);
         $visit!($runtime, $id, pending_launch_completions);
         $visit!($runtime, $id, pending_launch_delivery_acks);
+        $visit!($runtime, $id, pending_monitor_startups);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
         $visit!($runtime, $id, pending_fresh_execution_finalizations);
@@ -132,6 +133,58 @@ macro_rules! window_scoped_state {
 }
 
 impl AppRuntime {
+    /// Agent lifecycle requests must preserve recent evidence from their actual target.
+    /// Human canvas close and runtime terminal cleanup do not call this guard.
+    pub(super) fn agent_close_board_check(
+        &self,
+        principal: &gwt::agent_capability::AgentSessionPrincipal,
+        id: &str,
+    ) -> Option<String> {
+        let (tab, window) = self.tabs.iter().find_map(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| super::combined_window_id(&tab.id, &window.id) == id)
+                .map(|window| (tab, window))
+        })?;
+        let target_session = window.session_id.as_deref();
+        let target_owner = window
+            .linked_issue_number
+            .or_else(|| {
+                target_session.and_then(|session_id| {
+                    self.launch_wizard_cache
+                        .session_by_id(session_id)
+                        .and_then(|session| session.linked_issue_number)
+                })
+            })
+            .or_else(|| self.issue_monitor_issue_number_for_window(&tab.project_root, id))
+            .or_else(|| {
+                target_session.and_then(|session_id| {
+                    gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
+                        .ok()
+                        .and_then(|session| session.linked_issue_number)
+                })
+            });
+        match gwt::board_read_receipts::recent_owner_unread(
+            &tab.project_root,
+            principal.session_id(),
+            target_session,
+            target_owner,
+            chrono::Utc::now(),
+        ) {
+            Ok(entries) if !entries.is_empty() => Some(
+                gwt::board_read_receipts::read_required_message("pane.close", &entries),
+            ),
+            Ok(_) => None,
+            Err(error) => {
+                let warning = gwt::board_read_receipts::warning(error);
+                tracing::warn!(%warning, window_id = id, "agent pane close Board observation failed open");
+                None
+            }
+        }
+    }
+
     pub(crate) fn create_window_events(
         &mut self,
         context: &super::ProjectContext,
@@ -155,7 +208,10 @@ impl AppRuntime {
                     .persisted()
                     .windows
                     .iter()
-                    .filter(|window| shares_work_surface_singleton(window.preset))
+                    .filter(|window| {
+                        shares_work_surface_singleton(window.preset)
+                            || window.preset == WindowPreset::Settings
+                    })
                     .max_by_key(|window| window.z_index)
                     .map(|window| window.id.clone());
                 if let Some(existing_id) = existing_id.as_deref() {
@@ -170,6 +226,7 @@ impl AppRuntime {
                 return self.activate_tab_for_window_events(tab_id);
             }
         }
+        let preset = preset.canonical_surface_preset();
         let window = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();

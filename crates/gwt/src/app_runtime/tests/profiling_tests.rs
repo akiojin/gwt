@@ -129,8 +129,10 @@ fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo dir");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let (runtime, recorded_events) =
+    let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let stale_payload: Arc<str> = Arc::from("stale-before-watcher-patch");
     runtime
         .project_state_for_tab("tab-1")
@@ -163,13 +165,143 @@ fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
             .contains_key("tab-1"),
         "a cache-only structured mutation must invalidate the older wire payload"
     );
-    assert!(runtime
-        .active_work_projection_reply("client-1", "tab-1")
-        .is_some());
+    assert!(
+        runtime
+            .active_work_projection_reply("client-1", "tab-1")
+            .is_none(),
+        "a materialized Work must not be replaced by the empty live-session fallback"
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "the full wire payload is prepared off the GUI thread"
+    );
     assert!(
         recorded_events.lock().expect("recorded events").is_empty(),
         "FrontendReady must not replay a payload serialized before the watcher patch"
     );
+}
+
+#[test]
+fn issue_5404_unchanged_projection_inputs_skip_rebuild_and_changed_work_refreshes() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    super::super::workspace_views::reset_full_active_work_projection_builds();
+
+    let refresh = |runtime: &mut AppRuntime| {
+        runtime.refresh_active_work_projection_for_project_root(&repo);
+        tasks.lock().unwrap().remove(0)();
+        let event = events.lock().unwrap().pop().expect("completion");
+        let UserEvent::ActiveWorkProjectionPrepared(completion) =
+            into_recorded_project_payload(event)
+        else {
+            panic!("expected projection completion");
+        };
+        runtime.handle_active_work_projection_prepared(*completion)
+    };
+    assert!(refresh(&mut runtime).prepared_dispatch.is_some());
+    let unchanged = refresh(&mut runtime);
+    assert_eq!(
+        super::super::workspace_views::full_active_work_projection_builds(),
+        1,
+        "unchanged input fingerprints must reuse the prepared projection",
+    );
+    assert!(
+        unchanged.prepared_dispatch.is_none(),
+        "unchanged inputs do not broadcast"
+    );
+
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.title = "Changed canonical Work".into();
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save changed Current");
+    assert!(refresh(&mut runtime).prepared_dispatch.is_some());
+    assert_eq!(
+        super::super::workspace_views::full_active_work_projection_builds(),
+        2
+    );
+
+    fs::create_dir_all(repo.join(".claude")).expect("create hook surface");
+    assert!(
+        refresh(&mut runtime).prepared_dispatch.is_some(),
+        "hook surface presence invalidates the projection memo"
+    );
+
+    let discussion = repo.join(".gwt/discussion.md");
+    fs::create_dir_all(discussion.parent().unwrap()).unwrap();
+    fs::write(
+        discussion,
+        "## Discussion TODO\n\n### Proposal A - Goal handoff [chosen]\n\
+         - Goal Condition: finish projection verification\n- Goal State: pending\n",
+    )
+    .unwrap();
+    assert!(
+        refresh(&mut runtime).prepared_dispatch.is_some(),
+        "pending goal changes invalidate the projection memo"
+    );
+}
+
+#[test]
+#[ignore = "Issue #5404 same-fixture GUI occupancy measurement"]
+fn issue_5404_gui_occupancy_measurement() {
+    let temp = tempdir().expect("fixture");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    fs::create_dir_all(&runtime.sessions_dir).unwrap();
+    let mut session =
+        gwt_agent::Session::new(repo.clone(), "work/fixture", gwt_agent::AgentId::Codex);
+    session.launch_args = vec!["x".repeat(21 * 1024)];
+    for index in 0..2500 {
+        session.id = format!("occupancy-session-{index:04}");
+        session.save(&runtime.sessions_dir).unwrap();
+    }
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let before = Instant::now();
+    runtime
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+        .unwrap();
+    let synchronous_ms = before.elapsed().as_secs_f64() * 1000.0;
+    let after = Instant::now();
+    for _ in 0..20 {
+        runtime.refresh_active_work_projection_for_project_root(&repo);
+    }
+    let gui_ms_per_call = after.elapsed().as_secs_f64() * 1000.0 / 20.0;
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    tasks.lock().unwrap().remove(0)();
+    let event = events.lock().unwrap().pop().unwrap();
+    let UserEvent::ActiveWorkProjectionPrepared(completion) = into_recorded_project_payload(event)
+    else {
+        panic!("completion")
+    };
+    runtime.handle_active_work_projection_prepared(*completion);
+    tasks.lock().unwrap().remove(0)();
+    let event = events.lock().unwrap().pop().unwrap();
+    let UserEvent::ActiveWorkProjectionPrepared(completion) = into_recorded_project_payload(event)
+    else {
+        panic!("completion")
+    };
+    runtime.handle_active_work_projection_prepared(*completion);
+    let builds = super::super::workspace_views::full_active_work_projection_builds();
+    let loads = super::super::workspace_views::active_work_projection_shared_loads();
+    let memo_started = Instant::now();
+    runtime.refresh_active_work_projection_for_project_root(&repo);
+    tasks.lock().unwrap().remove(0)();
+    let memo_refresh_ms = memo_started.elapsed().as_secs_f64() * 1000.0;
+    let extra_builds = super::super::workspace_views::full_active_work_projection_builds() - builds;
+    let extra_loads = super::super::workspace_views::active_work_projection_shared_loads();
+    let extra_loads = std::array::from_fn::<_, 3, _>(|index| extra_loads[index] - loads[index]);
+    println!("Issue #5404: sessions=2500, synchronous_full_build_ms={synchronous_ms:.3}, gui_schedule_ms_per_call={gui_ms_per_call:.3}, burst_requests=20, workers=2, memo_refresh_ms={memo_refresh_ms:.3}, memo_full_builds={extra_builds}, memo_hook_journal_ledger_loads={extra_loads:?}");
 }
 
 #[test]

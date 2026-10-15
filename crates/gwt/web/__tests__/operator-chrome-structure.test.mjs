@@ -935,8 +935,8 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
   assert.match(
     appSource,
-    /case "issues":\s*openWorkspaceOverview\(\);/,
-    "expected the Issues surface to open the overview",
+    /splitSurfaces\?\.show\(surface\)/,
+    "rail surfaces use the fixed surface host",
   );
 });
 
@@ -1112,6 +1112,17 @@ test("Agent window chrome resolves dynamic purpose titles before legacy titles",
     /title-text"\)\.textContent\s*=\s*windowDisplayTitle\(windowData\)/,
     "expected window titlebars to use the shared display-title helper",
   );
+});
+
+test("Agent window title starts with assigned identity before its current purpose", () => {
+  const displayTitle = new Function("windowData", "isAgentWindowPreset", "PM_WINDOW_TITLE",
+    extractFunctionBody(appSource, "windowDisplayTitle"));
+  const agentPreset = preset => ["agent", "claude", "codex"].includes(preset);
+  const data = { preset: "agent", agent_id: "codex", title: "Codex", purpose_title: "Initial task", dynamic_title: "Fix cache" };
+  assert.equal(displayTitle({ ...data, agent_name: "Lumen" }, agentPreset, "Project Manager"), "Lumen — Fix cache");
+  assert.equal(displayTitle(data, agentPreset, "Project Manager"), "Naming… — Fix cache");
+  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager — Fix cache");
+  assert.equal(displayTitle({ preset: "shell", title: "Shell" }, agentPreset, "Project Manager"), "Shell");
 });
 
 test("Branches preset is removed — branch browsing is part of the Work surface", () => {
@@ -4392,6 +4403,7 @@ test("Workspace Windows render key ignores viewport and includes window shell fi
     "dynamic_title_detail",
     "purpose_title",
     "agent_id",
+    "agent_name",
     "agent_color",
     "status",
     "geometry",
@@ -5743,5 +5755,19 @@ test("window framing activates a hidden group member after the split route", () 
   assert.match(body, /windowData\.tab_group_id && !windowData\.tab_group_active/);
   assert.match(body, /pendingFrameWindowId\s*=\s*windowId/);
   assert.match(body, /kind:\s*"activate_window_tab",\s*id:\s*windowId/);
-  assert.ok(body.indexOf('splitSurfaces?.isOpen()') < body.indexOf('windowData.tab_group_id && !windowData.tab_group_active'));
+  assert.ok(body.indexOf('splitSurfaces?.hasLayout') < body.indexOf('windowData.tab_group_id && !windowData.tab_group_active'));
+  assert.match(body, /splitSurfaces\.close\(\)/);
+});
+
+test("fixed surface bounds use the visible host instead of the hidden canvas or camera", () => {
+  const body = extractFunctionBody(appSource, "visibleBounds");
+  const bounds = new Function("splitSurfaces", "stage", "canvas", "viewport", body);
+  const stage = { closest: () => ({ clientWidth: 1200, clientHeight: 800 }) };
+  const canvas = { clientWidth: 0, clientHeight: 0, parentElement: stage.closest() };
+  const viewport = { x: -400, y: 200, zoom: 0.5 };
+  assert.deepEqual(bounds({ hasLayout: true }, stage, canvas, viewport),
+    { x: 0, y: 0, width: 1200, height: 800 });
+  assert.deepEqual(bounds({ hasLayout: false }, stage,
+    { clientWidth: 600, clientHeight: 400 }, viewport),
+    { x: 800, y: -400, width: 1200, height: 800 });
 });

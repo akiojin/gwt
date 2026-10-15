@@ -619,6 +619,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::GetSystemSettings => {
             FrontendUserActionLog::new("get_system_settings", "settings")
         }
+        FrontendEvent::GetUpdateSettings => {
+            FrontendUserActionLog::new("get_update_settings", "update")
+        }
         FrontendEvent::GetBoardAuthStatus => {
             FrontendUserActionLog::new("get_board_auth_status", "settings")
         }
@@ -680,6 +683,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .target(format!("{work_id} ({close_kind})")),
         // SPEC-3050: log the injection request without its text payload —
         // the injected line lands in the PTY transcript anyway.
+        FrontendEvent::PaneName { .. } => return None,
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
         }
@@ -694,9 +698,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
-        FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
-            FrontendUserActionLog::new("set_issue_monitor_auto_apply_updates", "issue_monitor")
-                .mode(if *enabled { "on" } else { "off" })
+        FrontendEvent::SetAutoApplyUpdates { enabled } => {
+            FrontendUserActionLog::new("set_auto_apply_updates", "update").mode(if *enabled {
+                "on"
+            } else {
+                "off"
+            })
         }
         FrontendEvent::IssueMonitorProfilesSet { profiles, .. } => {
             FrontendUserActionLog::new("issue_monitor_profiles_set", "issue_monitor")
@@ -798,7 +805,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachmentUploadFailed { .. }
         | FrontendEvent::AttachFiles { .. }
-        | FrontendEvent::ReportKnowledgeError { .. } => return None,
+        | FrontendEvent::ReportKnowledgeError { .. }
+        | FrontendEvent::CheckKnowledgeRevision { .. } => return None,
     };
     Some(log)
 }

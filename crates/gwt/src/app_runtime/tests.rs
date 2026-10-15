@@ -807,6 +807,7 @@ fn sample_window(
         dynamic_title: None,
         dynamic_title_detail: None,
         agent_id: None,
+        agent_name: None,
         agent_color: None,
         worktree_form: gwt::WindowWorktreeForm::Unknown,
         tab_group_id: None,
@@ -1379,6 +1380,7 @@ fn sample_runtime_with_events(
     let (project_tab_incarnations, next_project_incarnation) =
         initial_project_tab_incarnations(&tabs);
     let mut runtime = AppRuntime {
+        _runtime_namespace_gc: None,
         tabs,
         active_tab_id: active_tab_id.map(str::to_owned),
         project_states: super::initial_project_states(&project_tab_incarnations),
@@ -1418,6 +1420,7 @@ fn sample_runtime_with_events(
         startup_worktree_inventories: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         pending_launch_delivery_acks: HashMap::new(),
+        pending_monitor_startups: HashMap::new(),
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
@@ -1471,6 +1474,9 @@ fn sample_runtime_with_events(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         )),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+        work_events_ingest_queue: Arc::new(
+            crate::work_events_ingest::WorkEventsIngestQueue::default(),
+        ),
         last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
@@ -1850,8 +1856,7 @@ fn wait_for_recorded_event_with_timeout(
 
 /// Issue #3297: `load_knowledge_bridge_events` replies off the GUI event
 /// loop through the stub proxy. Wait for the dispatched knowledge view for
-/// `window_id` and return that dispatch's outbound events so tests can keep
-/// asserting on the entries/detail pair.
+/// `window_id` and return that dispatch's outbound list events.
 fn wait_for_knowledge_view_dispatch(
     events: &Arc<Mutex<Vec<UserEvent>>>,
     window_id: &str,
@@ -1880,6 +1885,44 @@ fn wait_for_knowledge_view_dispatch(
     }
     let snapshot = events.lock().expect("event log").clone();
     panic!("timed out waiting for knowledge view dispatch for {window_id}: {snapshot:?}");
+}
+
+fn select_issue_detail_for_test(
+    runtime: &AppRuntime,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+    window_id: &str,
+    number: u64,
+) -> gwt::KnowledgeDetailView {
+    let immediate = runtime.select_knowledge_bridge_entry_events(
+        "client-1",
+        window_id,
+        gwt::KnowledgeKind::Issue,
+        Some(101),
+        number,
+    );
+    assert!(immediate.is_empty());
+    let find_detail = |events: &[UserEvent]| {
+        events.iter().find_map(|event| {
+            let UserEvent::Dispatch(dispatched) = recorded_project_payload(event) else {
+                return None;
+            };
+            dispatched
+                .iter()
+                .find_map(|outbound| match &outbound.event {
+                    BackendEvent::KnowledgeDetail {
+                        id,
+                        request_id: Some(101),
+                        detail,
+                        ..
+                    } if id == window_id && detail.number == Some(number) => Some(detail.clone()),
+                    _ => None,
+                })
+        })
+    };
+    wait_for_recorded_event("selected Issue detail", events, |events| {
+        find_detail(events).is_some()
+    });
+    find_detail(&events.lock().expect("event log")).expect("selected Issue detail")
 }
 
 fn dispatch_launch_materialization_request(
@@ -2759,7 +2802,8 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         &gwt::IssueMonitorPrefs {
             enabled: true,
             max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto,
-            max_active_agents: 9,
+            // A saved accepted zero holds admission until a fresh positive sample.
+            max_active_agents: 0,
             ..Default::default()
         },
     )
@@ -2827,6 +2871,139 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         .next()
         .is_none());
     assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+}
+
+#[test]
+fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for case in [
+        "active",
+        "expired",
+        "invalidated",
+        "review",
+        "restored_review",
+    ] {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        init_repo_with_initial_commit(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (mut runtime, events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+        fs::write(
+            runtime
+                .profile_config_path
+                .as_ref()
+                .expect("fixture profile"),
+            "invalid = [",
+        )
+        .expect("stop admitted launches before provider preparation");
+        let mut monitor = gwt::IssueMonitorState::with_prefs(
+            Default::default(),
+            gwt::IssueMonitorPrefs {
+                max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                max_active_agents: 3,
+                ..Default::default()
+            },
+        );
+        monitor.record_candidate(gwt::IssueMonitorIssue {
+            number: 42,
+            title: "Waiting implementation".to_string(),
+            labels: Vec::new(),
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::Ready,
+            updated_at: None,
+        });
+        let now = Utc::now();
+        let since = if case == "expired" {
+            now - chrono::Duration::hours(4)
+        } else {
+            now
+        };
+        monitor.complete_active_launch_at(42, "other-host::holder", &since.to_rfc3339());
+        monitor.declare_autonomous_wait(
+            42,
+            "verification lease",
+            "holder verification ends",
+            &since.to_rfc3339(),
+        );
+        if case == "invalidated" {
+            monitor.invalidate_autonomous_wait(42, "pm", "condition ended", &now.to_rfc3339());
+        }
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save wait");
+        let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+            .working_dir(&repo)
+            .linked_issue_number(42)
+            .build();
+        let mut feedback = issue_monitor_feedback(42);
+        feedback.issue_monitor_project_root = Some(repo.clone());
+        feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+        feedback.issue_monitor_review_dispatch = case == "review";
+        if case == "review" || case == "restored_review" {
+            config
+                .env_vars
+                .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
+        }
+        let result = if case == "restored_review" {
+            runtime.spawn_agent_window(
+                "tab-1",
+                config,
+                canvas_bounds(),
+                Some(WorkspaceResumeContext {
+                    title: Some("Implementation Work".to_string()),
+                    owner: Some("Issue #42".to_string()),
+                    summary: None,
+                    next_action: None,
+                }),
+            )
+        } else {
+            runtime.spawn_agent_window_with_feedback(
+                "tab-1",
+                config,
+                canvas_bounds(),
+                None,
+                feedback,
+            )
+        };
+        if case == "active" {
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|reason| reason.contains("active wait")),
+                "an in-force wait must refuse a second implementation: {result:?}"
+            );
+            assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+        } else {
+            result.expect("expired/invalidated waits and review must permit admission");
+            let windows = &runtime.tabs[0].workspace.persisted().windows;
+            assert_eq!(windows.len(), 1);
+            if case == "review" || case == "restored_review" {
+                assert_eq!(
+                    windows[0].purpose_title.as_deref(),
+                    Some("Review · Issue #42")
+                );
+                assert!(runtime
+                    .issue_monitor_review_dispatch_windows
+                    .contains(&combined_window_id("tab-1", &windows[0].id)));
+                assert!(runtime.pending_workspace_resume_contexts.is_empty());
+            }
+            let completion =
+                take_monitor_launch_complete("post-admission fixture failure", &events);
+            assert!(completion.is_err_and(|reason| reason.detail.contains("config parse error")));
+        }
+        assert!(runtime.runtimes.is_empty());
+        assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    }
 }
 
 #[test]
@@ -7670,6 +7847,7 @@ fn workspace_test_agent_with_conversation(
         session_id: session_id.to_string(),
         window_id: None,
         agent_id: "codex".to_string(),
+        agent_name: None,
         display_name: "Codex".to_string(),
         affiliation_status: "assigned".to_string(),
         workspace_id: None,

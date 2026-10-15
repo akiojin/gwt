@@ -76,7 +76,7 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await expect(page.locator("#close-project-button")).toBeVisible();
-      const windows = page.locator('.workspace-window[data-preset="issue"]');
+      const windows = page.locator('.workspace-window[data-preset="settings"]');
       const created = !(await windows.count());
       if (created) await sendLiveGwtEvent(page, {
         kind: "create_window", preset: "issue", bounds: { x: 60, y: 50, width: 1120, height: 820 },
@@ -89,9 +89,13 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
       const labels = issues.getByLabel("Allowed labels", { exact: true });
       const openIssues = async () => {
         await page.locator('[data-surface="issues"]').click();
-        await surface.getByRole("button", { name: "Issues settings", exact: true }).click();
         await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
         await expect(issues).toBeVisible();
+        const options = issues.locator(".settings-issues-options");
+        if (!await options.evaluate(element => (element as HTMLDetailsElement).open)) {
+          await surface.getByRole("button", { name: "Issues settings", exact: true }).click();
+        }
+        await expect(options).toHaveAttribute("open", "");
       };
       try {
         await sendLiveGwtEvent(page, { kind: "set_issue_monitor_allowed_labels", allowed_labels: [] });

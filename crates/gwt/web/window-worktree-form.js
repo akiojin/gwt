@@ -52,9 +52,14 @@ export function shouldShowWindowWorktreeBadge(windowData) {
 }
 
 export function windowWorktreeBadgeView(windowData) {
+  const view = WORKTREE_FORM_VIEWS[windowWorktreeForm(windowData)] ||
+    WORKTREE_FORM_VIEWS.unknown;
+  const name = String(windowData?.agent_name || "").trim() || "Naming…";
   return {
-    ...(WORKTREE_FORM_VIEWS[windowWorktreeForm(windowData)] ||
-      WORKTREE_FORM_VIEWS.unknown),
+    ...view,
+    shortLabel: name,
+    ariaLabel: `${name} — ${view.ariaLabel}`,
+    title: `${name} — ${view.title}`,
     providerColor: windowData?.agent_color || "",
   };
 }

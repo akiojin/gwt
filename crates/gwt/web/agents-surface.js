@@ -2,7 +2,7 @@ import { surfaceForWindow } from "./surface-rail.js";
 
 // The grid owns presentation only. Sessions and terminal runtimes remain shared
 // with the existing window model; column changes never persist canvas geometry.
-export function createAgentsSurface({ document, windowCatalogModel, getWindows,
+export function createAgentsSurface({ document, windowCatalogModel, getWindows, windowDisplayTitle,
   isMounted = () => true, mountTerminal, mountPreview, onLayout,
   onFocus = () => {}, onPreviewFocus = onFocus }) {
   const element = document.createElement("section");
@@ -15,6 +15,11 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
   const grid = element.querySelector(".agents-grid");
   const tablist = element.querySelector(".agents-tabs");
   const columns = element.querySelector("input");
+  const columnsKey = "gwt:ui:agent-columns";
+  try {
+    const saved = document.defaultView.localStorage?.getItem(columnsKey);
+    if (saved !== null && saved !== undefined) columns.value = saved;
+  } catch { /* Keep the default when browser storage is unavailable. */ }
   const tiles = new Map();
   const tabs = new Map();
   const previews = new Map();
@@ -112,12 +117,13 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
   }
   function openTab(id) {
     const tile = tiles.get(id);
-    if (!tile) return;
+    if (!tile) return false;
     if (!tabs.has(id)) {
       addTab(id, tile.querySelector("h3").textContent);
     }
     select(id);
     tabs.get(id).focus();
+    return true;
   }
   function addTab(id, label) {
     const entry = document.createElement("div");
@@ -161,12 +167,17 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
   }
   addTab(null, "All agents");
   function setColumns() {
-    const count = Math.max(1, Math.min(4, Number.parseInt(columns.value, 10) || 1));
+    const value = Number(columns.value);
+    const count = Math.max(1, Math.min(4, Number.isFinite(value) ? Math.trunc(value) : 1));
     columns.value = String(count);
     updateSelection();
     onLayout();
   }
-  columns.addEventListener("input", setColumns);
+  columns.addEventListener("input", () => {
+    setColumns();
+    try { document.defaultView.localStorage?.setItem(columnsKey, columns.value); }
+    catch { /* The in-memory preference remains usable without storage. */ }
+  });
   setColumns();
 
   function sync() {
@@ -201,7 +212,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
         addTab(data.id, "");
         changed = true;
       }
-      const title = data.dynamic_title || data.title || data.id;
+      const title = windowDisplayTitle(data);
       const open = tile.querySelector(".agent-tile__open");
       tile.querySelector("h3").textContent = title;
       open.setAttribute("aria-label", `Open ${title} tab`);
@@ -222,7 +233,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
     if (changed) onLayout();
   }
   const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
-  return { element, sync, setPreviewHost,
+  return { element, sync, setPreviewHost, openTab,
     dispose() { unsubscribe(); setPreviewHost(null); },
     contains: (id) => tiles.has(id),
     isVisible: (id) => tiles.has(id) && !tiles.get(id).hidden,

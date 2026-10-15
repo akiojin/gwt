@@ -401,12 +401,14 @@ pub fn command_exists(cmd: &str) -> bool {
 
 /// Create a non-interactive command that does not create an extra console
 /// window when spawned from the Windows GUI front door.
+/// Inherited Git selection is removed before callers add explicit child env.
 pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     // The one sanctioned raw constructor; every other call site must go
     // through this helper (enforced via clippy.toml disallowed-methods).
     #[allow(clippy::disallowed_methods)]
     let mut command = Command::new(program);
     configure_hidden_command(&mut command);
+    scrub_git_env(&mut command);
     command
 }
 
@@ -431,6 +433,9 @@ pub fn resolved_tokio_command(
     #[allow(clippy::disallowed_methods)]
     let mut command = tokio::process::Command::new(&plan.program);
     configure_hidden_tokio_command(&mut command);
+    for key in GIT_ENV_SCRUB_KEYS {
+        command.env_remove(key);
+    }
     apply_resolved_tokio_plan(&mut command, &plan);
     Ok(command)
 }
@@ -590,6 +595,72 @@ pub fn get_command_version(cmd: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_git_init_cannot_reinitialize_an_inherited_bare_repository() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let bare = temp.path().join("shared.git");
+        let fixture = temp.path().join("fixture");
+        let inherited_worktree = temp.path().join("inherited-worktree");
+        std::fs::create_dir_all(&fixture).unwrap();
+        std::fs::create_dir_all(&inherited_worktree).unwrap();
+        let mut seed = hidden_command("git");
+        scrub_git_env(&mut seed);
+        assert!(seed
+            .args(["init", "--bare", "--quiet"])
+            .arg(&bare)
+            .status()
+            .unwrap()
+            .success());
+        let config = std::fs::read(bare.join("config")).unwrap();
+        let _git_dir = crate::test_support::ScopedEnvVar::set("GIT_DIR", &bare);
+        let _worktree =
+            crate::test_support::ScopedEnvVar::set("GIT_WORK_TREE", &inherited_worktree);
+        let _index =
+            crate::test_support::ScopedEnvVar::set("GIT_INDEX_FILE", bare.join("fixture-index"));
+
+        let output = hidden_command("git")
+            .args(["init", "--quiet"])
+            .current_dir(&fixture)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            fixture.join(".git/config").is_file(),
+            "git init escaped the fixture"
+        );
+        assert_eq!(std::fs::read(bare.join("config")).unwrap(), config);
+    }
+
+    #[test]
+    fn process_constructors_scrub_git_overrides_and_preserve_explicit_environment() {
+        let program = std::env::current_exe().unwrap();
+        let hidden = hidden_command(&program);
+        let resolved = resolved_command(ProcessPlanRequest::new(&program)).unwrap();
+        let tokio = resolved_tokio_command(ProcessPlanRequest::new(&program)).unwrap();
+        for command in [&hidden, &resolved, tokio.as_std()] {
+            let environment = command
+                .get_envs()
+                .collect::<std::collections::HashMap<_, _>>();
+            for key in GIT_ENV_SCRUB_KEYS {
+                assert_eq!(environment.get(OsStr::new(key)), Some(&None), "{key}");
+            }
+        }
+        let explicit = resolved_command(
+            ProcessPlanRequest::new(&program).env("GIT_DIR", "explicit-repository"),
+        )
+        .unwrap();
+        assert_eq!(
+            explicit
+                .get_envs()
+                .find(|(key, _)| *key == "GIT_DIR")
+                .unwrap()
+                .1,
+            Some(OsStr::new("explicit-repository")),
+        );
+    }
 
     fn echo_command(text: &str) -> (String, Vec<String>) {
         if cfg!(windows) {

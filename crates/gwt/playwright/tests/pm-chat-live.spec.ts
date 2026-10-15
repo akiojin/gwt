@@ -1,7 +1,8 @@
 /* SPEC #5023: explicit durable reports -> backend -> read-only PM view. */
 import { expect, test } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
@@ -13,6 +14,112 @@ test.describe('PM reports', () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL || !HOME, 'requires isolated checkout fixture');
   test.use({ viewport: { width: 1440, height: 1000 } });
   test.setTimeout(90_000);
+
+  test('peer PM sent and received reports persist without duplicates', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      const reports = pane.getByRole('log', { name: 'PM reports' });
+      await expect(reports).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      const id = await pane.getAttribute('data-id');
+      expect(id).toBeTruthy();
+
+      // Use only the stopped PM registration in this owned fixture. No live
+      // recipient or ambient agent session is claimed by the UI regression.
+      const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME, USERPROFILE: HOME };
+      for (const key of Object.keys(childEnv)) {
+        if (key.startsWith('GWT_SESSION_') || key.startsWith('GWT_HOOK_FORWARD_') || key === 'GWT_PANE_WS_URL') delete childEnv[key];
+      }
+      childEnv.GWT_SESSION_ID = SESSION;
+      const peer = `${HOME}/issue-3431-missing-peer-${randomUUID()}`;
+      expect(existsSync(peer)).toBe(false);
+      const outgoingText = `Checkpoint requested ${info.project.name}\nPlease reply when available.`;
+      const result = spawnSync(`${ROOT}/target/debug/gwtd`, [], {
+        cwd: ROOT, env: childEnv, encoding: 'utf8',
+        input: JSON.stringify({ schema_version: 1, operation: 'pm.peer.send', params: {
+          project: peer, kind: 'request', text: outgoingText, timeout_seconds: 60,
+        } }),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const envelope = JSON.parse(result.stdout);
+      expect(envelope.ok).toBe(true);
+      const outgoing = JSON.parse(envelope.output);
+      expect(outgoing.status).toBe('unavailable');
+      expect(outgoing.message.unavailable).toBeTruthy();
+
+      // Real two-project delivery/reply is covered by Rust integration tests;
+      // this owned store entry exercises the received Reports projection only.
+      const storePath = `${HOME}/.gwt/pm-peer-messages.json`;
+      const store = JSON.parse(readFileSync(storePath, 'utf8'));
+      expect(store.schema_version).toBe(1);
+      const incoming = {
+        id: randomUUID(), from: outgoing.message.to, to: outgoing.message.from,
+        kind: 'notice', text: `Peer checkpoint received ${info.project.name}\nSaved successfully.`,
+        reply_to: null, created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 60_000).toISOString(), answered_by: null, unavailable: null,
+      };
+      store.messages.push(incoming);
+      const seededStorePath = `${storePath}.${incoming.id}.tmp`;
+      writeFileSync(seededStorePath, JSON.stringify(store));
+      renameSync(seededStorePath, storePath);
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      const outgoingReport = reports.locator('article').filter({ hasText: `PM peer ${outgoing.message.id} →` });
+      const incomingReport = reports.locator('article').filter({ hasText: `PM peer ${incoming.id} ←` });
+      const outgoingBody = `PM peer ${outgoing.message.id} → Request ${peer}: ${outgoingText.replace(/\n/g, ' ')} — Waiting for the peer project (PM absent, stopped, or liveness unconfirmed)`;
+      const incomingBody = `PM peer ${incoming.id} ← Notice ${peer}: ${incoming.text.replace(/\n/g, ' ')}`;
+      for (const [report, body] of [[outgoingReport, outgoingBody], [incomingReport, incomingBody]] as const) {
+        await expect(report).toHaveCount(1);
+        await expect(report.locator('.pm-chat__text')).toHaveText(body);
+        expect(await report.locator('.pm-chat__text').textContent()).toBe(body);
+      }
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await expect(outgoingReport).toHaveCount(1);
+      await expect(incomingReport).toHaveCount(1);
+      await page.reload();
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      await expect(outgoingReport).toHaveCount(1);
+      await expect(incomingReport).toHaveCount(1);
+      await expect(outgoingReport.locator('.pm-chat__text')).toHaveText(outgoingBody);
+      await expect(incomingReport.locator('.pm-chat__text')).toHaveText(incomingBody);
+      await incomingReport.scrollIntoViewIfNeeded();
+      const screenshot = info.outputPath(`pm-peer-reports-${info.project.name}.png`);
+      await pane.screenshot({ path: screenshot });
+      await info.attach('PM peer reports', { path: screenshot, contentType: 'image/png' });
+      const validPeerStore = readFileSync(storePath);
+      try {
+        writeFileSync(storePath, '{');
+        const nativeBody = `Native report during peer outage ${randomUUID()}`;
+        const nativeEnv = { ...childEnv };
+        delete nativeEnv.GWT_SESSION_ID;
+        const nativeResult = spawnSync(`${ROOT}/target/debug/gwtd`, [], {
+          cwd: ROOT, env: nativeEnv, encoding: 'utf8',
+          input: JSON.stringify({ schema_version: 1, operation: 'pm.report.post', params: {
+            kind: 'progress', body: nativeBody,
+          } }),
+        });
+        expect(nativeResult.status, nativeResult.stderr).toBe(0);
+        expect(JSON.parse(nativeResult.stdout).ok).toBe(true);
+        await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+        await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
+        await expect(reports.locator('article').filter({ hasText: nativeBody })).toHaveCount(1);
+        await expect(outgoingReport).toHaveCount(0);
+        await expect(incomingReport).toHaveCount(0);
+      } finally {
+        writeFileSync(seededStorePath, validPeerStore);
+        renameSync(seededStorePath, storePath);
+      }
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await expect(outgoingReport).toHaveCount(1);
+      await expect(incomingReport).toHaveCount(1);
+      expect(errors).toEqual([]);
+    });
+  });
 
   test('durable Markdown and Q&A reports, kind filter, copy, reload and unchanged execution log', async ({ page, context }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
@@ -52,8 +159,9 @@ test.describe('PM reports', () => {
         if ('ok' in output) expect(output.ok).toBe(true);
         return output;
       };
-      const currentCard = pane.getByRole('region', { name: 'PM の現在', exact: true });
+      const currentCard = pane.getByRole('region', { name: 'PM status', exact: true });
       await expect(currentCard).toBeVisible();
+      await currentCard.locator('summary').click();
       // Seed only this owned isolated fixture's history to observe the real
       // backend's default fifteen-minute threshold without a wall-clock wait.
       const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
@@ -64,12 +172,12 @@ test.describe('PM reports', () => {
       };
       writeFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-status.jsonl`, `${JSON.stringify(oldStatus)}\n`);
       await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
-      await expect(currentCard).toContainText('PM の更新が 16 分止まっています');
-      await expect(currentCard).toContainText('次に動く条件: v9.117.2 の公開');
-      await expect(currentCard).toContainText('ユーザーへの依頼: なし');
-      await expect(currentCard.getByRole('region', { name: '自動の事実' })).toContainText('Release v9.117.2');
-      await expect(currentCard.getByText('リリース: #5352 Release v9.117.2', { exact: true })).toBeInViewport();
-      await expect(currentCard).toContainText('稼働中の窓: 0');
+      await expect(currentCard).toContainText('PM has not updated for 16 minutes');
+      await expect(currentCard).toContainText('Next: v9.117.2 の公開');
+      await expect(currentCard).toContainText('User action: None');
+      await expect(currentCard.getByRole('region', { name: 'Live facts' })).toContainText('Release v9.117.2');
+      await expect(currentCard.getByText('Release: #5352 Release v9.117.2', { exact: true })).toBeInViewport();
+      await expect(currentCard).toContainText('Active windows: 0');
       const staleScreenshot = info.outputPath(`pm-current-stale-${info.project.name}.png`);
       await pane.screenshot({ path: staleScreenshot });
       await info.attach('PM current stale status', { path: staleScreenshot, contentType: 'image/png' });
@@ -83,7 +191,7 @@ test.describe('PM reports', () => {
       expect(statusReadback.current_status.items[0].text).toContain('公開結果を確認');
       await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
       await expect(currentCard).toContainText(`公開結果を確認 ${info.project.name}`);
-      await expect(currentCard).not.toContainText('更新が 16 分止まっています');
+      await expect(currentCard).not.toContainText('has not updated for 16 minutes');
       await expect(currentCard).not.toContainText('リリースの公開待ち');
       await expect(reports).not.toContainText('公開結果を確認');
       const saved = pmOperation('pm.report.post', { kind: 'progress', body });

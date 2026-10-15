@@ -5,7 +5,7 @@
 //! that a tight absolute threshold turns into a flaky test rather than a
 //! regression signal.
 //!
-//! So this file gates three things:
+//! So this file gates four things:
 //! 1. Budget enforcement itself — deterministic, no timing involved. If
 //!    smoothing or the summary stops flagging a sustained overage, this fails.
 //! 2. The collector's own cost — a representative burst must stay inside the
@@ -13,8 +13,14 @@
 //!    magnitude above what the path actually costs.
 //! 3. Aggregation scaling — a same-run relative check that catches an
 //!    accidentally quadratic `summarize`.
+//! 4. Session census — cumulative allocation bytes and an abnormal pass ceiling
+//!    for six thousand historical runtime namespaces.
 
-use std::time::{Duration, Instant};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
+    time::{Duration, Instant},
+};
 
 use chrono::{TimeZone as _, Utc};
 use gwt::perf::{
@@ -26,6 +32,113 @@ use gwt::perf::{
 };
 use gwt_config::PerfConfig;
 use gwt_core::{paths::gwt_logs_dir, test_support::ScopedGwtHome};
+
+struct CensusCountingAllocator;
+
+#[global_allocator]
+static CENSUS_ALLOCATOR: CensusCountingAllocator = CensusCountingAllocator;
+
+thread_local! {
+    // Disabled outside the measured pass; parallel tests have separate counters.
+    // Count cumulative successful allocation requests, not heap retained after frees.
+    static CENSUS_ALLOCATED_BYTES: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+fn record_census_allocation(bytes: usize) {
+    let _ = CENSUS_ALLOCATED_BYTES.try_with(|counter| {
+        counter.set(counter.get().map(|total| total.saturating_add(bytes)));
+    });
+}
+
+// SAFETY: every operation delegates its original pointer/layout to System.
+// The counter neither allocates nor changes allocation ownership or alignment.
+unsafe impl GlobalAlloc for CensusCountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: GlobalAlloc's caller supplies a valid allocation layout.
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            record_census_allocation(layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the same valid layout is passed to System's zeroed allocator.
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            record_census_allocation(layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: ptr and layout retain System's allocation contract.
+        unsafe { System.dealloc(ptr, layout) };
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: the caller's original allocation and new size go unchanged to System.
+        let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+        if !new_ptr.is_null() {
+            record_census_allocation(new_size);
+        }
+        new_ptr
+    }
+}
+
+/// Issue #5383 AC-2: historical namespaces must not pay for Session TOML decode.
+/// One second is the target, while five seconds catches an obviously abnormal
+/// pass without making scheduler or filesystem variability a tight CI gate.
+#[test]
+fn session_census_with_six_thousand_dead_namespaces_stays_within_read_budget() {
+    let temp = tempfile::tempdir().expect("isolated census fixture");
+    let project = temp.path().join("project");
+    let sessions = temp.path().join("sessions");
+    std::fs::create_dir_all(&project).expect("fixture project");
+    let mut session =
+        gwt_agent::Session::new(&project, "census-history", gwt_agent::AgentId::Codex);
+    session.id = "dead-history".to_string();
+    session.project_state_root = Some(project.clone());
+    // A representative ledger is shared: the old path decoded it once per namespace.
+    session.launch_args = vec!["x".repeat(5 * 1024)];
+    session.save(&sessions).expect("valid Session ledger");
+    let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Stopped);
+    runtime.host_started_at = Some(1);
+    let runtime_json = serde_json::to_vec(&runtime).expect("valid runtime JSON");
+    for index in 0..6000 {
+        // Keep Unix pid_t positive so the probe cannot address a process group.
+        let host_pid = i32::MAX as u32 - index;
+        assert!(
+            !gwt::process::is_host_process_alive(host_pid),
+            "fixture namespace must be dead: {host_pid}"
+        );
+        let path = gwt_agent::runtime_state_path_for_pid(&sessions, host_pid, &session.id);
+        std::fs::create_dir_all(path.parent().expect("runtime namespace"))
+            .expect("create dead namespace");
+        std::fs::write(path, &runtime_json).expect("write runtime JSON");
+    }
+
+    CENSUS_ALLOCATED_BYTES.with(|counter| counter.set(Some(0)));
+    let started = Instant::now();
+    let inventory = gwt::session_inventory::observe_sessions(&project, &sessions);
+    let elapsed = started.elapsed();
+    let allocated_bytes = CENSUS_ALLOCATED_BYTES
+        .with(|counter| counter.replace(None))
+        .expect("active allocation measurement");
+    eprintln!(
+        "6000 dead namespace census: {elapsed:?}, {allocated_bytes} allocated bytes (target <1s, <50MB)"
+    );
+    assert!(inventory.sessions.is_empty());
+    assert!(inventory.uncertainties.is_empty());
+    assert!(
+        allocated_bytes < 50_000_000,
+        "dead namespace census allocation budget exceeded: {allocated_bytes} bytes"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "dead namespace census exceeded the abnormal pass ceiling: {elapsed:?}"
+    );
+}
 
 fn sample_record(target: &str, value: f64) -> PerfLogRecord {
     PerfLogRecord {

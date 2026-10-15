@@ -52,6 +52,8 @@ test("surfaceForWindow puts the PM apart from the agents by its role marker", as
   assert.equal(surfaceForWindow({ preset: "claude", is_pm: true }), "pm");
   assert.equal(surfaceForWindow({ preset: "claude", is_pm: false }), "agents");
   assert.equal(surfaceForWindow({ preset: "board" }), "board");
+  assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "issues");
+  assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "system" }), "settings");
   assert.equal(surfaceForWindow(null), null);
 });
 

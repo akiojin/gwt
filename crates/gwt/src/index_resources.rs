@@ -1,17 +1,18 @@
 //! Index resource diagnostics (Issue #4527 AC-1, SPEC #1939 AS-33 / FR-425).
 //!
-//! Measures the logical runner tree from the OS through `sysinfo`, so Windows
+//! Measures actual runner process trees from the OS through `sysinfo`, so Windows
 //! reports the same CPU / RSS / private-memory fields as POSIX without
 //! depending on `ps`. The heavy lease and refresh broker counters come from
 //! their existing read-only projections; nothing here redesigns scheduling.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-/// Measured usage of one process and every descendant.
+/// Combined usage of selected processes and their descendants, counted once.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProcessTreeUsage {
     pub process_count: usize,
@@ -32,19 +33,24 @@ pub struct IndexRunnerHolder {
     pub project_root: Option<PathBuf>,
     pub action: Option<String>,
     pub qos: Option<String>,
+    pub model_state: Option<String>,
+    pub model_load_ms: Option<u64>,
 }
 
 impl std::fmt::Display for IndexRunnerHolder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "repo_hash={} project_root={} action={} qos={}",
+            "repo_hash={} project_root={} action={} qos={} model_state={} model_load_ms={}",
             self.repo_hash,
             self.project_root
                 .as_ref()
                 .map_or_else(|| "unknown".to_string(), |root| root.display().to_string(),),
             self.action.as_deref().unwrap_or("unknown"),
             self.qos.as_deref().unwrap_or("unknown"),
+            self.model_state.as_deref().unwrap_or("unknown"),
+            self.model_load_ms
+                .map_or_else(|| "unknown".to_string(), |ms| ms.to_string()),
         )
     }
 }
@@ -73,35 +79,96 @@ pub(crate) fn index_runner_holder(
             .holder_context
             .as_ref()
             .map(|context| context.qos.clone()),
+        model_state: status.model_state.clone(),
+        model_load_ms: status.model_load_ms,
     })
 }
 
 /// Measure `root_pid` and its descendants over one CPU sampling interval.
 /// Returns `None` when the root does not exist.
 pub fn measure_process_tree(root_pid: u32) -> Option<ProcessTreeUsage> {
-    let root = sysinfo::Pid::from_u32(root_pid);
-    let refresh = ProcessRefreshKind::nothing().with_cpu().with_memory();
-    let mut system = System::new();
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
-    system.process(root)?;
-    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
-    system.process(root)?;
+    measure_process_trees(Some(root_pid))
+}
 
-    let mut tree = HashSet::from([root]);
+// All launch paths pass the Python script as argv[1]. Match that argument's
+// basename, not mentions of the runner in an agent prompt or shell command.
+fn is_index_runner(command: &[OsString]) -> bool {
+    let python = command
+        .first()
+        .and_then(|arg| Path::new(arg).file_stem())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("python"));
+    python
+        && command
+            .get(1)
+            .and_then(|arg| Path::new(arg).file_name())
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name == "chroma_index_runner.py"
+                    || name
+                        .strip_prefix("chroma_index_runner-")
+                        .and_then(|suffix| suffix.strip_suffix(".py"))
+                        .is_some_and(|hash| !hash.is_empty())
+            })
+}
+
+fn runner_tree_pids(processes: &[(Pid, Option<Pid>, bool)]) -> HashSet<Pid> {
+    descendant_pids(
+        processes
+            .iter()
+            .filter(|(_, _, runner)| *runner)
+            .map(|(pid, _, _)| *pid)
+            .collect(),
+        processes,
+    )
+}
+
+fn descendant_pids(mut tree: HashSet<Pid>, processes: &[(Pid, Option<Pid>, bool)]) -> HashSet<Pid> {
     loop {
         let before = tree.len();
-        for (pid, process) in system.processes() {
-            if process
-                .parent()
-                .is_some_and(|parent| tree.contains(&parent))
-            {
+        for (pid, parent, _) in processes {
+            if parent.is_some_and(|parent| tree.contains(&parent)) {
                 tree.insert(*pid);
             }
         }
         if tree.len() == before {
-            break;
+            return tree;
         }
+    }
+}
+
+/// Without an explicit root, measure all actual runners, including reused
+/// search workers whose original lease owner has already exited.
+fn measure_process_trees(root_pid: Option<u32>) -> Option<ProcessTreeUsage> {
+    let root = root_pid.map(Pid::from_u32);
+    let refresh = ProcessRefreshKind::nothing()
+        .with_cpu()
+        .with_memory()
+        .with_cmd(UpdateKind::OnlyIfNotSet)
+        // Linux otherwise exposes threads as children with duplicate RSS.
+        .without_tasks();
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+    if let Some(root) = root {
+        system.process(root)?;
+    }
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+    if let Some(root) = root {
+        system.process(root)?;
+    }
+
+    let snapshot: Vec<_> = system
+        .processes()
+        .iter()
+        .map(|(pid, process)| (*pid, process.parent(), is_index_runner(process.cmd())))
+        .collect();
+    let tree = match root {
+        Some(root) => descendant_pids(HashSet::from([root]), &snapshot),
+        None => runner_tree_pids(&snapshot),
+    };
+    if tree.is_empty() {
+        return None;
     }
     let processes: Vec<_> = tree.iter().filter_map(|pid| system.process(*pid)).collect();
     Some(ProcessTreeUsage {
@@ -134,7 +201,8 @@ pub struct IndexResourceDiagnostics {
     pub broker_running: usize,
     /// Targets holding a coalesced follow-up refresh behind a running one.
     pub broker_follow_ups: usize,
-    /// The heavy owner's logical tree; `None` while no live owner holds it.
+    /// Actual index runners and their descendants across the host, independent
+    /// of the lease owner's GUI/agent tree. `None` when no runner is visible.
     pub runner_tree: Option<ProcessTreeUsage>,
 }
 
@@ -163,7 +231,7 @@ pub fn collect_index_resources() -> IndexResourceDiagnostics {
             broker_root,
             gwt_core::index::broker::DEFAULT_REFRESH_QUIET_PERIOD,
         )
-        .and_then(|broker| broker.inspect())
+        .and_then(|broker| broker.scan())
         {
             diagnostics.broker_targets = snapshot.target_count();
             diagnostics.broker_queue_depth = snapshot.queue_depth();
@@ -175,7 +243,7 @@ pub fn collect_index_resources() -> IndexResourceDiagnostics {
                 .count();
         }
     }
-    diagnostics.runner_tree = diagnostics.heavy_owner_pid.and_then(measure_process_tree);
+    diagnostics.runner_tree = measure_process_trees(None);
     diagnostics
 }
 
@@ -213,6 +281,57 @@ pub fn render_index_resources(out: &mut String, diagnostics: &IndexResourceDiagn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_selection_excludes_owner_and_agent_trees_but_includes_reused_workers() {
+        let pid = sysinfo::Pid::from_u32;
+        let processes = [
+            (pid(1), None, false),         // GUI / lease owner
+            (pid(2), Some(pid(1)), false), // agent
+            (pid(3), Some(pid(2)), false), // cargo
+            (pid(4), Some(pid(1)), true),  // runner
+            (pid(5), Some(pid(4)), false), // runner child
+            (pid(6), None, true),          // reused worker, no longer under owner
+            (pid(7), Some(pid(6)), false),
+            (pid(8), Some(pid(4)), true), // nested runner must not be counted twice
+        ];
+        assert_eq!(
+            runner_tree_pids(&processes),
+            HashSet::from([pid(4), pid(5), pid(6), pid(7), pid(8)])
+        );
+        assert!(runner_tree_pids(&processes[..3]).is_empty());
+    }
+
+    #[test]
+    fn runner_identity_uses_the_python_script_argument() {
+        let command = |args: &[&str]| {
+            args.iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        for script in [
+            "/runtime/chroma_index_runner.py",
+            "/runtime/runners/chroma_index_runner-abc123.py",
+            "/Users/日本語 user/runtime/chroma_index_runner.py",
+        ] {
+            assert!(is_index_runner(&command(&[
+                "python.exe",
+                script,
+                "--action",
+                "index-files"
+            ])));
+        }
+        for args in [
+            vec!["codex", "explain chroma_index_runner.py"],
+            vec!["python", "unrelated.py", "chroma_index_runner.py"],
+            vec!["python", "chroma_index_runner.py.bak"],
+            vec!["codex", "chroma_index_runner.py"],
+            vec!["python"],
+            vec![],
+        ] {
+            assert!(!is_index_runner(&command(&args)));
+        }
+    }
 
     #[test]
     fn resources_report_the_actual_cross_project_holder_before_runner_spawn() {
@@ -256,6 +375,22 @@ mod tests {
             lease_id,
             "diagnostics must preserve lease identity"
         );
+        coordinator
+            .write_heavy_progress(&gwt_core::index_coordinator::HeavyProgress {
+                target: key.file_stem(),
+                done: 0,
+                total: 40,
+                batch_size: 1,
+                batch_ms: 0,
+                updated_at_ms: coordinator
+                    .heavy_lease_status()
+                    .unwrap()
+                    .acquired_at_ms
+                    .unwrap(),
+                model_state: Some("warming".into()),
+                model_load_ms: Some(0),
+            })
+            .unwrap();
 
         let diagnostics = collect_index_resources();
         let payload = serde_json::to_value(&diagnostics).expect("diagnostics json");
@@ -266,10 +401,13 @@ mod tests {
         );
         assert_eq!(payload["heavy_holder"]["action"], "index-issues");
         assert_eq!(payload["heavy_holder"]["qos"], "background");
+        assert_eq!(payload["heavy_holder"]["model_state"], "warming");
+        assert_eq!(payload["heavy_holder"]["model_load_ms"], 0);
         let mut out = String::new();
         render_index_resources(&mut out, &diagnostics);
         assert!(out.contains("repo_hash=other-repo"), "{out}");
         assert!(out.contains("action=index-issues qos=background"), "{out}");
+        assert!(out.contains("model_state=warming model_load_ms=0"), "{out}");
     }
 
     #[test]

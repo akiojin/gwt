@@ -19,6 +19,7 @@ pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
+pub(crate) mod branch_freshness;
 mod context;
 pub mod coordination_event;
 pub mod diagnostics;
@@ -26,6 +27,7 @@ pub mod effect_classifier;
 pub mod envelope;
 pub mod event_dispatcher;
 pub mod execution_control_stop_check;
+pub mod external_skill_conflicts;
 pub mod forward;
 pub mod health;
 mod identity;
@@ -149,6 +151,9 @@ pub struct HookEvent {
     pub tool_input: Option<serde_json::Value>,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
+    /// Advisory provenance only; these fields never grant authority.
+    pub active_skill: Option<String>,
+    pub active_plugin: Option<String>,
 }
 
 impl HookEvent {
@@ -169,9 +174,36 @@ impl HookEvent {
         Self::read_from_str(&buf)
     }
 
-    /// Convenience accessor for `tool_input.command` (Bash tool payloads).
+    /// Shell text from Bash (`command`) or Codex exec_command (`cmd`).
     pub fn command(&self) -> Option<&str> {
-        self.tool_input.as_ref()?.get("command")?.as_str()
+        let input = self.tool_input.as_ref()?;
+        input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| input.get("cmd").and_then(serde_json::Value::as_str))
+    }
+
+    /// Codex can select a command directory independently of the hook cwd.
+    pub(super) fn command_cwd(&self, fallback: &std::path::Path) -> std::path::PathBuf {
+        let cwd = self
+            .cwd
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| fallback.to_path_buf());
+        if matches!(
+            self.tool_name.as_deref(),
+            Some("exec_command" | "functions.exec_command")
+        ) {
+            if let Some(workdir) = self
+                .tool_input
+                .as_ref()
+                .and_then(|input| input.get("workdir"))
+                .and_then(serde_json::Value::as_str)
+            {
+                return cwd.join(workdir);
+            }
+        }
+        cwd
     }
 }
 

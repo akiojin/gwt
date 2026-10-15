@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use codex::{CodexResetClient, ResetOutcome, ResetSnapshot};
 
-pub const CLAUDE_NOTICE: &str = "Claude の追加利用は課金を伴うため gwt からは実行しない。別プロバイダへの切り替えを提案します。";
+pub const CLAUDE_NOTICE: &str = "Additional Claude usage incurs charges and is not enabled by gwt. Consider switching to another provider.";
 
 /// The audit identifies an attempt, never an authorization reusable by a caller.
 #[derive(Debug, Serialize)]
@@ -57,10 +57,10 @@ pub(crate) fn execute(
         let before = backend.read()?;
         let credit = free_credit(&before)?;
         let prompt = format!(
-            "Codex の無料リセットを1回使用します。\n対象 window: {}\nアカウント: {}\n認証ルート: {}\n由来: {}\n\
-             このアカウントを共有する Codex の対象使用量枠がリセットされます。\n\
-             無料リセット枠を1つ消費します。購入や有料追加利用は行いません。\n\
-             成功と利用再開を確認した場合のみ gwt の hold を解除します。\n\n{CLAUDE_NOTICE}",
+            "Use one free Codex reset.\nTarget window: {}\nAccount: {}\nAuthentication root: {}\nOrigin: {}\n\
+             The affected Codex usage limits for this shared account will be reset.\n\
+             This consumes one free reset credit. No purchases or paid usage will be made.\n\
+             gwt releases the hold only after confirming both reset success and resumed usage.\n\n{CLAUDE_NOTICE}",
             request.window_id, before.account_id, auth_root.path.display(),
             serde_json::to_value(auth_root.origin).map_err(|_| "authentication origin encoding failed")?,
         );
@@ -149,7 +149,7 @@ pub fn proposals(
         let (action, message) = match provider.as_str() {
             "codex" if remaining as u64 >= min_reset_wait_secs => (
                 "check_free_reset",
-                "Codex の無料リセット枠を確認してください。provider.reset は対象 window を照合し、利用可能な無料枠と人間の明示承認がある場合だけ実行します。購入は行いません。".to_owned(),
+                "Check for a free Codex reset credit. provider.reset verifies the target window and runs only with an available free credit and explicit human approval. No purchases are made.".to_owned(),
             ),
             "claude" => ("switch_provider", CLAUDE_NOTICE.to_owned()),
             _ => return None,

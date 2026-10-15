@@ -28,6 +28,7 @@ pub(super) struct LaunchErrorInput {
     tab_id: String,
     raw_window_id: String,
     pub(super) active: Option<super::ActiveAgentSession>,
+    linked_issue_number: Option<u64>,
     project_root: Option<std::path::PathBuf>,
     sessions_dir: std::path::PathBuf,
     session_cache: super::launch::LaunchWizardMemoryCache,
@@ -84,7 +85,7 @@ pub(super) fn prepare_launch_error(
             window_id: Some(input.window_id.clone()),
             session_id: active.map(|a| a.session_id.clone()),
             project_root: input.project_root.as_ref().map(|p| p.display().to_string()),
-            issue: None,
+            issue: input.linked_issue_number,
         },
     );
     let feedback = input.feedback.as_ref();
@@ -432,7 +433,12 @@ impl AppRuntime {
         );
     }
 
-    fn log_window_launch_error(&self, stage: &'static str, window_id: &str, error: &str) {
+    pub(super) fn log_window_launch_error(
+        &self,
+        stage: &'static str,
+        window_id: &str,
+        error: &str,
+    ) {
         let (tab_id, raw_window_id) = self
             .window_lookup
             .get(window_id)
@@ -467,6 +473,11 @@ impl AppRuntime {
                 .find(|tab| tab.id == address.tab_id)
                 .map(|tab| tab.project_root.display().to_string())
         });
+        let issue = self.window_lookup.get(window_id).and_then(|address| {
+            self.tab(&address.tab_id)
+                .and_then(|tab| tab.workspace.window(&address.raw_id))
+                .and_then(|window| window.linked_issue_number)
+        });
         gwt::error_report::report_error_and_publish(
             gwt_core::error_ledger::ErrorKind::LaunchFailure,
             sanitized_error,
@@ -474,7 +485,7 @@ impl AppRuntime {
                 window_id: Some(window_id.to_string()),
                 session_id: session.map(|session| session.session_id.clone()),
                 project_root,
-                issue: None,
+                issue,
             },
         );
     }
@@ -553,6 +564,12 @@ impl AppRuntime {
                 .map(|a| a.raw_id.clone())
                 .unwrap_or_else(|| "unknown".into()),
             active: self.active_agent_sessions.get(window_id).cloned(),
+            // A pre-PTY restore already has its Issue link on the window.
+            linked_issue_number: address.and_then(|address| {
+                self.tab(&address.tab_id)
+                    .and_then(|tab| tab.workspace.window(&address.raw_id))
+                    .and_then(|window| window.linked_issue_number)
+            }),
             project_root: self.issue_monitor_project_root_for_window(window_id),
             sessions_dir: self.sessions_dir.clone(),
             session_cache: self.launch_wizard_cache.clone(),

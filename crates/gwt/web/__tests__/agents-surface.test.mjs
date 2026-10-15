@@ -3,14 +3,20 @@ import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { readFileSync } from "node:fs";
 
-async function fixture({ isMounted = () => true } = {}) {
+const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+const titleBody = appSource.match(/function windowDisplayTitle\(windowData\)\s*\{([\s\S]*?)\n      \}/)[1];
+const titleFromApp = new Function("windowData", "isAgentWindowPreset", "PM_WINDOW_TITLE", titleBody);
+const windowDisplayTitle = data => titleFromApp(data, preset => ["agent", "claude", "codex"].includes(preset), "Project Manager");
+
+async function fixture({ isMounted = () => true, storage } = {}) {
   const { createUiStateStore } = await import("../ui-state-store.js");
   const model = createUiStateStore({ catalog: { windows: [], version: 0 } });
   const { createAgentsSurface } = await import("../agents-surface.js");
   const { document, window } = parseHTML("<main></main>");
+  Object.defineProperty(window, "localStorage", { configurable: true, get: () => storage });
   const mounted = [], focused = [], layouts = [];
   const previews = new Set();
-  const surface = createAgentsSurface({ document, windowCatalogModel: model,
+  const surface = createAgentsSurface({ document, windowCatalogModel: model, windowDisplayTitle,
     getWindows: catalog => catalog.windows, isMounted,
     mountTerminal: (id, root) => { mounted.push([id, root]); if (!root.firstChild) root.appendChild(document.createElement("textarea")); },
     mountPreview: (id, root) => {
@@ -28,11 +34,28 @@ async function fixture({ isMounted = () => true } = {}) {
 }
 
 const agents = [
-  { id: "one", preset: "codex", title: "One", session_id: "s1", status: "running" },
-  { id: "two", preset: "claude", title: "Two", session_id: "s2", placement: { kind: "issue_preview" }, status: "running" },
-  { id: "three", preset: "agent", title: "Three", status: "stopped" },
+  { id: "one", preset: "codex", title: "One", agent_name: "One", session_id: "s1", status: "running" },
+  { id: "two", preset: "claude", title: "Two", agent_name: "Two", session_id: "s2", placement: { kind: "issue_preview" }, status: "running" },
+  { id: "three", preset: "agent", title: "Three", agent_name: "Three", status: "stopped" },
   { id: "pm", preset: "claude", is_pm: true },
 ];
+
+test("Agents tiles, tabs and readonly preview acquire a late assigned name", async () => {
+  const { surface, setWindows, document } = await fixture();
+  const data = { ...agents[0], agent_name: null, dynamic_title: "Fix cache" };
+  setWindows([data]);
+  const host = document.createElement("div");
+  document.querySelector("main").appendChild(host);
+  surface.setPreviewHost(host);
+  assert.equal(surface.element.querySelector("h3").textContent, "Naming… — Fix cache");
+  const terminal = surface.element.querySelector("textarea");
+  setWindows([{ ...data, agent_name: "Lumen" }]);
+  assert.equal(surface.element.querySelector("h3").textContent, "Lumen — Fix cache");
+  assert.equal(document.getElementById("agents-tab-one").textContent, "Lumen — Fix cache");
+  assert.equal(host.querySelector("h3").textContent, "Lumen — Fix cache");
+  assert.equal(surface.element.querySelector("textarea"), terminal);
+  surface.dispose();
+});
 
 test("Agents and its preview pull one catalog revision and release their subscription", async () => {
   let active = false;
@@ -47,15 +70,15 @@ test("Agents and its preview pull one catalog revision and release their subscri
   assert.equal(surface.element.querySelectorAll(".agent-tile").length, 3);
   const terminal = surface.element.querySelector("textarea");
   setWindows([{ ...agents[0], dynamic_title: "Latest", status: "stopped" }]);
-  assert.equal(surface.element.querySelector("h3").textContent, "Latest");
-  assert.equal(host.querySelector("h3").textContent, "Latest");
+  assert.equal(surface.element.querySelector("h3").textContent, "One — Latest");
+  assert.equal(host.querySelector("h3").textContent, "One — Latest");
   assert.match(surface.element.textContent, /Input unavailable/);
   assert.equal(surface.element.querySelector("textarea"), terminal);
   for (const view of [surface.element, host.firstElementChild]) {
     assert.equal(view.dataset.catalogVersion, String(model.read().catalog.version));
   }
   surface.sync([{ ...agents[0], dynamic_title: "Bypass" }]);
-  assert.equal(surface.element.querySelector("h3").textContent, "Latest", "a view cannot accept uncommitted payloads");
+  assert.equal(surface.element.querySelector("h3").textContent, "One — Latest", "a view cannot accept uncommitted payloads");
   surface.dispose();
   assert.equal(host.childNodes.length, 0);
   const mounts = mounted.length;
@@ -79,6 +102,38 @@ test("Agents includes off-canvas agents, excludes PM and clamps the column spin 
   assert.equal(document.querySelectorAll(".agent-tile").length, 1);
 });
 
+test("Agents restores Columns when recreated and normalizes saved values", async () => {
+  const saved = new Map();
+  const storage = { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) };
+  const first = await fixture({ storage });
+  const columns = first.surface.element.querySelector("input");
+  assert.equal(columns.value, "2", "missing preference keeps the existing default");
+  columns.value = "3";
+  columns.dispatchEvent(new first.window.Event("input"));
+  first.surface.dispose();
+  const restored = await fixture({ storage });
+  assert.equal(restored.surface.element.querySelector("input").value, "3");
+  assert.equal(restored.surface.element.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(3, minmax(0, 1fr))");
+  restored.surface.dispose();
+  for (const [value, expected] of [["0", "1"], ["9", "4"], ["invalid", "1"]]) {
+    saved.set("gwt:ui:agent-columns", value);
+    const current = await fixture({ storage });
+    assert.equal(current.surface.element.querySelector("input").value, expected);
+    current.surface.dispose();
+  }
+});
+
+test("Agents keeps Columns usable when browser storage is unavailable", async () => {
+  const storage = { getItem() { throw new Error("unavailable"); }, setItem() { throw new Error("unavailable"); } };
+  const { surface, window } = await fixture({ storage });
+  const columns = surface.element.querySelector("input");
+  assert.equal(columns.value, "2");
+  columns.value = "3";
+  columns.dispatchEvent(new window.Event("input"));
+  assert.equal(surface.element.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(3, minmax(0, 1fr))");
+  surface.dispose();
+});
+
 test("a second pane shares the agent selection as a readonly preview and cleans up subscriptions", async () => {
   const { surface, setWindows, document, window, previews } = await fixture();
   setWindows(agents);
@@ -95,7 +150,7 @@ test("a second pane shares the agent selection as a readonly preview and cleans 
   setWindows(agents.map(data => data.id === "one" ? { ...data, dynamic_title: "Updated" } : data));
   assert.match(host.textContent, /Updated/);
   assert.equal(previews.size, 3);
-  document.querySelector('[aria-label="Close Updated tab"]').click();
+  document.querySelector('[aria-label="Close One — Updated tab"]').click();
   assert.equal(host.querySelector('[data-agent-id="two"]').hidden, false, "closing the shared selection returns both panes to All agents");
   const columns = surface.element.querySelector("input");
   columns.value = "3";
@@ -159,7 +214,7 @@ test("tab selection survives updates and falls back when the selected agent disa
   const layoutCount = layouts.length;
   setWindows(agents.map(data => data.id === "two" ? { ...data, dynamic_title: "Updated" } : data));
   assert.equal(layouts.length, layoutCount, "metadata updates do not trigger resize feedback");
-  assert.equal(tab.textContent, "Updated");
+  assert.equal(tab.textContent, "Two — Updated");
   assert.equal(tab.getAttribute("aria-selected"), "true");
   setWindows(agents.filter(data => data.id !== "two"));
   assert.equal(document.querySelector('[role="tab"]').getAttribute("aria-selected"), "true");
@@ -206,6 +261,20 @@ test("closing agent tabs preserves the live grid and reopens the same terminal",
   setWindows(agents);
   assert.ok(tab("two"), "a newly arriving agent has an open tab");
   assert.equal(document.querySelectorAll('[aria-label="Close All agents tab"]').length, 0);
+});
+
+test("external tab selection reopens the same terminal and reports whether the agent exists", async () => {
+  const { surface, setWindows, document, focused } = await fixture();
+  setWindows(agents);
+  const terminal = document.querySelector('[data-agent-id="two"] textarea');
+  document.querySelector('[aria-label="Close Two tab"]').click();
+  assert.equal(surface.openTab("two"), true);
+  assert.equal(document.getElementById("agents-tab-two").getAttribute("aria-selected"), "true");
+  assert.equal(document.querySelector('[data-agent-id="two"] textarea'), terminal);
+  assert.equal(focused.at(-1), "two");
+  assert.equal(surface.openTab("pm"), false);
+  assert.equal(surface.openTab("missing"), false);
+  assert.equal(document.getElementById("agents-tab-two").getAttribute("aria-selected"), "true");
 });
 
 test("the grid uses Operator tokens and contains the terminal inside each tile", () => {

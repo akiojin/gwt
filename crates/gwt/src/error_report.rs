@@ -129,6 +129,11 @@ enum BackendErrorJob {
         #[cfg(test)]
         home: Option<std::path::PathBuf>,
     },
+    Publish {
+        record: ErrorRecord,
+        #[cfg(test)]
+        home: Option<std::path::PathBuf>,
+    },
     #[cfg(test)]
     Flush(mpsc::SyncSender<()>),
 }
@@ -153,6 +158,17 @@ fn backend_error_sender() -> Option<&'static mpsc::Sender<BackendErrorJob>> {
                                     .as_ref()
                                     .map(gwt_core::test_support::ScopedGwtHome::set);
                                 append_record(record, true);
+                            }
+                            BackendErrorJob::Publish {
+                                record,
+                                #[cfg(test)]
+                                home,
+                            } => {
+                                #[cfg(test)]
+                                let _home = home
+                                    .as_ref()
+                                    .map(gwt_core::test_support::ScopedGwtHome::set);
+                                publish_recorded(&record, record.target.project_root.as_deref());
                             }
                             #[cfg(test)]
                             BackendErrorJob::Flush(done) => {
@@ -219,6 +235,18 @@ fn publish_recorded(record: &ErrorRecord, project_root: Option<&str>) {
     let Some(project_root) = project_root.filter(|root| !root.trim().is_empty()) else {
         return;
     };
+    // The daemon's capacity tick runs on Tokio. Keep its synchronous ledger
+    // append, but publish outside that runtime to preserve the control worker.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        if let Some(sender) = backend_error_sender() {
+            let _ = sender.send(BackendErrorJob::Publish {
+                record: record.clone(),
+                #[cfg(test)]
+                home: gwt_core::test_support::gwt_home_override(),
+            });
+        }
+        return;
+    }
     let Ok(payload) = serde_json::to_value(record) else {
         return;
     };

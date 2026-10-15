@@ -299,6 +299,46 @@ fn native_tray_measurement_runs_only_on_nightly_by_exact_name() {
     assert!(reporter.contains("test-windows-startup-tray"));
 }
 
+/// Issue #5437: Windows must exercise the real model across every search scope.
+#[test]
+fn nightly_windows_index_e2e_runs_real_scopes_and_background_contention() {
+    let nightly = read(NIGHTLY_WORKFLOW);
+    let job = job_body(&nightly, "  test-windows-index-e2e:");
+    assert!(job.contains("runs-on: windows-latest"));
+    assert!(job.contains("ref: develop"));
+    assert!(
+        !job.contains("if:"),
+        "index verification must not be skipped"
+    );
+    assert!(
+        !job.contains("continue-on-error:"),
+        "real-model failures must fail the nightly run"
+    );
+    let build = job
+        .find("cargo test -p gwt --test runtime_tests --no-run")
+        .expect("compile the runtime harness before either measurement");
+    for test in [
+        "index_resource_harness_test::real_e5_all_scopes_build_and_search",
+        "index_resource_harness_test::real_warm_search_finishes_during_background_build_and_build_resumes",
+    ] {
+        let command = format!(
+            "cargo test -p gwt --test runtime_tests {test} -- --exact --ignored --test-threads=1 --nocapture"
+        );
+        let run = job.find(&command).unwrap_or_else(|| panic!("missing {test}"));
+        assert!(build < run, "compile before running {test}");
+    }
+    let reporter = job_body(&nightly, "  report-nightly-failure:");
+    let needs = reporter
+        .lines()
+        .find(|line| line.trim_start().starts_with("needs:"))
+        .expect("nightly failure dependencies");
+    assert!(needs.contains("test-windows-index-e2e"));
+    assert!(
+        reporter.contains("real-model index measurement"),
+        "failure reports must describe index verification"
+    );
+}
+
 #[test]
 fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
     let workflow = read(TEST_WORKFLOW);

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
-function load(name) {
+function load(name, bindings = {}) {
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing ${name}`);
   const open = source.indexOf("{", source.indexOf(")", start));
@@ -14,7 +14,7 @@ function load(name) {
     if (source[end] === "}") depth--;
     end++;
   }
-  return Function(`return (${source.slice(start, end)})`)();
+  return Function(...Object.keys(bindings), `return (${source.slice(start, end)})`)(...Object.values(bindings));
 }
 
 test("Issues Settings keeps labels and values together and sends existing project controls", () => {
@@ -35,23 +35,51 @@ test("Issues Settings keeps labels and values together and sends existing projec
     else control.value = value;
     control.dispatchEvent(new Event("change"));
   };
-  change("Autonomous", true);
   change("Max active", "6");
-  panel.querySelector('[data-action="settings-use-auto"]').click();
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  assert.equal(mode.value, "manual");
+  mode.querySelector('[value="auto"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
   change("Auto-refill", true);
   change("Refill limit", "5");
   change("Allowed labels", "auto-merge, bug");
-  panel.querySelector('[data-action="settings-monitor-stop"]').click();
   assert.deepEqual(sent, [
-    { kind: "set_issue_monitor_autonomous_mode", enabled: true },
     { kind: "set_issue_monitor_max_active_agents", max_active_agents: 6 },
     { kind: "set_issue_monitor_max_active_agents", max_active_agents: null },
     { kind: "set_issue_monitor_auto_refill", enabled: true, limit: 3 },
     { kind: "set_issue_monitor_auto_refill", enabled: true, limit: 5 },
     { kind: "set_issue_monitor_allowed_labels", allowed_labels: ["auto-merge", "bug"] },
-    { kind: "set_issue_monitor_enabled", enabled: false },
   ]);
-  assert.equal(panel.querySelector('[aria-label="Max active"]').closest("label").textContent.includes("Manual"), true);
+  assert.equal(panel.querySelector('[aria-label="Autonomous"]'), null, "the summary owns Autonomous once");
+});
+
+test("Auto capacity is read-only until Manual is selected", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 4, max_active_agents_override: null }, send: m => sent.push(m) });
+  const max = panel.querySelector('[aria-label="Max active"]');
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  assert.equal(max.disabled, true);
+  assert.equal(mode.value, "auto");
+  mode.querySelector('[value="manual"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 4 }]);
+});
+
+test("Manual starts at one when Auto has no available capacity", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 0, max_active_agents_override: null }, send: m => sent.push(m) });
+  const max = panel.querySelector('[aria-label="Max active"]');
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  assert.equal(max.value, "0", "Auto still displays its effective capacity");
+  mode.querySelector('[value="manual"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  assert.equal(max.disabled, false);
+  assert.equal(max.value, "1");
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 }]);
 });
 
 test("Agents Settings edits full profiles while preserving runtime fields and project isolation", () => {
@@ -86,10 +114,13 @@ test("section-addressed Settings selects and focuses the requested project panel
   const { document, CustomEvent } = parseHTML('<html><body><div id="settings"><button class="settings-tab" data-settings-tab="issues"></button><section class="settings-panel" data-settings-panel="issues"></section></div></body></html>');
   const body = document.getElementById("settings");
   body.dataset.settingsProjectRoot = "/A";
+  body.dataset.settingsWindowId = "settings-A";
   const unbound = body.cloneNode(true);
   delete unbound.dataset.settingsProjectRoot;
   document.body.prepend(unbound);
   const panel = body.querySelector("section");
+  let selectedSection;
+  body.addEventListener("settings:section-changed", event => { selectedSection = event.detail; });
   let focused = 0, scrollOptions, spawned = 0;
   panel.focus = () => focused++;
   panel.scrollIntoView = options => { scrollOptions = options; };
@@ -102,14 +133,55 @@ test("section-addressed Settings selects and focuses the requested project panel
   assert.equal(focused, 1);
   assert.deepEqual(scrollOptions, { block: "start" });
   assert.equal(spawned, 1);
+  assert.deepEqual(selectedSection, { windowId: "settings-A", section: "issues" });
 });
 
 test("Settings declares app/project scope and the global update condition using existing primitives", () => {
   assert.match(source, /buildSettingsTab\("issues", "Issues"/);
-  assert.match(source, /buildSettingsTab\("agents", "Agents"/);
+  assert.match(source, /settings-issues-options/);
+  assert.match(source, /mountIssues\(windowData, issuesHost\)/);
+  assert.match(source, /aria-orientation.*vertical/);
   assert.match(source, /Application settings/);
   assert.match(source, /Auto-apply updates/);
   assert.match(source, /at least one open project.*Autonomous/);
-  assert.match(source, /set_issue_monitor_auto_apply_updates/);
+  assert.match(source, /set_auto_apply_updates/);
+  assert.doesNotMatch(source, /set_issue_monitor_auto_apply_updates/);
   assert.doesNotMatch(source, /style\.cssText\s*=/);
+});
+
+test("System update settings show saved and effective values and the blocking drain", () => {
+  const { document } = parseHTML('<html><body><section></section></body></html>');
+  const panel = document.querySelector("section");
+  const render = load("renderUpdateSettingsStatus");
+  render(panel, { auto_apply_updates: null, auto_apply_updates_effective: false,
+    update_drain: { version: "9.120.0", blocking: [
+      { kind: "active_pane", label: "Fix #4271", state: "Running" },
+      { kind: "pending_acquire_claim", issue_number: 12 },
+      { kind: "active_execution", worktree: "/work/issue-13" },
+      { kind: "held_verification_lease", lease_id: "verification-14" },
+    ] } });
+  assert.match(panel.textContent, /Saved: Default \(Off\).*Effective: Off/);
+  assert.match(panel.textContent, /Update 9\.120\.0 pending/);
+  assert.equal(panel.querySelectorAll("li").length, 4);
+  for (const expected of ["Fix #4271", "#12", "/work/issue-13", "verification-14"]) {
+    assert.ok(panel.textContent.includes(expected), expected);
+  }
+  render(panel, { auto_apply_updates: true, auto_apply_updates_effective: true, update_drain: null });
+  assert.match(panel.textContent, /Saved: On.*Effective: On.*No update pending/);
+  assert.equal(panel.querySelectorAll("li").length, 0);
+});
+
+test("failed update preference save restores the last authoritative toggle value", () => {
+  let state = { auto_apply_updates: true, auto_apply_updates_effective: true, loaded: true, drains: {} };
+  const { document } = parseHTML('<input type="checkbox">');
+  const toggle = document.querySelector("input");
+  toggle.checked = false;
+  const globalUpdateModel = { update(reducer) {
+    state = reducer(state);
+    toggle.checked = state.auto_apply_updates_effective;
+  } };
+  load("applyGlobalUpdateSettings", { globalUpdateModel })({ kind: "system_settings_error" });
+  assert.equal(toggle.checked, true, "failed OFF must not look saved");
+  assert.equal(state.auto_apply_updates, true);
+  assert.match(readFileSync(new URL("../app.js", import.meta.url), "utf8"), /case "system_settings_error":\s*applyGlobalUpdateSettings\(event\)/);
 });

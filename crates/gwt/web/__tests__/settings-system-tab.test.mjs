@@ -102,7 +102,7 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
     { kind: "set_agent_auto_update", enabled: true },
   ]);
   assert.match(panel.textContent, /next.*startup/i);
-  assert.match(panel.textContent, /npm/i);
+  assert.match(panel.textContent, /installed agents with a verified update route/i);
   assert.match(panel.textContent, /agent windows/i);
   const supportedAgentsModel = createUiStateStore({
     agents, autoUpdate: false, maintenanceByAgent: {},
@@ -241,7 +241,7 @@ test("settings-tab uses Operator color/space tokens (no hardcoded colors)", () =
   assert.doesNotMatch(body, /\brgb\(/, "no raw rgb() literals");
 });
 
-test("settings toolbar lets tabs wrap inside compact tiled windows", () => {
+test("Settings keeps grouped navigation beside a flexible content pane", () => {
   const toolbarBlock = componentsCss.match(
     /:root\[data-theme\]\s+\.settings-toolbar\s*\{([\s\S]*?)\}/,
   );
@@ -256,9 +256,12 @@ test("settings toolbar lets tabs wrap inside compact tiled windows", () => {
     /:root\[data-theme\]\s+\.settings-tabs\s*\{([\s\S]*?)\}/,
   );
   assert.ok(tabsBlock, "expected .settings-tabs block in components.css");
-  assert.match(tabsBlock[1], /flex-wrap:\s*wrap/);
+  assert.match(tabsBlock[1], /flex-direction:\s*column/);
   assert.match(tabsBlock[1], /min-width:\s*0/);
-  assert.match(tabsBlock[1], /max-width:\s*100%/);
+  assert.match(tabsBlock[1], /overflow-y:\s*auto/);
+  assert.match(componentsCss, /\.settings-layout\s*\{[^}]*grid-template-columns:[^}]*minmax\(0, 1fr\)/);
+  assert.match(componentsCss, /\.settings-field\s*\{[^}]*align-items:\s*center/);
+  assert.match(componentsCss, /\.settings-issues-options\[open\]\s*\{[^}]*overflow:\s*auto/);
 });
 
 test("settings-tab[aria-selected=true] uses --color-state-active tint", () => {

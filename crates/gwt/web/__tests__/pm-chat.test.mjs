@@ -22,11 +22,42 @@ function fixture() {
   return { root, model, view, visibility, copied, update };
 }
 
+test('current summary defaults to collapsed and keeps disclosure across polling per window', () => {
+  const { root, update } = fixture();
+  const current = { status: { items: [
+    { kind: 'working', text: '確認しています', started_at: '2026-10-14T00:00:00Z' },
+    { kind: 'waiting', text: 'Waiting for CI', started_at: '2026-10-14T00:00:00Z' },
+  ], next_trigger: 'CI passes', user_action: null, updated_at: '2026-10-14T00:00:00Z' }, stale_minutes: 15 };
+  update([report()], null, current);
+  const details = root.querySelector('details');
+  assert.ok(details, 'current card uses native disclosure');
+  assert.equal(details.hasAttribute('open'), false);
+  assert.match(details.querySelector('summary').textContent, /1 working.*1 waiting.*Next: CI passes.*User action: None/s);
+  assert.match(details.querySelector('summary').textContent, /Updated:.*PM has not updated for 15 minutes/s);
+  details.setAttribute('open', '');
+  update([report()], null, { ...current, stale_minutes: 16 });
+  assert.equal(root.querySelector('details'), details, 'polling keeps the disclosure node');
+  assert.equal(details.hasAttribute('open'), true);
+  assert.match(root.textContent, /確認しています/, 'authored content keeps its language');
+  assert.equal(fixture().root.querySelector('details').hasAttribute('open'), false, 'another window starts collapsed');
+  assert.ok(root.querySelector('.pm-chat__history-header select'), 'history heading and filter share a row');
+});
+
+test('Reports has a single scroll body and compact token-based history', async () => {
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  const rule = name => css.match(new RegExp(`\\.${name}\\s*\\{([^}]+)\\}`))[1];
+  assert.match(rule('pm-chat__body'), /overflow-y:\s*auto/);
+  assert.doesNotMatch(rule('pm-chat__current'), /max-height|overflow:\s*auto/);
+  assert.doesNotMatch(rule('pm-chat__transcript'), /overflow:\s*auto/);
+  assert.match(rule('pm-chat__message'), /padding:\s*var\(--space-2\)/);
+  assert.match(css, /\.pm-chat__current-summary > span\s*\{[^}]*white-space:\s*nowrap[^}]*text-overflow:\s*ellipsis/);
+});
+
 test('current card stays above history and distinguishes PM explanation from automatic facts', () => {
   const { root, update } = fixture();
-  const card = root.querySelector('[aria-label="PM の現在"]');
+  const card = root.querySelector('[aria-label="PM status"]');
   assert.ok(card, 'current card exists before any PM post');
-  assert.match(card.textContent, /現在状態はまだ報告されていません/);
+  assert.match(card.textContent, /No current status reported yet/);
   const current = {
     observed_at: '2026-10-13T09:20:00.100Z', stale_minutes: 15,
     status: { items: [{ kind: 'waiting', text: 'v9.117.2 の公開を待っています', started_at: '2026-10-13T09:00:00Z' }],
@@ -38,20 +69,20 @@ test('current card stays above history and distinguishes PM explanation from aut
   };
   update([report()], null, current);
   assert.equal(root.querySelector('.pm-chat__body').firstElementChild, card);
-  assert.match(card.querySelector('[aria-label="PM の記述"]').textContent, /待ち.*v9.117.2/s);
-  assert.equal(card.querySelector('time').getAttribute('datetime'), current.status.items[0].started_at);
-  assert.match(card.textContent, /ユーザーへの依頼: なし/);
-  assert.match(card.textContent, /PM の更新が 15 分止まっています/);
-  const facts = card.querySelector('[aria-label="自動の事実"]');
+  assert.match(card.querySelector('[aria-label="PM notes"]').textContent, /Waiting.*v9.117.2/s);
+  assert.equal(card.querySelector('[aria-label="PM notes"] time').getAttribute('datetime'), current.status.items[0].started_at);
+  assert.match(card.textContent, /User action: None/);
+  assert.match(card.textContent, /PM has not updated for 15 minutes/);
+  const facts = card.querySelector('[aria-label="Live facts"]');
   assert.match(facts.textContent, /#5349.*PM current state/s);
   assert.match(facts.textContent, /#5342.*Instruction memory/s);
   assert.match(facts.textContent, /needs_human: 2/);
   assert.match(facts.textContent, /Release v9.117.2/);
-  assert.match(facts.textContent, /未適用の更新: v9.117.2/);
+  assert.match(facts.textContent, /Pending update: v9.117.2/);
   assert.equal(root.querySelectorAll('article').length, 1, 'current state is outside chronological reports');
   update([report()], null, { ...current, observed_at: '2026-10-13T09:20:00.100001Z', stale_minutes: null, status: { ...current.status,
     items: [{ ...current.status.items[0], text: '公開結果を確認しています', kind: 'working' }], user_action: '配信設定を確認' } });
-  assert.doesNotMatch(card.textContent, /公開を待っています|15 分止まっています/);
+  assert.doesNotMatch(card.textContent, /公開を待っています|has not updated for 15 minutes/);
   assert.match(card.textContent, /公開結果を確認しています|配信設定を確認/);
   update([report()], null, current);
   assert.match(card.textContent, /公開結果を確認しています/, 'an older concurrent snapshot cannot restore the earlier status');
@@ -64,10 +95,10 @@ test('current card marks unknown automatic data instead of claiming an empty fle
   const { root, update } = fixture();
   update([], null, { status: null, facts: { source: 'unavailable', active_windows: [], queue_head: null,
     needs_human_count: null, release: null, release_observed_at: null, pending_update: null, error: 'Monitor unavailable' } });
-  const facts = root.querySelector('[aria-label="自動の事実"]');
+  const facts = root.querySelector('[aria-label="Live facts"]');
   assert.match(facts.textContent, /Monitor unavailable/);
-  assert.match(facts.textContent, /needs_human: 不明/);
-  assert.match(facts.textContent, /リリース: 不明/);
+  assert.match(facts.textContent, /needs_human: Unknown/);
+  assert.match(facts.textContent, /Release: Unknown/);
 });
 
 test('Reports renders shared Markdown, metadata and copy, with no input or submit surface', async () => {
@@ -75,10 +106,10 @@ test('Reports renders shared Markdown, metadata and copy, with no input or submi
   update([report()]);
   assert.equal(root.querySelector('[role="log"]').getAttribute('aria-label'), 'PM reports');
   assert.equal(root.querySelector('h1').textContent, 'Update');
-  assert.equal(root.querySelector('strong').textContent, 'Ready');
+  assert.equal(root.querySelector('article strong').textContent, 'Ready');
   assert.equal(root.querySelector('li').textContent, 'checked');
   assert.equal(root.querySelector('pre code').textContent, 'cargo test');
-  assert.equal(root.querySelector('time').getAttribute('datetime'), report().created_at);
+  assert.equal(root.querySelector('article time').getAttribute('datetime'), report().created_at);
   assert.match(root.textContent, /progress/);
   assert.equal(root.querySelectorAll('input, textarea, form, [contenteditable], button[type="submit"]').length, 0);
   root.querySelector('[aria-label="Copy report"]').click();
@@ -141,10 +172,10 @@ test('report kind filter retains its selection on polling and hides with the exe
 });
 
 test('report updates preserve nodes and scroll, append history, and retain history on read failure', () => {
-  const { root, update } = fixture();
+  const { root, model, update } = fixture();
   update([report()]);
   const first = root.querySelector('article');
-  const transcript = root.querySelector('[role="log"]');
+  const transcript = root.querySelector('.pm-chat__body');
   transcript.scrollTop = 20;
   update([report()]);
   assert.ok(root.querySelector('article') === first);
@@ -157,6 +188,13 @@ test('report updates preserve nodes and scroll, append history, and retain histo
   update([], 'Reports could not be loaded');
   assert.equal(root.querySelectorAll('article').length, 2);
   assert.match(root.querySelector('[role="status"]').textContent, /could not be loaded/);
+  update([report(), report('two'), report('pm-peer-a'), report('pm-peer-b')], null,
+    { observed_at: '2026-10-15T00:00:00Z' });
+  update([report(), report('two'), { ...report('qa'), kind: 'qa', question: 'Can we continue?' }], null,
+    { observed_at: '2026-10-15T00:01:00Z' });
+  assert.deepEqual(model.readPmWindowState().windows.pm.reports.map(row => row.id), ['one', 'two', 'qa']);
+  assert.equal(model.readPmWindowState().windows.pm.current.observed_at, '2026-10-15T00:01:00Z');
+  assert.equal(root.querySelectorAll('article').length, 3);
 });
 
 test('Reports and raw terminal share one immutable version without replaying terminal packets', () => {

@@ -1932,6 +1932,10 @@ enum UserEvent {
         window_id: String,
         watch: ContinueWorkReadinessWatch,
     },
+    IssueMonitorStartupTimeout {
+        window_id: String,
+        generation: u64,
+    },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
     /// drag/drop natively via the HTML5 API. The variant stays around
@@ -3225,7 +3229,6 @@ mod tests {
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
-            auto_apply_updates: false,
             enabled: true,
             state: "idle".to_string(),
             queue_len: 1,
@@ -3809,6 +3812,7 @@ mod tests {
             dynamic_title: None,
             dynamic_title_detail: None,
             agent_id: None,
+            agent_name: None,
             agent_color: None,
             worktree_form: gwt::WindowWorktreeForm::Unknown,
             tab_group_id: None,
@@ -4626,6 +4630,7 @@ mod tests {
         let (project_tab_incarnations, next_project_incarnation) =
             crate::app_runtime::initial_project_tab_incarnations(&tabs);
         let mut runtime = AppRuntime {
+            _runtime_namespace_gc: None,
             issue_monitor_review_dispatch_windows: std::collections::HashSet::new(),
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
@@ -4660,6 +4665,7 @@ mod tests {
 
             pending_launch_feedback_contexts: HashMap::new(),
             pending_launch_delivery_acks: HashMap::new(),
+            pending_monitor_startups: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
@@ -4713,6 +4719,9 @@ mod tests {
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             )),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            work_events_ingest_queue: Arc::new(
+                crate::work_events_ingest::WorkEventsIngestQueue::default(),
+            ),
             last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
@@ -5053,11 +5062,15 @@ mod tests {
             &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
             &gwt::IssueMonitorPrefs {
                 autonomous_mode: true,
-                auto_apply_updates: Some(true),
                 ..Default::default()
             },
         )
         .unwrap();
+        let legacy_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&legacy_path).unwrap()).unwrap();
+        legacy["auto_apply_updates"] = serde_json::json!(true);
+        fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let config = gwt_core::paths::gwt_config_path();
         fs::create_dir_all(config.parent().unwrap()).unwrap();
         fs::write(config, "auto_apply_updates = false\n").unwrap();
@@ -5162,7 +5175,6 @@ mod tests {
                 &prefs_path,
                 &gwt::IssueMonitorPrefs {
                     autonomous_mode,
-                    auto_apply_updates,
                     ..Default::default()
                 },
             )
@@ -5763,7 +5775,7 @@ mod tests {
             3
         );
 
-        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
         let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
         let file_tree_raw_id = runtime
             .window_lookup
@@ -5929,12 +5941,9 @@ mod tests {
 
         for preset in [
             WindowPreset::FileTree,
-            WindowPreset::Branches,
             WindowPreset::Settings,
             WindowPreset::Profile,
             WindowPreset::Logs,
-            WindowPreset::Issue,
-            WindowPreset::Spec,
             WindowPreset::Pr,
         ] {
             assert_eq!(
@@ -5961,11 +5970,11 @@ mod tests {
             assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
 
-        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
         let branches_raw_id = runtime
             .window_lookup
             .get(&branches_id)
-            .expect("Branches lookup")
+            .expect("Settings lookup")
             .raw_id
             .clone();
         let before_z = runtime
@@ -5973,14 +5982,14 @@ mod tests {
             .expect("tab")
             .workspace
             .window(&branches_raw_id)
-            .expect("Branches window")
+            .expect("Settings window")
             .z_index;
         assert_eq!(
             runtime
                 .create_window_events(&runtime.test_context(), WindowPreset::Work, bounds.clone())
                 .len(),
             1,
-            "Work must focus the existing legacy Branches singleton",
+            "Work must focus the existing Settings surface",
         );
         let reused_work = runtime
             .tab("tab-1")
@@ -11330,6 +11339,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::ContinueWorkReadyTimeout { window_id, watch }) => {
                 clients.dispatch(app.handle_continue_work_ready_timeout(&window_id, &watch));
             }
+            Event::UserEvent(UserEvent::IssueMonitorStartupTimeout { window_id, generation }) => {
+                clients.dispatch(app.handle_issue_monitor_startup_timeout(&window_id, generation));
+            }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the
                 // only producer of this variant. The browser UI now
@@ -11404,20 +11416,10 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.handle_daemon_runtime_approval_wait_state(&id, waiting));
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionChanged { project_root }) => {
-                // `begin` takes `&mut` state, so this cannot become a match
-                // guard; bind it first to keep `collapsible_match` quiet.
-                let started = active_work_refresh_queue.begin(&project_root);
-                if started {
-                    match app.active_work_projection_refresh_job(&project_root) {
-                        Some(job) => spawn_active_work_projection_refresh(
-                            runtime.handle(),
-                            &proxy,
-                            job,
-                        ),
-                        // No open tab owns the project — nothing to rebuild.
-                        None => drop(active_work_refresh_queue.finish(&project_root)),
-                    }
-                }
+                // RuntimeHook already schedules the same project. Use its
+                // memoized latest-wins broker instead of a second worker/GUI
+                // clone pipeline for this notification (Issue #5404).
+                clients.dispatch(app.refresh_active_work_projection_for_project_root(&project_root));
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionRefreshed {
                 project_root,

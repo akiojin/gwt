@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 import chroma_index_runner as runner
+from tests.git_fixture import git_fixture_env
 
 
 class StatusHealthTests(unittest.TestCase):
@@ -59,16 +60,12 @@ class StatusHealthTests(unittest.TestCase):
         )
 
     def _git(self, root: Path, *args: str) -> None:
-        env = os.environ.copy()
-        env["GIT_CONFIG_NOSYSTEM"] = "1"
-        env["GIT_CONFIG_GLOBAL"] = os.devnull
-        env["GIT_ATTR_NOSYSTEM"] = "1"
         completed = subprocess.run(
             ["git", "-C", str(root), *args],
             check=False,
             capture_output=True,
             text=True,
-            env=env,
+            env=git_fixture_env(),
             timeout=30,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)

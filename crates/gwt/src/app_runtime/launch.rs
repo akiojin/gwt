@@ -1332,6 +1332,25 @@ impl FinalizedAgentCapabilityLaunch<'_> {
         // PTY and burns the Issue Monitor retry budget. A heal failure is
         // logged and the strict read reports the real state.
         heal_lost_generation_publication_best_effort(worktree, owner);
+        // Issue #5478 AC-3: Monitor must not materialize another producer over
+        // an Active owner. Manual concurrent launches retain SPEC #3590, and
+        // the projection read also covers generation-less legacy executions.
+        if session.launch_route == gwt_agent::LaunchRoute::Autonomous
+            && gwt::cli::execution_state::load(worktree)
+                .map_err(|error| error.to_string())?
+                .is_some_and(|record| {
+                    record.owner_kind == owner.kind
+                        && record.owner_number == owner.number
+                        && record.status
+                            == gwt::cli::execution_state::ExecutionControlStatus::Active
+                })
+        {
+            return Err(format!(
+                "Issue Monitor owner {} #{} already has an Active execution; inspect execution.status and continue the existing holder; if stale, use its recommended recovery before requeueing",
+                owner.kind.as_str(),
+                owner.number,
+            ).into());
+        }
         super::continuation::reconcile_unindexed_prepared_fresh_launches(
             sessions_dir,
             worktree,
@@ -3168,6 +3187,18 @@ pub(super) fn launch_config_from_persisted_session(
         );
         config.suppress_execution_control = true;
     }
+    if session.review_dispatch {
+        // Restore the observation role without rematerializing its existing
+        // detached checkout or arming producing execution control.
+        config
+            .env_vars
+            .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
+        config.suppress_execution_control = true;
+        config.is_ephemeral = true;
+        // The persisted branch can be the detached checkout's display fallback.
+        // Matching it would join a different review that shares that label.
+        config.branch = None;
+    }
     config
 }
 
@@ -3182,6 +3213,43 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
         return WindowProcessStatus::Starting;
     }
     WindowProcessStatus::Running
+}
+
+#[cfg(test)]
+mod persisted_review_launch_tests {
+    use super::*;
+
+    #[test]
+    fn restored_review_retains_observation_contract_and_isolated_worktree() {
+        let mut session = gwt_agent::Session::new(
+            "/tmp/isolated-review-checkout",
+            "work",
+            gwt_agent::AgentId::Codex,
+        );
+        session.review_dispatch = true;
+        session.linked_issue_number = Some(5478);
+        session.agent_session_id = Some("review-provider-conversation".to_string());
+        let config = launch_config_from_persisted_session(&session);
+
+        assert_eq!(
+            config
+                .env_vars
+                .get("GWT_REVIEW_DISPATCH")
+                .map(String::as_str),
+            Some("1"),
+            "a restored reviewer must retain its read-only hook identity"
+        );
+        assert!(config.suppress_execution_control);
+        assert!(config.is_ephemeral);
+        assert!(
+            config.branch.is_none(),
+            "a detached review must not join another review via the shared fallback branch"
+        );
+        assert_eq!(config.working_dir.as_ref(), Some(&session.worktree_path));
+        assert!(config.ephemeral_base_ref.is_none());
+        assert_eq!(config.linked_issue_number, Some(5478));
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3216,6 +3284,7 @@ pub(super) struct IssueMonitorTrustCandidate {
     pub(super) issue_number: u64,
     pub(super) project_root: PathBuf,
     pub(super) session_mode: gwt_agent::SessionMode,
+    pub(super) review_dispatch: bool,
 }
 
 /// A canonical worktree whose Issue Monitor ownership and Git inventory have
@@ -3262,6 +3331,7 @@ pub(super) fn issue_monitor_trust_candidate_from_feedback(
         issue_number,
         project_root,
         session_mode,
+        review_dispatch: context.issue_monitor_review_dispatch,
     }))
 }
 
@@ -4378,7 +4448,7 @@ pub(super) fn validate_issue_monitor_managed_codex_worktree(
     }
 
     let expected_branch = format!("work/issue-{}", candidate.issue_number);
-    if config.branch.as_deref() != Some(expected_branch.as_str()) {
+    if !candidate.review_dispatch && config.branch.as_deref() != Some(expected_branch.as_str()) {
         return Err(format!(
             "Issue Monitor branch must be {expected_branch}, got {:?}",
             config.branch
@@ -4389,6 +4459,51 @@ pub(super) fn validate_issue_monitor_managed_codex_worktree(
         "Issue Monitor Codex launch has no resolved working directory to validate".to_string()
     })?;
     let configured_worktree = canonical_launch_path(configured_worktree, "launch worktree")?;
+    if candidate.review_dispatch {
+        if !config.is_ephemeral
+            || !config.suppress_execution_control
+            || config
+                .env_vars
+                .get("GWT_REVIEW_DISPATCH")
+                .map(String::as_str)
+                != Some("1")
+            || config.branch.is_some()
+            || !is_ephemeral_worktree_path(&configured_worktree)
+        {
+            return Err(
+                "Issue Monitor review trust requires an isolated read-only detached launch".into(),
+            );
+        }
+        if !worktrees.iter().any(|worktree| {
+            worktree.branch.is_none()
+                && crate::runtime_support::usable_worktree_entry(worktree)
+                && canonical_launch_path(&worktree.path, "authoritative review worktree")
+                    .is_ok_and(|path| path == configured_worktree)
+        }) {
+            return Err(
+                "Issue Monitor review checkout is not an authoritative detached gwt worktree"
+                    .into(),
+            );
+        }
+        let reviewed_sha = config
+            .ephemeral_base_ref
+            .as_deref()
+            .filter(|sha| !sha.is_empty())
+            .ok_or_else(|| "Issue Monitor review trust requires its reviewed SHA".to_string())?;
+        let head = gwt_core::process::run_git_logged(
+            &["rev-parse", "--verify", "HEAD"],
+            Some(&configured_worktree),
+        )
+        .map_err(|error| {
+            format!("failed to inspect Issue Monitor review checkout HEAD: {error}")
+        })?;
+        if !head.status.success() || String::from_utf8_lossy(&head.stdout).trim() != reviewed_sha {
+            return Err(format!(
+                "Issue Monitor review checkout HEAD does not match reviewed SHA {reviewed_sha}"
+            ));
+        }
+        return Ok(Some(ManagedCodexWorktree(configured_worktree)));
+    }
     let authoritative_worktree =
         crate::usable_worktree_path_for_branch(worktrees, &expected_branch).ok_or_else(|| {
             format!("Issue Monitor branch {expected_branch} has no authoritative gwt worktree")
@@ -5159,6 +5274,11 @@ impl AppRuntime {
             success.initial_prompt_file,
             success.session_snapshot.as_ref(),
         );
+        if !self.pending_continue_work.contains_key(&window_id) {
+            if let Some(context) = feedback.as_ref() {
+                let _ = self.arm_issue_monitor_startup(&window_id, context);
+            }
+        }
         if let Some(operation_id) = self
             .pending_continue_work
             .get(&window_id)
@@ -5917,21 +6037,35 @@ impl AppRuntime {
     }
 
     pub(super) fn host_update_drain_launch_hold(&self) -> Result<Option<String>, String> {
+        let pending = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
+            !manifest.auto_apply_deferred
+                && gwt_core::update::pending_version_is_newer(
+                    &manifest.version,
+                    env!("CARGO_PKG_VERSION"),
+                )
+        });
+        let mut hold = None;
         for context in self.project_contexts() {
-            let prefs = gwt::load_issue_monitor_prefs(
+            let prefs = gwt::issue_monitor::load_issue_monitor_prefs_for_running_version(
                 &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
             )
             .map_err(|error| format!("Cannot check host update_drain admission: {error}"))?;
-            if let Some(drain) = prefs.update_drain {
-                return Ok(Some(format!(
-                    "Host update_drain for v{} in {} holds new agent launches; {}",
-                    drain.version,
-                    context.project_root.display(),
-                    gwt::UPDATE_DRAIN_RELEASE_OPERATION,
-                )));
+            if let Some(drain) = prefs.update_drain.filter(|drain| {
+                pending
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.version == drain.version)
+            }) {
+                hold.get_or_insert_with(|| {
+                    format!(
+                        "Host update_drain for v{} in {} holds new agent launches; release.update.defer {{\"version\":\"{}\"}} (host-wide)",
+                        drain.version,
+                        context.project_root.display(),
+                        drain.version,
+                    )
+                });
             }
         }
-        Ok(None)
+        Ok(hold)
     }
 
     fn spawn_agent_window_with_placement(
@@ -5953,6 +6087,17 @@ impl AppRuntime {
             agent_kanban_target,
             continuation,
         } = options;
+        let is_review = config
+            .env_vars
+            .get("GWT_REVIEW_DISPATCH")
+            .is_some_and(|value| value == "1");
+        // Review restoration can carry the implementation's saved context.
+        // It must not publish or resume an owner Work projection.
+        let workspace_resume_context = if is_review {
+            None
+        } else {
+            workspace_resume_context
+        };
         // Issue Monitor owns a stricter native-conversation writer preflight
         // than the generic branch singleton. Once that preflight authorizes a
         // Resume or chooses a fresh fallback, a same-branch window must not
@@ -6079,6 +6224,19 @@ impl AppRuntime {
                 gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
             monitor.refresh_agent_capacity(&project_root_path);
             let now = chrono::Utc::now().to_rfc3339();
+            // Issue #5478 AC-3: protect a declared wait even if delivery
+            // admission preceded it. Read the durable declaration directly:
+            // prefs restore does not carry inbox rows. Keep the existing expiry
+            // and PM invalidation contract; independent reviews stay separate.
+            if !review_dispatch
+                && monitor
+                    .autonomous_wait(issue_number)
+                    .is_some_and(|wait| gwt::issue_monitor::wait_declaration_in_force(wait, &now))
+            {
+                return Err(format!(
+                    "Issue Monitor active wait protects Issue #{issue_number}; resume the waiting implementation before launching another producer"
+                ));
+            }
             if let Some(snapshot) = self.issue_monitor_window_snapshot_for_tab(tab_id, &now) {
                 let tabs = self.issue_monitor_project_tab_ids(tab_id);
                 if let Some(started) = gwt::process::host_process_start_time(std::process::id()) {
@@ -6109,7 +6267,11 @@ impl AppRuntime {
         let resume_title = workspace_resume_context
             .as_ref()
             .and_then(WorkspaceResumeContext::purpose_title);
-        let purpose_title = if resume_title.is_some() {
+        let purpose_title = if is_review {
+            config
+                .linked_issue_number
+                .map(|number| format!("Review · Issue #{number}"))
+        } else if resume_title.is_some() {
             resume_title
         } else {
             agent_launch_purpose_title(
@@ -6220,14 +6382,17 @@ impl AppRuntime {
                 },
             );
         }
+        // Issue #4084 AC-2 / #5478: restored reviewers carry the durable marker
+        // without launch feedback and must retain the same review identity.
+        if is_review
+            || launch_feedback_context
+                .as_ref()
+                .is_some_and(|context| context.issue_monitor_review_dispatch)
+        {
+            self.issue_monitor_review_dispatch_windows
+                .insert(window_id.clone());
+        }
         if let Some(context) = launch_feedback_context {
-            // Issue #4084 AC-2: remember which windows are independent review
-            // dispatches (Issue #4041) so an idle one with a published verdict
-            // is classified as review rather than as an unexplained stall.
-            if context.issue_monitor_review_dispatch {
-                self.issue_monitor_review_dispatch_windows
-                    .insert(window_id.clone());
-            }
             self.pending_launch_feedback_contexts
                 .insert(window_id.clone(), context);
         }
@@ -7727,6 +7892,98 @@ mod agent_endpoint_env_tests {
                 .map(|session| &session.agent_id),
             Some(&replacement.agent_id)
         );
+    }
+
+    #[test]
+    fn autonomous_fresh_launch_refuses_active_owner_with_or_without_generation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for legacy in [false, true] {
+            let home = tempfile::tempdir().expect("home tempdir");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let mut launch = persisted_execution_launch(home.path());
+            let issuer = AgentCapabilityIssuer::for_test(
+                "http://127.0.0.1:45123/internal/hook-live",
+                "ws://127.0.0.1:46234/ws",
+                "ws://127.0.0.1:45123/internal/pane-ws",
+            );
+            if legacy {
+                gwt::cli::execution_state::materialize_at_launch(
+                    &launch.project,
+                    launch.owner.kind,
+                    launch.owner.number,
+                    &launch.session.id,
+                    "$gwt-execute #2359",
+                    false,
+                )
+                .expect("materialize legacy Active execution");
+            } else {
+                FinalizedAgentCapabilityLaunch {
+                    issuer: Some(&issuer),
+                    sessions_dir: &launch.sessions_dir,
+                    session: &mut launch.session,
+                    project_root: &launch.project,
+                    worktree: &launch.project,
+                    producing_owner: Some(launch.owner),
+                    prepared_continuation: None,
+                    rebound_continuation: None,
+                    execution_entrypoint: "$gwt-execute #2359",
+                    runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                    container_runtime: None,
+                    permission_decision: None,
+                }
+                .install(&mut HashMap::new())
+                .expect("materialize the first producing generation");
+            }
+            let projection =
+                gwt::cli::trusted_store::read(&launch.project, "execution-control.json")
+                    .expect("read Active projection");
+            let ledger =
+                gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                    .expect("read Active ledger");
+            let mut relaunch = gwt_agent::Session::new(
+                &launch.project,
+                "work/issue-2359",
+                gwt_agent::AgentId::Codex,
+            );
+            relaunch.project_state_root = Some(launch.project.clone());
+            relaunch.linked_issue_number = Some(launch.owner.number);
+            relaunch.launch_route = gwt_agent::LaunchRoute::Autonomous;
+            let mut env = HashMap::new();
+
+            let error = FinalizedAgentCapabilityLaunch {
+                issuer: Some(&issuer),
+                sessions_dir: &launch.sessions_dir,
+                session: &mut relaunch,
+                project_root: &launch.project,
+                worktree: &launch.project,
+                producing_owner: Some(launch.owner),
+                prepared_continuation: None,
+                rebound_continuation: None,
+                execution_entrypoint: "$gwt-execute #2359",
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                container_runtime: None,
+                permission_decision: None,
+            }
+            .install(&mut env)
+            .expect_err("Monitor must not start a second producer for an Active owner");
+
+            assert!(error.contains("already has an Active execution"), "{error}");
+            assert!(relaunch.execution_binding.is_none());
+            assert!(env.is_empty(), "a refused duplicate receives no capability");
+            assert_eq!(
+                gwt::cli::trusted_store::read(&launch.project, "execution-control.json")
+                    .expect("read preserved Active projection"),
+                projection
+            );
+            assert_eq!(
+                gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                    .expect("read preserved Active ledger"),
+                ledger
+            );
+        }
     }
 
     /// SPEC #3590 FR-001 / US-1 / US-4: a live Active holder must not refuse

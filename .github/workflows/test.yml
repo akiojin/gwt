@@ -722,8 +722,17 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_lease:: -- --test-threads=1
         timeout-minutes: 15
       - name: Run Windows verification driver relink regression
-        run: 'node scripts/ci-windows-tests.mjs run gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1'
-        timeout-minutes: 15
+        # Issue #5466 AC-4: retain the real-artifact assertions on every run.
+        # The failed run measured 75s for both cases; ten runs +50% fits 20m.
+        run: |
+          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_record::driver:: -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          for ($attempt = 1; $attempt -le 10; $attempt++) {
+            Write-Host "Windows verification driver relink regression $attempt/10"
+            node scripts/ci-windows-tests.mjs run gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        timeout-minutes: 20
       # Issue #4078 AC-4: the wait declaration is the only way a Windows agent
       # can tell the Issue Monitor its silence is a wait rather than a stall.
       # Both the acceptance of a declaration and its durable prefs fallback are

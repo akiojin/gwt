@@ -296,7 +296,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     // to it through the Windows list before exercising its cues.
     await page.locator("#window-list-button").click();
     await page.locator(".window-list-row")
-      .filter({ has: page.locator(".window-list-title", { hasText: "Monitor-linked Agent" }) })
+      .filter({ has: page.locator(".window-list-title", { hasText: "Cedar — Monitor-linked Agent" }) })
       .click();
     await expect(monitor.win).toBeVisible();
     await expect(manual.win).toBeHidden();
@@ -361,6 +361,7 @@ async function installKillSwitchBackend(page) {
         dynamic_title: null,
         dynamic_title_detail: null,
         agent_id: id,
+        agent_name: { "agent-1": "Aster", "agent-2": "Birch", "agent-3": "Cedar" }[id],
         agent_color: "cyan",
         tab_group_id: null,
         tab_group_active: false,
@@ -373,6 +374,7 @@ async function installKillSwitchBackend(page) {
       agentWindow("agent-1", 120, 100, 1),
       agentWindow("agent-2", 1600, 1200, 2, {
         title: "Manual Agent",
+        purpose_title: "Manual Agent",
         tab_group_id: "approval-agent-tabs",
         tab_group_active: true,
       }),
@@ -382,6 +384,7 @@ async function installKillSwitchBackend(page) {
       // without inventing a frontend-only `source` discriminator.
       agentWindow("agent-3", 1600, 1200, 2, {
         title: "Monitor-linked Agent",
+        purpose_title: "Monitor-linked Agent",
         agent_color: "violet",
         tab_group_id: "approval-agent-tabs",
       }),

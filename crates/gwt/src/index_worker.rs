@@ -296,6 +296,8 @@ pub struct ProjectIndexScopes {
     pub discussions: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub board: Option<ScopeHealthView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub works: Option<ScopeHealthView>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub files: BTreeMap<String, ScopeHealthView>,
     #[serde(
@@ -313,6 +315,7 @@ impl ProjectIndexScopes {
             && self.memory.is_none()
             && self.discussions.is_none()
             && self.board.is_none()
+            && self.works.is_none()
             && self.files.is_empty()
             && self.files_docs.is_empty()
     }
@@ -524,6 +527,9 @@ pub fn build_aggregated_status_view(
                 scopes.board = Some(view);
             }
         }
+        if scopes.works.is_none() {
+            scopes.works = status_obj.get("works").and_then(parse_scope_health);
+        }
         if let Some(view) = status_obj.get("files").and_then(parse_scope_health) {
             scopes.files.insert(probe.input.worktree_hash.clone(), view);
         }
@@ -589,6 +595,9 @@ fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
         count += 1;
     }
     if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
+        count += 1;
+    }
+    if matches!(&scopes.works, Some(view) if scope_requires_repair(view)) {
         count += 1;
     }
     count += scopes
@@ -1709,6 +1718,9 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Board, None));
     }
+    if matches!(&scopes.works, Some(view) if scope_requires_repair(view)) {
+        targets.push((IndexRebuildScope::Works, None));
+    }
     let worktree_hashes = scopes
         .files
         .keys()
@@ -1767,6 +1779,9 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     }
     if matches!(&scopes.board, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Board, None));
+    }
+    if matches!(&scopes.works, Some(view) if scope_requires_repair(view)) {
+        targets.push((IndexRebuildScope::Works, None));
     }
     if let Some(current_hash) = current_worktree_hash {
         let file_view_requires_repair = scopes
@@ -2000,6 +2015,7 @@ fn issue_index_needs_rebuild_for_cache(
 pub struct RegisteredRefreshProject {
     pub project_root: PathBuf,
     pub index_root: PathBuf,
+    worktree_roots: Vec<PathBuf>,
 }
 
 fn refresh_project_registry() -> &'static Mutex<HashMap<String, RegisteredRefreshProject>> {
@@ -2011,13 +2027,24 @@ fn register_refresh_project(repo_hash: &str, project_root: &Path, index_root: &P
     let mut registry = refresh_project_registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    registry.insert(
-        repo_hash.to_string(),
-        RegisteredRefreshProject {
+    registry
+        .entry(repo_hash.to_string())
+        .and_modify(|project| {
+            project.project_root = project_root.to_path_buf();
+            project.index_root = index_root.to_path_buf();
+            if !project
+                .worktree_roots
+                .iter()
+                .any(|path| path == project_root)
+            {
+                project.worktree_roots.push(project_root.to_path_buf());
+            }
+        })
+        .or_insert_with(|| RegisteredRefreshProject {
             project_root: project_root.to_path_buf(),
             index_root: index_root.to_path_buf(),
-        },
-    );
+            worktree_roots: vec![project_root.to_path_buf()],
+        });
 }
 
 /// Project registered for `repo_hash` by a bootstrap in this process.
@@ -2032,6 +2059,221 @@ pub fn registered_refresh_project(repo_hash: &str) -> Option<RegisteredRefreshPr
 /// Both Files scopes always travel together so one View head publishes them
 /// atomically (SPEC #1939 AS-23).
 pub const REFRESH_FILE_SCOPES: [RefreshScope; 2] = [RefreshScope::Files, RefreshScope::FilesDocs];
+const REFRESH_REPO_SCOPES: [RefreshScope; 6] = [
+    RefreshScope::Issues,
+    RefreshScope::Specs,
+    RefreshScope::Memory,
+    RefreshScope::Discussions,
+    RefreshScope::Board,
+    RefreshScope::Works,
+];
+
+fn repo_scope_source_paths(scope: RefreshScope, root: &Path, repo_hash: &RepoHash) -> Vec<PathBuf> {
+    let home = gwt_core::paths::gwt_project_dir(repo_hash);
+    match scope {
+        RefreshScope::Issues | RefreshScope::Specs => {
+            vec![crate::issue_cache::issue_cache_root_for_repo_hash(
+                repo_hash,
+            )]
+        }
+        RefreshScope::Memory | RefreshScope::Discussions => {
+            let name = if scope == RefreshScope::Memory {
+                "memory.md"
+            } else {
+                "discussions.md"
+            };
+            let primary = home.join("work-notes").join(name);
+            vec![if primary.is_file() {
+                primary
+            } else {
+                root.join(".gwt/work").join(name)
+            }]
+        }
+        RefreshScope::Board => {
+            let primary = home.join("coordination");
+            let source = if primary.join("events.manifest.json").is_file() {
+                primary
+            } else {
+                root.join(".gwt/coordination")
+            };
+            vec![source.join("events.manifest.json"), source.join("events")]
+        }
+        RefreshScope::Works => {
+            let state = home.join("project-state");
+            for name in ["works.json", "work_items.json"] {
+                let projection = state.join(name);
+                if projection.is_file() {
+                    return vec![projection];
+                }
+            }
+            vec![
+                state.join("work-events.jsonl"),
+                root.join(".gwt/work/events.jsonl"),
+                root.join(".gwt/work/events"),
+            ]
+        }
+        RefreshScope::Files | RefreshScope::FilesDocs => Vec::new(),
+    }
+}
+
+/// Metadata-only source snapshot. Nanosecond mtimes detect same-size edits;
+/// missing paths remain in the identity so creation/removal is observable.
+fn refresh_source_snapshot(paths: &[PathBuf]) -> Result<String, String> {
+    fn collect(path: &Path, files: &mut Vec<(PathBuf, u64, u128)>) -> io::Result<()> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                files.push((path.to_path_buf(), 0, 0));
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                collect(&entry?.path(), files)?;
+            }
+        } else if metadata.is_file() {
+            files.push((
+                path.to_path_buf(),
+                metadata.len(),
+                metadata
+                    .modified()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+            ));
+        }
+        Ok(())
+    }
+    use sha2::{Digest, Sha256};
+    let mut files = Vec::new();
+    for path in paths {
+        collect(path, &mut files)
+            .map_err(|error| format!("index source snapshot {}: {error}", path.display()))?;
+    }
+    files.sort();
+    let mut digest = Sha256::new();
+    for (path, size, mtime) in files {
+        digest.update(path.to_string_lossy().as_bytes());
+        digest.update([0]);
+        digest.update(size.to_le_bytes());
+        digest.update(mtime.to_le_bytes());
+    }
+    Ok(format!("source:{:x}", digest.finalize()))
+}
+
+fn submit_repo_source_refreshes(
+    broker: &RefreshBroker,
+    root: &Path,
+    repo_hash: &RepoHash,
+) -> Result<(), String> {
+    let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let previous = broker.inspect().map_err(|error| error.to_string())?;
+    for scope in REFRESH_REPO_SCOPES {
+        let target = RefreshTarget::base(repo_hash.as_str(), [scope]);
+        let snapshot = refresh_source_snapshot(&repo_scope_source_paths(scope, &root, repo_hash))?;
+        if previous
+            .target(&target)
+            .is_some_and(|old| old.desired_snapshot() == snapshot)
+        {
+            continue;
+        }
+        let desired_epoch = unix_millis_now().max(
+            previous
+                .target(&target)
+                .map_or(0, |old| old.desired_epoch().saturating_add(1)),
+        );
+        broker
+            .submit(RefreshIntent {
+                protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+                target,
+                desired_epoch,
+                desired_snapshot: snapshot,
+                priority: JobPriority::Background,
+                reason: RefreshReason::DirtyEvent,
+                resource_class: RefreshResourceClass::Embedding,
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Observe repo-shared sources without starting a model or runner. Called by
+/// the existing GUI drain; unchanged sources never reset the broker quiet window.
+pub fn poll_registered_project_index_sources(broker: &RefreshBroker) -> Result<(), String> {
+    if automatic_background_index_disabled() || test_fixture_status_path().is_some() {
+        return Ok(());
+    }
+    let projects = refresh_project_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    for project in projects.values() {
+        if let Some(repo_hash) = detect_repo_hash(&project.project_root) {
+            submit_repo_source_refreshes(broker, &project.project_root, &repo_hash)?;
+        }
+        for root in &project.worktree_roots {
+            if let Some(repo_hash) = detect_repo_hash(root) {
+                // File scopes share one overlay target and the existing path
+                // policy. Git supplies tracked/unignored files without walking
+                // build outputs; metadata observes edits as well as branch moves.
+                let output = run_project_index_git_probe(
+                    root,
+                    &[
+                        "ls-files",
+                        "--cached",
+                        "--others",
+                        "--exclude-standard",
+                        "-z",
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+                if !output.success() {
+                    return Err("index source file inventory failed".to_string());
+                }
+                let policy = gwt_core::index::path_policy::default_index_path_policy();
+                let files: Vec<_> = output
+                    .stdout
+                    .split('\0')
+                    .filter(|name| !name.is_empty())
+                    .map(|name| root.join(name))
+                    .filter(|path| !policy.is_builtin_denied_path(root, path))
+                    .collect();
+                let snapshot = refresh_source_snapshot(&files)?;
+                let worktree_hash =
+                    compute_worktree_hash(root).map_err(|error| error.to_string())?;
+                let target = RefreshTarget::overlay(
+                    repo_hash.as_str(),
+                    worktree_hash.as_str(),
+                    REFRESH_FILE_SCOPES,
+                );
+                let previous = broker.inspect().map_err(|error| error.to_string())?;
+                if previous
+                    .target(&target)
+                    .is_none_or(|old| old.desired_snapshot() != snapshot)
+                {
+                    let desired_epoch = unix_millis_now().max(
+                        previous
+                            .target(&target)
+                            .map_or(0, |old| old.desired_epoch().saturating_add(1)),
+                    );
+                    broker
+                        .submit(RefreshIntent {
+                            protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+                            target,
+                            desired_epoch,
+                            desired_snapshot: snapshot,
+                            priority: JobPriority::Background,
+                            reason: RefreshReason::DirtyEvent,
+                            resource_class: RefreshResourceClass::Embedding,
+                        })
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 fn unix_millis_now() -> u64 {
     std::time::SystemTime::now()
@@ -2043,11 +2285,22 @@ fn unix_millis_now() -> u64 {
 /// Canonical repo base intent for startup admission (Flow A). The desired
 /// snapshot pins the locally available canonical root tree without a fetch;
 /// the epoch is wall-clock so a newer startup supersedes an older one.
-fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> RefreshIntent {
+fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> Option<RefreshIntent> {
     let desired_epoch = unix_millis_now();
     let desired_snapshot = match gwt_git::refs::resolve_canonical_root_tree(repo_root) {
+        // Git hashes the empty tree identically for every repository using
+        // the same object format (SHA-1 or SHA-256).
+        Ok(Some(tree))
+            if matches!(
+                tree.root_tree_oid.as_str(),
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+                    | "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"
+            ) =>
+        {
+            return None
+        }
         Ok(Some(tree)) => format!("tree:{}", tree.root_tree_oid),
-        Ok(None) => "tree:unborn".to_string(),
+        Ok(None) => return None,
         Err(error) => {
             tracing::warn!(
                 target: "gwt::index",
@@ -2058,7 +2311,7 @@ fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> Refres
             format!("epoch:{desired_epoch}")
         }
     };
-    RefreshIntent {
+    Some(RefreshIntent {
         protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
         target: RefreshTarget::base(repo_hash.as_str(), REFRESH_FILE_SCOPES),
         desired_epoch,
@@ -2066,7 +2319,7 @@ fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> Refres
         priority: JobPriority::Background,
         reason: RefreshReason::Startup,
         resource_class: RefreshResourceClass::Embedding,
-    }
+    })
 }
 
 /// Injectable startup admission (SPEC #1939 FR-416). Registers the project
@@ -2100,10 +2353,17 @@ pub fn bootstrap_project_index_for_path_with_broker<S: RunnerSpawner + ?Sized>(
         return Ok(());
     };
     register_refresh_project(repo_hash.as_str(), &refresh_project_root, index_root);
-    let intent = startup_base_refresh_intent(&repo_root, &repo_hash);
-    let snapshot = broker
-        .submit(intent)
-        .map_err(|err| format!("submit project index refresh intent: {err}"))?;
+    let Some(intent) = startup_base_refresh_intent(&repo_root, &repo_hash) else {
+        return submit_repo_source_refreshes(broker, &refresh_project_root, &repo_hash);
+    };
+    let existing = broker.inspect().map_err(|error| error.to_string())?;
+    let snapshot = match existing.target(&intent.target) {
+        Some(old) if old.desired_snapshot() == intent.desired_snapshot => old.clone(),
+        _ => broker
+            .submit(intent)
+            .map_err(|err| format!("submit project index refresh intent: {err}"))?,
+    };
+    submit_repo_source_refreshes(broker, &refresh_project_root, &repo_hash)?;
     tracing::info!(
         target: "gwt::index",
         project_root = %repo_root.display(),
@@ -2257,6 +2517,31 @@ fn execute_claimed_refresh_inner(
 
     let active_worktrees = reconcile_claimed_refresh_worktrees(&repo_root, index_root, &repo_hash)?;
 
+    // Repo sources have independent targets so a large/failing corpus cannot
+    // consume another scope's finite refresh quantum.
+    if let Some(scope) = intent
+        .target
+        .scopes()
+        .iter()
+        .find(|scope| REFRESH_REPO_SCOPES.contains(scope))
+    {
+        if *scope != RefreshScope::Issues {
+            let rebuild_scope = match scope {
+                RefreshScope::Specs => IndexRebuildScope::Specs,
+                RefreshScope::Memory => IndexRebuildScope::Memory,
+                RefreshScope::Discussions => IndexRebuildScope::Discussions,
+                RefreshScope::Board => IndexRebuildScope::Board,
+                RefreshScope::Works => IndexRebuildScope::Works,
+                _ => unreachable!(),
+            };
+            return rebuild_index_target(
+                &refresh_project_root,
+                rebuild_scope,
+                None,
+                intent.priority,
+            );
+        }
+    }
     let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(&repo_hash);
     match crate::issue_cache::sync_issue_cache_from_remote_if_stale_with_fingerprint(
         &refresh_project_root,
@@ -2329,7 +2614,7 @@ fn file_rebuild_scopes(scopes: &[RefreshScope]) -> Vec<IndexRebuildScope> {
         .filter_map(|scope| match scope {
             RefreshScope::Files => Some(IndexRebuildScope::Files),
             RefreshScope::FilesDocs => Some(IndexRebuildScope::FilesDocs),
-            RefreshScope::Issues => None,
+            _ => None,
         })
         .collect()
 }
@@ -3874,7 +4159,57 @@ detached
     }
 
     #[test]
-    fn bootstrap_with_broker_registers_one_quiet_base_target_without_touching_index_root() {
+    fn bootstrap_empty_trees_skip_files_but_register_shared_scopes() {
+        let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo_with_origin(&repo);
+        for committed in [false, true] {
+            if committed {
+                run_git_at(
+                    &repo,
+                    &[
+                        "-c",
+                        "user.name=Test",
+                        "-c",
+                        "user.email=test@example.com",
+                        "commit",
+                        "--allow-empty",
+                        "-m",
+                        "empty",
+                    ],
+                );
+            }
+            let broker = RefreshBroker::open(
+                temp.path().join(format!("broker-{committed}")),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+            bootstrap_project_index_for_path_with_broker(
+                &repo,
+                &temp.path().join("index"),
+                &broker,
+                &PanicRunnerSpawner,
+            )
+            .unwrap();
+            let snapshot = broker.inspect().unwrap();
+            assert_eq!(
+                snapshot.target_count(),
+                6,
+                "only repo-shared scopes for empty tree"
+            );
+            assert!(snapshot
+                .targets()
+                .iter()
+                .all(|target| !target.target().scopes().contains(&RefreshScope::Files)));
+        }
+    }
+
+    #[test]
+    fn bootstrap_with_broker_registers_all_scope_targets_without_touching_index_root() {
         let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3882,10 +4217,25 @@ detached
         let repo = temp.path().join("repo");
         std::fs::create_dir(&repo).expect("create repo");
         init_git_repo_with_origin(&repo);
+        std::fs::write(repo.join("source.rs"), "fn main() {}\n").unwrap();
+        run_git_at(&repo, &["add", "source.rs"]);
+        run_git_at(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "nonempty tree",
+            ],
+        );
         let index_root = temp.path().join("index");
         let broker = RefreshBroker::open(temp.path().join("broker"), Duration::from_secs(30))
             .expect("open refresh broker");
 
+        let mut first_base_epoch = None;
         for _ in 0..3 {
             bootstrap_project_index_for_path_with_broker(
                 &repo,
@@ -3894,14 +4244,24 @@ detached
                 &PanicRunnerSpawner,
             )
             .expect("register startup intent");
+            let state = broker.inspect().unwrap();
+            let target = RefreshTarget::base(
+                detect_repo_hash(&repo).unwrap().as_str(),
+                REFRESH_FILE_SCOPES,
+            );
+            let epoch = state.target(&target).unwrap().desired_epoch();
+            if let Some(first) = first_base_epoch {
+                assert_eq!(epoch, first);
+            }
+            first_base_epoch = Some(epoch);
         }
 
         let repo_hash = detect_repo_hash(&repo).expect("repo hash");
         let snapshot = broker.inspect().expect("inspect");
         assert_eq!(
             snapshot.target_count(),
-            1,
-            "replays coalesce onto one base target"
+            7,
+            "replays coalesce onto one Files pair and six repo scope targets"
         );
         assert_eq!(snapshot.queue_depth(), 0);
         assert_eq!(snapshot.running_count(), 0);
@@ -3926,6 +4286,109 @@ detached
                 .expect("registered project")
                 .index_root,
             index_root
+        );
+        let memory_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Memory]);
+        let before = broker
+            .inspect()
+            .unwrap()
+            .target(&memory_target)
+            .unwrap()
+            .clone();
+        submit_repo_source_refreshes(&broker, &repo, &repo_hash).unwrap();
+        let unchanged = broker
+            .inspect()
+            .unwrap()
+            .target(&memory_target)
+            .unwrap()
+            .clone();
+        assert_eq!(before.desired_epoch(), unchanged.desired_epoch());
+        assert_eq!(
+            before.quiet_deadline_millis(),
+            unchanged.quiet_deadline_millis()
+        );
+        let source = repo_scope_source_paths(RefreshScope::Memory, &repo, &repo_hash).remove(0);
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "## Regression\nsource addition\n").unwrap();
+        submit_repo_source_refreshes(&broker, &repo, &repo_hash).unwrap();
+        let changed = broker
+            .inspect()
+            .unwrap()
+            .target(&memory_target)
+            .unwrap()
+            .clone();
+        assert_ne!(before.desired_snapshot(), changed.desired_snapshot());
+        assert!(changed.desired_epoch() > before.desired_epoch());
+        std::fs::remove_file(&source).unwrap();
+        submit_repo_source_refreshes(&broker, &repo, &repo_hash).unwrap();
+        assert_ne!(
+            changed.desired_snapshot(),
+            broker
+                .inspect()
+                .unwrap()
+                .target(&memory_target)
+                .unwrap()
+                .desired_snapshot()
+        );
+        let first_root = registered_refresh_project(repo_hash.as_str())
+            .unwrap()
+            .project_root;
+        let second_root = temp.path().join("second-worktree");
+        register_refresh_project(repo_hash.as_str(), &second_root, &index_root);
+        let project = registered_refresh_project(repo_hash.as_str()).unwrap();
+        assert!(project.worktree_roots.contains(&first_root));
+        assert!(project.worktree_roots.contains(&second_root));
+    }
+
+    #[test]
+    fn source_poll_detects_edits_in_each_registered_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let broker =
+            RefreshBroker::open(temp.path().join("broker"), Duration::from_secs(30)).unwrap();
+        let mut roots = Vec::new();
+        for name in ["first", "second"] {
+            let root = temp.path().join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            init_git_repo_with_origin(&root);
+            std::fs::write(root.join("lib.rs"), "fn initial() {}\n").unwrap();
+            let root = dunce::canonicalize(root).unwrap();
+            let repo_hash = detect_repo_hash(&root).unwrap();
+            register_refresh_project(repo_hash.as_str(), &root, &temp.path().join("index"));
+            roots.push(root);
+        }
+        poll_registered_project_index_sources(&broker).unwrap();
+        let repo_hash = detect_repo_hash(&roots[0]).unwrap();
+        let targets: Vec<_> = roots
+            .iter()
+            .map(|root| {
+                RefreshTarget::overlay(
+                    repo_hash.as_str(),
+                    compute_worktree_hash(root).unwrap().as_str(),
+                    REFRESH_FILE_SCOPES,
+                )
+            })
+            .collect();
+        let before = broker.inspect().unwrap();
+        std::fs::write(roots[0].join("lib.rs"), "fn changed_source() {}\n").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let after = broker.inspect().unwrap();
+        let memory_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Memory]);
+        assert_eq!(
+            before.target(&memory_target).unwrap().desired_epoch(),
+            after.target(&memory_target).unwrap().desired_epoch(),
+            "repo sources must not alternate between worktree fallback paths"
+        );
+        assert_ne!(
+            before.target(&targets[0]).unwrap().desired_snapshot(),
+            after.target(&targets[0]).unwrap().desired_snapshot()
+        );
+        assert_eq!(
+            before.target(&targets[1]).unwrap().desired_epoch(),
+            after.target(&targets[1]).unwrap().desired_epoch()
+        );
+        assert_eq!(
+            before.target(&targets[1]).unwrap().quiet_deadline_millis(),
+            after.target(&targets[1]).unwrap().quiet_deadline_millis()
         );
     }
 

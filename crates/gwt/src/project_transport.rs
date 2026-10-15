@@ -1403,6 +1403,28 @@ async fn hook_live_handler(
             .to_string_lossy()
             .into_owned(),
     );
+    let source_event = match event.source_event.as_deref() {
+        Some(
+            source @ ("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop"
+            | "SubagentStart" | "SubagentStop" | "Notification" | "PermissionRequest"),
+        ) => source,
+        None => "none",
+        _ => "other",
+    };
+    let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
+        event.occurred_at.as_str()
+    } else {
+        "invalid"
+    };
+    tracing::info!(
+        target: "gwt.hook.delivery",
+        stage = "receipt",
+        outcome = "authenticated",
+        gwt_session_id = principal.session_id(),
+        source_event,
+        occurred_at,
+        "runtime hook delivery"
+    );
     state.send(TransportEvent::RuntimeHook(event));
     StatusCode::NO_CONTENT
 }
@@ -1943,6 +1965,15 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            FrontendEvent::PaneName {
+                candidate,
+                request_id,
+            } if self.grant.principal().authorizes_producing_mutation() => {
+                Some(AgentFrontendRequest::Name {
+                    candidate,
+                    request_id,
+                })
+            }
             // Issue #3629 AC-9: closing a scoped peer pane is a window
             // lifecycle operation, not a producing Work mutation — the PM
             // holds only an observation grant and pane.close is its everyday
@@ -2032,6 +2063,7 @@ impl AgentPaneSessionScope {
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
             "issue_monitor_scan_request_result" => Some(payload),
+            "pane_name_result" => Some(payload),
             // Issue #3629 AC-12: the close reply is already client-scoped by
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.
@@ -2139,6 +2171,7 @@ impl ClientSessionScope {
 
     fn filter_inbound(&self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
         match self {
+            Self::Browser(_) if matches!(event, FrontendEvent::PaneName { .. }) => None,
             Self::Browser(_) => Some(ScopedFrontendRequest::Browser(event)),
             Self::Agent(scope) => {
                 if let FrontendEvent::PmPaneSendInput {
@@ -2179,6 +2212,23 @@ impl ClientSessionScope {
             Self::Agent(scope) => scope.filter_repair_panes(repair_panes),
         }
     }
+}
+
+fn decode_frontend_event(text: &str) -> Result<FrontendEvent, serde_json::Error> {
+    let event = serde_json::from_str(text)?;
+    if matches!(&event, FrontendEvent::PaneName { .. }) {
+        let raw: serde_json::Value = serde_json::from_str(text)?;
+        if raw.as_object().is_some_and(|fields| {
+            fields
+                .keys()
+                .any(|key| !["kind", "candidate", "request_id"].contains(&key.as_str()))
+        }) {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "pane_name accepts only candidate and request_id; target and authority claims are forbidden",
+            ));
+        }
+    }
+    Ok(event)
 }
 
 pub async fn client_session(socket: WebSocket, state: TransportState, scope: ClientScope) {
@@ -2222,6 +2272,30 @@ async fn send_agent_self_close_acceptance<S>(
     // result. If this future is cancelled while awaiting the sink, Rust drops
     // the owned acceptance and runs the same finalizer.
     drop(acceptance);
+}
+
+async fn send_agent_self_close_response<S>(
+    sender: &mut S,
+    response: crate::agent_capability::AgentSelfCloseResponse,
+    deadline: Duration,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match response {
+        Ok(acceptance) => send_agent_self_close_acceptance(sender, acceptance, deadline).await,
+        Err(refusal) => {
+            send_agent_pm_terminal_result(
+                sender,
+                BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id: refusal.window_id,
+                    reason: Some(refusal.reason),
+                },
+                deadline,
+            )
+            .await
+        }
+    }
 }
 
 async fn send_agent_pm_terminal_result<S>(
@@ -2370,7 +2444,7 @@ async fn client_session_with_scope(
                             .await;
                             break;
                         }
-                        match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
+                        match decode_frontend_event(text.as_ref()) {
                             Ok(event) => {
                                 match scope.filter_inbound(event) {
                                     Some(ScopedFrontendRequest::Browser(event)) => {
@@ -2623,15 +2697,10 @@ async fn client_session_with_scope(
                                                     }
                                                 }
                                             };
-                                            let Some(acceptance) = accepted else {
+                                            let Some(response) = accepted else {
                                                 break;
                                             };
-                                            send_agent_self_close_acceptance(
-                                                &mut sender,
-                                                acceptance,
-                                                Duration::from_secs(2),
-                                            )
-                                            .await;
+                                            send_agent_self_close_response(&mut sender, response, Duration::from_secs(2)).await;
                                             break;
                                         }
                                     }
@@ -2751,6 +2820,51 @@ pub async fn send_agent_self_close_acceptance_for_test<S>(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn issue_3713_direct_self_close_refusal_crosses_the_origin_socket_with_recovery() {
+        use futures_util::{SinkExt, StreamExt};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut sender = socket.with(|message: axum::extract::ws::Message| {
+                    let axum::extract::ws::Message::Text(text) = message else {
+                        panic!("expected text response")
+                    };
+                    futures_util::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(
+                        tokio_tungstenite::tungstenite::Message::Text(text.as_str().into()),
+                    ))
+                });
+                super::send_agent_self_close_response(
+                    &mut sender,
+                    Err(crate::agent_capability::AgentSelfCloseRefusal {
+                        window_id: "tab::own".into(),
+                        reason: "unread evidence; run board.show all:true".into(),
+                    }),
+                    std::time::Duration::from_secs(1),
+                )
+                .await;
+            });
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+                .await
+                .unwrap();
+            let message = client.next().await.unwrap().unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(payload["kind"], "pane_close_result");
+            assert_eq!(payload["ok"], false);
+            assert_eq!(payload["window_id"], "tab::own");
+            assert!(payload["reason"].as_str().unwrap().contains("board.show"));
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
     fn supported_agent_notifications_are_host_global_and_project_events_stay_scoped() {
         use super::{DispatchTarget, OutboundEvent};
         use crate::BackendEvent;
@@ -2811,6 +2925,7 @@ mod tests {
             error_origin: None,
         }
     }
+
     #[tokio::test]
     async fn authenticated_http_and_websocket_dispatch_without_gui() {
         let project = tempfile::tempdir().expect("project");
@@ -2834,6 +2949,13 @@ mod tests {
             }),
         );
         let app = agent_router(state, AccessLogSink::default());
+        let hook_log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(hook_log.reopen().unwrap())
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -2847,7 +2969,8 @@ mod tests {
             .bearer_auth(&grant.token)
             .json(&serde_json::json!({
                 "kind": "runtime_state", "gwt_session_id": "transport-session",
-                "occurred_at": "2026-09-28T00:00:00Z"
+                "source_event": "PostToolUse", "occurred_at": "2026-09-28T00:00:00Z",
+                "agent_session_id": "private-provider-id", "message": "private-hook-content"
             }))
             .send()
             .await
@@ -2859,6 +2982,30 @@ mod tests {
                 .unwrap(),
             Some(TransportEvent::RuntimeHook(_))
         ));
+        let text = std::fs::read_to_string(hook_log.path()).unwrap();
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let receipt = records
+            .iter()
+            .find(|record| record["target"] == "gwt.hook.delivery")
+            .expect("authenticated receipt must survive outside the access ring");
+        assert_eq!(receipt["level"], "INFO");
+        assert_eq!(receipt["fields"]["stage"], "receipt");
+        assert_eq!(receipt["fields"]["gwt_session_id"], "transport-session");
+        assert_eq!(receipt["fields"]["source_event"], "PostToolUse");
+        assert_eq!(receipt["fields"]["occurred_at"], "2026-09-28T00:00:00Z");
+        for private in [
+            grant.token.as_str(),
+            "private-provider-id",
+            "private-hook-content",
+        ] {
+            assert!(
+                !text.contains(private),
+                "receipt must contain correlation metadata only"
+            );
+        }
         let mut request = format!("ws://{addr}/internal/pane-ws")
             .into_client_request()
             .unwrap();
@@ -2883,6 +3030,72 @@ mod tests {
         socket.close(None).await.unwrap();
         server.abort();
     }
+    #[test]
+    fn pane_name_wire_refuses_target_and_authority_claims() {
+        let request = serde_json::json!({
+            "kind": "pane_name", "candidate": "Aster", "request_id": "request-1"
+        });
+        assert!(decode_frontend_event(&request.to_string()).is_ok());
+        for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
+            let mut foreign = request.clone();
+            foreign[forbidden] = serde_json::json!("foreign");
+            assert!(
+                decode_frontend_event(&foreign.to_string()).is_err(),
+                "accepted {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_name_requires_producing_agent_authority_and_refuses_browser_dispatch() {
+        let project = tempfile::tempdir().expect("project");
+        let request = || {
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "pane_name", "candidate": "Aster",
+                "request_id": "72fc3cd4-ad49-43e3-bf3d-d791357643a3"
+            }))
+            .expect("self-naming wire request")
+        };
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-name".to_string(),
+            repo_hash: "repo-name".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3824,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-name".to_string(),
+                binding_id: "binding-name".to_string(),
+                ledger_head_hash: "head-name".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let bound =
+            AgentSessionPrincipal::for_test_bound(project.path(), "session-name", binding.clone())
+                .unwrap();
+        let inspection = AgentSessionPrincipal::for_test(project.path(), "session-name").unwrap();
+        let prepared =
+            AgentSessionPrincipal::for_test_prepared(project.path(), "session-name", binding)
+                .unwrap();
+        for principal in [inspection, prepared] {
+            let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+                "observation-capability".to_string(),
+                principal,
+            ));
+            assert!(scope.filter_inbound(request()).is_none());
+        }
+        let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "producing-capability".to_string(),
+            bound,
+        ));
+        let name_request = scope
+            .filter_inbound(request())
+            .expect("producing self-name request");
+        assert!(name_request.mutates_host_state());
+        assert!(name_request.requires_producing_authority());
+        let browser = ClientSessionScope::Browser(ClientScope::Hub);
+        assert!(browser.filter_inbound(request()).is_none());
+    }
+
     #[test]
     fn connected_agent_scope_refreshes_same_bearer_after_prepared_promotion() {
         let project = tempfile::tempdir().expect("project tempdir");

@@ -2,6 +2,75 @@ use super::*;
 use gwt::runtime_daemon_events::IssueMonitorControlPublishError;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+const MONITOR_STARTUP_TIMEOUT_PREFIX: &str = "Issue Monitor startup timed out after ";
+const MONITOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[cfg(test)]
+mod startup_tests {
+    #[test]
+    fn issue_5415_startup_deadline_records_the_unsent_prompt_and_provider_error() {
+        assert_eq!(super::MONITOR_STARTUP_TIMEOUT.as_secs(), 180);
+        let error =
+            "Could not read Windows sandbox configuration and requirements from the app server.";
+        let detail = super::monitor_startup_failure_detail(
+            5415,
+            Some(&format!("■ {error}\n› $gwt-execute #5415")),
+        );
+        assert!(detail.contains("initial prompt was not submitted"));
+        assert!(detail.contains(error));
+        assert!(gwt_agent::is_transient_launch_failure(&detail));
+        let other_owner =
+            super::monitor_startup_failure_detail(5415, Some("› $gwt-execute #54150"));
+        assert!(!other_owner.contains("initial prompt was not submitted"));
+    }
+}
+
+/// Only initial Monitor launches are supervised; native resumes, reviews and
+/// answered handoffs retain their existing delivery/readiness contracts.
+#[derive(Clone)]
+pub(crate) struct MonitorStartupWatch {
+    generation: u64,
+    session_id: String,
+    runtime_incarnation: Option<u64>,
+    feedback: LaunchFeedbackContext,
+}
+
+pub(super) fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
+    let screen = screen.unwrap_or_default();
+    let owner = format!("#{issue}");
+    let unsubmitted = screen.lines().any(|line| {
+        let Some(composer) = line.trim_start().strip_prefix('›') else {
+            return false;
+        };
+        let mut words = composer.split_whitespace();
+        words.next() == Some("$gwt-execute") && words.next() == Some(owner.as_str())
+    });
+    let observation = if unsubmitted {
+        "initial prompt was not submitted"
+    } else {
+        "no initial prompt submission or tool activity"
+    };
+    let error = screen
+        .lines()
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("could not read windows sandbox configuration")
+                || lower.contains("error")
+                || lower.contains("failed")
+        })
+        .map(|line| {
+            format!(
+                "; last output: {}",
+                line.trim().chars().take(800).collect::<String>()
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{MONITOR_STARTUP_TIMEOUT_PREFIX}180s: {observation}{error}; {}",
+        gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+    )
+}
+
 #[derive(Clone)]
 pub(crate) struct LaunchDeliveryAckIdentity {
     generation: u64,
@@ -196,6 +265,19 @@ fn acknowledge_delivery_inner(
                     },
                 )
                 .map_err(|error| (error, "launch-succeeded"))?;
+            if !accepted {
+                if let Some(owner) = monitor
+                    .conflicting_launch_window_owner(identity.issue_number, &identity.window_id)
+                {
+                    return Err((
+                        IssueMonitorControlPublishError::Rejected(format!(
+                            "window {} already belongs to Issue #{owner}; refused Issue #{}",
+                            identity.window_id, identity.issue_number
+                        )),
+                        "launch-succeeded",
+                    ));
+                }
+            }
             Ok(accepted.then(|| LaunchDeliveryAckResult {
                 monitor: Some(Box::new(monitor)),
                 stale_window,
@@ -207,6 +289,172 @@ fn acknowledge_delivery_inner(
 }
 
 impl AppRuntime {
+    pub(crate) fn arm_issue_monitor_startup(
+        &mut self,
+        window_id: &str,
+        feedback: &LaunchFeedbackContext,
+    ) -> Option<u64> {
+        feedback.issue_monitor_launch_binding_issue_number()?;
+        if feedback.issue_monitor_review_dispatch
+            || feedback.issue_monitor_autonomous_handoff.is_some()
+            || feedback
+                .issue_monitor_session_mode
+                .is_some_and(|mode| mode != gwt_agent::SessionMode::Normal)
+        {
+            return None;
+        }
+        let active = self.active_agent_sessions.get(window_id)?;
+        let generation = next_window_runtime_incarnation();
+        self.pending_monitor_startups.insert(
+            window_id.to_string(),
+            MonitorStartupWatch {
+                generation,
+                session_id: active.session_id.clone(),
+                runtime_incarnation: self
+                    .runtimes
+                    .get(window_id)
+                    .map(|runtime| runtime.incarnation),
+                feedback: feedback.clone(),
+            },
+        );
+        self.rearm_issue_monitor_startup(window_id, generation, MONITOR_STARTUP_TIMEOUT);
+        Some(generation)
+    }
+
+    fn rearm_issue_monitor_startup(&self, window_id: &str, generation: u64, delay: Duration) {
+        let proxy = self.proxy.clone();
+        let window_id = window_id.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            proxy.send(UserEvent::IssueMonitorStartupTimeout {
+                window_id,
+                generation,
+            });
+        });
+    }
+
+    pub(crate) fn observe_issue_monitor_startup_activity(
+        &mut self,
+        window_id: &str,
+        event: &gwt::RuntimeHookEvent,
+    ) {
+        let acknowledged = self
+            .pending_monitor_startups
+            .get(window_id)
+            .is_some_and(|watch| {
+                // The child can submit before its pane is installed and replay
+                // buffered hooks afterwards. Its exact Session proves ownership.
+                event.gwt_session_id.as_deref() == Some(watch.session_id.as_str())
+                    && matches!(
+                        event.source_event.as_deref(),
+                        Some("UserPromptSubmit" | "PreToolUse" | "PostToolUse")
+                    )
+            });
+        if acknowledged {
+            self.pending_monitor_startups.remove(window_id);
+        }
+    }
+
+    pub(crate) fn handle_issue_monitor_startup_timeout(
+        &mut self,
+        window_id: &str,
+        generation: u64,
+    ) -> Vec<OutboundEvent> {
+        let Some(watch) = self
+            .pending_monitor_startups
+            .get(window_id)
+            .filter(|watch| watch.generation == generation)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let current = self
+            .active_agent_sessions
+            .get(window_id)
+            .is_some_and(|active| active.session_id == watch.session_id)
+            && self
+                .runtimes
+                .get(window_id)
+                .map(|runtime| runtime.incarnation)
+                == watch.runtime_incarnation;
+        if !current {
+            self.pending_monitor_startups.remove(window_id);
+            return Vec::new();
+        }
+        let issue = watch
+            .feedback
+            .issue_monitor_launch_binding_issue_number()
+            .expect("Monitor startup owner");
+        let screen = self.runtimes.get(window_id).and_then(|runtime| {
+            runtime
+                .pane
+                .lock()
+                .ok()
+                .map(|pane| pane.screen().contents())
+        });
+        let detail = monitor_startup_failure_detail(issue, screen.as_deref());
+        self.log_window_launch_error("monitor_startup_timeout", window_id, &detail);
+        self.invalidate_launch_delivery_ack(window_id);
+        let events = if self
+            .pending_fresh_execution_launches
+            .contains_key(window_id)
+        {
+            // The exact Prepared candidate rolls back; an Activated candidate
+            // reconciles first and keeps this watch until its commit is settled.
+            self.fresh_execution_launch_failed_events(window_id, &detail)
+        } else if let Some(root) = watch.feedback.issue_monitor_project_root.as_deref() {
+            let committed =
+                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root))
+                    .ok()
+                    .and_then(|prefs| {
+                        let pending = watch
+                            .feedback
+                            .issue_monitor_delivery_id
+                            .as_deref()
+                            .filter(|id| {
+                                prefs.pending_launch_deliveries.iter().any(|delivery| {
+                                    delivery.issue_number == issue && delivery.delivery_id == *id
+                                })
+                            })
+                            .map(str::to_string);
+                        let monitor = gwt::IssueMonitorState::with_prefs(
+                            gwt::IssueMonitorConfig::default(),
+                            prefs,
+                        );
+                        // ACK consumes the delivery id. Never reuse it or act on a
+                        // replacement Issue binding when reporting a post-ACK failure.
+                        (pending.is_some()
+                            || monitor.launched_window_issue(window_id) == Some(issue))
+                        .then(|| {
+                            self.issue_monitor_launch_failed_delivery_committed_events_with_mode(
+                                Some(root),
+                                issue,
+                                &detail,
+                                pending.as_deref(),
+                                gwt_agent::SessionMode::Normal,
+                            )
+                        })
+                    });
+            match committed {
+                Some((mut events, true)) => {
+                    self.stop_window_runtime_without_session_projection(window_id);
+                    events.extend(self.close_window_after_issue_monitor_finalize_events(window_id));
+                    events
+                }
+                Some((events, false)) => events,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        if self.pending_monitor_startups.contains_key(window_id) {
+            // Unavailable durable state or a commit in flight cannot authorize
+            // teardown. Keep the correlated recovery alive instead of losing it.
+            self.rearm_issue_monitor_startup(window_id, generation, Duration::from_secs(60));
+        }
+        events
+    }
+
     pub(crate) fn invalidate_launch_delivery_ack(&mut self, window_id: &str) {
         self.pending_launch_delivery_acks.remove(window_id);
     }

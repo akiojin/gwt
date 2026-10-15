@@ -41,6 +41,8 @@ pub enum HookOutput {
         event: IntentBoundaryEvent,
         text: String,
     },
+    /// Agent-visible advisory on a tool boundary; never denies the tool.
+    PreToolUseAdditionalContext(String),
     SystemMessage(String),
     Silent,
     /// Stop-hook block envelope: `{"decision":"block","reason":"<reason>"}`.
@@ -94,6 +96,9 @@ struct StopBlockPayload<'a> {
 }
 
 impl HookOutput {
+    pub fn pre_tool_use_context(text: impl Into<String>) -> Self {
+        Self::PreToolUseAdditionalContext(text.into())
+    }
     pub fn pre_tool_use_permission(summary: impl Into<String>, detail: impl Into<String>) -> Self {
         let summary = summary.into();
         let detail = detail.into();
@@ -154,6 +159,7 @@ impl HookOutput {
         match self {
             Self::PreToolUsePermission { .. } => 2,
             Self::HookSpecificAdditionalContext { .. }
+            | Self::PreToolUseAdditionalContext(_)
             | Self::SystemMessage(_)
             | Self::Silent
             | Self::StopBlock { .. } => 0,
@@ -202,6 +208,16 @@ impl HookOutput {
                 serde_json::to_writer(&mut *writer, &payload)?;
                 writer.write_all(b"\n")?;
             }
+            Self::PreToolUseAdditionalContext(text) => {
+                let payload = AdditionalContextPayload {
+                    hook_specific_output: AdditionalContextContent {
+                        hook_event_name: "PreToolUse",
+                        additional_context: text,
+                    },
+                };
+                serde_json::to_writer(&mut *writer, &payload)?;
+                writer.write_all(b"\n")?;
+            }
             Self::Silent => {}
             Self::StopBlock { reason } => {
                 let payload = StopBlockPayload {
@@ -213,6 +229,28 @@ impl HookOutput {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coordination_context_tests {
+    use super::*;
+
+    #[test]
+    fn issue_3713_tool_advisory_is_agent_context_without_denying_the_tool() {
+        let output = HookOutput::pre_tool_use_context("Fetch before making a stagnation judgment");
+        assert_eq!(output.exit_code(), 0);
+        let mut bytes = Vec::new();
+        output.serialize_to(&mut bytes).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(
+            value["hookSpecificOutput"]["additionalContext"],
+            "Fetch before making a stagnation judgment"
+        );
+        assert!(value["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none());
     }
 }
 

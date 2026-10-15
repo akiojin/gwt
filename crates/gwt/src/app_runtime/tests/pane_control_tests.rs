@@ -1,5 +1,202 @@
 use super::*;
 
+fn issue_3713_read_board(project: &Path, session: &str) {
+    let _session =
+        gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session);
+    let mut env = gwt::cli::TestEnv::new(project.to_path_buf());
+    let command =
+        gwt::cli::parse_board_args(&["show".into(), "--all".into(), "--json".into()]).unwrap();
+    assert_eq!(gwt::cli::run(&mut env, command).unwrap(), 0);
+    let _: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+}
+
+#[test]
+fn issue_3713_agent_self_close_keeps_capability_until_recent_owner_evidence_is_read() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _, issuer, grant, window_id) = self_close_runtime(temp.path());
+    let project = temp.path().join("project");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: window_id.clone(),
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let evidence = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::Agent,
+        "Reviewer",
+        gwt_core::coordination::BoardEntryKind::Handoff,
+        "Keep Issue 42 evidence until the ruling",
+        None,
+        None,
+        vec![],
+        vec!["42".into()],
+    )
+    .with_origin_session_id("reviewer-session");
+    gwt::board_provider::post_entry(&project, evidence).unwrap();
+    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
+    runtime.handle_agent_frontend_event_if_current(
+        "self-client".into(),
+        grant.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: window_id.clone(),
+            request_id: Some("a728413a-8bde-4b13-81c2-2a216a484cdc".into()),
+            responder: Some(responder),
+        },
+    );
+    assert!(
+        runtime.pending_agent_self_closes.is_empty(),
+        "unread owner evidence must refuse before accepting a self-close ticket"
+    );
+    assert!(
+        issuer.grant_is_current(&grant),
+        "a refused close must preserve the caller capability for recovery"
+    );
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    let refused = match acceptance.try_recv().expect("direct refusal") {
+        Err(refusal) => refusal,
+        Ok(_) => panic!("unread evidence must not be accepted"),
+    };
+    assert!(refused.reason.contains("board.show"));
+    assert_eq!(refused.window_id, window_id);
+    issue_3713_read_board(&project, "session-project");
+    gwt::board_provider::post_entry(
+        &project,
+        gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Self",
+            gwt_core::coordination::BoardEntryKind::Status,
+            "My own completion does not require rereading",
+            None,
+            None,
+            vec![],
+            vec!["42".into()],
+        )
+        .with_origin_session_id("session-project"),
+    )
+    .unwrap();
+    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
+    runtime.handle_agent_frontend_event_if_current(
+        "self-client".into(),
+        grant.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: window_id.clone(),
+            request_id: Some("70f95447-1746-4b6a-8e4f-1a7b98674bb8".into()),
+            responder: Some(responder),
+        },
+    );
+    let accepted = acceptance
+        .try_recv()
+        .expect("direct response")
+        .expect("explicit read enables retry");
+    assert!(!issuer.grant_is_current(&grant));
+    drop(accepted);
+}
+
+#[test]
+fn issue_3713_human_canvas_close_is_not_subject_to_agent_read_receipts() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _, _, _, window_id) = self_close_runtime(temp.path());
+    gwt::board_provider::post_entry(
+        &temp.path().join("project"),
+        gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Owner",
+            gwt_core::coordination::BoardEntryKind::Handoff,
+            "Unread evidence",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("session-project"),
+    )
+    .unwrap();
+    assert!(runtime.close_window_outcome(&window_id).closed);
+}
+
+#[test]
+fn issue_3713_agent_peer_close_requires_reading_recent_target_session_evidence() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let mut tab = sample_project_tab_with_window_at(
+        "tab",
+        "peer",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.workspace
+        .set_session_id("peer", Some("peer-session".into()));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    let entry = gwt_core::coordination::BoardEntry::new(
+        gwt_core::coordination::AuthorKind::Agent,
+        "Peer",
+        gwt_core::coordination::BoardEntryKind::Handoff,
+        "Keep this pane for the ruling",
+        None,
+        None,
+        vec![],
+        vec![],
+    )
+    .with_origin_session_id("peer-session");
+    gwt::board_provider::post_entry(&project, entry).unwrap();
+    let principal = AgentSessionPrincipal::for_test(&project, "caller-session").unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "client".into(),
+        principal.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: "tab::peer".into(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(
+        matches!(events.first(), Some(OutboundEvent {
+        event: BackendEvent::PaneCloseResult { ok: false, reason: Some(reason), .. }, ..
+    }) if reason.contains("board.show")),
+        "must preserve unread target evidence: {events:?}"
+    );
+    assert!(runtime.window_lookup.contains_key("tab::peer"));
+    issue_3713_read_board(&project, "different-session");
+    assert!(runtime
+        .agent_close_board_check(&principal, "tab::peer")
+        .is_some());
+    issue_3713_read_board(&project, "caller-session");
+    let events = runtime.handle_agent_frontend_event(
+        "client".into(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab::peer".into(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(matches!(
+        events.first(),
+        Some(OutboundEvent {
+            event: BackendEvent::PaneCloseResult { ok: true, .. },
+            ..
+        })
+    ));
+    assert!(!runtime.window_lookup.contains_key("tab::peer"));
+}
+
 #[test]
 fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() {
     let temp = tempdir().expect("tempdir");
@@ -3295,7 +3492,10 @@ fn accepted_agent_self_close_waits_for_direct_ack_then_commits_exactly_once() {
         super::super::AgentFrontendDispatchOutcome::Dispatched(ref dispatched)
             if dispatched.is_empty()
     ));
-    let accepted = acceptance.try_recv().expect("direct acceptance");
+    let accepted = acceptance
+        .try_recv()
+        .expect("direct response")
+        .expect("direct acceptance");
     assert!(!issuer.grant_is_current(&grant));
     assert!(
         issuer
@@ -3426,7 +3626,12 @@ fn accepted_bound_agent_self_close_persists_terminal_session_in_finalizer() {
         ),
         "unexpected self-close dispatch outcome: {outcome:?}"
     );
-    drop(acceptance.try_recv().expect("direct self-close acceptance"));
+    drop(
+        acceptance
+            .try_recv()
+            .expect("direct response")
+            .expect("direct self-close acceptance"),
+    );
     let ticket = take_self_close_commit(&recorded_events);
     assert!(!runtime.commit_agent_self_close(ticket).is_empty());
     let finalizer = finalizers
@@ -3609,7 +3814,10 @@ fn accepted_agent_self_close_survives_external_stop_before_commit() {
         outcome,
         super::super::AgentFrontendDispatchOutcome::Dispatched(_)
     ));
-    let accepted = acceptance.try_recv().expect("direct acceptance");
+    let accepted = acceptance
+        .try_recv()
+        .expect("direct response")
+        .expect("direct acceptance");
 
     let stopped = runtime.stop_window_events(&window_id);
     assert!(!stopped.is_empty());
@@ -3642,7 +3850,10 @@ fn accepted_agent_self_close_does_not_remove_same_id_successor_session() {
         outcome,
         super::super::AgentFrontendDispatchOutcome::Dispatched(_)
     ));
-    let accepted = acceptance.try_recv().expect("direct acceptance");
+    let accepted = acceptance
+        .try_recv()
+        .expect("direct response")
+        .expect("direct acceptance");
     let address = runtime
         .window_lookup
         .get(&window_id)
@@ -3683,7 +3894,10 @@ fn accepted_agent_self_close_does_not_remove_same_address_same_session_successor
         outcome,
         super::super::AgentFrontendDispatchOutcome::Dispatched(_)
     ));
-    let accepted = acceptance.try_recv().expect("direct acceptance");
+    let accepted = acceptance
+        .try_recv()
+        .expect("direct response")
+        .expect("direct acceptance");
     let address = runtime
         .window_lookup
         .get(&window_id)
@@ -3727,5 +3941,250 @@ fn accepted_agent_self_close_does_not_remove_same_address_same_session_successor
             .issue(temp.path().join("project").as_path(), "session-project")
             .is_ok(),
         "the stale ticket must be irreversibly settled after its no-op commit"
+    );
+}
+
+#[test]
+fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let own = temp.path().join("own");
+    let foreign = temp.path().join("foreign");
+    fs::create_dir_all(&own).unwrap();
+    fs::create_dir_all(&foreign).unwrap();
+    let mut own_tab = sample_project_tab_with_window_at(
+        "own",
+        "agent",
+        own.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    own_tab
+        .workspace
+        .set_session_id("agent", Some("same-session".into()));
+    let mut foreign_tab = sample_project_tab_with_window_at(
+        "foreign",
+        "agent",
+        foreign,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    foreign_tab
+        .workspace
+        .set_session_id("agent", Some("same-session".into()));
+    foreign_tab
+        .workspace
+        .set_agent_name("agent", Some("FALCON".into()));
+    let (mut runtime, _) =
+        sample_runtime_with_events(temp.path(), vec![foreign_tab, own_tab], Some("own"));
+    let principal = AgentSessionPrincipal::for_test(&own, "same-session").unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "caller".into(),
+        principal.clone(),
+        AgentFrontendRequest::Name {
+            candidate: " falcon ".into(),
+            request_id: "name-request".into(),
+        },
+    );
+    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::PaneNameResult { request_id, ok: true, agent_name: Some(name), error: None } if request_id == "name-request" && name == "Falcon-2") && matches!(&event.target, DispatchTarget::Client(id) if id == "caller")));
+    assert_eq!(
+        runtime
+            .tab("own")
+            .unwrap()
+            .workspace
+            .window("agent")
+            .unwrap()
+            .agent_name
+            .as_deref(),
+        Some("Falcon-2")
+    );
+    assert_eq!(
+        runtime
+            .tab("foreign")
+            .unwrap()
+            .workspace
+            .window("agent")
+            .unwrap()
+            .agent_name
+            .as_deref(),
+        Some("FALCON")
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. }))
+            .count(),
+        1
+    );
+    let retry = runtime.handle_agent_frontend_event(
+        "caller".into(),
+        principal,
+        AgentFrontendRequest::Name {
+            candidate: "Mint".into(),
+            request_id: "retry".into(),
+        },
+    );
+    assert!(
+        matches!(&retry[0].event, BackendEvent::PaneNameResult { ok: true, agent_name: Some(name), .. } if name == "Falcon-2")
+    );
+    assert_eq!(retry.len(), 1);
+}
+
+#[test]
+fn agent_name_refuses_pm_missing_and_invalid_without_mutation() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let mut tab = sample_project_tab_with_window_at(
+        "tab",
+        "agent",
+        root.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.workspace
+        .set_session_id("agent", Some("session".into()));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    for (session, candidate) in [("session", "Issue3824"), ("missing", "Falcon")] {
+        let principal = AgentSessionPrincipal::for_test(&root, session).unwrap();
+        let events = runtime.handle_agent_frontend_event(
+            "caller".into(),
+            principal,
+            AgentFrontendRequest::Name {
+                candidate: candidate.into(),
+                request_id: "refused".into(),
+            },
+        );
+        assert!(matches!(
+            &events[0].event,
+            BackendEvent::PaneNameResult {
+                ok: false,
+                agent_name: None,
+                error: Some(_),
+                ..
+            }
+        ));
+        assert!(runtime
+            .tab("tab")
+            .unwrap()
+            .workspace
+            .window("agent")
+            .unwrap()
+            .agent_name
+            .is_none());
+    }
+    let context = runtime.project_context("tab").unwrap();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .pm_sessions
+        .insert(root.clone(), "session".into());
+    let principal = AgentSessionPrincipal::for_test(&root, "session").unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "caller".into(),
+        principal,
+        AgentFrontendRequest::Name {
+            candidate: "Falcon".into(),
+            request_id: "pm".into(),
+        },
+    );
+    assert!(
+        matches!(&events[0].event, BackendEvent::PaneNameResult { ok: false, error: Some(error), .. } if error.contains("PM"))
+    );
+    assert!(runtime
+        .tab("tab")
+        .unwrap()
+        .workspace
+        .window("agent")
+        .unwrap()
+        .agent_name
+        .is_none());
+}
+
+#[test]
+fn agent_name_projects_into_active_work_without_replacing_provider_identity() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut view = active_work_projection_from_saved(
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(temp.path()),
+    );
+    view.agents.push(workspace_test_agent_with_conversation(
+        "named",
+        "2026-10-15T00:00:00Z",
+        "conversation",
+    ));
+    view.unassigned_agents
+        .push(workspace_test_agent_with_conversation(
+            "other",
+            "2026-10-15T00:00:00Z",
+            "conversation",
+        ));
+    super::super::workspace_views::attach_agent_names(
+        &mut view,
+        &HashMap::from([("named".into(), "Falcon".into())]),
+    );
+    assert_eq!(view.agents[0].agent_name.as_deref(), Some("Falcon"));
+    assert_eq!(view.agents[0].agent_id, "codex");
+    assert_eq!(view.agents[0].display_name, "Codex");
+    assert!(view.unassigned_agents[0].agent_name.is_none());
+}
+
+#[test]
+fn agent_name_invalidates_projection_payload_and_watcher_revision() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let mut tab = sample_project_tab_with_window_at(
+        "tab",
+        "agent",
+        root.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.workspace
+        .set_session_id("agent", Some("session".into()));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.active_work_projection_broadcast_for_tab("tab");
+    tasks.lock().unwrap().remove(0)();
+    let old_completion = recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ActiveWorkProjectionPrepared(prepared) => Some(prepared.as_ref().clone()),
+            _ => None,
+        })
+        .expect("old unnamed projection completion");
+    let state = runtime.project_state_for_tab("tab").unwrap();
+    let revision = state.workspace_projection_revision.get();
+    state
+        .active_work_projection_payload_cache
+        .borrow_mut()
+        .insert("tab".into(), Arc::from("stale unnamed payload"));
+    let principal = AgentSessionPrincipal::for_test(&root, "session").unwrap();
+    runtime.handle_agent_frontend_event(
+        "caller".into(),
+        principal,
+        AgentFrontendRequest::Name {
+            candidate: "Falcon".into(),
+            request_id: "name".into(),
+        },
+    );
+    let state = runtime.project_state_for_tab("tab").unwrap();
+    assert!(!state
+        .active_work_projection_payload_cache
+        .borrow()
+        .contains_key("tab"));
+    assert!(state.workspace_projection_revision.get() > revision);
+    assert!(
+        runtime
+            .handle_active_work_projection_prepared(old_completion)
+            .prepared_dispatch
+            .is_none(),
+        "naming supersedes an in-flight unnamed snapshot"
     );
 }

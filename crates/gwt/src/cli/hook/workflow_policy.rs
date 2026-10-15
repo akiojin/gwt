@@ -858,6 +858,7 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
             | "issue.spec.list"
             | "issue.spec.audit"
             | "issue.monitor.status"
+            | "update.settings.status"
             | "issue.monitor.profiles"
             | "issue.monitor.tiers"
             | "pr.current"
@@ -1286,6 +1287,8 @@ mod tests {
                 "command": "cargo test -p gwt"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1319,6 +1322,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": command })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         }
     }
@@ -1411,6 +1416,8 @@ mod tests {
                     "file_path": worktree.join("crates/gwt/src/lib.rs").to_string_lossy()
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             let output =
@@ -1501,6 +1508,8 @@ mod tests {
                     "content": "cycle notes",
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             },
             HookEvent {
@@ -1511,6 +1520,8 @@ mod tests {
                     "new_string": "b",
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             },
         ];
@@ -1686,6 +1697,8 @@ mod tests {
                     "file_path": format!("E:/work/repo/{state_file}")
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert!(
@@ -1704,6 +1717,8 @@ mod tests {
                 "file_path": "E:\\work\\repo\\.gwt\\skill-state\\execution-control.json"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert!(matches!(
@@ -1723,6 +1738,8 @@ mod tests {
                 tool_name: Some("Write".to_string()),
                 tool_input: Some(serde_json::json!({ "file_path": trusted_path })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert!(
@@ -1741,6 +1758,8 @@ mod tests {
                 "file_path": "E:/work/repo/crates/gwt/src/main.rs"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert_eq!(
@@ -1751,6 +1770,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": "cargo test" })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert_eq!(
@@ -1768,6 +1789,8 @@ mod tests {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({ "command": command })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -1841,6 +1864,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({ "command": command })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert_eq!(
@@ -1854,6 +1879,8 @@ mod tests {
             tool_name: Some("Write".to_string()),
             tool_input: Some(serde_json::json!({ "file_path": path })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         // Worktree bookkeeping (any extension) and the OS temp scratchpad
@@ -1979,6 +2006,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({"command": command})),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert_eq!(
@@ -1998,6 +2027,8 @@ mod tests {
                 "command": "cargo test -p gwt"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         let context = WorkflowContext::unknown().with_title_summary_missing(true);
@@ -2020,6 +2051,8 @@ mod tests {
                 "command": "gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2037,6 +2070,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2085,6 +2120,8 @@ mod tests {
                 "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2102,6 +2139,8 @@ mod tests {
                 "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2119,6 +2158,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON\n&& cargo test -p gwt"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2136,6 +2177,8 @@ mod tests {
                 "command": "rg -n title_summary crates/gwt/src"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2153,6 +2196,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"issue.view\",\"params\":{\"number\":3253}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2170,6 +2215,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2189,6 +2236,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"pm.status\",\"params\":{}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2417,6 +2466,8 @@ mod tests {
                 "command": "git config --list --show-origin"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2434,6 +2485,8 @@ mod tests {
                 "command": "git remote -v"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2456,6 +2509,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({ "command": command })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
 
@@ -2492,6 +2547,8 @@ mod tests {
                     "command": command
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
 
@@ -2511,6 +2568,8 @@ mod tests {
                 "command": "sed -i '' 's/a/b/' README.md"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2528,6 +2587,8 @@ mod tests {
                 "command": "find target -name '*.tmp' -delete"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2545,6 +2606,8 @@ mod tests {
                 "command": "git config user.name Codex"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2562,6 +2625,8 @@ mod tests {
                 "command": "git remote add origin https://example.com/repo.git"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2587,6 +2652,8 @@ mod tests {
                     "command": command
                 })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
 
@@ -2608,6 +2675,8 @@ mod tests {
                 "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"status\",\"body\":\"Starting implementation\"}}\nJSON"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2625,6 +2694,8 @@ mod tests {
                 "file_path": "crates/gwt/src/lib.rs"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2653,6 +2724,8 @@ mod tests {
                 "file_path": "crates/gwt/src/lib.rs"
             })),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
 
@@ -2682,6 +2755,8 @@ mod tests {
             tool_name: Some("create_goal".to_string()),
             tool_input: Some(serde_json::json!({})),
             transcript_path: None,
+            active_skill: None,
+            active_plugin: None,
             cwd: None,
         };
         assert_eq!(
@@ -2703,6 +2778,8 @@ mod tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({ "command": command })),
                 transcript_path: None,
+                active_skill: None,
+                active_plugin: None,
                 cwd: None,
             };
             assert_eq!(
