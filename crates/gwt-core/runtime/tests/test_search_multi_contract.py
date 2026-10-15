@@ -589,6 +589,13 @@ class SearchMultiContractTests(unittest.TestCase):
             self.assertTrue(payload.get("ok"), payload)
             self.assertEqual(payload.get("model_load_ms"), 2500, payload)
             self.assertEqual(warm.get("model_load_ms"), 0, warm)
+            for measured in (payload, warm):
+                phases = measured["timings_ms"]
+                self.assertEqual(set(phases), {
+                    "index_read", "model_load", "query_encode", "query", "assemble",
+                })
+                self.assertEqual(phases["model_load"], measured["model_load_ms"])
+                self.assertTrue(all(value >= 0 for value in phases.values()), phases)
 
     def test_search_multi_dispatch_forwards_explicit_file_index_protocol(self):
         args = argparse.Namespace(

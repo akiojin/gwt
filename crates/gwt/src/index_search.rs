@@ -301,6 +301,7 @@ pub(crate) fn search_project_index_attempt(
     // JSON operation funnel through here, so one guard measures the search
     // route end to end, early returns included.
     let _perf_route = crate::perf::RouteTimer::start(crate::perf::PerfRoute::Search);
+    let mut phases = crate::perf::RoutePhaseClock::start(crate::perf::PerfRoute::Search);
     let route_started = Instant::now();
     // One absolute attempt budget covers runtime ensure/provisioning, its
     // cross-process lock, every health probe, repair polling, and the final
@@ -317,8 +318,10 @@ pub(crate) fn search_project_index_attempt(
     let repo_search_root =
         crate::index_worker::default_project_index_worktree_root_for_search(&git_context)
             .map_err(|_| search_unavailable_error("project index git context unavailable"))?;
+    phases.mark("git_context");
     gwt_core::runtime::ensure_project_index_runtime()
         .map_err(|_| search_unavailable_error("project index runtime unavailable"))?;
+    phases.mark("runtime");
 
     let effective_scopes = if scopes.is_empty() {
         default_index_search_scopes()
@@ -336,6 +339,7 @@ pub(crate) fn search_project_index_attempt(
     } else {
         None
     };
+    phases.mark("scope_context");
 
     // Phase 70 FR-384 / AS-2: every scope — repo-shared and worktree file
     // scopes alike — goes through ONE versioned `search-multi` request: one
@@ -356,6 +360,27 @@ pub(crate) fn search_project_index_attempt(
             per_scope_limit,
             match_mode,
         )?;
+        if let Some(timings) = payload.get("timings_ms") {
+            for phase in [
+                "index_read",
+                "model_load",
+                "query_encode",
+                "query",
+                "assemble",
+            ] {
+                if let Some(elapsed) = timings
+                    .get(phase)
+                    .and_then(Value::as_f64)
+                    .and_then(|ms| Duration::try_from_secs_f64(ms / 1_000.0).ok())
+                {
+                    crate::perf::record_route_phase(
+                        crate::perf::PerfRoute::Search,
+                        &format!("runner.{phase}"),
+                        elapsed,
+                    );
+                }
+            }
+        }
         model_load.set(
             model_load
                 .get()
@@ -469,6 +494,7 @@ pub(crate) fn search_project_index_attempt(
     let payload = payload.ok_or_else(|| {
         search_unavailable_error("project index search completed without a payload")
     })?;
+    phases.mark("search_and_repair");
 
     // Issue #5430: serve usable scopes immediately and repair only the
     // excluded scopes that are not held by an explicit operator stop.
@@ -526,6 +552,7 @@ pub(crate) fn search_project_index_attempt(
     suggestions.sort_by(|left, right| distance_key(left).total_cmp(&distance_key(right)));
     results.truncate(INDEX_SEARCH_LIMIT);
     suggestions.truncate(INDEX_SEARCH_LIMIT);
+    phases.mark("assemble");
     if let Some(model_load) = model_load.get() {
         crate::perf::record_route(
             crate::perf::PerfRoute::SearchWarm,
