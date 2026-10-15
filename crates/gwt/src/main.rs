@@ -10806,15 +10806,15 @@ fn main() -> std::io::Result<()> {
     if let Err(error) = std::thread::Builder::new()
         .name("gwt-agent-capacity".into())
         .spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(gwt::agent_capacity::CAPACITY_TICK_INTERVAL);
             let roots = capacity_roots
                 .read()
                 .map(|projects| projects.clone())
                 .unwrap_or_default();
+            if let Err(error) = gwt::agent_capacity::refresh_machine_capacity_for_projects(&roots) {
+                tracing::warn!(%error, "agent capacity observation failed");
+            }
             for root in roots {
-                if let Err(error) = gwt::agent_capacity::refresh_machine_capacity(&root) {
-                    tracing::warn!(%error, project_root = %root.display(), "agent capacity observation failed");
-                }
                 // Failed observations must also publish expiry instead of leaving
                 // an old positive Auto limit on a stopped Monitor.
                 if capacity_proxy

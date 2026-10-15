@@ -1650,6 +1650,10 @@ fn issue_monitor_capacity_sampler_notifies_stopped_projects_without_scanning() {
         !sampler.contains("IssueMonitorScheduledTick"),
         "measurement changes must not trigger scans or PM wakes"
     );
+    assert!(
+        sampler.contains("refresh_machine_capacity_for_projects(&roots)"),
+        "one tick must share its machine observation and target scan budget across projects"
+    );
 }
 
 #[test]
@@ -1745,6 +1749,30 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
                 "preserve every noncapacity daemon field"
             );
             assert_eq!(status.max_active_agents_override, manual);
+            assert!(
+                runtime
+                    .issue_monitor_capacity_changed_events_with(&other, |_| {
+                        expected.agent_capacity.clone()
+                    })
+                    .is_empty(),
+                "an unchanged capacity must not broadcast the full Monitor status"
+            );
+            let mut renewed = expected.agent_capacity.clone();
+            let observed = renewed.observed_at.unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    .saturating_sub(2)
+            });
+            renewed.observed_at = Some(observed + 1);
+            renewed.expires_at = Some(renewed.expires_at.unwrap_or(observed + 30) + 1);
+            assert!(
+                runtime
+                    .issue_monitor_capacity_changed_events_with(&other, |_| renewed)
+                    .is_empty(),
+                "a timestamp-only renewal must not broadcast the full Monitor status"
+            );
         }
         let rows = gwt_core::error_ledger::list_since(None).unwrap();
         let reductions = rows
@@ -1764,10 +1792,10 @@ fn issue_monitor_capacity_updates_stopped_auto_and_manual_without_changing_autho
         let events = runtime.issue_monitor_capacity_changed_events_with(&other, |_| {
             expected.agent_capacity.clone()
         });
-        let BackendEvent::IssueMonitorStatus { status } = &events[0].event else {
-            panic!("capacity refresh must retain the cached status");
-        };
-        assert_eq!(**status, expected);
+        assert!(
+            events.is_empty(),
+            "failed prefs read retains unchanged cached mode"
+        );
         assert_eq!(fs::read(&prefs_path).unwrap(), b"corrupt");
         fs::write(&prefs_path, prefs_before).unwrap();
     }
