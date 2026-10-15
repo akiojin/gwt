@@ -485,7 +485,7 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
     );
     assert!(immediate.is_empty());
     let issue_events = wait_for_knowledge_view_dispatch(&recorded_events, &issue_window_id);
-    assert_eq!(issue_events.len(), 2);
+    assert_eq!(issue_events.len(), 1);
     assert!(matches!(
         &issue_events[0].event,
         BackendEvent::KnowledgeEntries {
@@ -503,13 +503,12 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             && *selected_number == Some(42)
             && *refresh_enabled
     ));
-    assert!(matches!(
-        &issue_events[1].event,
-        BackendEvent::KnowledgeDetail { detail, .. }
-            if detail.launch_issue_number == Some(42)
-                && detail.sections.iter().any(|section| section.title == "Linked branches"
-                    && section.body.contains("feature/issue-bridge"))
-    ));
+    let issue_detail =
+        select_issue_detail_for_test(&runtime, &recorded_events, &issue_window_id, 42);
+    assert_eq!(issue_detail.launch_issue_number, Some(42));
+    assert!(issue_detail.sections.iter().any(|section| {
+        section.title == "Linked branches" && section.body.contains("feature/issue-bridge")
+    }));
 
     let spec_window_id = combined_window_id("tab-1", "spec-1");
     let immediate = runtime.load_knowledge_bridge_events(
@@ -524,7 +523,7 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
     );
     assert!(immediate.is_empty());
     let spec_events = wait_for_knowledge_view_dispatch(&recorded_events, &spec_window_id);
-    assert_eq!(spec_events.len(), 2);
+    assert_eq!(spec_events.len(), 1);
     assert!(matches!(
         &spec_events[0].event,
         BackendEvent::KnowledgeEntries {
@@ -539,12 +538,11 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             && *selected_number == Some(1930)
             && *refresh_enabled
     ));
-    assert!(matches!(
-        &spec_events[1].event,
-        BackendEvent::KnowledgeDetail { detail, .. }
-            if detail.sections.iter().any(|section| section.title == "spec"
-                && section.body.contains("Cache-backed issue view"))
-    ));
+    let spec_detail =
+        select_issue_detail_for_test(&runtime, &recorded_events, &spec_window_id, 1930);
+    assert!(spec_detail.sections.iter().any(|section| {
+        section.title == "spec" && section.body.contains("Cache-backed issue view")
+    }));
 }
 
 #[test]
@@ -749,18 +747,8 @@ fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
             )
         })
     });
-    wait_for_recorded_event("knowledge detail dispatch", &events, |events| {
-        events.iter().any(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::Dispatch(dispatched)
-                    if dispatched.iter().any(|outbound| matches!(
-                        &outbound.event,
-                        BackendEvent::KnowledgeDetail { id, .. } if id == &window_id
-                    ))
-            )
-        })
-    });
+    let detail = select_issue_detail_for_test(&runtime, &events, &window_id, 42);
+    assert_eq!(detail.number, Some(42));
 }
 
 #[test]
@@ -855,10 +843,13 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
     assert_eq!(entries[0].related_work_count, 1);
     assert_eq!(entries[0].related_session_count, 1);
 
-    let detail = match &events[1].event {
-        BackendEvent::KnowledgeDetail { detail, .. } => detail,
-        other => panic!("unexpected detail event: {other:?}"),
-    };
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3096,
+    );
     assert_eq!(detail.related_works.len(), 1);
     let work = &detail.related_works[0];
     assert_eq!(work.title, "Fix Launch Agent trace");
@@ -929,10 +920,13 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
     let events =
         wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
-    let detail = match &events[1].event {
-        BackendEvent::KnowledgeDetail { detail, .. } => detail,
-        other => panic!("unexpected detail event: {other:?}"),
-    };
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3133,
+    );
     assert_eq!(detail.related_works.len(), 1);
     assert_eq!(detail.related_works[0].status_category, "idle");
     assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
@@ -1054,10 +1048,13 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
     assert_eq!(entries[0].number, 3133);
     assert_eq!(entries[0].related_session_count, 1);
 
-    let detail = match &events[1].event {
-        BackendEvent::KnowledgeDetail { detail, .. } => detail,
-        other => panic!("unexpected detail event: {other:?}"),
-    };
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3133,
+    );
     assert_eq!(detail.related_works.len(), 1);
     assert_eq!(detail.related_works[0].agents.len(), 1);
     assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
@@ -1217,10 +1214,13 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
     assert_eq!(entries[0].number, 3133);
     assert_eq!(entries[0].related_session_count, 1);
 
-    let detail = match &events[1].event {
-        BackendEvent::KnowledgeDetail { detail, .. } => detail,
-        other => panic!("unexpected detail event: {other:?}"),
-    };
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3133,
+    );
     assert_eq!(detail.related_works.len(), 1);
     assert_eq!(detail.related_works[0].agents.len(), 1);
     assert_eq!(
@@ -1373,10 +1373,13 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
     assert_eq!(entries[0].related_work_count, 1);
     assert_eq!(entries[0].related_session_count, 1);
 
-    let detail = match &events[1].event {
-        BackendEvent::KnowledgeDetail { detail, .. } => detail,
-        other => panic!("unexpected detail event: {other:?}"),
-    };
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3133,
+    );
     assert_eq!(detail.related_works.len(), 1);
     assert_eq!(
         detail.related_works[0].title,
