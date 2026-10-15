@@ -26,6 +26,7 @@ import { createInteractionGuard } from "/interaction-guard.js";
 import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
 import { createUiStateStore } from "./ui-state-store.js";
+import { setControlExplanation } from "./control-explanations.js";
 
 export function renderUpdateSettingsStatus(panel, status) {
   const document = panel.ownerDocument;
@@ -218,7 +219,7 @@ export function mountProjectManagerSettingsPanel(
 }
 
 export function renderIssuesSettingsPanel(panel, options) {
-  const { project, status, send } = options;
+  const { project, status, send, launchControls = [] } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
   const heading = document.createElement("h3");
@@ -226,38 +227,57 @@ export function renderIssuesSettingsPanel(panel, options) {
   heading.textContent = `Project settings · ${project?.name || project?.project_root || "No project"}`;
   panel.appendChild(heading);
   const description = document.createElement("p");
-  description.className = "settings-help";
+  description.className = "settings-help settings-issues-description";
   description.textContent = project?.project_root || "Open a project to configure Issues.";
+  description.title = description.textContent;
   panel.appendChild(description);
-  const section = document.createElement("fieldset");
-  section.className = "settings-section";
-  section.disabled = !status;
-  const legend = document.createElement("legend");
-  legend.textContent = "Issues";
-  section.appendChild(legend);
-  panel.appendChild(section);
-  const field = (name, type, value) => {
+  const group = name => {
+    const section = document.createElement("fieldset");
+    section.className = "settings-section";
+    section.disabled = !status;
+    const legend = document.createElement("legend");
+    legend.textContent = name;
+    section.appendChild(legend);
+    panel.appendChild(section);
+    return section;
+  };
+  const row = (section, name, control) => {
     const label = document.createElement("label");
     label.className = "settings-field";
     const caption = document.createElement("span");
     caption.textContent = name;
     label.appendChild(caption);
+    label.appendChild(control);
+    section.appendChild(label);
+    return label;
+  };
+  const field = (section, name, type, value) => {
     const input = document.createElement("input");
     input.type = type;
     input.className = type === "checkbox" ? "settings-checkbox" : "settings-input";
     input.setAttribute("aria-label", name);
     if (type === "checkbox") input.checked = value === true;
     else input.value = String(value ?? "");
-    label.appendChild(input);
-    section.appendChild(label);
+    row(section, name, input);
     return input;
   };
-  const max = field("Max active", "number", status?.max_active_agents ?? 0);
+  const launch = group("Launch control");
+  for (const [action, name] of [["monitor-autonomous", "Autonomous"], ["monitor-toggle", "Monitoring"]]) {
+    const slot = document.createElement("span");
+    const control = launchControls.find(control => control.dataset.action === action);
+    if (control) slot.appendChild(control);
+    row(launch, name, slot).dataset.settingsLaunchAction = action;
+  }
+  const max = field(launch, "Max active", "number", status?.max_active_agents ?? 0);
+  const capacityExplanation = "Maximum number of issue agents the monitor may run at once. Auto uses the current recommended capacity; Manual sets a fixed maximum.";
+  setControlExplanation(max, capacityExplanation, "settings-max-active");
+  launch.insertBefore(max.closest("label"), launch.querySelector('[data-settings-launch-action="monitor-toggle"]'));
   max.min = "1";
   max.step = "1";
   const mode = document.createElement("select");
   mode.className = "settings-select";
   mode.setAttribute("aria-label", "Max active mode");
+  setControlExplanation(mode, "Choose Automatic capacity from current system limits, or Manual to set a fixed maximum.", "settings-max-active-mode");
   for (const [value, name] of [["auto", "Auto"], ["manual", "Manual"]]) {
     const option = document.createElement("option");
     option.value = value;
@@ -266,7 +286,11 @@ export function renderIssuesSettingsPanel(panel, options) {
     mode.appendChild(option);
   }
   max.disabled = status?.max_active_agents_override == null;
-  max.closest("label").insertBefore(mode, max);
+  const capacity = document.createElement("span");
+  capacity.className = "settings-issues-capacity";
+  setControlExplanation(capacity, capacityExplanation, "settings-capacity");
+  max.replaceWith(capacity);
+  capacity.append(mode, max);
   mode.addEventListener("change", () => {
     max.disabled = mode.value === "auto";
     if (!max.disabled && !(Number.isInteger(Number(max.value)) && Number(max.value) > 0)) max.value = "1";
@@ -277,8 +301,11 @@ export function renderIssuesSettingsPanel(panel, options) {
     const value = Number(max.value);
     if (!max.disabled && Number.isInteger(value) && value > 0) send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: value });
   });
-  const refill = field("Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
-  const limit = field("Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
+  const replenishment = group("Refill");
+  const refill = field(replenishment, "Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
+  const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
+  setControlExplanation(refill, "Automatically add eligible issues to the launch queue when it has fewer issues than the refill limit.", "settings-auto-refill");
+  setControlExplanation(limit, "Target number of eligible issues kept in the launch queue by Auto-refill. 0 disables automatic refill.", "settings-refill-limit");
   limit.min = "0";
   limit.step = "1";
   const saveRefill = () => {
@@ -287,12 +314,37 @@ export function renderIssuesSettingsPanel(panel, options) {
   };
   refill.addEventListener("change", saveRefill);
   limit.addEventListener("change", saveRefill);
-  const labels = field("Allowed labels", "text", (status?.allowed_labels || []).join(", "));
+  const labels = field(group("Target"), "Allowed labels", "text", (status?.allowed_labels || []).join(", "));
+  setControlExplanation(labels, "Comma-separated labels. Only matching issues enter the launch queue.", "settings-allowed-labels");
   labels.addEventListener("change", () => send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: [...new Set(labels.value.split(",").map(v => v.trim()).filter(Boolean))] }));
 }
 
+function renderCandidateSaveError(panel, event) {
+  if (!event || Number(panel.dataset.pendingRequest) !== event.request_id) return;
+  panel.dataset.saving = "false";
+  delete panel.dataset.pendingRequest;
+  const feedback = panel.querySelector("[data-candidate-status]");
+  if (feedback) {
+    feedback.textContent = event.message;
+    feedback.dataset.kind = "error";
+    feedback.setAttribute("role", "alert");
+  }
+}
+
+function positionIssuesLaunchControls(body) {
+  const open = body.querySelector(".settings-issues-options")?.hasAttribute("open");
+  const summary = body.querySelector(".knowledge-monitor-controls");
+  for (const action of ["monitor-autonomous", "monitor-toggle"]) {
+    const control = body.querySelector(`[data-action="${action}"]`);
+    const slot = body.querySelector(`[data-settings-launch-action="${action}"] > :last-child`);
+    if (!control) continue;
+    if (open) slot?.appendChild(control);
+    else summary?.insertBefore(control, summary.querySelector('[data-action="monitor-settings"]'));
+  }
+}
+
 export function renderAgentsSettingsPanel(panel, options) {
-  const { project, profiles, status, send } = options;
+  const { project, profiles, status, send, availableAgents = null } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.dirty = "false";
@@ -312,6 +364,15 @@ export function renderAgentsSettingsPanel(panel, options) {
     help.textContent += " Loading launch profiles…";
     return;
   }
+  const feedback = document.createElement("p");
+  feedback.className = "settings-status";
+  feedback.dataset.candidateStatus = "";
+  const showFeedback = (message, error = false) => {
+    feedback.textContent = message;
+    feedback.dataset.kind = error ? "error" : "info";
+    feedback.setAttribute("role", error ? "alert" : "status");
+    if (error) panel.dataset.dirty = "true";
+  };
   const rows = [];
   const field = (parent, name, key, value, type = "text", choices = null) => {
     const label = document.createElement("label");
@@ -350,7 +411,12 @@ export function renderAgentsSettingsPanel(panel, options) {
   });
   const submit = next => {
     const value = Number(threshold.value);
-    if (Number.isInteger(value) && value >= 1 && value <= 100) send({ kind: "issue_monitor_profiles_set", profiles: next, usage_threshold_percent: value });
+    if (!Number.isInteger(value) || value < 1 || value > 100) {
+      showFeedback("Usage threshold must be a whole number between 1 and 100.", true);
+      return;
+    }
+    showFeedback("Saving candidates…");
+    send({ kind: "issue_monitor_profiles_set", profiles: next, usage_threshold_percent: value });
   };
   const button = (parent, title, action, callback) => {
     const node = document.createElement("button");
@@ -405,11 +471,38 @@ export function renderAgentsSettingsPanel(panel, options) {
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
-  const candidate = field(add, "Add candidate", "new", "");
-  button(add, "Add candidate", "add-candidate", () => {
+  // Match resolve_agent_id aliases and the backend's provider comparison.
+  const providerAliases = new Map([
+    ["claudecode", "claude"], ["claude-code", "claude"], ["claude code", "claude"],
+    ["grok build", "grok"], ["grok-build", "grok"],
+    ["antigravity", "agy"], ["antigravity cli", "agy"], ["antigravity-cli", "agy"],
+    ["open-code", "opencode"], ["open-claw", "openclaw"],
+    ["hermes agent", "hermes"], ["hermes-agent", "hermes"],
+    ["copilot", "gh"], ["github copilot", "gh"], ["github-copilot", "gh"],
+  ]);
+  const provider = agentId => {
+    const id = String(agentId ?? "").trim().replace(/[A-Z]/g, character => character.toLowerCase());
+    return providerAliases.get(id) || id;
+  };
+  const remaining = (availableAgents || []).filter(agent => !profiles.some(profile => provider(profile.agent_id) === provider(agent.id)));
+  const candidate = field(add, "Add candidate", "new", "", "text", ["", ...remaining.map(agent => agent.id)]);
+  candidate.options[0].textContent = "Select an agent…";
+  for (const option of candidate.options) {
+    const agent = remaining.find(agent => agent.id === option.value);
+    if (agent) option.textContent = `${agent.name || agent.id} (${agent.id})`;
+  }
+  const addButton = button(add, "Add candidate", "add-candidate", () => {
     const agent = candidate.value.trim();
-    if (agent && !profiles.some(p => p.agent_id === agent)) submit([...draft(), { agent_id: agent }]);
+    const next = draft();
+    if (!agent) showFeedback("Select an agent to add.", true);
+    else if (next.some(profile => provider(profile.agent_id) === provider(agent))) showFeedback(`Agent ${agent} is already in the candidate pool.`, true);
+    else if (!availableAgents?.some(known => known.id === agent)) showFeedback(`Unknown agent: ${agent}. Select a known agent.`, true);
+    else submit([...next, { agent_id: agent }]);
   });
+  candidate.disabled = addButton.disabled = availableAgents === null || remaining.length === 0;
+  showFeedback(availableAgents === null ? "Loading available agents…"
+    : remaining.length === 0 ? "All known agents are already in the candidate pool." : "Select an agent to add.");
+  add.appendChild(feedback);
 }
 
 export function switchSettingsTab(body, target, focus = false) {
@@ -433,7 +526,9 @@ export function switchSettingsTab(body, target, focus = false) {
       panel.tabIndex = -1;
       const destination = showCandidates ? panel.querySelector("[data-settings-candidates]") || panel : panel;
       destination.tabIndex = -1;
-      destination.scrollIntoView?.({ block: "start" });
+      const scroller = body.dataset.surfaceOwner === "pm" ? body.querySelector(".settings-body") : null;
+      if (scroller) scroller.scrollTop = Math.max(0, destination.offsetTop - scroller.offsetTop);
+      else destination.scrollIntoView?.({ block: "start" });
       destination.focus({ preventScroll: true });
     }
   });
@@ -452,20 +547,22 @@ export function installSettingsOpenHandler(options) {
   document.addEventListener("settings:open", (event) => {
     const target = event?.detail?.section || event?.detail?.target || "system";
     const projectRoot = event?.detail?.project_root || activeProjectTab?.()?.project_root || "";
+    const surfaceOwner = event?.detail?.surface_owner === "pm" ? "pm" : null;
     if (target === "index") {
       focusOrSpawnPreset("index");
       return;
     }
     const existingBody = Array.from(settingsWindowBodies).find(
-      (settingsBody) => settingsBody.isConnected && (settingsBody.dataset.settingsProjectRoot || "") === projectRoot,
+      (settingsBody) => settingsBody.isConnected && (settingsBody.dataset.settingsProjectRoot || "") === projectRoot
+        && (settingsBody.dataset.surfaceOwner || null) === surfaceOwner,
     );
     if (existingBody) {
       switchSettingsTab(existingBody, target, true);
-      focusOrSpawnPreset("settings");
+      focusOrSpawnPreset("settings", { surfaceOwner });
       return;
     }
-    setPendingTarget(target);
-    focusOrSpawnPreset("settings");
+    setPendingTarget(target, surfaceOwner);
+    focusOrSpawnPreset("settings", { surfaceOwner });
   });
 }
 
@@ -729,7 +826,10 @@ export function createSettingsSurface({
         const root = body.dataset.settingsProjectRoot || "";
         const current = projectSettingsSnapshot(body);
         const project = { project_root: root, name: body.dataset.settingsProjectName };
+        const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+        const focusedLaunchControl = launchControls.find(control => control === document.activeElement);
         const agentsPanel = body.querySelector("[data-settings-candidates]");
+        if (agentsPanel) renderCandidateSaveError(agentsPanel, current.profilesFailure);
         if (current.profilesRequestId != null
           && Number(agentsPanel?.dataset.pendingRequest) === current.profilesRequestId && agentsPanel?.dataset.saving === "true") {
           agentsPanel.dataset.dirty = "false";
@@ -758,9 +858,16 @@ export function createSettingsSurface({
             && document.activeElement?.matches("input:not([type=checkbox]), select, textarea");
           if (editing && section === "issues") body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
-            project, status: current.status, profiles: current.profiles, send: dispatch,
+            project, status: current.status, profiles: current.profiles, send: dispatch, launchControls,
+            availableAgents: supportedAgentsModel.read().agents === null || customAgentsState.loading ? null : [
+              ...supportedAgentsModel.read().agents,
+              ...customAgentsState.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
+            ],
           });
         }
+        positionIssuesLaunchControls(body);
+        focusedLaunchControl?.focus({ preventScroll: true });
+        body.querySelector(".issue-bridge-root")?.dispatchEvent(new document.defaultView.Event("control-explanations:refresh"));
       }
       function applyIssueSettingsStatus(status, projectRoot) {
         if (!projectRoot) return;
@@ -772,6 +879,12 @@ export function createSettingsSurface({
         if (!root) return;
         issueSettingsModel.update(state => ({ ...state, [root]: {
           ...state[root], profiles: event.profiles, profilesRequestId: event.request_id,
+        } }));
+      }
+      function applyIssueMonitorProfilesError(event) {
+        if (!event.project_root) return;
+        issueSettingsModel.update(state => ({ ...state, [event.project_root]: {
+          ...state[event.project_root], profilesFailure: event,
         } }));
       }
       issueSettingsModel.subscribe(state => state, () => {
@@ -843,7 +956,10 @@ export function createSettingsSurface({
         }));
       }
 
-      supportedAgentsModel.subscribe(state => state, renderSupportedAgentPanels);
+      supportedAgentsModel.subscribe(state => state, () => {
+        renderSupportedAgentPanels();
+        for (const body of settingsWindowBodies) renderProjectSettings(body);
+      });
 
       function requestSupportedAgentRefresh() {
         purgeDetachedSettingsBodies();
@@ -876,6 +992,7 @@ export function createSettingsSurface({
         const project = activeProjectTab();
         body.dataset.settingsSection = "issues";
         body.dataset.settingsWindowId = windowData.id;
+        body.dataset.surfaceOwner = windowData.surface_owner || "";
         body.dataset.settingsProjectRoot = project?.project_root || "";
         body.dataset.settingsProjectName = project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "No project";
 
@@ -1029,7 +1146,10 @@ export function createSettingsSurface({
         issuesRoot.querySelector(".knowledge-monitor-bar").after(issuesOptions);
         const gear = issuesRoot.querySelector('[data-action="monitor-settings"]');
         gear.setAttribute("aria-expanded", "false");
-        issuesOptions.addEventListener("toggle", () => gear.setAttribute("aria-expanded", String(issuesOptions.open)));
+        issuesOptions.addEventListener("toggle", () => {
+          gear.setAttribute("aria-expanded", String(issuesOptions.open));
+          positionIssuesLaunchControls(body);
+        });
         gear.addEventListener("click", () => { issuesOptions.open = !issuesOptions.open; });
 
         tabs.addEventListener("click", (e) => {
@@ -1101,11 +1221,12 @@ export function createSettingsSurface({
 
         // Honour any pending settings:open dispatch (e.g. from the badge
         // click) by switching to the requested tab once the panel is mounted.
-        switchSettingsTab(body, pendingSettingsTabTarget || "issues", Boolean(pendingSettingsTabTarget));
-        pendingSettingsTabTarget = null;
+        const target = pendingSettingsTabTargets.get(windowData.surface_owner || null);
+        switchSettingsTab(body, target || "issues", Boolean(target));
+        pendingSettingsTabTargets.delete(windowData.surface_owner || null);
       }
 
-      let pendingSettingsTabTarget = null;
+      const pendingSettingsTabTargets = new Map();
 
       function renderIndexPanel(panel) {
         const activeProjectRoot = activeProjectTab()?.project_root || "";
@@ -1218,8 +1339,8 @@ export function createSettingsSurface({
         settingsWindowBodies,
         focusOrSpawnPreset,
         activeProjectTab,
-        setPendingTarget: (target) => {
-          pendingSettingsTabTarget = target;
+        setPendingTarget: (target, surfaceOwner) => {
+          pendingSettingsTabTargets.set(surfaceOwner, target);
         },
       });
 
@@ -1970,6 +2091,7 @@ export function createSettingsSurface({
       }
 
       function renderSettingsAgentList() {
+        issueSettingsModel.update(state => ({ ...state }));
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
@@ -2196,6 +2318,7 @@ export function createSettingsSurface({
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
+        applyIssueMonitorProfilesError,
         customAgentsState,
         agentBackendsState,
         systemSettingsState,

@@ -17,6 +17,34 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
+# Each suite/theme owns its backend and every report source (including Q&A
+# and peer messages). Canonical verification registers these eight commands
+# separately: the embedded reporter writes one result per Playwright process.
+if [ "${1:-}" != --fixture ]; then
+  if [ -n "${GWT_HEADED_E2E_REPORT:-}" ]; then
+    echo 'Canonical verification requires --fixture <suite> <chromium-project> per command' >&2
+    exit 1
+  fi
+  for CHECK_SUITE in pm-chat pm-layout pm-english release-notes; do
+    for CHECK_PROJECT in chromium-dark chromium-light; do
+      bash "$REPO_ROOT/scripts/verify-issue-5023.sh" --fixture "$CHECK_SUITE" "$CHECK_PROJECT" "$@"
+    done
+  done
+  exit 0
+fi
+CHECK_SUITE="${2:-}"
+CHECK_PROJECT="${3:-}"
+case "$CHECK_SUITE" in
+  pm-chat|pm-layout|pm-english|release-notes) ;;
+  *) echo 'Unknown Issue #5023 fixture suite' >&2; exit 1 ;;
+esac
+case "$CHECK_PROJECT" in
+  chromium-dark|chromium-light) ;;
+  *) echo 'Unknown Issue #5023 fixture Chromium project' >&2; exit 1 ;;
+esac
+shift 3
+printf 'Fixture: %s / %s\n' "$CHECK_SUITE" "$CHECK_PROJECT"
+
 CHECK_HOME="$(mktemp -d -t gwt-issue-5023-home.XXXXXX)"
 URL_FILE="$CHECK_HOME/url"
 LOG_FILE="$CHECK_HOME/startup.log"
@@ -193,13 +221,15 @@ if [ -z "$CHECK_URL" ] || grep -qi 'another tray-resident gwt instance is alread
 fi
 printf '%s\n' "$CHECK_URL" > "$URL_FILE"
 if [ "$CHECK_LAUNCH" = 1 ]; then
-  # Save while the first app is alive, then verify the same history after a
-  # real app shutdown/relaunch (not merely a browser reload).
-  printf '%s\n' '{"schema_version":1,"operation":"pm.report.post","params":{"kind":"decision","body":"# Persisted before restart\n\nThis report survives the application restart."}}' \
-    | env -u GWT_SESSION_ID -u GWT_SESSION_RUNTIME_PATH -u GWT_HOOK_FORWARD_URL \
-      -u GWT_HOOK_FORWARD_TOKEN -u GWT_PANE_WS_URL -u GWT_BIN_PATH \
-      HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" "$CHECKOUT_GWTD" \
-    | jq -e 'select(.ok == true) | .output | fromjson | select(.ok == true) | .report.id' >/dev/null
+  if [ "$CHECK_SUITE" = pm-chat ]; then
+    # Save while the first app is alive, then verify the same history after a
+    # real app shutdown/relaunch (not merely a browser reload).
+    printf '%s\n' '{"schema_version":1,"operation":"pm.report.post","params":{"kind":"decision","body":"# Persisted before restart\n\nThis report survives the application restart."}}' \
+      | env -u GWT_SESSION_ID -u GWT_SESSION_RUNTIME_PATH -u GWT_HOOK_FORWARD_URL \
+        -u GWT_HOOK_FORWARD_TOKEN -u GWT_PANE_WS_URL -u GWT_BIN_PATH \
+        HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" "$CHECKOUT_GWTD" \
+      | jq -e 'select(.ok == true) | .output | fromjson | select(.ok == true) | .report.id' >/dev/null
+  fi
   cleanup_browser_check
   cp "$LOG_FILE" "$CHECK_HOME/startup-before-restart.log"
   : > "$URL_FILE"
@@ -228,7 +258,5 @@ GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
   GWT_PLAYWRIGHT_PROJECT_ROOT="$REPO_ROOT" \
   bash "$REPO_ROOT/scripts/run-visual-tests.sh" \
     --workers=1 --output "$CHECK_HOME/playwright-artifacts" \
-    crates/gwt/playwright/tests/pm-chat-live.spec.ts \
-    crates/gwt/playwright/tests/pm-layout-live.spec.ts \
-    crates/gwt/playwright/tests/pm-english-live.spec.ts \
-    crates/gwt/playwright/tests/release-notes-live.spec.ts "$@"
+    "crates/gwt/playwright/tests/$CHECK_SUITE-live.spec.ts" \
+    --project="$CHECK_PROJECT" "$@"

@@ -115,6 +115,7 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
           reason: "ready",
         },
         board: { healthy: true, document_count: 21, repair_required: false, reason: "ready" },
+        reports: { healthy: true, document_count: 6, repair_required: false, reason: "ready" },
         files: {
           wtAhash: { healthy: true, document_count: 310, repair_required: false, reason: "ready" },
           wtBhash: {
@@ -148,7 +149,7 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
     summary,
     "summary cards should appear before the detailed table",
   );
-  assert.match(summary.textContent, /5 ready/);
+  assert.match(summary.textContent, /6 ready/);
   assert.match(summary.textContent, /2 degraded/);
   assert.match(summary.textContent, /specs/);
   assert.match(summary.textContent, /files · feature\/x/);
@@ -168,6 +169,7 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
     "discussions",
     "board",
     "works",
+    "reports",
     "files",
     "files-docs",
   ]);
@@ -197,14 +199,18 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
   assert.match(boardCell.textContent, /21 docs/);
 
   // files row has one cell per worktree, in worktree-hash sort order.
-  const filesCells = scopeRows[6].querySelectorAll(".settings-index-cell");
+  const reportsCell = scopeRows[6].querySelector(".settings-index-cell");
+  assert.equal(reportsCell.colSpan, 2);
+  assert.match(reportsCell.textContent, /6 docs/);
+
+  const filesCells = scopeRows[7].querySelectorAll(".settings-index-cell");
   assert.equal(filesCells.length, 2);
   assert.equal(filesCells[0].dataset.worktreeHash, "wtAhash");
   assert.equal(filesCells[1].dataset.worktreeHash, "wtBhash");
   assert.ok(filesCells[1].classList.contains("unhealthy"));
 
   // files-docs only seeded wtAhash — wtB renders an empty placeholder.
-  const docsCells = scopeRows[7].querySelectorAll(".settings-index-cell");
+  const docsCells = scopeRows[8].querySelectorAll(".settings-index-cell");
   assert.equal(docsCells.length, 2);
   assert.ok(docsCells[1].classList.contains("settings-index-cell-empty"));
 });

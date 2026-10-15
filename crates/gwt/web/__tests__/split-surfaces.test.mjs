@@ -136,6 +136,9 @@ test("same Agents surface keeps the active live host and a preview in the other 
 
 test("Split reconciles arriving views from catalog commits and unsubscribes", async () => {
   const { controller, model, windows, elements, stage, document } = await fixture();
+  const settings = document.createElement("select");
+  settings.innerHTML = '<option value="Normal" disabled>Normal</option><option value="Continue" selected>Continue</option>';
+  elements.get("board").appendChild(settings);
   controller.open("board");
   controller.select("board", 1);
   const second = { id: "second-board", preset: "board" };
@@ -144,6 +147,9 @@ test("Split reconciles arriving views from catalog commits and unsubscribes", as
   elements.set(second.id, element);
   windows.push(second);
   model.update(() => ({ catalog: { version: 1 } }));
+  assert.equal(settings.value, "Continue", "host sync must preserve embedded settings choices");
+  assert.equal(settings.options[0].hasAttribute("disabled"), true);
+  assert.equal(settings.options[1].textContent, "Continue");
   assert.ok(element.closest(".split-pane") === document.querySelectorAll(".split-pane")[1], "catalog commit mounts the arriving view without manual sync");
   assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "1");
   controller.dispose();
@@ -250,4 +256,60 @@ test("Issues and Settings select their canonical views, not legacy windows shari
   controller.select("settings", 1);
   assert.equal(controller.containsWindow("settings"), true);
   assert.equal(controller.containsWindow("branches"), false);
+});
+
+test("PM uses one fixed window without entering the core split selector and retains its live DOM", async () => {
+  const { controller, document, stage, elements, opened } = await fixture();
+  const pm = elements.get("pm");
+  const input = document.createElement("textarea");
+  pm.appendChild(input);
+  controller.open("agents");
+  assert.equal(controller.showWindow("pm"), true);
+  assert.equal(controller.activeSurface(), "pm");
+  assert.equal(controller.isOpen(), false);
+  assert.equal(controller.hasLayout, true);
+  assert.equal([...document.querySelectorAll(".split-pane")].filter(pane => !pane.hidden).length, 1);
+  assert.equal(pm.closest(".split-pane").dataset.surface, "pm");
+  assert.equal(document.querySelectorAll('option[value="pm"]').length, 0);
+  const button = document.getElementById("split-view-button");
+  assert.equal(button.disabled, true);
+  assert.match(button.title, /PM.*single pane/);
+  controller.open("issues");
+  assert.equal(controller.activeSurface(), "pm", "PM cannot be split through the title bar action");
+  assert.equal(controller.showWindow("a"), false, "an implementation agent cannot enter the PM host");
+  controller.sync();
+  assert.deepEqual(opened, [], "PM sync never starts a window");
+  controller.show("agents");
+  assert.equal(button.disabled, false);
+  assert.equal(pm.parentElement, stage);
+  assert.equal(controller.showWindow("pm"), true);
+  assert.equal(pm.querySelector("textarea"), input);
+  controller.close();
+  assert.equal(button.disabled, false);
+});
+
+test("PM auxiliary selection survives sync and returns to the existing PM only after catalog removal", async () => {
+  const { controller, model, document, windows, elements, stage, opened } = await fixture();
+  const auxiliary = { id: "pm-settings", preset: "settings", surface_owner: "pm" };
+  const element = document.createElement("div");
+  stage.appendChild(element);
+  elements.set(auxiliary.id, element);
+  windows.unshift(auxiliary);
+  controller.show("settings");
+  assert.equal(controller.containsWindow(auxiliary.id), false, "core Settings does not steal PM-owned Settings");
+  controller.showWindow(auxiliary.id);
+  controller.sync();
+  assert.equal(controller.containsWindow(auxiliary.id), true, "a cancelled close or metadata update preserves the auxiliary selection");
+  windows.splice(windows.indexOf(auxiliary), 1);
+  model.update(() => ({ catalog: { version: 1 } }));
+  assert.equal(controller.activeSurface(), "pm");
+  assert.equal(controller.containsWindow("pm"), true);
+  assert.equal(controller.containsWindow(auxiliary.id), false);
+  windows.splice(windows.findIndex(data => data.id === "pm"), 1);
+  model.update(() => ({ catalog: { version: 2 } }));
+  controller.sync();
+  assert.equal(controller.containsWindow("pm"), false);
+  assert.equal(controller.activeSurface(), "pm");
+  assert.deepEqual(opened, [], "removal does not implicitly respawn the PM");
+  assert.equal(controller.showWindow("missing-pm"), false);
 });

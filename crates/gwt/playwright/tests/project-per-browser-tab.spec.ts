@@ -135,14 +135,14 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         await expect(page.locator(`.workspace-window[data-id="${aWindow}"]`)).toBeVisible();
 
         // URL stability: workspace actions keep the URL; another Project and
-        // the Hub open in new browser tabs.
+        // Hub links open Projects in new browser tabs.
         await sendLiveGwtEvent(page, { kind: "close_window", id: aWindow });
         created.shift();
         await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
         expect(page.url()).toBe(liveGwtProjectUrl(base!, projectA.project_key));
-        const hubPopup = page.waitForEvent("popup");
-        await page.locator("#project-home-link").click();
-        const hubTab = await hubPopup;
+        await expect(page.locator("#project-home-link")).toHaveCount(0);
+        const hubTab = await context.newPage();
+        await hubTab.goto(new URL("/", base!).href);
         await expect(hubTab.locator("[data-hub]")).toBeVisible();
         const projectPopup = hubTab.waitForEvent("popup");
         await hubTab.locator(`[data-hub-list="open"] a[href="/p/${projectB.project_key}"]`).click();

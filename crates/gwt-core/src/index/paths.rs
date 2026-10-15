@@ -57,6 +57,7 @@ pub enum Scope {
     /// (including completed/discarded) so similar prior work can be found
     /// at Start Work time (SPEC-2359 US-80).
     Works,
+    Reports,
     /// Worktree-scoped: project source code files.
     FilesCode,
     /// Worktree-scoped: project documentation files.
@@ -76,6 +77,7 @@ impl Scope {
             Scope::Memory => "memory",
             Scope::Discussions => "discussions",
             Scope::Works => "works",
+            Scope::Reports => "reports",
             Scope::FilesCode => "files",
             Scope::FilesDocs => "files-docs",
         }
@@ -180,7 +182,12 @@ pub fn gwt_index_db_path(
 ) -> Result<PathBuf> {
     if matches!(
         scope,
-        Scope::Issues | Scope::Specs | Scope::Memory | Scope::Discussions | Scope::Works
+        Scope::Issues
+            | Scope::Specs
+            | Scope::Memory
+            | Scope::Discussions
+            | Scope::Works
+            | Scope::Reports
     ) {
         return Ok(gwt_index_repo_dir(repo).join(scope.subdir()));
     }

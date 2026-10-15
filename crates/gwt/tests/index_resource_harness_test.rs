@@ -251,7 +251,7 @@ impl Drop for HarnessWorker {
     }
 }
 
-/// Issue #5437: exercise the checkout runner, real E5, and published indexes on Windows.
+/// Issues #5437 / #5429: exercise every scope and Reports publication with real E5.
 /// Invoked explicitly by nightly CI; missing Python/model assets must fail, never skip.
 #[test]
 #[ignore]
@@ -274,6 +274,22 @@ fn real_e5_all_scopes_build_and_search() {
             .to_string(),
         project,
     };
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/all-scopes-e2e.git",
+        ],
+    ] {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(&harness.project)
+            .status()
+            .unwrap()
+            .success());
+    }
     let write = |path: PathBuf, content: String| {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
@@ -283,6 +299,7 @@ fn real_e5_all_scopes_build_and_search() {
     let mut discussions = String::new();
     let mut board = String::new();
     let mut works = Vec::new();
+    let mut reports = String::new();
     // Four distractors make top-three ranking meaningful rather than a nonempty check.
     for (index, topic) in [
         "filesystem watcher debounce",
@@ -342,9 +359,22 @@ fn real_e5_all_scopes_build_and_search() {
                 "created_at": "2026-10-15T00:00:00Z", "updated_at": "2026-10-15T00:00:00Z"
             }})
         ));
+        reports.push_str(&format!("{}\n", json!({"id": name, "kind": "progress",
+            "body": format!("PM delivered {topic}. Issue #5429"), "created_at": "2026-10-16T00:00:00Z"})));
         works.push(json!({"id": name, "title": topic, "intent": topic,
             "summary": topic, "status_category": "done", "events": []}));
     }
+    write(state.join("project-state/pm-reports.jsonl"), reports);
+    // A foreign project with an exact query match must not appear in this corpus.
+    write(
+        harness
+            .home
+            .join(".gwt/projects/foreign/project-state/pm-reports.jsonl"),
+        format!(
+            "{}\n",
+            json!({"id":"foreign", "kind":"progress", "body":"filesystem watcher debounce", "created_at":"2026-10-16T00:00:00Z"})
+        ),
+    );
     write(state.join("work-notes/memory.md"), memory);
     write(state.join("work-notes/discussions.md"), discussions);
     write(state.join("coordination/events/000001.jsonl"), board);
@@ -388,6 +418,7 @@ fn real_e5_all_scopes_build_and_search() {
             json!("filesystem watcher debounce"),
         ),
         ("works", "workResults", "work_id", json!("watcher")),
+        ("reports", "reportResults", "report_id", json!("watcher")),
     ] {
         let started = Instant::now();
         let build = invoke(
@@ -430,6 +461,14 @@ fn real_e5_all_scopes_build_and_search() {
             hits.iter().any(|hit| hit[identity] == expected),
             "{scope}: {result}"
         );
+        if scope == "reports" {
+            assert!(hits.iter().all(|hit| hit["report_id"] != "foreign"));
+            assert!(
+                hits.iter()
+                    .all(|hit| hit["report_type"] == "digest"
+                        && hit["issue_numbers"] == json!([5429]))
+            );
+        }
         assert_eq!(
             result["model_load_ms"], 0,
             "{scope}: warm query reloaded model"
@@ -448,6 +487,144 @@ fn real_e5_all_scopes_build_and_search() {
             })
         );
     }
+    // Drive the same broker → background runner action as the GUI drain, after a
+    // real pm.report.post. This keeps the fixture isolated from resident PM/GUI work.
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+    let _home = ScopedGwtHome::set(&harness.home);
+    let _env_home = ScopedEnvVar::set("HOME", &harness.home);
+    let _env_profile = ScopedEnvVar::set("USERPROFILE", &harness.home);
+    let _hf = ScopedEnvVar::set("HF_HOME", &harness.hf_home);
+    let _real_model = ScopedEnvVar::set("GWT_INDEX_FAKE_EMBEDDING", "0");
+    // Reuse the prepared interpreter's packages in a disposable runtime venv.
+    // Only this fixture HOME receives the versioned checkout runner and policy.
+    let package_paths = gwt_core::process::hidden_command(&harness.python)
+        .args(["-c", "import json,sys; print(json.dumps([p for p in sys.path if p.endswith('site-packages')]))"])
+        .output().unwrap();
+    assert!(package_paths.status.success());
+    let package_paths: Vec<PathBuf> = serde_json::from_slice(&package_paths.stdout).unwrap();
+    let _packages = ScopedEnvVar::set("PYTHONPATH", std::env::join_paths(package_paths).unwrap());
+    let runtime_python = gwt_core::runtime::project_index_python_path();
+    let runtime_venv = runtime_python.parent().unwrap().parent().unwrap();
+    let venv = gwt_core::process::hidden_command(&harness.python)
+        .args(["-m", "venv", "--without-pip", "--system-site-packages"])
+        .arg(runtime_venv)
+        .output()
+        .unwrap();
+    assert!(
+        venv.status.success(),
+        "{}",
+        String::from_utf8_lossy(&venv.stderr)
+    );
+    let runtime_runner = gwt_core::runtime::project_index_runner_path();
+    fs::create_dir_all(runtime_runner.parent().unwrap()).unwrap();
+    fs::copy(&harness.runner, &runtime_runner).unwrap();
+    fs::copy(
+        harness.runner.with_file_name("index_path_policy.json"),
+        runtime_runner.with_file_name("index_path_policy.json"),
+    )
+    .unwrap();
+    let posted_at = Instant::now();
+    let mut post = gwt_core::process::hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+        .current_dir(&harness.project)
+        .env("HOME", &harness.home)
+        .env("USERPROFILE", &harness.home)
+        .env(
+            "GWT_INDEX_COORDINATOR_ROOT",
+            harness.home.join(".gwt/runtime/index-coordinator"),
+        )
+        .env_remove("GWT_SESSION_ID")
+        .env_remove("GWT_PROJECT_ROOT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    post.stdin
+        .take()
+        .unwrap()
+        .write_all(
+            json!({"schema_version":1, "operation":"pm.report.post",
+        "params":{"kind":"qa", "question":"What did PM decide about underwater coral restoration?",
+            "body":"We approved underwater coral reef restoration. Issue #5429"}})
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+    let posted = post.wait_with_output().unwrap();
+    assert!(
+        posted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&posted.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&posted.stdout).unwrap();
+    assert_eq!(response["ok"], true, "{response}");
+    let output: serde_json::Value =
+        serde_json::from_str(response["output"].as_str().unwrap()).unwrap();
+    let post_id = &output["report"]["id"];
+    let broker = gwt_core::index::broker::RefreshBroker::open(
+        gwt_core::index::broker::refresh_broker_root_from(&harness.home.join(".gwt")),
+        gwt_core::index::broker::DEFAULT_REFRESH_QUIET_PERIOD,
+    )
+    .unwrap();
+    let claim = loop {
+        if let Some(claim) = broker
+            .claim_next_where(|target| {
+                target.repo_hash() == harness.repo_hash
+                    && target
+                        .scopes()
+                        .contains(&gwt_core::index::broker::RefreshScope::Reports)
+            })
+            .unwrap()
+        {
+            break claim;
+        }
+        assert!(
+            posted_at.elapsed() < Duration::from_secs(60),
+            "Reports post did not become runnable"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let spawner = gwt_core::index::runtime::PythonRunnerSpawner {
+        python_executable: runtime_python,
+        runner_script: runtime_runner,
+    };
+    gwt::index_worker::execute_claimed_project_index_refresh_with(
+        claim,
+        &harness.project,
+        &harness.home.join(".gwt/index"),
+        &spawner,
+    )
+    .expect("production Reports broker executor publishes the new post");
+    let result = invoke(
+        "search-multi",
+        &[
+            "--scopes",
+            "reports",
+            "--query",
+            "PM decision about underwater coral restoration",
+            "--n-results",
+            "3",
+            "--no-auto-build",
+        ],
+    );
+    assert!(
+        result["reportResults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| &hit["report_id"] == post_id),
+        "{result}"
+    );
+    assert!(
+        posted_at.elapsed() <= Duration::from_secs(60),
+        "Reports post → search exceeded one minute"
+    );
+    println!(
+        "Reports publication E5 report: {}",
+        json!({"platform":std::env::consts::OS,
+        "post_to_search_ms":posted_at.elapsed().as_millis(), "ceiling_ms":60000, "top_three":result["reportResults"]})
+    );
     drop(workers); // Close only fixture-owned workers before removing their HOME/indexes.
 }
 

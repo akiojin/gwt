@@ -4,6 +4,8 @@
 // The controller owns every PM settings event so entry points and Settings
 // rendering cannot grow separate mutation paths.
 
+import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
+
 const DEFAULT_LOOP_INTERVAL_SECS = 60;
 const MIN_LOOP_INTERVAL_SECS = 10;
 const MAX_U64 = 18446744073709551615n;
@@ -131,8 +133,11 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
   }
 
   function pruneDetachedMounts() {
-    for (const [container] of mounts) {
-      if (!container.isConnected) mounts.delete(container);
+    for (const [container, view] of mounts) {
+      if (!container.isConnected) {
+        view.explanations.dispose();
+        mounts.delete(container);
+      }
     }
   }
 
@@ -153,6 +158,8 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
       : state.paused ? "Autonomous loop paused" : "Autonomous loop active";
     view.pauseToggle.textContent = state.paused ? "Resume" : "Pause";
     view.pauseToggle.setAttribute("aria-pressed", String(state.paused));
+    setControlExplanation(view.autonomyStatus,
+      `${view.autonomyStatus.textContent}. Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.`, "pm-autonomy-status");
 
     view.pendingChip.hidden = !(
       state.isRunning
@@ -219,6 +226,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     view.intervalError.hidden = true;
     view.intervalError.textContent = "";
     view.intervalInput.setAttribute("aria-invalid", "false");
+    view.explanations.refresh();
   }
 
   function renderAll() {
@@ -372,11 +380,25 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     section.appendChild(restart);
     container.appendChild(section);
 
+    for (const [control, text, key] of [
+      [runningLine, "The agent, model and effort of the current Project Manager session. Saved profile changes apply after restart.", "pm-running-as"],
+      [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.", "pm-pause-toggle"],
+      [pendingChip, PROFILE_HELP, "pm-pending-chip"],
+      [agentSelect, PROFILE_HELP, "pm-agent-select"],
+      [modelInput, PROFILE_HELP, "pm-model-input"],
+      [effortSelect, PROFILE_HELP, "pm-effort-select"],
+      [intervalInput, LOOP_INTERVAL_HELP, "pm-loop-interval"],
+      [autoStartInput, AUTO_START_HELP, "pm-auto-start"],
+      [restart, RESTART_CONFIRM, "pm-restart"],
+    ]) setControlExplanation(control, text, key);
+    const explanations = bindControlExplanations({ document, root: container, id: `pm-control-explanation-${intervalError.id}` });
+
     const view = {
       agentSelect,
       autoStartInput,
       autonomyStatus,
       effortSelect,
+      explanations,
       intervalError,
       intervalInput,
       modelInput,
@@ -418,7 +440,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     const CustomEventCtor = entryDocument.defaultView?.CustomEvent || CustomEvent;
     entryDocument.dispatchEvent(
       new CustomEventCtor("settings:open", {
-        detail: { target: "project-manager" },
+        detail: { target: "project-manager", surface_owner: "pm" },
       }),
     );
   }
@@ -429,9 +451,15 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
         throw new TypeError("pmSettingsPanel.mount requires a container");
       }
       pruneDetachedMounts();
+      mounts.get(container)?.explanations.dispose();
       const view = build(container);
       mounts.set(container, view);
       renderView(view);
+      return this;
+    },
+    unmount(container) {
+      mounts.get(container)?.explanations.dispose();
+      mounts.delete(container);
       return this;
     },
     applyStatus(status) {

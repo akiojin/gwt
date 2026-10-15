@@ -165,31 +165,6 @@ fn load_knowledge_bridge_filters_specs_and_exposes_cached_sections() {
 }
 
 #[test]
-fn load_knowledge_bridge_returns_disabled_pr_surface_until_cache_support_exists() {
-    let dir = tempdir().expect("tempdir");
-    let repo_path = dir.path().join("repo");
-    fs::create_dir_all(&repo_path).expect("create repo");
-    init_repo(&repo_path);
-
-    let loaded = load_knowledge_bridge(&repo_path, KnowledgeKind::Pr, None, false).expect("load");
-
-    assert_eq!(loaded.kind, KnowledgeKind::Pr);
-    assert!(loaded.entries.is_empty());
-    assert!(!loaded.refresh_enabled);
-    assert!(loaded
-        .empty_message
-        .as_deref()
-        .is_some_and(|message| message.contains("cache-backed PR list support")));
-    assert!(loaded
-        .detail
-        .as_ref()
-        .expect("disabled PR detail")
-        .sections
-        .iter()
-        .any(|section| section.body.contains("cache-backed PR list support")));
-}
-
-#[test]
 fn load_knowledge_bridge_includes_open_and_closed_issues_for_kanban() {
     let dir = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(dir.path());

@@ -815,6 +815,7 @@ fn sample_window(
         session_id: None,
         linked_issue_number: None,
         runtime_started_at_ms: None,
+        surface_owner: None,
         is_pm: false,
     }
 }
@@ -1136,7 +1137,9 @@ fn long_running_test_pane(id: &str) -> Pane {
     } else {
         (
             "/bin/sh".to_string(),
-            vec!["-lc".to_string(), "sleep 30".to_string()],
+            // Keep this basic fixture in one process: killing a shell can leave
+            // its sleep child orphaned after the direct child has been reaped.
+            vec!["-lc".to_string(), "exec sleep 30".to_string()],
         )
     };
     Pane::new(
@@ -1508,7 +1511,6 @@ fn sample_runtime_with_events(
         pty_writers,
         attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
         persist_dispatcher,
-        file_tree_worktree_roots: HashMap::new(),
 
         server_url: None,
         usage_refresh: None,

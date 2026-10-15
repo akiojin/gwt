@@ -1,0 +1,17 @@
+{
+  "observed_at": "2026-10-15T08:13:44.1151161Z",
+  "instrumented": false,
+  "profile": "diagnostic opt-level=0, existing target/debug dependencies",
+  "baseline_sha256": "e1a7f70534cbe5c2cd5a86287469113ea4bb931121dd9449557fb9d707ddb22f",
+  "current_sha256": "82e11229432f8dddabcf19c7da7fccbf173dd0d46e22849ae7bbd3edaa69fc26",
+  "sessions_dir": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\sessions",
+  "roots": [
+    "E:\\gwt",
+    "E:\\160-Idina",
+    "E:\\KeibaSuite",
+    "E:\\unity-cli",
+    "E:\\llmlb"
+  ],
+  "instrumentation_note": "Instrumented CPU includes GetProcessTimes overhead per load; use an uninstrumented comparison for the improvement ratio.",
+  "gwt_library": "E:\\gwt\\work\\issue-5489\\target\\debug\\deps\\libgwt-2d0217b5aa2a4e4e.rlib"
+}

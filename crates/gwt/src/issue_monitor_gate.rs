@@ -40,6 +40,7 @@ pub struct AcceptanceCriteria {
     /// (`(visual)`), so review-time judgment must include visual assessment.
     pub visual_surface: bool,
     /// Criterion ids whose checklist box is not `[x]` (Issue #3917 AC-2).
+    /// Unnumbered unchecked items in an explicitly numbered block retain their text.
     /// Kept beside `ids` on purpose: [`AcceptanceSnapshot`] compares the id
     /// set only, so ticking a box is completion evidence, never drift.
     pub unchecked: Vec<String>,
@@ -232,10 +233,19 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
         text.contains("(visual)") || text.contains("[visual]")
     });
     // Issue #3917 AC-2: an item without a ticked box is outstanding work.
-    let unchecked: Vec<String> = accepted
+    let unchecked: Vec<String> = items
         .iter()
-        .filter(|(_, checked, _)| !*checked)
-        .map(|(id, _, _)| id.clone())
+        .enumerate()
+        .filter(|(_, (_, checked, _))| !*checked)
+        .map(|(index, (id, _, text))| {
+            id.clone().unwrap_or_else(|| {
+                if has_explicit_ids {
+                    text.clone()
+                } else {
+                    format!("AC-{}", index + 1)
+                }
+            })
+        })
         .collect();
     let ids: Vec<String> = accepted.into_iter().map(|(id, _, _)| id).collect();
     let defect = if !ids.is_empty() {
@@ -692,6 +702,13 @@ mod tests {
                     - [ ] AC-3: also real\n";
         let c = classify_acceptance_criteria(body);
         assert_eq!(c.ids, vec!["AC-1", "AC-3"]);
+        // Issue #5126: preserving snapshot IDs must not hide unchecked work.
+        let mixed = classify_acceptance_criteria(
+            "## Acceptance Criteria\n- [x] AC-1: done\n- [ ] remaining check\n",
+        );
+        assert_eq!(mixed.ids, vec!["AC-1"]);
+        assert_eq!(mixed.unchecked, vec!["remaining check"]);
+        assert!(!mixed.all_checked());
     }
 
     #[test]

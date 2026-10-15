@@ -55,6 +55,7 @@ pub fn parse(args: &[String]) -> Result<SearchCommand, CliParseError> {
             "--board" => push_scope(&mut scopes, IndexSearchScope::Board),
             "--discussions" => push_scope(&mut scopes, IndexSearchScope::Discussions),
             "--works" => push_scope(&mut scopes, IndexSearchScope::Works),
+            "--reports" => push_scope(&mut scopes, IndexSearchScope::Reports),
             "--json" => json = true,
             "--match-mode" => {
                 i += 1;

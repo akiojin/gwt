@@ -127,6 +127,13 @@ pub enum WindowWorktreeForm {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowSurfaceOwner {
+    Pm,
+    Agents,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedWindowState {
     pub id: String,
@@ -138,6 +145,10 @@ pub struct PersistedWindowState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_title_detail: Option<String>,
     pub preset: WindowPreset,
+    /// Origin of an auxiliary surface; this never grants the PM role.
+    /// Missing values retain the legacy preset-based classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_owner: Option<WindowSurfaceOwner>,
     pub geometry: WindowGeometry,
     #[serde(default)]
     pub geometry_revision: u64,
@@ -373,6 +384,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 session_id: None,
                 linked_issue_number: None,
                 runtime_started_at_ms: None,
+                surface_owner: None,
                 is_pm: false,
             },
             PersistedWindowState {
@@ -402,6 +414,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 session_id: None,
                 linked_issue_number: None,
                 runtime_started_at_ms: None,
+                surface_owner: None,
                 is_pm: false,
             },
         ],
@@ -431,9 +444,25 @@ pub fn pause_process_windows_for_restore(state: &mut PersistedWindowCanvasState)
 }
 
 fn normalize_loaded_workspace_state(state: &mut PersistedWindowCanvasState) {
+    let affected_groups: std::collections::HashSet<_> = state
+        .windows
+        .iter()
+        .filter(|window| window.preset.is_removed_legacy())
+        .filter_map(|window| window.tab_group_id.clone())
+        .collect();
     state
         .windows
-        .retain(|window| !window.preset.is_removed_legacy());
+        .retain(|window| {
+            if window.preset.is_removed_legacy() {
+                tracing::info!(id = %window.id, preset = ?window.preset, "Dropping retired legacy surface during workspace restore");
+                false
+            } else {
+                true
+            }
+        });
+    for group_id in affected_groups {
+        crate::window_canvas::normalize_window_group(&mut state.windows, &group_id);
+    }
     for window in &mut state.windows {
         let canonical = window.preset.canonical_surface_preset();
         if window.preset != canonical {
@@ -699,6 +728,29 @@ mod tests {
     }
 
     #[test]
+    fn surface_owner_survives_workspace_save_and_restore() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let mut value = serde_json::to_value(default_workspace_state()).expect("workspace");
+        value["windows"][0]["surface_owner"] = serde_json::json!("pm");
+        value["windows"][0]["is_pm"] = serde_json::json!(true);
+        value["windows"][1]["surface_owner"] = serde_json::json!("agents");
+        let state: PersistedWindowCanvasState = serde_json::from_value(value).expect("owners");
+        save_workspace_state(&path, &state).expect("save");
+        let mut loaded = load_workspace_state(&path).expect("restore");
+        pause_process_windows_for_restore(&mut loaded);
+        let restored = serde_json::to_value(&loaded).expect("readback");
+        assert_eq!(restored["windows"][0]["surface_owner"], "pm");
+        assert_eq!(restored["windows"][1]["surface_owner"], "agents");
+        assert!(
+            !loaded.windows[0].is_pm,
+            "ownership must not confer the PM role"
+        );
+        let legacy = serde_json::to_value(default_workspace_state()).expect("legacy");
+        assert!(legacy["windows"][0].get("surface_owner").is_none());
+    }
+
+    #[test]
     fn default_workspace_contains_claude_and_codex_windows() {
         let state = default_workspace_state();
         assert_eq!(state.viewport, default_canvas_viewport());
@@ -939,6 +991,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -968,6 +1021,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
             ],
@@ -1369,6 +1423,56 @@ mod tests {
     }
 
     #[test]
+    fn load_workspace_state_drops_retired_surfaces_and_preserves_other_windows() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let presets = ["board", "file_tree", "console", "pr", "logs", "shell"];
+        let windows: Vec<_> = presets
+            .iter()
+            .enumerate()
+            .map(|(index, preset)| {
+                serde_json::json!({
+                    "id": preset,
+                    "title": preset,
+                    "preset": preset,
+                    "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
+                    "z_index": index + 1,
+                    "status": "running",
+                    "persist": true,
+                    "tab_group_id": if *preset == "shell" || *preset == "console" { "shell-group" } else { "board-group" },
+                    "tab_group_active": *preset == "file_tree" || *preset == "console"
+                })
+            })
+            .collect();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({ "windows": windows, "next_z_index": 7 }))
+                .expect("serialize workspace"),
+        )
+        .expect("write legacy workspace");
+
+        let loaded = load_workspace_state(&path).expect("retired surfaces must not fail restore");
+        assert_eq!(
+            loaded
+                .windows
+                .iter()
+                .map(|window| window.id.as_str())
+                .collect::<Vec<_>>(),
+            ["board", "logs", "shell"]
+        );
+        assert_eq!(loaded.next_z_index, 7);
+        assert!(loaded.windows.iter().any(|window| {
+            window.tab_group_id.as_deref() == Some("board-group") && window.tab_group_active
+        }));
+        let shell = loaded
+            .windows
+            .iter()
+            .find(|window| window.id == "shell")
+            .unwrap();
+        assert_eq!(shell.tab_group_id, None);
+    }
+
+    #[test]
     fn load_workspace_state_drops_legacy_memo_windows_without_failing_restore() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("workspace.json");
@@ -1548,6 +1652,7 @@ mod tests {
                 session_id: Some("sess-1".into()),
                 linked_issue_number: None,
                 runtime_started_at_ms: None,
+                surface_owner: None,
                 is_pm: false,
             }],
             next_z_index: 2,
@@ -1651,6 +1756,7 @@ mod tests {
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -1728,12 +1834,13 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
-                    id: "file-tree-1".to_string(),
+                    id: "board-1".to_string(),
                     title: "Files".to_string(),
-                    preset: WindowPreset::FileTree,
+                    preset: WindowPreset::Board,
                     geometry: WindowGeometry {
                         x: 0.0,
                         y: 0.0,
@@ -1757,6 +1864,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
             ],
@@ -1976,6 +2084,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -2005,6 +2114,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
             ],

@@ -95,13 +95,10 @@ use super::continuation::{
 };
 use crate::{ShellLaunchConfig, UserEvent};
 
-/// `Pr => None` because Launch Agent is not exposed for PR bridges
-/// (`KnowledgeDetailView::launch_issue_number` stays `None` for PR entries).
-fn linked_issue_kind_from_knowledge(kind: KnowledgeKind) -> Option<LinkedIssueKind> {
+fn linked_issue_kind_from_knowledge(kind: KnowledgeKind) -> LinkedIssueKind {
     match kind {
-        KnowledgeKind::Issue => Some(LinkedIssueKind::Issue),
-        KnowledgeKind::Spec => Some(LinkedIssueKind::Spec),
-        KnowledgeKind::Pr => None,
+        KnowledgeKind::Issue => LinkedIssueKind::Issue,
+        KnowledgeKind::Spec => LinkedIssueKind::Spec,
     }
 }
 
@@ -4610,19 +4607,7 @@ impl AppRuntime {
 
         match result {
             Ok(base_branch_name) => {
-                let Some(linked_issue_kind) = linked_issue_kind_from_knowledge(knowledge_kind)
-                else {
-                    return vec![OutboundEvent::reply(
-                        &client_id,
-                        knowledge_error_event(
-                            id,
-                            knowledge_kind,
-                            "Launch Agent is not available for this knowledge bridge",
-                            None,
-                            None,
-                        ),
-                    )];
-                };
+                let linked_issue_kind = linked_issue_kind_from_knowledge(knowledge_kind);
                 match self.open_knowledge_launch_wizard_for_base_branch(
                     &tab_id,
                     &project_root,
@@ -6200,6 +6185,8 @@ impl AppRuntime {
         let window = tab
             .workspace
             .add_window_with_title(WindowPreset::Shell, title, false, bounds);
+        tab.workspace
+            .set_surface_owner(&window.id, Some(gwt::WindowSurfaceOwner::Agents));
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
