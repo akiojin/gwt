@@ -705,6 +705,9 @@ gwt は project knowledge を Agent workspace の近くに置きます。
 - `gwt-search` は共有 ChromaDB runtime を通じて SPEC、Issue、source files、
   docs を検索します。index が無い場合は必要に応じて build され、desktop app は
   管理対象 Python search runtime を修復できます。
+  Issue index の再構築中も直前に公開された世代を検索できます。複数 scope の検索は
+  利用可能な結果を返し、除外した scope と理由を通知します。JSON 応答には
+  `partial` と `unavailable_scopes` が含まれます。
 - Work Item Knowledge Bridge は plain Issue と `gwt-spec` label 付き Issue の
   cache-backed list/detail、semantic ranking、exact match priority、match percentage
   を組み合わせます。

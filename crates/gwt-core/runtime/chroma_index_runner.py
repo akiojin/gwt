@@ -1621,7 +1621,7 @@ def file_embedding_cas_key(
 
 
 @contextlib.contextmanager
-def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
+def acquire_lock(db_path: Path, exclusive: bool = True, blocking: bool = True) -> Iterator[None]:
     """Cross-process file lock around a DB directory.
 
     Uses portalocker when available; falls back to fcntl on POSIX and
@@ -1635,8 +1635,14 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
         import portalocker  # type: ignore
 
         flag = portalocker.LOCK_EX if exclusive else portalocker.LOCK_SH
-        lock = portalocker.Lock(str(lock_path), mode="a+", flags=flag)
-        fh = lock.acquire()
+        if not blocking:
+            flag |= portalocker.LOCK_NB
+        lock = portalocker.Lock(str(lock_path), mode="a+", flags=flag,
+                                timeout=None if blocking else 0)
+        try:
+            fh = lock.acquire()
+        except portalocker.exceptions.LockException as error:
+            raise BlockingIOError(str(error)) from error
         try:
             yield
         finally:
@@ -1658,7 +1664,8 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
 
         fh = open(lock_path, "a+b")
         try:
-            mode = msvcrt.LK_LOCK  # always blocking; Windows lacks shared locks here
+            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+            fh.seek(0)
             msvcrt.locking(fh.fileno(), mode, 1)
             try:
                 yield
@@ -1676,7 +1683,8 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
 
     fh = open(lock_path, "a+b")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(fh, flags if blocking else flags | fcntl.LOCK_NB)
         try:
             yield
         finally:
@@ -7502,6 +7510,21 @@ def _issue_build_failure(db_path: Path, fingerprint: str, mode: str,
             "repair": payload, "mode": mode}
 
 
+def _recover_issue_build(db_path: Path) -> bool:
+    """Recover an orphan sentinel under the build lock; return whether it is live."""
+    if _read_issue_repair(db_path).get("last_error") != "BUILD_INCOMPLETE":
+        return False
+    try:
+        with acquire_lock(db_path / "build", blocking=False):
+            # Re-read after locking: never erase a newer build's real failure.
+            if _read_issue_repair(db_path).get("last_error") == "BUILD_INCOMPLETE":
+                (db_path / "repair.json").unlink(missing_ok=True)
+        return False
+    except OSError:
+        # Contention or an unreadable lock cannot prove the builder died.
+        return True
+
+
 def _issue_status_v2(
     repo_hash: str,
     db_root: Optional[Path] = None,
@@ -7597,10 +7620,15 @@ def _issue_status_v2(
             ttl_secs = meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT) * 60
             status["ttl_remaining_seconds"] = max(0, int(ttl_secs - age))
     status["mode"] = meta.get("mode", "full")
+    if check_repair:
+        _recover_issue_build(db_path)
     repair_state = _read_issue_repair(db_path)
     if repair_state:
         status["repair"] = repair_state
-        if check_repair and repair_state.get("fingerprint") == source.get("fingerprint") and repair_state.get("failures", 0):
+        # A builder can create its sentinel after the recovery probe.
+        if check_repair and repair_state.get("last_error") == "BUILD_INCOMPLETE":
+            status.update(reason="building", building=True)
+        elif check_repair and repair_state.get("fingerprint") == source.get("fingerprint") and repair_state.get("failures", 0):
             status.update(reason="repair_stopped", healthy=False, repair_required=True, source_drift=False)
             status["mode"] = repair_state.get("mode", status["mode"])
     if (db_path / "cancel-requested").exists():
@@ -7609,6 +7637,26 @@ def _issue_status_v2(
 
 
 def action_index_issues_v2(
+    repo_hash: str,
+    project_root: str,
+    db_root: Optional[Path] = None,
+    respect_ttl: bool = False,
+    ttl_minutes: int = ISSUE_TTL_MINUTES_DEFAULT,
+    qos: str = "interactive",
+    mode: str = "full",
+    repair: bool = False,
+) -> dict:
+    db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
+    # Separate from the publication lock so readers keep using the active
+    # generation while staging is built. OS ownership ends even on process kill.
+    with acquire_lock(db_path / "build"):
+        if _read_issue_repair(db_path).get("last_error") == "BUILD_INCOMPLETE":
+            (db_path / "repair.json").unlink(missing_ok=True)
+        return _index_issues_v2_locked(repo_hash, project_root, db_root, respect_ttl,
+                                       ttl_minutes, qos, mode, repair)
+
+
+def _index_issues_v2_locked(
     repo_hash: str,
     project_root: str,
     db_root: Optional[Path] = None,
@@ -7640,34 +7688,18 @@ def action_index_issues_v2(
               "cache_refresh_at": _issue_cache_refresh_meta(repo_hash).get("last_full_refresh")}
     fingerprint = source["fingerprint"]
     previous_failure = _read_issue_repair(db_path)
-    expected_interrupt = previous_failure.get("expected_budget_interruption", {})
-    known_budget_interrupt = (
-        previous_failure.get("last_error") == "BUILD_INCOMPLETE"
-        and previous_failure.get("fingerprint") == fingerprint
-        and isinstance(expected_interrupt, dict)
-        and expected_interrupt.get("fingerprint") == fingerprint
-        and bool(previous_failure.get("refresh_run_id"))
-        and expected_interrupt.get("run_id") == previous_failure.get("refresh_run_id")
-    )
-    if known_budget_interrupt:
-        # Consume this one known interruption without a repair-free interval.
-        # A crash in the health probe belongs to the new run and must stop.
-        _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(issues))
-    if (not known_budget_interrupt and previous_failure.get("fingerprint") == fingerprint
+    if (previous_failure.get("fingerprint") == fingerprint
             and previous_failure.get("failures", 0)):
         return {"ok": False, "scope": "issues", "error_code": "REPAIR_STOPPED",
                 "error": "issues rebuild stopped after failure for the same source; use explicit repair",
                 "repair": previous_failure, "mode": previous_failure.get("mode", mode)}
-    health = _issue_status_v2(repo_hash, db_root=db_root, source=source,
-                              check_repair=not known_budget_interrupt)
+    health = _issue_status_v2(repo_hash, db_root=db_root, source=source)
     if respect_ttl and not repair and health.get("healthy"):
         meta = _read_issue_meta(db_path) or {}
         last = _parse_iso(meta.get("last_full_refresh", ""))
         if last is not None:
             age = (_now_utc() - last).total_seconds()
             if age < ttl_minutes * 60:
-                if known_budget_interrupt:
-                    (db_path / "repair.json").unlink(missing_ok=True)
                 return {"ok": True, "skipped": True, "scope": "issues",
                         "mode": meta.get("mode", "full"),
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age)}
@@ -7686,8 +7718,8 @@ def action_index_issues_v2(
     new_entries = [{"path": str(issue["number"]),
                     "content_hash": _issue_source_fingerprint([issue])} for issue in issues]
 
-    # Persist before touching staging so process death cannot restart the
-    # same source indefinitely. Normal yield and verified success clear it.
+    # Persist before staging. The held build lock distinguishes a live build
+    # from an orphan left by process death. Normal yield/success clear it.
     _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(issues))
 
     emit_progress(
@@ -8299,6 +8331,10 @@ def action_search_v2(
         health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
     needs_build = not health["exists"] or health.get("repair_required", False)
+    if scope == "issues" and health.get("building") and (
+        health.get("healthy") or health.get("source_drift")
+    ):
+        needs_build = False
     needs_spec_refresh = scope == "specs" and health.get("healthy", False) and not no_auto_build
 
     if needs_build or needs_spec_refresh:
@@ -8436,6 +8472,8 @@ def _classify_scope_for_search(
         health = _issue_status_v2(repo_hash, db_root=db_root)
         if not health.get("exists"):
             return "missing", health
+        if health.get("building") and (health.get("healthy") or health.get("source_drift")):
+            return "stale", health
         if health.get("healthy"):
             if health.get("ttl_remaining_seconds") == 0:
                 return "stale", health
@@ -9166,6 +9204,7 @@ def _action_search_multi_v2_pinned(
                 )
                 if state in ("missing", "corrupt"):
                     unresolved.append(scope)
+                    legacy_file_selections[scope] = {"state": state, **health}
                     continue
                 legacy_file_selections[scope] = {
                     "state": "stale",
@@ -9173,7 +9212,7 @@ def _action_search_multi_v2_pinned(
                     "fallback_source": "legacy",
                     "health": health,
                 }
-            if unresolved:
+            if unresolved and all(scope in unresolved for scope in scopes):
                 return {
                     "ok": False,
                     "error_code": "INDEX_NOT_READY",
