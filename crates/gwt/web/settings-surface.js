@@ -779,6 +779,19 @@ export function createSettingsSurface({
         statusKind: "",
       };
       const settingsWindowBodies = new Set();
+      const systemSettingsModel = createUiStateStore(systemSettingsState);
+      systemSettingsModel.subscribe(state => state, () => {
+        for (const body of Array.from(settingsWindowBodies)) {
+          if (!body.isConnected) {
+            settingsWindowBodies.delete(body);
+            continue;
+          }
+          const panel = body.querySelector(
+            "[data-system-settings-content]",
+          );
+          if (panel) renderSystemPanel(panel);
+        }
+      });
       let nextProfilesRequest = 0;
       const issueSettingsModel = createUiStateStore({});
       const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} });
@@ -2074,16 +2087,7 @@ export function createSettingsSurface({
       }
 
       function renderSystemPanelInAllSettingsWindows() {
-        for (const body of Array.from(settingsWindowBodies)) {
-          if (!body.isConnected) {
-            settingsWindowBodies.delete(body);
-            continue;
-          }
-          const panel = body.querySelector(
-            "[data-system-settings-content]",
-          );
-          if (panel) renderSystemPanel(panel);
-        }
+        systemSettingsModel.update(() => systemSettingsState);
       }
 
       function renderSettingsAgentList() {
