@@ -26,6 +26,7 @@ pub mod migration;
 pub mod named_pipe;
 pub mod operation_deadline;
 pub mod paths;
+pub mod pm_peer;
 pub mod pm_report;
 pub mod pm_status;
 pub mod process;

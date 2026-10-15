@@ -8,6 +8,7 @@ export function createPmWindowModel() {
   // chrono emits UTC timestamps with variable fractional precision. Keep the
   // nanoseconds when comparing; JavaScript Date truncates them to milliseconds.
   const snapshotTime = value => value.replace(/(?:\.(\d+))?Z$/, (_, digits = '') => `.${digits.padEnd(9, '0')}Z`);
+  const nativeCount = reports => reports.filter(report => !report.id.startsWith('pm-peer-')).length;
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
       reports: [], current: null, error: null, loaded: false };
@@ -27,8 +28,9 @@ export function createPmWindowModel() {
       let next = previous || emptyWindow(event.id);
       if (event.kind === 'pm_reports') {
         if (!previous || event.session_id !== previous.sessionId) return state;
-        // The durable ledger only appends. Ignore older concurrent reads.
-        if (!event.error && (event.reports || []).length < previous.reports.length) return state;
+        // Native history only appends. Optional peer projections may be absent
+        // during a peer-store failure without freezing native reports/current.
+        if (!event.error && nativeCount(event.reports || []) < nativeCount(previous.reports)) return state;
         if (!event.error && event.current?.observed_at && previous.current?.observed_at
           && snapshotTime(event.current.observed_at) < snapshotTime(previous.current.observed_at)) return state;
         next = { ...next, error: event.error || null, loaded: true,

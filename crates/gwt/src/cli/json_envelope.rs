@@ -1537,6 +1537,32 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             text: required_string(params, "text")?,
         }),
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.peer.send" => {
+            reject_unknown_params(
+                params,
+                &["project", "kind", "text", "reply_to", "timeout_seconds"],
+                "pm.peer.send",
+            )?;
+            let project = required_string(params, "project")?;
+            let kind = serde_json::from_value::<gwt_core::pm_peer::PeerKind>(Value::String(
+                required_string(params, "kind")?,
+            ))
+            .map_err(|_| {
+                CliParseError::InvalidJson("PM peer kind must be request, reply, or notice".into())
+            })?;
+            let text = required_string(params, "text")?;
+            let reply_to = optional_string(params, "reply_to")?;
+            let timeout_seconds = optional_u64(params, "timeout_seconds")?.unwrap_or(900);
+            gwt_core::pm_peer::validate(kind, &text, reply_to.as_deref(), timeout_seconds)
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::PeerSend {
+                project,
+                kind,
+                text,
+                reply_to,
+                timeout_seconds,
+            })
+        }
         "pm.report.post" => {
             let kind: gwt_core::pm_report::PmReportKind = serde_json::from_value(Value::String(
                 required_string(params, "kind")?,
@@ -5943,6 +5969,8 @@ mod tests {
             CliCommand::Pm(command) => command,
             other => panic!("unexpected report command: {other:?}"),
         };
+        let peer_path = gwt_core::paths::gwt_home().join("pm-peer-messages.json");
+        std::fs::write(&peer_path, b"{").unwrap();
         assert_eq!(
             crate::cli::pm::run(&mut env, capture(), &mut output).unwrap(),
             0
@@ -5954,6 +5982,7 @@ mod tests {
         );
         assert_eq!(saved["instruction"]["id"], saved["report"]["id"]);
         assert_eq!(gwt_core::user_instruction::load(&repo).unwrap().len(), 1);
+        assert_eq!(std::fs::read(&peer_path).unwrap(), b"{");
         let CliCommand::Pm(list) = ok("pm.report.list", json!({})) else {
             panic!("expected PM list")
         };
@@ -6203,6 +6232,164 @@ mod tests {
             3
         );
         assert!(!gwt_core::pm_status::status_path(&pm).exists());
+    }
+
+    #[test]
+    fn pm_peer_send_strict_boundary() {
+        let valid = json!({"project":"/tmp/peer","kind":"request","text":"Please checkpoint"});
+        assert!(matches!(
+            ok("pm.peer.send", valid.clone()),
+            CliCommand::Pm(_)
+        ));
+        for field in ["project", "kind", "text"] {
+            let mut invalid = valid.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(parse(&envelope("pm.peer.send", invalid)).is_err());
+        }
+        for (field, value) in [
+            ("id", json!("foreign-pane")),
+            ("session_id", json!("forged")),
+            ("project_root", json!("/tmp/foreign")),
+            ("kind", json!("stop")),
+            ("text", json!(" ")),
+            ("timeout_seconds", json!(0)),
+            ("timeout_seconds", json!(86401)),
+            ("reply_to", json!("unrelated")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(parse(&envelope("pm.peer.send", invalid)).is_err());
+        }
+        assert!(crate::cli::pm::capabilities_report()
+            .capabilities
+            .iter()
+            .any(|row| row.operation == "pm.peer.send" && row.executable));
+    }
+
+    #[test]
+    fn pm_peer_two_project_runtime_roundtrip_and_unavailable() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let a = home.path().join("a");
+        let b = home.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let register = |repo: &std::path::Path, id: &str| {
+            let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(repo);
+            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::create_dir_all(worktree.parent().unwrap().join("runtime")).unwrap();
+            let mut session = gwt_agent::Session::new(&worktree, "work", gwt_agent::AgentId::Codex);
+            session.id = id.into();
+            session.project_state_root = Some(repo.to_path_buf());
+            session.status = gwt_agent::AgentStatus::Running;
+            session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+            let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+            runtime.child_pid = Some(std::process::id());
+            runtime.child_started_at = crate::process::host_process_start_time(std::process::id());
+            assert!(runtime.child_started_at.is_some());
+            runtime
+                .save(&gwt_agent::runtime_state_path(
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    id,
+                ))
+                .unwrap();
+            crate::pm_registry::save_pm_prefs(
+                &crate::pm_registry::pm_prefs_path_for_repo_path(repo),
+                &crate::pm_registry::PmPrefs {
+                    registration: Some(crate::pm_registry::PmRegistration {
+                        session_id: id.into(),
+                        agent_id: "codex".into(),
+                        worktree_path: worktree.display().to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        register(&a, "pm-a");
+        register(&b, "pm-b");
+        let send = |repo: &std::path::Path, params: Value| {
+            let mut env = TestEnv::new(
+                crate::pm_registry::pm_worktree_path_for_repo_path(repo)
+                    .parent()
+                    .unwrap()
+                    .join("runtime"),
+            );
+            let CliCommand::Pm(command) = ok("pm.peer.send", params) else {
+                panic!("expected PM command")
+            };
+            let mut output = String::new();
+            crate::cli::pm::run(&mut env, command, &mut output)
+                .map(|_| serde_json::from_str::<Value>(&output).unwrap())
+        };
+        let request = json!({"project":b,"kind":"request","text":"Please checkpoint"});
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        assert!(send(&a, request.clone()).is_err());
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "implementation-agent");
+        assert!(send(&a, request.clone()).is_err());
+        let _pm_a = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+        let sent = send(&a, request.clone()).unwrap();
+        assert_eq!(sent["status"], "queued");
+        assert!(crate::cli::pm::peer_context(&a).unwrap().is_empty());
+        {
+            let _pm_b = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-b");
+            let context = crate::cli::pm::peer_context(&b).unwrap();
+            assert!(
+                context.contains("Please checkpoint")
+                    && context.contains(sent["message"]["id"].as_str().unwrap())
+            );
+            assert_eq!(crate::cli::pm::peer_context(&b).unwrap(), context);
+            let reply = json!({"project":a,"kind":"reply","text":"Checkpoint saved","reply_to":sent["message"]["id"]});
+            assert_eq!(send(&b, reply).unwrap()["status"], "queued");
+            assert!(!crate::cli::pm::peer_context(&b)
+                .unwrap()
+                .contains("Please checkpoint"));
+        }
+        assert!(crate::cli::pm::peer_context(&a)
+            .unwrap()
+            .contains("Checkpoint saved"));
+        assert_eq!(gwt_core::pm_report::load_reports(&a).unwrap().len(), 2);
+        assert_eq!(gwt_core::pm_report::load_reports(&b).unwrap().len(), 2);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut stopped = gwt_agent::Session::load(&sessions.join("pm-b.toml")).unwrap();
+        stopped.status = gwt_agent::AgentStatus::Stopped;
+        stopped.save(&sessions).unwrap();
+        assert_eq!(send(&a, request.clone()).unwrap()["status"], "unavailable");
+        stopped.status = gwt_agent::AgentStatus::Running;
+        stopped.save(&sessions).unwrap();
+        std::fs::remove_file(gwt_agent::runtime_state_path(
+            &gwt_core::paths::gwt_sessions_dir(),
+            "pm-b",
+        ))
+        .unwrap();
+        assert_eq!(
+            send(&a, request.clone()).unwrap()["status"],
+            "unavailable",
+            "stale Running registration must not count as live"
+        );
+        let missing =
+            json!({"project":home.path().join("absent"),"kind":"notice","text":"Update pending"});
+        assert_eq!(send(&a, missing).unwrap()["status"], "unavailable");
+        let reports = gwt_core::pm_report::load_reports(&a).unwrap();
+        assert!(reports
+            .iter()
+            .any(|r| r.body.contains("Waiting for the peer project")));
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&a),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(
+            send(&a, request).is_err(),
+            "replaced PM loses send authority"
+        );
     }
 
     #[test]
