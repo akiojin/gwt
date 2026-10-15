@@ -103,8 +103,8 @@ try {
     }
     $baseUrl = (Get-Content "$checkHome/url.txt" -Raw).Trim()
     if ((Invoke-WebRequest -Method Head -Uri $baseUrl).StatusCode -ne 200) { throw 'Fresh checkout URL is not ready' }
-    foreach ($asset in @('app.js', 'socket-receive-dispatcher.js', 'file-tree-surface.js', 'board-logs-surface.js', 'knowledge-kanban-surface.js',
-        'branches-cleanup-surface.js', 'console-window.js', 'profile-window-surface.js', 'project-index-search-surface.js', 'settings-surface.js')) {
+    foreach ($asset in @('app.js', 'socket-receive-dispatcher.js', 'agents-surface.js', 'board-logs-surface.js', 'knowledge-kanban-surface.js',
+        'branches-cleanup-surface.js', 'control-explanations.js', 'profile-window-surface.js', 'project-index-search-surface.js', 'settings-surface.js')) {
         $served = (Invoke-WebRequest -Uri ($baseUrl.TrimEnd('/') + '/' + $asset)).Content
         $expected = [IO.File]::ReadAllText((Join-Path $checkout "crates/gwt/web/$asset"))
         if ($served -cne $expected) { throw "Checkout binary embeds stale $asset; rebuild gwt and gwtd before retrying." }
@@ -127,7 +127,7 @@ try {
     Set-CheckEnvironment $testVariables
     $sourceHashes = @{}
     foreach ($source in @('app.js', 'socket-receive-dispatcher.js', 'board-logs-surface.js', 'branches-cleanup-surface.js',
-        'console-window.js', 'file-tree-surface.js', 'knowledge-kanban-surface.js', 'profile-window-surface.js',
+        'agents-surface.js', 'control-explanations.js', 'knowledge-kanban-surface.js', 'profile-window-surface.js',
         'project-index-search-surface.js', 'settings-surface.js')) {
         $sourceHashes[$source] = Get-SourceDigest (Join-Path $checkout "crates/gwt/web/$source")
     }

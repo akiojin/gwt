@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
+import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
 function load(name, bindings = {}) {
+  bindings = { setControlExplanation, ...bindings };
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing ${name}`);
   const open = source.indexOf("{", source.indexOf(")", start));
@@ -132,6 +134,47 @@ test("Auto capacity is read-only until Manual is selected", () => {
   assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 4 }]);
 });
 
+test("AC-6: Issues Settings exposes explanations for capacity, refill and targeting", t => {
+  const { document } = parseHTML("<html><body><section></section></body></html>");
+  const panel = document.querySelector("section"), sent = [];
+  const explanations = bindControlExplanations({ document, root: panel, id: "settings-explanation" });
+  t.after(() => explanations.dispose());
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
+  for (const [name, meaning] of [
+    ["Max active", /maximum.*agents/i], ["Max active mode", /automatic.*manual/i],
+    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*disables/i],
+    ["Allowed labels", /matching issues/i],
+  ]) {
+    const control = panel.querySelector(`[aria-label="${name}"]`);
+    assert.match(control.getAttribute("aria-description") || "", meaning, name);
+    assert.equal(control.dataset.issueExplanation, control.getAttribute("aria-description"));
+    assert.ok(control.dataset.issueExplanationKey, "status redraw can find the replacement control");
+    if (!control.disabled) {
+      control.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+      assert.equal(document.getElementById("settings-explanation").textContent, control.getAttribute("aria-description"));
+      assert.equal(explanations.visible, true);
+      control.dispatchEvent(new document.defaultView.Event("focusout", { bubbles: true }));
+    }
+    control.dispatchEvent(new document.defaultView.Event("mouseover", { bubbles: true }));
+    assert.equal(document.getElementById("settings-explanation").textContent, control.getAttribute("aria-description"));
+    assert.equal(explanations.visible, true);
+    control.dispatchEvent(new document.defaultView.Event("mouseout", { bubbles: true }));
+  }
+  const capacity = panel.querySelector(".settings-issues-capacity");
+  assert.equal(capacity.getAttribute("tabindex"), "0", "Auto's disabled value has a keyboard reachable explanation");
+  assert.match(capacity.getAttribute("aria-description"), /maximum.*agents/i);
+  capacity.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 5, max_active_agents_override: null }, send: message => sent.push(message) });
+  panel.dispatchEvent(new document.defaultView.Event("control-explanations:refresh"));
+  assert.equal(explanations.visible, true, "a Settings redraw keeps a focused explanation readable");
+  const replacement = panel.querySelector(".settings-issues-capacity");
+  assert.equal(replacement.getAttribute("aria-describedby"), "settings-explanation");
+  assert.equal(document.getElementById("settings-explanation").textContent, replacement.getAttribute("aria-description"));
+  assert.deepEqual(sent, [], "registering explanations does not change settings");
+});
+
 test("Manual starts at one when Auto has no available capacity", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
@@ -173,6 +216,59 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.match(a.textContent, /Candidates/);
   assert.ok(a.querySelector('[aria-label="Prefer for codex"]'));
   assert.ok(a.querySelector('[data-action="add-candidate"]'));
+});
+
+test("Candidates use the known catalog, including custom agents, and explain empty or invalid choices", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "ClaudeCode" }],
+    availableAgents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "team-agent", name: "Team agent" }],
+    send: message => sent.push(message),
+  });
+  const picker = panel.querySelector('[aria-label="Add candidate candidate"]');
+  assert.equal(picker.localName, "select");
+  assert.deepEqual([...picker.options].map(option => option.value), ["", "codex", "team-agent"]);
+  const add = panel.querySelector('[data-action="add-candidate"]');
+  add.click();
+  assert.match(panel.querySelector('[role="alert"]').textContent, /Select an agent/);
+  picker.querySelector('[value="team-agent"]').selected = true;
+  add.click();
+  assert.deepEqual(sent[0].profiles.map(profile => profile.agent_id), ["ClaudeCode", "team-agent"]);
+  panel.querySelector('[aria-label="Agent ClaudeCode"]').value = "Codex";
+  picker.querySelector('[value="codex"]').selected = true;
+  add.click();
+  assert.match(panel.querySelector('[role="alert"]').textContent, /already in the candidate pool/);
+  assert.equal(sent.length, 1, "a legacy alias in the draft is already the same provider");
+  assert.ok(panel.querySelector(".settings-status"), "feedback uses the shared Settings primitive");
+});
+
+test("Candidates disable addition with an accessible reason when the catalog is exhausted", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "Codex" }], availableAgents: [{ id: "codex", name: "Codex" }],
+    send: () => assert.fail("no available candidate"),
+  });
+  assert.equal(panel.querySelector('[data-action="add-candidate"]').disabled, true);
+  assert.match(panel.querySelector('[role="status"]').textContent, /All known agents.*candidate pool/);
+});
+
+test("a rejected candidate save shows its reason inline and preserves the draft", () => {
+  const { document } = parseHTML('<div id="settings"><section data-settings-candidates data-saving="true" data-dirty="true" data-pending-request="1"><input value="draft model"><p data-candidate-status></p></section></div>');
+  const body = document.getElementById("settings");
+  body.dataset.settingsProjectRoot = "/A";
+  const apply = load("renderCandidateSaveError");
+  const panel = body.querySelector("section");
+  apply(panel, { request_id: 2, message: "Unrelated save rejected" });
+  assert.equal(panel.dataset.saving, "true", "a stale failure must not cancel this save");
+  panel.dataset.saving = "false"; // Editing while the save is in flight keeps the pending request.
+  apply(panel, { request_id: 1, message: "Candidate save rejected" });
+  assert.equal(panel.dataset.saving, "false");
+  assert.equal(panel.dataset.dirty, "true");
+  assert.equal(panel.querySelector("input").value, "draft model");
+  assert.equal(panel.querySelector('[role="alert"]').textContent, "Candidate save rejected");
+  assert.match(readFileSync(new URL("../app.js", import.meta.url), "utf8"), /case "issue_monitor_profiles_write_failed":\s*applyIssueMonitorProfilesError\(event\)/);
 });
 
 test("section-addressed Settings selects and focuses the requested project panel", () => {

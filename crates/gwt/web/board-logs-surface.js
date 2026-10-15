@@ -1771,8 +1771,7 @@ export function createBoardLogsSurface({
 
       // SPEC-3064 Phase 3 (E6c): receive() bodies for board_* / log_*
       // events moved verbatim from app.js; the case arms in app.js delegate
-      // here. (process_line / process_console_snapshot stay in app.js with
-      // the Console window controllers.)
+      // here.
       function applyBoardLogsReceiveEvent(event) {
         switch (event.kind) {
           case "board_entries": {

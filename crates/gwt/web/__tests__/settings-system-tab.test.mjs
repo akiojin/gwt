@@ -16,6 +16,7 @@ import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
 import { createInteractionGuard } from "../interaction-guard.js";
+import { setControlExplanation } from "../control-explanations.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -58,11 +59,11 @@ function loadFunctionWithDeps(name, deps) {
 function createSettingsHarness() {
   const { document, window } = parseHTML("<html><body><main></main></body></html>");
   const sent = [];
-  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore",
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
     "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
       .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, () => {}, () => {},
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {},
   );
   const surface = factory({
     send: message => sent.push(message),

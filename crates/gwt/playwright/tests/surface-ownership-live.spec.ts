@@ -167,7 +167,7 @@ test.describe("AC-11 real backend surface ownership", () => {
     await page.getByRole("tab", { name: "All agents", exact: true }).click();
     const shellWindow = (await catalog(page)).find(data => data.preset === "shell")!;
     const shell = main.locator(`.agent-tile[data-agent-id='${shellWindow.id}']`);
-    await expect(shell.locator(".agent-tile__header span")).toHaveText("Interactive");
+    await expect(shell.locator(".agent-tile__mode")).toHaveText("Interactive");
     await main.getByRole("tab", { name: "Start Work", exact: true }).click();
     await typeInto(shell, "printf 'AC11_SHELL_%s\\n' INPUT_OK");
     await expect(shell.locator(".xterm-rows")).toContainText("AC11_SHELL_INPUT_OK");

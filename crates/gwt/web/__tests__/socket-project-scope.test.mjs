@@ -33,11 +33,10 @@ function fixture({ routeProjectKey = null } = {}) {
     projectPageMetadata: { resetConnection() {} },
     requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(),
     activeWorkspace: () => ({ windows: [{ id: "pane-a" }] }),
-    resyncCalls: [], consoleControllers: new Map(),
+    resyncCalls: [],
     resyncBoardLogs: (ids) => context.resyncCalls.push(["board-logs", ...ids]),
     resyncBranches: (ids) => context.resyncCalls.push(["branches", ...ids]),
     resyncKnowledge: (ids) => context.resyncCalls.push(["knowledge", ...ids]),
-    resyncFileTree: (ids) => context.resyncCalls.push(["files", ...ids]),
     resyncProfile: (ids) => context.resyncCalls.push(["profile", ...ids]),
     resyncProjectIndexSearch: (ids) => context.resyncCalls.push(["index", ...ids]),
     resyncSettings: () => context.resyncCalls.push(["settings"]),
@@ -197,7 +196,7 @@ test("receive recovery requests pane and open surface snapshots only on the owni
   assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "frontend_ready" }]);
   assert.deepEqual(context.resyncCalls, [
     ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
-    ["files", "pane-a"], ["profile", "pane-a"],
+    ["profile", "pane-a"],
     ["index", "pane-a"], ["settings"],
   ]);
   assert.equal(recoveryLoads, 1, "a lost Recovery Center read is reissued");

@@ -59,3 +59,8 @@ test("Issue #5531: resync replaces a lost index search without losing its query 
   assert.equal(state.searching, false);
   assert.equal(state.results[0].title, "Fresh snapshot");
 });
+
+test("Issue #4174: file results cannot spawn the retired File Tree GUI", () => {
+  assert.doesNotMatch(surfaceSource, /focusOrSpawnPreset\("file_tree"\)/);
+  assert.match(surfaceSource, /if \(selected\.target\?\.kind !== "file"\) \{\s*detail\.appendChild\(makeEl\("button"/);
+});

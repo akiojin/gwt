@@ -60,7 +60,7 @@ test.describe("launch-loop responsiveness (live backend)", () => {
       const windows: unknown[] = [];
       for (let index = initial.length; index < 60; index += 1) {
         windows.push({
-          kind: "create_window", preset: "console",
+          kind: "create_window", preset: "logs",
           bounds: { x: index * 8, y: index * 8, width: 480, height: 280 },
         });
       }

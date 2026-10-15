@@ -139,7 +139,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
       // Resume with those frames pending instead of demanding a hidden drain.
       const readyBeforeResume = fixture.counters().ready_requests;
       fixture.freezeSnapshot();
-      const input = "GWT_INPUT_5531";
+      const input = "X";
       let outcome: "complete" | "timeout" | "error" = "complete";
       let recoveryStage = "restore_window";
       let failedRecoveryStage: string | null = null;
@@ -174,7 +174,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
           if (document.activeElement !== textarea) throw new Error("terminal input did not focus");
         }, paneIds[0]);
         recoveryStage = "input_type";
-        // Pipeline ordered protocol messages rather than charging 26 controller
+        // Pipeline ordered protocol messages rather than charging per-event controller
         // round trips to the renderer's input latency.
         await Promise.all([...input].flatMap(key => {
           const code = key === "_" ? "Minus" : /\d/.test(key) ? `Digit${key}` : `Key${key}`;

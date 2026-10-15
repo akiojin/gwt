@@ -58,20 +58,20 @@ fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
         "Repo",
         repo,
         ProjectKind::Git,
-        &[WindowPreset::Work, WindowPreset::FileTree],
+        &[WindowPreset::Work, WindowPreset::Board],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let work_id = combined_window_id("tab-1", "work-1");
-    let file_tree_id = combined_window_id("tab-1", "file-tree-1");
+    let board_id = combined_window_id("tab-1", "board-1");
 
-    runtime.dock_window_tab_events(&file_tree_id, &work_id);
+    runtime.dock_window_tab_events(&board_id, &work_id);
     let before = runtime.tab("tab-1").expect("tab").workspace.persisted();
     assert!(
         before
             .windows
             .iter()
-            .find(|window| window.id == "file-tree-1")
-            .expect("File Tree tab")
+            .find(|window| window.id == "board-1")
+            .expect("Board tab")
             .tab_group_active
     );
     assert!(
@@ -95,19 +95,19 @@ fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
         .iter()
         .find(|window| window.id == "work-1")
         .expect("reused Work tab");
-    let file_tree = after
+    let board = after
         .windows
         .iter()
-        .find(|window| window.id == "file-tree-1")
-        .expect("grouped File Tree tab");
+        .find(|window| window.id == "board-1")
+        .expect("grouped Board tab");
 
     assert_eq!(after.windows.len(), 2);
     assert!(
         work.tab_group_active,
         "reuse must reveal the Work group tab"
     );
-    assert!(!file_tree.tab_group_active);
-    assert!(work.z_index >= file_tree.z_index);
+    assert!(!board.tab_group_active);
+    assert!(work.z_index >= board.z_index);
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));

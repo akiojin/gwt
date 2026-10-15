@@ -51,12 +51,6 @@ const liveGwtHelperSource = readFileSync(
   resolve(here, "../../playwright/tests/_helpers/live-gwt.ts"),
   "utf8",
 );
-// SPEC-3064 Phase 3 (E6a): the File Tree window surface moved from app.js
-// to file-tree-surface.js.
-const fileTreeSurfaceSource = readFileSync(
-  resolve(here, "../file-tree-surface.js"),
-  "utf8",
-);
 // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved from
 // app.js to branches-cleanup-surface.js.
 const branchesCleanupSource = readFileSync(
@@ -1027,7 +1021,7 @@ test("Workspace Overview uses the Quiet Work list filter + Detail layout", () =>
 
 test("Workspace Overview root participates in full-window layout", () => {
   const fullWindowRootRule = inlineStyle.match(
-    /\.file-tree-root,[\s\S]*?\.mock-root\s*\{[^}]+\}/,
+    /\.branch-list-root,[\s\S]*?\.mock-root\s*\{[^}]+\}/,
   );
   assert.ok(fullWindowRootRule, "expected shared full-window root layout rule");
   assert.match(
@@ -2484,7 +2478,7 @@ test("Keyboard-navigable rows have :focus-visible outlines", () => {
   // treatment. Source-of-truth audit: every selector in app.js that
   // sets `tabIndex = 0` and `role="button"` must be in the CSS group.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  for (const selector of [".project-tab", ".file-tree-row", ".branch-row"]) {
+  for (const selector of [".project-tab", ".branch-row"]) {
     const re = new RegExp(`:root\\[data-theme\\] \\${selector}:focus-visible`);
     assert.match(
       css,
@@ -2609,44 +2603,6 @@ test("Launch wizard renders a backend-gated Back control in the footer", () => {
     launchWizardSource,
     /wizardBackButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{[\s\S]*?kind:\s*"back"/,
     "expected Back to dispatch the canonical backend action",
-  );
-});
-
-test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {
-  // <div>-based rows can't be Tab'd to or activated with the keyboard
-  // unless explicitly opted in. Add tabindex, role="button", and a
-  // keydown handler that mirrors the click handler for Enter/Space.
-  // Without all three, keyboard-only users couldn't browse the file
-  // tree — only mouse users could.
-  assert.match(fileTreeSurfaceSource, /row\.tabIndex\s*=\s*0/, "expected file tree row tabindex=0");
-  assert.match(
-    fileTreeSurfaceSource,
-    /row\.setAttribute\("role",\s*"button"\)/,
-    "expected file tree row role='button'",
-  );
-  assert.match(
-    fileTreeSurfaceSource,
-    /row\.addEventListener\("keydown",[\s\S]*event\.key === "Enter" \|\| event\.key === " "[\s\S]*activate\(\)/,
-    "expected file tree row keydown handler invoking the click activate path on Enter/Space",
-  );
-});
-
-test("File tree directory rows expose collapse state via aria-expanded", () => {
-  // The file tree shows directories with ▾/▸ caret glyphs to indicate
-  // expand/collapse state visually. Without aria-expanded, screen
-  // readers can't tell whether a directory is open or closed, so the
-  // user has to guess via context. File (non-directory) rows must
-  // explicitly removeAttribute so a row that was a directory and
-  // became a file (via state change) doesn't keep the marker.
-  assert.match(
-    fileTreeSurfaceSource,
-    /isDirectory[\s\S]*row\.setAttribute\("aria-expanded",\s*expanded\s*\?\s*"true"\s*:\s*"false"\)/,
-    "expected directory rows to set aria-expanded based on expanded state",
-  );
-  assert.match(
-    fileTreeSurfaceSource,
-    /row\.removeAttribute\("aria-expanded"\)/,
-    "expected non-directory rows to remove aria-expanded",
   );
 });
 
@@ -2943,7 +2899,6 @@ test("Selected list rows mark active item with aria-current", () => {
   // surfaces extracted from app.js count too.
   const rowSurfacesSource = [
     appAndProjectTabsSource,
-    fileTreeSurfaceSource,
     boardLogsSurfaceSource,
     knowledgeKanbanSurfaceSource,
     profileWindowSurfaceSource,
@@ -3794,7 +3749,7 @@ test("non-terminal surface bodies still follow the overall theme (FR-013 boundar
   // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:agent-kanban|branches|board|logs|knowledge|index|work|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3810,7 +3765,6 @@ test("mountWindowBody clears every known surface class before applying the activ
   for (const surfaceClass of [
     "surface-terminal",
     "surface-agent-kanban",
-    "surface-file-tree",
     "surface-branches",
     "surface-board",
     "surface-logs",
@@ -3818,7 +3772,6 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-index",
     "surface-work",
     "surface-profile",
-    "surface-console",
     "surface-mock",
   ]) {
     assert.match(
@@ -3831,7 +3784,6 @@ test("mountWindowBody clears every known surface class before applying the activ
 
 test("every readable non-terminal surface participates in the opaque window chrome grammar", () => {
   for (const surface of [
-    "file-tree",
     "branches",
     "board",
     "logs",
@@ -3839,7 +3791,6 @@ test("every readable non-terminal surface participates in the opaque window chro
     "index",
     "work",
     "profile",
-    "console",
     "mock",
   ]) {
     assert.match(
