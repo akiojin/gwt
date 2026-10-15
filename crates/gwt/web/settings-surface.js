@@ -479,6 +479,7 @@ export function switchSettingsTab(body, target, focus = false) {
 export function installSettingsOpenHandler(options) {
   const {
     document,
+    send,
     settingsWindowBodies,
     focusOrSpawnPreset,
     setPendingTarget,
@@ -499,6 +500,7 @@ export function installSettingsOpenHandler(options) {
     if (existingBody) {
       switchSettingsTab(existingBody, target, true);
       focusOrSpawnPreset("settings", { surfaceOwner });
+      if (target === "system") send({ kind: "get_update_settings" });
       return;
     }
     setPendingTarget(target, surfaceOwner);
@@ -1230,6 +1232,7 @@ export function createSettingsSurface({
 
       installSettingsOpenHandler({
         document,
+        send,
         settingsWindowBodies,
         focusOrSpawnPreset,
         activeProjectTab,

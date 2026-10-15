@@ -81,7 +81,27 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             return 1;
         }
     };
-    let parsed = match parse(&input) {
+    dispatch_input(env, prog, &input, None)
+}
+
+pub(super) fn parse_operation(
+    operation: &str,
+    params: &Value,
+) -> Result<CliCommand, CliParseError> {
+    parse(
+        &serde_json::json!({"schema_version":1,"operation":operation,"params":params}).to_string(),
+    )
+    .map(|parsed| parsed.command)
+}
+
+/// The same dispatcher with an explicit input/output sink for bounded delegation.
+pub(super) fn dispatch_input<E: CliEnv>(
+    env: &mut E,
+    prog: &str,
+    input: &str,
+    mut captured: Option<&mut Vec<u8>>,
+) -> i32 {
+    let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
             let _ = writeln!(env.stderr(), "{prog}: {err}");
@@ -186,7 +206,7 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                     serde_json::to_value(&warnings).expect("operation warnings must serialize");
             }
             attach_project_store(&mut payload);
-            if let Err(err) = write_response(env.stdout(), &payload) {
+            if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
             }
             match (code, declared_block) {
@@ -237,7 +257,7 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                     .expect("operation refusal metadata must serialize");
             }
             attach_project_store(&mut payload);
-            if let Err(err) = write_response(env.stdout(), &payload) {
+            if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
             }
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
@@ -255,6 +275,17 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             }
             1
         }
+    }
+}
+
+fn write_dispatch_response<E: CliEnv>(
+    env: &mut E,
+    captured: &mut Option<&mut Vec<u8>>,
+    payload: &Value,
+) -> Result<(), String> {
+    match captured {
+        Some(output) => write_response(*output, payload),
+        None => write_response(env.stdout(), payload),
     }
 }
 
@@ -359,14 +390,16 @@ mod param_audit {
         static CONSULTED: RefCell<Option<BTreeSet<String>>> = const { RefCell::new(None) };
     }
 
-    /// Records consulted keys for as long as it is alive. Parsing is
-    /// synchronous and non-reentrant, so one recording per thread is enough.
-    pub(super) struct Recording;
+    /// Records consulted keys for as long as it is alive, restoring the
+    /// enclosing operation's recording after synchronous nested parsing.
+    pub(super) struct Recording {
+        previous: Option<BTreeSet<String>>,
+    }
 
     impl Recording {
         pub(super) fn start() -> Self {
-            CONSULTED.with(|consulted| *consulted.borrow_mut() = Some(BTreeSet::new()));
-            Recording
+            let previous = CONSULTED.with(|consulted| consulted.replace(Some(BTreeSet::new())));
+            Recording { previous }
         }
 
         pub(super) fn consulted(&self) -> BTreeSet<String> {
@@ -376,7 +409,7 @@ mod param_audit {
 
     impl Drop for Recording {
         fn drop(&mut self) {
-            CONSULTED.with(|consulted| *consulted.borrow_mut() = None);
+            CONSULTED.with(|consulted| *consulted.borrow_mut() = self.previous.take());
         }
     }
 
@@ -810,10 +843,28 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             project_root: optional_path(params, "project_root")?,
             number: required_u64(params, "number")?,
         }),
+        "discussion.create"
+        | "board.config.set"
+        | "repository.required_checks.update"
+        | "repository.settings.set"
+        | "release.metadata.set"
+        | "pr.reopen"
+        | "pr.review.submit"
+        | "update.settings.set"
+        | "pm.approval.request"
+        | "pm.approval.status"
+        | "pm.approval.revoke"
+        | "pm.operation.execute" => {
+            params.keys().for_each(|key| param_audit::note(key));
+            CliCommand::PmAuthorization(super::pm_authorization::parse(
+                &envelope.operation,
+                &envelope.params,
+            )?)
+        }
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
             if lookup(params, "auto_apply_updates").is_some() {
                 return Err(CliParseError::InvalidJson(
-                    "unknown parameter auto_apply_updates; configure automatic updates in Settings > System"
+                    "unknown parameter auto_apply_updates; use JSON operation update.settings.set with instruction_id or approval_id (also available in Settings > System)"
                         .to_string(),
                 ));
             }
@@ -857,7 +908,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain",
                 ));
             }
-            // The handler owns the GUI-only ON policy so dispatch can return
+            // The handler owns the resident-PM caller policy so dispatch can return
             // the normal structured `ok:false` operation envelope. This layer
             // only rejects malformed config values.
             if max_active == Some(0) {
@@ -2694,6 +2745,129 @@ mod tests {
             "params": params,
         })
         .to_string()
+    }
+
+    #[test]
+    fn pm_delegated_operation_executes_authorized_cleanup_dry_run() {
+        use gwt_core::pm_authorization::{self, OperationIntent};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        std::fs::write(repo.join("target/keep"), "build cache").unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let intent = OperationIntent {
+            operation: "worktree.gc_build_artifacts".into(),
+            params: json!({"dry_run":true,"include_unmerged":true}),
+        };
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Inspect build caches",
+            "No deletion in dry run",
+            false,
+        )
+        .unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "pm.operation.execute",
+            json!({
+                "operation":intent.operation,"params":intent.params,"approval_id":approval.id,
+            }),
+        );
+        assert_eq!(
+            super::dispatch(&mut env, "gwtd"),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let result: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(result["after"]["operation"], "worktree.gc_build_artifacts");
+        assert_eq!(result["after"]["ok"], true);
+        let report: Value =
+            serde_json::from_str(result["after"]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(report["dry_run"], true);
+        assert!(repo.join("target/keep").exists());
+        assert!(pm_authorization::approvals(&repo).unwrap()[0].consumed);
+        assert!(std::fs::read_to_string(pm_authorization::audit_path(&repo))
+            .unwrap()
+            .contains("succeeded"));
+    }
+
+    #[test]
+    fn pm_delegated_operation_propagates_inner_refusal() {
+        use gwt_core::pm_authorization::{self, OperationIntent};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _pane = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let intent = OperationIntent {
+            operation: "pm.message.send".into(),
+            params: json!({"id":"fixture-agent","text":"Approved exact action"}),
+        };
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Forward approved action",
+            "No input if target is unavailable",
+            false,
+        )
+        .unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "pm.operation.execute",
+            json!({
+                "operation":intent.operation,"params":intent.params,"approval_id":approval.id,
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["ok"], false);
+        let result: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(result["after"]["ok"], false);
+        assert_eq!(result["after"]["exit_code"], 1);
+        assert!(result["after"]["error"]
+            .as_str()
+            .unwrap()
+            .contains(gwt_agent::GWT_PANE_WS_URL_ENV));
+        assert!(std::fs::read_to_string(pm_authorization::audit_path(&repo))
+            .unwrap()
+            .contains("failed"));
+    }
+
+    #[test]
+    fn pm_delegated_operation_rejects_other_operations_and_foreign_targets() {
+        for params in [
+            json!({"operation":"actions.dispatch","params":{"workflow":"release.yml"}}),
+            json!({"operation":"pm.operation.execute","params":{}}),
+            json!({"operation":"pm.message.send","params":{"id":"agent","text":"yes","project_root":"/other"}}),
+            json!({"operation":"pr.close","params":{"number":7,"repo":"other/repo"}}),
+        ] {
+            assert!(parse(&envelope("pm.operation.execute", params)).is_err());
+        }
+        assert!(parse(&envelope(
+            "pm.operation.execute",
+            json!({
+                "operation":"pr.close","params":{"number":7},"approval_id":"scoped-id"
+            })
+        ))
+        .is_ok());
     }
 
     #[test]
@@ -4717,8 +4891,8 @@ mod tests {
             )
         );
         assert!(matches!(
-            err("update.settings.set", json!({"auto_apply_updates": false})),
-            CliParseError::UnknownSubcommand(_)
+            ok("update.settings.set", json!({"auto_apply_updates": false})),
+            CliCommand::PmAuthorization(_)
         ));
     }
 

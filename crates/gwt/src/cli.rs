@@ -43,6 +43,7 @@ pub(crate) mod perf;
 pub mod permission_readiness;
 mod plan;
 mod pm;
+pub mod pm_authorization;
 mod pr;
 mod provider_reset;
 pub(crate) mod register;
@@ -113,6 +114,7 @@ pub enum CliCommand {
     Build(BuildCommand),
     Register(RegisterCommand),
     Update(UpdateCommand),
+    PmAuthorization(pm_authorization::PmAuthorizationCommand),
     /// SPEC-3248 P8b: `verify.run` tool-generated verification records.
     Verify(verification_record::VerifyCommand),
     /// SPEC #3576: `verify.lease.*` host-wide heavy verification serialization.
@@ -703,6 +705,7 @@ pub(crate) fn run_collect<E: CliEnv>(
             0
         }
         CliCommand::Diagnostics(inner) => diagnostics::run(env, inner, &mut out)?,
+        CliCommand::PmAuthorization(inner) => pm_authorization::run(env, inner, &mut out)?,
         CliCommand::Update(UpdateCommand::SettingsStatus { project_root }) => {
             update::run_settings_status(env, project_root.as_deref(), &mut out)?
         }

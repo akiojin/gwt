@@ -98,6 +98,10 @@ pub struct Capability {
     /// What the owner does instead, when the PM cannot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alternative_operation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -111,16 +115,52 @@ pub struct CapabilitiesReport {
 /// missing operation lands or a permission row names an unknown operation.
 const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
     (
-        "issue.monitor.config.set",
-        r#"{"enabled":true}"#,
+        "discussion.create",
+        r#"{}"#,
         CapabilityGapReason::Permission,
-        "Issue Monitor panel: Start",
+        "Use a recorded scoped instruction_id or pm.approval.request; no manual GitHub click is required",
     ),
     (
-        "issue.monitor.config.set",
-        r#"{"autonomous_mode":true}"#,
+        "repository.required_checks.update",
+        r#"{}"#,
         CapabilityGapReason::Permission,
-        "Issue Monitor panel: Autonomous switch -> On",
+        "Use a recorded scoped instruction_id or pm.approval.request; only develop/main required check contexts change",
+    ),
+    (
+        "update.settings.set", r#"{}"#, CapabilityGapReason::Permission,
+        "Use a recorded scoped instruction_id or pm.approval.request; changes the app-wide Settings preference",
+    ),
+    (
+        "board.config.set", r#"{}"#, CapabilityGapReason::Permission,
+        "Use a recorded scoped instruction_id or pm.approval.request to bind the project's Discussion",
+    ),
+    (
+        "pr.reopen", r#"{}"#, CapabilityGapReason::Permission,
+        "Use a recorded scoped instruction_id or pm.approval.request for this PR number",
+    ),
+    (
+        "pr.review.submit", r#"{}"#, CapabilityGapReason::Permission,
+        "Use a recorded scoped instruction_id or pm.approval.request for this PR and review event; GitHub reviewer and CI gates remain enforced",
+    ),
+    (
+        "release.metadata.set", r#"{}"#, CapabilityGapReason::Permission,
+        "Use a recorded scoped instruction_id or pm.approval.request to edit release metadata; publishing stays with the release workflow",
+    ),
+    (
+        "repository.settings.set", r#"{}"#, CapabilityGapReason::Permission,
+        "Use a recorded scoped instruction_id or pm.approval.request for typed reversible repository settings; identity and protection settings are not accepted",
+    ),
+    (
+        "pr.close", r#"{}"#, CapabilityGapReason::Permission,
+        "Use pm.operation.execute for this exact PR with a scoped instruction or native approval; existing PR gates remain in force",
+    ),
+    (
+        "worktree.gc_build_artifacts", r#"{}"#, CapabilityGapReason::Permission,
+        "Use pm.operation.execute with scoped cleanup parameters; dry-run and live-worktree exclusions remain in force",
+    ),
+    (
+        "pm.message.send", r#"{}"#, CapabilityGapReason::Permission,
+        "Use pm.operation.execute for the exact pane id and input text; project and live-target authority remain enforced",
     ),
 ];
 
@@ -131,6 +171,8 @@ pub(crate) fn capabilities_report() -> CapabilitiesReport {
         executable: true,
         reason: None,
         owner_action: None,
+        permission_stage: None,
+        alternative_operation: None,
     });
     let gaps = CAPABILITY_GAPS
         .iter()
@@ -141,6 +183,18 @@ pub(crate) fn capabilities_report() -> CapabilitiesReport {
             executable: false,
             reason: Some(*reason),
             owner_action: Some((*owner_action).to_string()),
+            permission_stage: Some("instruction_or_approval".into()),
+            alternative_operation: Some(
+                if matches!(
+                    *operation,
+                    "pr.close" | "worktree.gc_build_artifacts" | "pm.message.send"
+                ) {
+                    "pm.operation.execute"
+                } else {
+                    "pm.approval.request"
+                }
+                .into(),
+            ),
         });
     CapabilitiesReport {
         schema_version: 1,
@@ -312,8 +366,15 @@ pub(super) fn run<E: CliEnv>(
                 }
                 input.summary = question.unwrap_or_default();
                 input.answer = body;
-                let saved =
-                    gwt_core::user_instruction::record(&repo_path, *input).map_err(|error| {
+                let saved = if input.authorizations.is_empty() {
+                    gwt_core::user_instruction::record(&repo_path, *input)
+                } else {
+                    let turn = qa_turn.as_ref().ok_or_else(|| refusal(
+                        "permission_stage=instruction: scoped instruction capture requires the current human PM turn; use pm.approval.request otherwise".into()))?;
+                    let (session, turn_id) = super::hook::pm_reporting::instruction_prompt_identity(
+                        &repo_path, turn, &input.original).map_err(super::io_as_api_error)?;
+                    gwt_core::user_instruction::record_from_prompt(&repo_path, *input, &session, &turn_id)
+                }.map_err(|error| {
                         SpecOpsError::from(ApiError::Unexpected(format!(
                             "failed to persist PM report: {error}"
                         )))
@@ -738,20 +799,34 @@ mod tests {
             }
         }
 
-        let autonomous_on = report
-            .capabilities
-            .iter()
-            .find(|entry| {
-                entry.operation == "issue.monitor.config.set"
-                    && entry.params == Some(serde_json::json!({"autonomous_mode": true}))
-            })
-            .expect("autonomous_mode ON is described");
-        assert!(!autonomous_on.executable);
-        assert_eq!(autonomous_on.reason, Some(CapabilityGapReason::Permission));
-        assert!(autonomous_on
-            .owner_action
-            .as_deref()
-            .is_some_and(|action| action.contains("Autonomous")));
+        assert!(
+            report
+                .capabilities
+                .iter()
+                .filter(|entry| entry.operation == "issue.monitor.config.set")
+                .all(|entry| entry.executable),
+            "resident PM ON is already supported"
+        );
+        for operation in gwt_core::pm_authorization::OPERATIONS {
+            let row = report
+                .capabilities
+                .iter()
+                .find(|entry| entry.operation == *operation && !entry.executable)
+                .expect("bounded operation describes its permission path");
+            let row = serde_json::to_value(row).unwrap();
+            assert_eq!(row["permission_stage"], "instruction_or_approval");
+            assert_eq!(
+                row["alternative_operation"],
+                if matches!(
+                    *operation,
+                    "pr.close" | "worktree.gc_build_artifacts" | "pm.message.send"
+                ) {
+                    "pm.operation.execute"
+                } else {
+                    "pm.approval.request"
+                }
+            );
+        }
     }
 
     /// Issue #3607 AC-4: two project stores over one repository, the shape the

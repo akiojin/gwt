@@ -114,7 +114,17 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
         if let Some(subcommand) = next_gh_workflow_word(&mut args) {
             let verb = next_gh_workflow_word(&mut args);
             match subcommand {
-                "auth" | "repo" | "release" => continue,
+                "auth" | "release" => continue,
+                "repo" if is_blocked_repo_subcommand(verb) => {
+                    let trailing: Vec<_> = args.collect();
+                    let help_only = trailing.iter().any(|arg| matches!(*arg, "--help" | "-h"))
+                        && trailing
+                            .iter()
+                            .all(|arg| matches!(*arg, "--help" | "-h") || !arg.starts_with('-'));
+                    if !help_only {
+                        return Some(github_workflow_block_decision(command));
+                    }
+                }
                 "issue" if is_blocked_issue_subcommand(verb) => {
                     return Some(github_workflow_block_decision(command));
                 }
@@ -246,6 +256,10 @@ fn is_blocked_issue_subcommand(subcommand: Option<&str>) -> bool {
     )
 }
 
+fn is_blocked_repo_subcommand(subcommand: Option<&str>) -> bool {
+    matches!(subcommand, Some("edit" | "archive" | "unarchive"))
+}
+
 fn is_blocked_pr_subcommand(subcommand: Option<&str>) -> bool {
     // "draft" does not exist as a gh subcommand (the real reverse of
     // `gh pr ready` is `gh pr ready --undo`, already covered by "ready");
@@ -277,10 +291,16 @@ fn github_workflow_block_decision(command: &str) -> HookOutput {
         format!(
             "GitHub reads may use direct `gh` commands. Route GitHub writes through gwt JSON-envelope operations so workflow gates and audit state see them.\n\n\
 Recommended alternatives:\n\
-- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.spec.*`\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.review_threads.reply_and_resolve`\n\
-- Merges: gwtd has no merge operation. The repository's merge automation or a human merges; hold a pending merge with `pr.draft`\n\
-- Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
+- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
+- Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
+- Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\
+- Automatic updates: JSON operation `update.settings.set`\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- Merges: existing merge automation and CI/review gates decide delivery; gwtd has no direct merge operation\n\
+- Actions: JSON operations `actions.rerun` (`run_id` + `failed_only`, or `job_id`) and `actions.cancel` (`run_id`)\n\
 Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
         ),
@@ -648,10 +668,15 @@ fn github_mutation_block_decision(command: &str) -> HookOutput {
         format!(
             "GitHub writes must go through the canonical gwt operations so the completion/PR gates and audit state see them (SPEC-3248 P10, T-217).\n\n\
 Recommended alternatives:\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.review_threads.reply_and_resolve`\n\
-- Issues/SPECs: JSON operations `issue.create`, `issue.comment`, `issue.spec.*`\n\
+- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
+- Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
+- Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
+- Actions: JSON operations `actions.rerun` and `actions.cancel`\n\
 - lifecycle state: JSON operations `intake.outcome.record`, `execution.*`, `verify.*`\n\
-- releases: the release workflow owns publishing — not agent Bash\n\n\
+- Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\n\
 Blocked command: {command}"
         ),
     )
@@ -817,6 +842,56 @@ mod tests {
             evaluate_bash_command("sleep 30 && gwtd pr checks 123", Path::new("/worktree"));
 
         assert!(decision.is_none());
+    }
+
+    #[test]
+    fn blocks_repository_settings_writes_but_allows_reads_and_help() {
+        for command in [
+            "gh repo edit akiojin/gwt --description Updated",
+            "gh repo archive akiojin/gwt --yes",
+            "gh repo unarchive akiojin/gwt --yes",
+            "gh repo edit --help && gh repo archive akiojin/gwt --yes",
+        ] {
+            let decision = github_mutation_policy(command)
+                .unwrap_or_else(|| panic!("expected canonical-write block: {command}"));
+            assert!(decision.detail().contains("instruction_or_approval"));
+            assert!(decision.detail().contains("repository.settings.set"));
+        }
+        for command in [
+            "gh repo view akiojin/gwt --json description",
+            "gh repo list akiojin --limit 1",
+            "gh repo edit --help",
+            "gh repo archive akiojin/gwt -h",
+            "gh repo unarchive --help",
+            "gh help repo edit",
+        ] {
+            assert!(
+                github_mutation_policy(command).is_none(),
+                "read/help must pass: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_write_denials_name_the_scoped_recovery_routes() {
+        for command in [
+            "gh pr reopen 17",
+            "gh api -X PATCH repos/akiojin/gwt/releases/17",
+        ] {
+            let decision = github_mutation_policy(command).expect("GitHub write is blocked");
+            for route in [
+                "instruction_or_approval",
+                "repository.settings.set",
+                "release.metadata.set",
+                "pr.reopen",
+                "pr.review.submit",
+            ] {
+                assert!(
+                    decision.detail().contains(route),
+                    "missing {route}: {command}"
+                );
+            }
+        }
     }
 
     // SPEC-3248 P10 (T-212/T-217 core): GitHub API mutations are blocked
