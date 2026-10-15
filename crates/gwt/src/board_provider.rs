@@ -106,6 +106,7 @@ pub(crate) mod test_provider_override {
                     repo_hash,
                     PromptBoardReadRequest {
                         diff_since: request.diff_since,
+                        cursor: request.cursor,
                         scope: request.scope,
                         status_author: request.status_author,
                         status_kind: request.status_kind,
