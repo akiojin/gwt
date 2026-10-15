@@ -2571,10 +2571,7 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
     let load_request_block = html
         .split("function requestKnowledgeBridge")
         .nth(1)
-        .and_then(|tail| {
-            tail.split("function scheduleKnowledgeRelatedWorkRefresh")
-                .next()
-        })
+        .and_then(|tail| tail.split("\n      }").next())
         .expect("knowledge load request block");
     assert!(
         load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")

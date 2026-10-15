@@ -7826,11 +7826,14 @@ import { createUiStateStore } from "/ui-state-store.js";
         scheduleFit: scheduleTerminalFit,
         markPending: markTerminalViewportRefreshPending,
       });
+      let wasDocumentHidden = document.hidden;
       document.addEventListener("visibilitychange", () => {
-        if (document.hidden) {
+        const wasHidden = wasDocumentHidden;
+        wasDocumentHidden = document.hidden;
+        if (wasDocumentHidden) {
           return;
         }
-        socketReceiveDispatcher?.resume?.();
+        if (wasHidden) socketReceiveDispatcher?.resume?.();
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
         refreshVisibleKnowledgeWindows();
