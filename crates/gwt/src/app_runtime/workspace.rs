@@ -384,13 +384,16 @@ pub(super) fn apply_workspace_launch_for_current_work(
                 .iter()
                 .find(|item| item.id == successor_id)
             {
-                // Earlier refused launches could leave an Idle orphan at
+                // Earlier refused launches could leave an inactive orphan at
                 // this deterministic ID. Complete its missing lineage under
                 // fresh execution authority, preserving historical events.
                 // Inline histories are compacted, so absence of Start in the
                 // retained tail cannot prove that a lifetime never started.
                 let recoverable_orphan = !occupied.is_terminal()
-                    && occupied.status_category == WorkspaceStatusCategory::Idle
+                    && (occupied.status_category == WorkspaceStatusCategory::Idle
+                        || (occupied.status_category == WorkspaceStatusCategory::Active
+                            && transition.canonical_owner.is_some()
+                            && occupied.owner == owner))
                     && occupied.related_work_item_ids.is_empty()
                     && (occupied.owner == owner
                         || can_upgrade_work_owner(occupied.owner.as_deref(), owner.as_deref()))

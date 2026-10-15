@@ -189,6 +189,14 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             gwt::cli::execution_state::ExecutionSettlement::Completed,
             gwt_core::workspace_projection::WorkEventKind::Done,
         ),
+        (
+            "issue4783-3824-active-orphan",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "active orphan holder exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Done,
+        ),
     ] {
         let mut fixture = monitor_relaunch_fixture_with_settlement(
             temp.path(),
@@ -207,6 +215,11 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
         } else {
             None
         };
+        let staged_diff = (case == "issue4783-3824-active-orphan").then(|| {
+            fs::write(fixture.worktree.join("retained-staged-source.txt"), case).unwrap();
+            run_git(&fixture.worktree, &["add", "retained-staged-source.txt"]);
+            git_stdout(&fixture.worktree, &["diff", "--cached", "--binary"])
+        });
         let source_path = fixture
             .sessions_dir
             .join(format!("{}.toml", fixture.source_session_id));
@@ -410,14 +423,48 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             &history,
         )
         .expect("seed observed historical Work shape");
-        let predecessor =
-            gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+        let predecessor = history
+            .work_items
+            .iter()
+            .find(|work| work.id == predecessor_id)
+            .expect("terminal predecessor Work")
+            .clone();
+        if staged_diff.is_some() {
+            // #3824 retained a real Active Start at the deterministic successor
+            // id, with no parent link and a departed Session.
+            let mut orphan = predecessor
+                .events
+                .iter()
+                .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Start)
                 .unwrap()
-                .unwrap()
+                .clone();
+            orphan.id = format!("{case}-orphan-start");
+            orphan.work_item_id =
+                gwt_core::workspace_projection::successor_work_id(&predecessor_id);
+            orphan.agent_session_id = Some("departed-orphan-session".to_string());
+            orphan.updated_at = Utc::now();
+            orphan.execution_container.as_mut().unwrap().worktree_path =
+                Some(dunce::canonicalize(&fixture.worktree).unwrap());
+            gwt_core::workspace_projection::record_workspace_work_event(
+                &fixture.worktree,
+                orphan.clone(),
+            )
+            .expect("persist the Active orphan source");
+            let seeded =
+                gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                    .unwrap()
+                    .unwrap();
+            let seeded = seeded
                 .work_items
-                .into_iter()
-                .find(|work| work.id == predecessor_id)
-                .expect("terminal predecessor Work");
+                .iter()
+                .find(|work| work.id == orphan.work_item_id)
+                .unwrap();
+            assert_eq!(
+                seeded.status_category,
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+            );
+            assert!(seeded.related_work_item_ids.is_empty());
+        }
         let predecessor_terminal = predecessor.is_terminal();
 
         let before =
@@ -512,6 +559,54 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
         if predecessor_terminal {
             assert!(successor.related_work_item_ids.contains(&predecessor_id));
         }
+        if staged_diff.is_some() {
+            let start = successor
+                .events
+                .iter()
+                .find(|event| {
+                    event.kind == gwt_core::workspace_projection::WorkEventKind::Start
+                        && event.agent_session_id.as_deref() == Some(session_id.as_str())
+                })
+                .expect("committed successor Start");
+            assert_eq!(
+                start.related_work_item_id.as_deref(),
+                Some(predecessor_id.as_str()),
+                "{case}"
+            );
+            assert!(
+                gwt_core::workspace_projection::workspace_work_event_shard_matches(
+                    &fixture.worktree,
+                    start,
+                )
+                .unwrap(),
+                "{case}: stored shard retains the returned Start lineage"
+            );
+            // A cold intake must derive the same linked lifetime from the
+            // immutable sources, including the original malformed Start.
+            let cold_intake_path = temp.path().join(format!("{case}-cold-intake.json"));
+            let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+                &fixture.project_root,
+                &works_path,
+                &cold_intake_path,
+            );
+            assert!(intake.load_error.is_none(), "{case}: {intake:?}");
+            assert!(intake.projection_rebuilt, "{case}: {intake:?}");
+            let reloaded =
+                gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                gwt_core::workspace_projection::current_work_id(
+                    &reloaded,
+                    &fixture.project_root,
+                    Some("work/issue-3165"),
+                    Some(&fixture.worktree),
+                )
+                .as_deref(),
+                Some(successor_id.as_str()),
+                "{case}: cold intake keeps successor authority"
+            );
+        }
         let projection =
             gwt_core::workspace_projection::load_workspace_projection(&fixture.project_root)
                 .unwrap()
@@ -575,6 +670,13 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
                 git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]),
                 unique_head,
                 "{case}: retain unique commit"
+            );
+        }
+        if let Some(staged_diff) = staged_diff {
+            assert_eq!(
+                git_stdout(&fixture.worktree, &["diff", "--cached", "--binary"]),
+                staged_diff,
+                "{case}: retain staged source bytes"
             );
         }
         let updated =
@@ -687,13 +789,13 @@ fn successor_placeholder_cannot_take_over_related_foreign_or_live_work() {
         let mut pause = WorkEvent::new(WorkEventKind::Pause, &successor_id, now);
         pause.agent_session_id = Some("stranded-session".to_string());
         works.apply_event(pause);
-        if invalid == "active" || invalid == "terminal" {
+        if matches!(invalid, "active" | "live" | "terminal") {
             works
                 .work_items
                 .iter_mut()
                 .find(|work| work.id == successor_id)
                 .unwrap()
-                .status_category = if invalid == "active" {
+                .status_category = if invalid != "terminal" {
                 gwt_core::workspace_projection::WorkspaceStatusCategory::Active
             } else {
                 gwt_core::workspace_projection::WorkspaceStatusCategory::Done
@@ -715,7 +817,12 @@ fn successor_placeholder_cannot_take_over_related_foreign_or_live_work() {
                 work_id: None,
                 base_branch: None,
                 linked_issue_number: Some(42),
-                canonical_owner: None,
+                canonical_owner: (invalid == "live").then_some(
+                    gwt::cli::execution_state::ExecutionOwnerKey {
+                        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                        number: 42,
+                    },
+                ),
                 resume_context: None,
                 kind: WorkspaceLaunchProjectionKind::StartWork,
                 live_session_ids: &live,

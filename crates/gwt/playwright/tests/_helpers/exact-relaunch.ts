@@ -92,6 +92,16 @@ try {
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
 readline.createInterface({input:process.stdin}).on('line', line => {
   if (line.trim() === 'GWT_FIXTURE_EXIT') process.exit(0);
+  if (line.trim() === 'GWT_FIXTURE_DONE') {
+    const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
+      cwd:process.cwd(), env:process.env, encoding:'utf8', timeout:30000,
+      input:JSON.stringify({schema_version:1,operation:'workspace.update',params:{status:'done'}}),
+    });
+    let done = false;
+    try { done = result.status === 0 && JSON.parse(result.stdout).ok; } catch {}
+    console.log(done ? 'GWT_FAKE_PROVIDER_DONE' : 'GWT_FAKE_PROVIDER_DONE_FAILED');
+    return;
+  }
   if (line.trim() === 'GWT_FIXTURE_BLOCK') {
     // Exercise the provider's real authenticated execution boundary. Never
     // copy its launch capability into the test runner or print the envelope.

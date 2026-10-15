@@ -2,8 +2,9 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture } from "./exact-relaunch";
 
@@ -56,6 +57,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
   let checkoutGwtd = "";
   let stableHook = "";
   let projectLogs = "";
+  let projectState = "";
   const hookAudits: unknown[] = [];
   function auditHooks(cwd: string, repair: boolean) {
     const operation = repair ? "hook.doctor" : "hook.health";
@@ -93,6 +95,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
         launch_profile: { agent_id: "codex", version: "installed", runtime_target: "Host", skip_permissions: true },
       },
       async beforeStart({ project, env, preferences }) {
+        projectState = preferences;
         projectLogs = join(preferences, "..", "logs");
         daemon = spawn(checkoutGwtd, [], { cwd: project, env, stdio: ["pipe", "ignore", "pipe"] });
         let daemonErrors = "";
@@ -169,6 +172,46 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     throw error;
   }
   const active = fixture;
+  const workItems = async () => JSON.parse(await readFile(join(projectState, "works.json"), "utf8"));
+  function eventShardPath(cwd: string, eventId: string) {
+    const digest = createHash("sha256").update(eventId).digest("hex");
+    return join(cwd, ".gwt", "work", "events", digest.slice(0, 2), `${digest}.jsonl`);
+  }
+  function stagedDiff(cwd: string) {
+    const result = spawnSync("git", ["diff", "--cached", "--binary"], { cwd, env: auditEnv });
+    if (result.status !== 0) throw new Error("Fixture staged diff failed");
+    return result.stdout;
+  }
+  async function seedActiveOrphan(cwd: string, sessionId: string) {
+    // Pause only the owned GUI; retain the loopback service and daemon for
+    // restart. No Session, ECR, capability or home projection is fabricated.
+    await active.stop();
+    const worktree = await realpath(cwd);
+    const candidates = (await workItems()).work_items.filter((work: any) =>
+      work.events.some((event: any) => event.kind === "start" && event.agent_session_id === sessionId));
+    if (candidates.length !== 1 || candidates[0].status_category !== "done") {
+      throw new Error("Fixture requires one authenticated terminal predecessor");
+    }
+    const predecessor = candidates[0];
+    const start = predecessor.events.find((event: any) => event.kind === "start" && event.agent_session_id === sessionId);
+    if (start.owner !== `Issue #${issue.number}` || !start.execution_container?.branch
+      || await realpath(start.execution_container.worktree_path) !== worktree) {
+      throw new Error("Fixture predecessor has no exact owner/container proof");
+    }
+    const successorId = `work-successor-${createHash("sha256").update(predecessor.id).digest("hex")}`;
+    const orphan = { ...start, id: randomUUID(), work_item_id: successorId,
+      agent_session_id: `fixture-departed-orphan-${randomUUID()}`, related_work_item_id: null,
+      execution_container: { ...start.execution_container, worktree_path: worktree }, updated_at: new Date().toISOString() };
+    const shard = eventShardPath(worktree, orphan.id);
+    await mkdir(dirname(shard), { recursive: true });
+    await writeFile(shard, `${JSON.stringify(orphan)}\n`, { flag: "wx" });
+    const stagedPath = "retained-staged-source.txt";
+    await writeFile(join(worktree, stagedPath), "Active orphan recovery must retain these staged bytes.\n");
+    const staged = spawnSync("git", ["add", "--", stagedPath], { cwd: worktree, env: auditEnv });
+    if (staged.status !== 0) throw new Error("Fixture stage failed");
+    return { predecessorId: predecessor.id, successorId, orphan, worktree,
+      branch: start.execution_container.branch, stagedDiff: stagedDiff(worktree) };
+  }
   function readOperation(operation: "execution.status" | "perf.startup", cwd: string) {
     const result = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000,
       input: JSON.stringify({ schema_version: 1, operation,
@@ -196,6 +239,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
   }
   return { ...active, get url() { return active.url; }, get ownedPid() { return active.ownedPid; },
     issueNumber: issue.number, requests, comments, hookAudits, restoreSummary,
+    workItems, eventShardPath, stagedDiff, seedActiveOrphan,
     auditHooks: (cwd: string) => auditHooks(cwd, false),
     executionStatus: (cwd: string) => readOperation("execution.status", cwd),
     startupReport: () => readOperation("perf.startup", active.project).startup,
