@@ -257,7 +257,7 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
     pr_number: u64,
     merge_sha: Option<&str>,
     action: &MergedIssueSettlementAction,
-    close_guard: impl FnOnce() -> OwnerMutationResult<()>,
+    mut close_guard: impl FnMut() -> OwnerMutationResult<()>,
 ) -> OwnerMutationResult<MergedIssueSettlementOutcome> {
     let number = IssueNumber(issue_number);
     let snapshot = match client.fetch(number, None) {
@@ -323,6 +323,9 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
             .map(|comment| comment.body.as_str()),
         &marker,
     );
+    if wants_close {
+        close_guard()?;
+    }
     // A close re-checks on every attempt; other settlements check once per
     // merge so an unpushed owner commit is surfaced before it is stranded
     // (Issue #4615).
@@ -581,10 +584,32 @@ mod tests {
         );
         let unreadable_mutations = client.owner_mutation_count();
 
+        seed_open_issue(&client, 42, vec![]);
+        let already_revoked = settle_merged_issue(
+            &client,
+            &repository(),
+            repo.path(),
+            42,
+            7,
+            Some("abc123"),
+            &MergedIssueSettlementAction::Close { delegated: false },
+            || {
+                Err(OwnerMutationError::PreSubmit(
+                    gwt_github::ApiError::Unexpected("close authority revoked".to_string()),
+                ))
+            },
+        );
+        assert!(matches!(
+            already_revoked,
+            Err(OwnerMutationError::PreSubmit(_))
+        ));
+        assert!(client.comments(IssueNumber(42)).is_empty());
+
         // A review may fail after the executor read the checked checklist.
         // The guard must run after all readback/comments and before the close.
         let client = FakeIssueClient::new();
         seed_open_issue(&client, 42, vec![]);
+        let mut guard_calls = 0;
         let revoked = settle_merged_issue(
             &client,
             &repository(),
@@ -594,6 +619,10 @@ mod tests {
             Some("abc123"),
             &MergedIssueSettlementAction::Close { delegated: false },
             || {
+                guard_calls += 1;
+                if guard_calls == 1 {
+                    return Ok(());
+                }
                 assert!(!client.comments(IssueNumber(42)).is_empty());
                 Err(OwnerMutationError::PreSubmit(
                     gwt_github::ApiError::Unexpected(
@@ -602,6 +631,7 @@ mod tests {
                 ))
             },
         );
+        assert_eq!(guard_calls, 2);
         assert_eq!(
             (
                 matches!(unreadable, Err(OwnerMutationError::PreSubmit(_))),

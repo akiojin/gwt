@@ -59,6 +59,7 @@ test("closed audit fails on GitHub errors or an invalid inventory instead of ret
 test("closed audit reads only routed SPEC comments and assembles split acceptance", () => {
   const issue = {
     number: 7, state: "closed", state_reason: "completed", html_url: "https://example.test/issues/7",
+    url: "https://api.github.com/repos/owner/repo/issues/7",
     labels: [{ name: "gwt-spec" }],
     body: "<!-- gwt-spec id=7 version=1 -->\n<!-- sections:\nspec=comment:12,comment:11\n-->",
   };
@@ -70,7 +71,7 @@ test("closed audit reads only routed SPEC comments and assembles split acceptanc
   assert.deepEqual(auditClosedAcceptance("owner/repo", (_command, args) => {
     calls.push(args[3]);
     const commentId = args[3].match(/\/issues\/comments\/(\d+)$/)?.[1];
-    return { status: 0, stdout: JSON.stringify(commentId ? { body: comments[commentId] } : [[issue]]) };
+    return { status: 0, stdout: JSON.stringify(commentId ? { body: comments[commentId], issue_url: issue.url } : [[issue]]) };
   }), [{ number: 7, url: issue.html_url, unchecked: ["AC-2"] }]);
   assert.deepEqual(calls, [
     "repos/owner/repo/issues?state=closed&per_page=100",
@@ -80,12 +81,12 @@ test("closed audit reads only routed SPEC comments and assembles split acceptanc
   for (const id of [11, 12]) comments[id] = comments[id].replaceAll(/ part=\d\/2/g, "");
   assert.deepEqual(auditClosedAcceptance("owner/repo", (_command, args) => {
     const commentId = args[3].match(/\/issues\/comments\/(\d+)$/)?.[1];
-    return { status: 0, stdout: JSON.stringify(commentId ? { body: comments[commentId] } : [[issue]]) };
+    return { status: 0, stdout: JSON.stringify(commentId ? { body: comments[commentId], issue_url: issue.url } : [[issue]]) };
   }), [{ number: 7, url: issue.html_url, unchecked: ["AC-2"] }]);
   delete comments[11];
   assert.throws(() => auditClosedAcceptance("owner/repo", (_command, args) => {
     const commentId = args[3].match(/\/issues\/comments\/(\d+)$/)?.[1];
-    return { status: 0, stdout: JSON.stringify(commentId ? { body: comments[commentId] } : [[issue]]) };
+    return { status: 0, stdout: JSON.stringify(commentId ? { body: comments[commentId], issue_url: issue.url } : [[issue]]) };
   }), /missing SPEC section/);
   // Plain bug reports can quote a SPEC routing index as a code example.
   issue.labels = [];
@@ -94,4 +95,31 @@ test("closed audit reads only routed SPEC comments and assembles split acceptanc
     assert.equal(args[3], "repos/owner/repo/issues?state=closed&per_page=100");
     return { status: 0, stdout: JSON.stringify([[issue]]) };
   }), [{ number: 7, url: issue.html_url, unchecked: ["AC-plain"] }]);
+});
+
+test("closed audit rejects an explicitly empty SPEC route", () => {
+  const issue = {
+    number: 7, state: "closed", state_reason: "completed",
+    labels: [{ name: "gwt-spec" }],
+    body: "<!-- sections:\nspec=\n-->\n## Acceptance Criteria\n- [x] AC-1: done\n",
+  };
+  assert.throws(() => auditClosedAcceptance("owner/repo", () => ({
+    status: 0, stdout: JSON.stringify([[issue]]),
+  })), /invalid SPEC comment route/);
+});
+
+test("closed audit rejects a routed SPEC comment belonging to another Issue", () => {
+  const issue = {
+    number: 7, state: "closed", state_reason: "completed",
+    url: "https://api.github.com/repos/owner/repo/issues/7",
+    labels: [{ name: "gwt-spec" }],
+    body: "<!-- sections:\nspec=comment:11\n-->",
+  };
+  const comment = {
+    issue_url: "https://api.github.com/repos/owner/repo/issues/8",
+    body: "<!-- artifact:spec BEGIN -->\n## Acceptance Criteria\n- [x] AC-1: done\n<!-- artifact:spec END -->",
+  };
+  assert.throws(() => auditClosedAcceptance("owner/repo", (_command, args) => ({
+    status: 0, stdout: JSON.stringify(args[3].endsWith("/comments/11") ? comment : [[issue]]),
+  })), /SPEC comment belongs to another Issue/);
 });
