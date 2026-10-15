@@ -12,13 +12,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 struct CachedSession {
     mtime: SystemTime,
     size: u64,
-    session: Option<crate::Session>,
+    session: Option<Arc<crate::Session>>,
 }
 
 #[derive(Default)]
@@ -40,10 +40,14 @@ impl SessionLedgerCache {
     /// (mtime, size) are unchanged. Files that fail to stat or parse are
     /// skipped, matching the previous eager loader's semantics.
     pub fn load(&mut self, sessions_dir: &Path) -> Vec<crate::Session> {
-        self.try_load(sessions_dir).unwrap_or_default()
+        self.try_load(sessions_dir)
+            .unwrap_or_default()
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect()
     }
 
-    fn try_load(&mut self, sessions_dir: &Path) -> std::io::Result<Vec<crate::Session>> {
+    fn try_load(&mut self, sessions_dir: &Path) -> std::io::Result<Vec<Arc<crate::Session>>> {
         let dir = std::fs::read_dir(sessions_dir).inspect_err(|_| self.entries.clear())?;
         let mut seen = HashSet::new();
         let mut sessions = Vec::new();
@@ -68,7 +72,7 @@ impl SessionLedgerCache {
         mtime: SystemTime,
         size: u64,
         fresh_success: bool,
-    ) -> Option<crate::Session> {
+    ) -> Option<Arc<crate::Session>> {
         if let Some(hit) = self.entries.get(path) {
             if hit.mtime == mtime && hit.size == size && (!fresh_success || hit.session.is_none()) {
                 return hit.session.clone();
@@ -88,7 +92,7 @@ impl SessionLedgerCache {
         path: &Path,
         mtime: SystemTime,
         size: u64,
-    ) -> Option<Option<crate::Session>> {
+    ) -> Option<Option<Arc<crate::Session>>> {
         self.entries
             .get(path)
             .filter(|hit| hit.mtime == mtime && hit.size == size)
@@ -112,11 +116,11 @@ impl SessionLedgerCache {
             u64,
         ),
         fresh_success: bool,
-    ) -> Option<crate::Session> {
+    ) -> Option<Arc<crate::Session>> {
         let (result, candidate, attempts) = parsed;
         self.parse_count += attempts;
         let session = match result {
-            Ok(session) => session,
+            Ok(session) => session.map(Arc::new),
             Err(error) => {
                 // Concurrent candidate misses may parse twice, but only the
                 // first matching failure commit emits the diagnostic.
@@ -127,7 +131,7 @@ impl SessionLedgerCache {
             }
         };
         let result = if fresh_success {
-            candidate
+            candidate.map(Arc::new)
         } else {
             session.clone()
         };
@@ -217,6 +221,7 @@ pub fn load_session_candidate(sessions_dir: &Path, session_id: &str) -> Option<c
         cache.commit_entry(&path, mtime, size, parsed, true)
     })
     .0
+    .map(Arc::unwrap_or_clone)
 }
 
 // File reads, parsing, and normalization happen outside the shared guard.
@@ -246,6 +251,13 @@ fn with_shared_cache<T>(
 /// Share both successful and failed directory reads across read-only ledger
 /// consumers. Exact authority reads still use `Session::load` under its lease.
 pub fn load_sessions(sessions_dir: &Path) -> std::io::Result<Vec<crate::Session>> {
+    load_sessions_shared(sessions_dir)
+        .map(|sessions| sessions.into_iter().map(Arc::unwrap_or_clone).collect())
+}
+
+/// Load immutable snapshots without cloning unchanged Session contents.
+/// Replacing a cache entry leaves earlier snapshots valid for their readers.
+pub fn load_sessions_shared(sessions_dir: &Path) -> std::io::Result<Vec<Arc<crate::Session>>> {
     let started = Instant::now();
     let mut seen = HashSet::new();
     let mut hold = Duration::ZERO;
@@ -322,6 +334,26 @@ mod tests {
         let second = cache.load(tmp.path());
         assert_eq!(second.len(), 2);
         assert_eq!(cache.parse_count, 2, "unchanged files must not re-parse");
+    }
+
+    #[test]
+    fn shared_snapshots_reuse_unchanged_sessions_and_preserve_prior_versions() {
+        let tmp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
+        let mut changed = write_session(tmp.path(), "work/changed");
+        let first = load_sessions_shared(tmp.path()).expect("first shared load");
+        let second = load_sessions_shared(tmp.path()).expect("unchanged shared load");
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert!(Arc::ptr_eq(&first[0], &second[0]));
+
+        changed.model = Some("changed-model-with-a-new-file-size".to_string());
+        changed.save(tmp.path()).expect("save changed session");
+        let updated = load_sessions_shared(tmp.path()).expect("updated shared load");
+        assert_eq!(updated.len(), 1);
+        assert!(!Arc::ptr_eq(&first[0], &updated[0]));
+        assert!(first[0].model.is_none(), "prior snapshots remain valid");
+        assert_eq!(updated[0].model, changed.model);
     }
 
     #[test]

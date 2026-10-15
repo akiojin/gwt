@@ -424,6 +424,10 @@ Agent が status、decision、handoff、request を外部化する coordination 
 Work Item Knowledge Bridge は frontend から GitHub API response を直接描画せず、
 ローカル Issue cache と semantic index を使います。
 
+Board は各ウィンドウで最大1,000件を保持します。先頭までスクロールするか
+`Load earlier entries` を選ぶと、古い投稿を再取得できます。過去の履歴を閲覧中は
+`Back to latest entries` で最新の更新へ戻れます。
+
 作業 Agent は起動時に短く覚えやすい固有名を選び、バッジ・ウィンドウタイトル・
 Fleet・Kanban カードに表示します。候補が重複すると数字の接尾辞が付きます。
 名前は復元・その場での再起動をまたいで維持され、確定前のバッジは `Naming…` です。

@@ -616,11 +616,34 @@ impl RefreshBroker {
     /// Read-only projection of every target. Never creates, appends, or
     /// rewrites durable bytes (AS-32).
     pub fn inspect(&self) -> BrokerResult<RefreshBrokerSnapshot> {
-        let mut targets: Vec<RefreshTargetSnapshot> = self
-            .list_records()?
-            .into_iter()
-            .map(|(_, record)| RefreshTargetSnapshot { record })
-            .collect();
+        let mut targets = Vec::new();
+        for (stem, mut record) in self.list_records()? {
+            if record.running.is_some() {
+                // Probe only existing files: inspect must not create even a
+                // lock file. A missing owner lock cannot have a live holder.
+                let owner = match OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(self.owner_lock_path(&stem))
+                {
+                    Ok(owner) => Some(owner),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                };
+                let abandoned = match owner.as_ref() {
+                    None => true,
+                    Some(owner) => match fs2::FileExt::try_lock_exclusive(owner) {
+                        Ok(()) => true,
+                        Err(error) if is_contended(&error) => false,
+                        Err(error) => return Err(error.into()),
+                    },
+                };
+                if abandoned {
+                    recover_abandoned_record(&mut record, self.now_millis());
+                }
+            }
+            targets.push(RefreshTargetSnapshot { record });
+        }
         targets.sort_by(|left, right| {
             left.record
                 .target
@@ -628,6 +651,32 @@ impl RefreshBroker {
                 .cmp(&right.record.target.file_stem())
         });
         Ok(RefreshBrokerSnapshot { targets })
+    }
+
+    /// Requeue crash residue without disturbing a live owner's kernel lock.
+    /// Keep the latest desired epoch/snapshot, including a coalesced follow-up.
+    pub fn scan(&self) -> BrokerResult<RefreshBrokerSnapshot> {
+        for (stem, record) in self.list_records()? {
+            if record.running.is_none() {
+                continue;
+            }
+            let owner = open_lock_file(&self.owner_lock_path(&stem))?;
+            match fs2::FileExt::try_lock_exclusive(&owner) {
+                Ok(()) => {}
+                Err(error) if is_contended(&error) => continue,
+                Err(error) => return Err(error.into()),
+            }
+            // Same lock order as claim/complete; reread after acquiring both
+            // locks so a concurrent submission or completion is never lost.
+            let _state = StateLockGuard::acquire(&self.state_lock_path(&stem))?;
+            let path = self.record_path(&stem);
+            if let Some(mut record) = self.read_record(&path)? {
+                if recover_abandoned_record(&mut record, self.now_millis()) {
+                    write_json_atomic(&path, &record)?;
+                }
+            }
+        }
+        self.inspect()
     }
 
     /// Claim the most urgent runnable target, if any.
@@ -786,6 +835,19 @@ impl RefreshBroker {
         records.sort_by(|(left, _), (right, _)| left.cmp(right));
         Ok(records)
     }
+}
+
+fn recover_abandoned_record(record: &mut TargetRecord, now: u64) -> bool {
+    let Some(running) = record.running.take() else {
+        return false;
+    };
+    record.priority = more_urgent(record.priority, running.priority);
+    record.state = RefreshTargetState::Queued;
+    record.quiet_deadline_millis = None;
+    record.follow_up_required = false;
+    record.updated_at_millis = now;
+    record.last_error = Some("refresh owner exited without settling".to_string());
+    true
 }
 
 fn is_urgent(priority: JobPriority) -> bool {

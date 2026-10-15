@@ -5,11 +5,30 @@ use std::{
 };
 
 use gwt_agent::{
-    runtime_gc::collect_stale_runtime_namespaces, AgentId, AgentStatus, Session,
-    SessionRuntimeState,
+    runtime_gc::{
+        collect_stale_runtime_namespaces, RUNTIME_NAMESPACE_GC_INTERVAL, RUNTIME_NAMESPACE_MIN_AGE,
+    },
+    AgentId, AgentStatus, Session, SessionRuntimeState,
 };
 
-const AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const AGE: Duration = RUNTIME_NAMESPACE_MIN_AGE;
+
+#[test]
+fn runtime_gc_reclaims_five_minute_dead_namespaces_on_minute_schedule() {
+    let root = tempfile::tempdir().unwrap();
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let old = now - Duration::from_secs(5 * 60);
+    namespace(root.path(), 1, "dead", old);
+    namespace(root.path(), 2, "recent", old + Duration::from_secs(1));
+
+    let report = collect_stale_runtime_namespaces(root.path(), now, AGE, |_| Some(false)).unwrap();
+    assert_eq!(report.reclaimed, 1);
+    assert_eq!(report.retained, 1);
+    assert_eq!(report.reasons["recent"], 1);
+    assert!(!gwt_agent::runtime_state_dir_for_pid(root.path(), 1).exists());
+    assert!(gwt_agent::runtime_state_dir_for_pid(root.path(), 2).exists());
+    assert!(RUNTIME_NAMESPACE_GC_INTERVAL <= Duration::from_secs(60));
+}
 
 #[test]
 fn runtime_gc_keeps_namespace_during_sidecar_publication() {

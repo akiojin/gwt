@@ -392,6 +392,9 @@ pub struct Session {
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     #[serde(default)]
     pub linked_issue_number: Option<u64>,
+    /// Independent review dispatch, distinct from a producing agent session.
+    #[serde(default)]
+    pub review_dispatch: bool,
     /// Issue #4217 FR-002: who started this session. Stamped by the launcher,
     /// which is the only party that knows; every gate that used to sniff
     /// `GWT_AUTONOMOUS_EXECUTION` reads this instead. Absent in legacy records,
@@ -558,6 +561,7 @@ impl Session {
             execution_binding: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
+            review_dispatch: false,
             launch_route: LaunchRoute::Manual,
             launch_origin: SessionLaunchOrigin::Launch,
             restore_source_session_id: None,
@@ -607,6 +611,10 @@ impl Session {
         session.docker_service = config.docker_service.clone();
         session.docker_lifecycle_intent = config.docker_lifecycle_intent;
         session.linked_issue_number = config.linked_issue_number;
+        session.review_dispatch = config
+            .env_vars
+            .get("GWT_REVIEW_DISPATCH")
+            .is_some_and(|value| value.trim() == "1");
         session.launch_route = config.launch_route;
         session.launch_command = config.command.clone();
         session.launch_args = config.args.clone();
@@ -2959,6 +2967,10 @@ mod tests {
         assert!(!session.skip_permissions);
         assert!(!session.fast_mode);
         assert!(!session.codex_fast_mode);
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["review_dispatch"],
+            false
+        );
         assert_eq!(session.runtime_target, LaunchRuntimeTarget::Host);
         assert!(session.docker_service.is_none());
         assert!(session.docker_runtime_binding.is_none());
@@ -2979,20 +2991,24 @@ mod tests {
         assert_eq!(value["launch_origin"], "launch");
         value["launch_origin"] = serde_json::json!("automatic_restore");
         value["restore_source_session_id"] = serde_json::json!("source-session");
+        value["review_dispatch"] = serde_json::json!(true);
         let restored: Session = serde_json::from_value(value.clone()).expect("restore metadata");
         let persisted = toml::to_string(&restored).expect("persist restore metadata");
         let roundtrip: Session = toml::from_str(&persisted).expect("read restore metadata");
         let roundtrip = serde_json::to_value(roundtrip).expect("inspect restore metadata");
         assert_eq!(roundtrip["launch_origin"], "automatic_restore");
         assert_eq!(roundtrip["restore_source_session_id"], "source-session");
+        assert_eq!(roundtrip["review_dispatch"], true);
 
         let legacy = value.as_object_mut().expect("Session object");
         legacy.remove("launch_origin");
         legacy.remove("restore_source_session_id");
+        legacy.remove("review_dispatch");
         let legacy: Session = serde_json::from_value(value).expect("read legacy Session");
         let legacy = serde_json::to_value(legacy).expect("inspect legacy Session");
         assert_eq!(legacy["launch_origin"], "unknown");
         assert!(legacy["restore_source_session_id"].is_null());
+        assert_eq!(legacy["review_dispatch"], false);
     }
 
     #[test]
@@ -6299,6 +6315,9 @@ display_name = "Claude Code"
         config.docker_lifecycle_intent = DockerLifecycleIntent::Restart;
         config.linked_issue_number = Some(1921);
         config.session_mode = crate::SessionMode::Continue;
+        config
+            .env_vars
+            .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
 
         let session = Session::from_launch_config("/tmp/worktree", "feature/demo", &config);
 
@@ -6323,6 +6342,10 @@ display_name = "Claude Code"
         assert_eq!(session.linked_issue_number, Some(1921));
         assert_eq!(session.session_mode, crate::SessionMode::Continue);
         assert_eq!(session.status, AgentStatus::Running);
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["review_dispatch"],
+            true
+        );
     }
 
     /// Issue #4217 AC-2: the launch route reaches the durable Session, which
