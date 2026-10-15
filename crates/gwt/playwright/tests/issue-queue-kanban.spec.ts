@@ -375,6 +375,9 @@ test("Issue #5321 Settings integrates Issues at 1280px without duplicate surface
   await max.fill("3");
   await max.press("Tab");
   await expect(max).toHaveValue("3");
+  // Wait for the saved Manual status before requesting Auto; the input's
+  // optimistic value alone does not acknowledge the fixture's async reply.
+  await expect(root.locator('[data-metric="active"]')).toHaveText("Active 1/3");
   await mode.selectOption("auto");
   await expect(max).toBeDisabled();
   await expect(settings.getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);

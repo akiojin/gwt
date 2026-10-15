@@ -1034,9 +1034,8 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
       });
 
       await page.goto(APP_URL);
-      await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(
-        SELECTION_ROW_COUNT,
-      );
+      await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       // Distinct rows, striding across the list so consecutive clicks never
       // reuse the previous row and the stale 300 ms replies keep landing on
@@ -1106,9 +1105,8 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
       });
 
       await page.goto(APP_URL);
-      await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(
-        SELECTION_ROW_COUNT,
-      );
+      await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       const first = SELECTION_FIRST_NUMBER + 3;
       const second = SELECTION_FIRST_NUMBER + 21;
@@ -1143,9 +1141,8 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
       });
 
       await page.goto(APP_URL);
-      await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(
-        SELECTION_ROW_COUNT,
-      );
+      await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       await page
         .locator(".surface-knowledge .knowledge-search")
@@ -1201,9 +1198,8 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
       });
 
       await page.goto(APP_URL);
-      await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(
-        SELECTION_ROW_COUNT,
-      );
+      await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       await page
         .locator(".surface-knowledge .knowledge-search")
@@ -1278,7 +1274,7 @@ async function measureKnowledgeSelectionLatency(
     }) => {
       const probe = window.__knowledgeSelectionProbe();
       const clickAndObserve = async (number, observeMs) => {
-        const row = probe.rowFor(number);
+        const row = await probe.rowFor(number);
         if (!row) {
           throw new Error(`row ${number} is not rendered`);
         }
@@ -1337,9 +1333,8 @@ async function runReversedKnowledgeSelection(page, { first, second, observeMs })
     async ({ first: a, second: b, observeMs: window_ }) => {
       const probe = window.__knowledgeSelectionProbe();
       const observer = { expected: null, mismatchedFrames: 0, staleBodyFrames: 0, frames: 0 };
-      const rowA = probe.rowFor(a);
-      const rowB = probe.rowFor(b);
-      if (!rowA || !rowB) {
+      const rowA = await probe.rowFor(a);
+      if (!rowA) {
         throw new Error("reversed-order fixture rows are not rendered");
       }
       const started = performance.now();
@@ -1364,6 +1359,8 @@ async function runReversedKnowledgeSelection(page, { first, second, observeMs })
         }
         const elapsed = performance.now() - started;
         if (observer.expected === a && elapsed >= 32) {
+          const rowB = await probe.rowFor(b);
+          if (!rowB) throw new Error(`row ${b} is not rendered`);
           observer.expected = b;
           clickedSecondAt = performance.now();
           rowB.click();
@@ -1390,9 +1387,9 @@ async function runReversedKnowledgeSelection(page, { first, second, observeMs })
 }
 
 async function clickKnowledgeRow(page, number) {
-  return await page.evaluate((target) => {
+  return await page.evaluate(async (target) => {
     const probe = window.__knowledgeSelectionProbe();
-    const row = probe.rowFor(target);
+    const row = await probe.rowFor(target);
     if (!row) {
       throw new Error(`row ${target} is not rendered`);
     }
@@ -1572,10 +1569,27 @@ async function installKnowledgeSelectionBackend(
         }
         const pane = () => root.querySelector(".knowledge-detail-pane");
         return {
-          rowFor: (number) =>
-            root.querySelector(
+          rowFor: async (number) => {
+            const findRow = () => root.querySelector(
               `.knowledge-row[data-issue-number="${number}"] .knowledge-row-select`,
-            ),
+            );
+            if (findRow()) return findRow();
+            // Scroll the 500-entry fixture before measuring the click itself.
+            // Virtual rows enter the DOM only near the viewport; measured row
+            // heights can shift the initial proportional scroll estimate.
+            const list = root.querySelector(".knowledge-list-pane");
+            list.scrollTop = (number - fixtureFirstNumber) / fixtureRowCount * list.scrollHeight;
+            for (let attempt = 0; attempt < 100; attempt += 1) {
+              await new Promise(resolve => requestAnimationFrame(resolve));
+              const row = findRow();
+              if (row) return row;
+              const first = root.querySelector(".knowledge-row");
+              if (!first) break;
+              list.scrollTop += number < Number(first.dataset.issueNumber)
+                ? -list.clientHeight : list.clientHeight;
+            }
+            return null;
+          },
           nextFrame: () =>
             new Promise((resolve) => requestAnimationFrame(() => resolve(null))),
           identity: () => {
