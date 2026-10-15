@@ -11,92 +11,16 @@ const report = (id = 'one') => ({ id, kind: 'progress', created_at: '2026-10-11T
 function fixture() {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const visibility = [], copied = [], requested = [];
+  const visibility = [], copied = [];
   const view = createPmChat({ document, root, sessionId: 'session',
-    onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
-    onRequestReports: request => requested.push(request) });
+    onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text) });
   const model = createPmWindowModel();
   model.bindPmWindowState('pm', 'session');
   model.subscribePmWindowState(state => state.windows.pm, state => view.update(state));
-  let reportRevision = 0;
-  const update = (reports = [], error = null, current = null, revision = ++reportRevision) => model.applyPmWindowReceiveEvent({
-    kind: 'pm_reports', id: 'pm', session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current,
-    reports_mode: 'snapshot', slice: { epoch: 'reports', base_revision: 0, revision } });
-  return { root, model, view, visibility, copied, requested, update };
+  const update = (reports = [], error = null, current = null) => model.applyPmWindowReceiveEvent({
+    kind: 'pm_reports', id: 'pm', session_id: model.readPmWindowState().windows.pm.sessionId, reports, error, current });
+  return { root, model, view, visibility, copied, update };
 }
-
-test('Reports revisions fence gaps while snapshots replace the bounded tail', () => {
-  const model = createPmWindowModel();
-  model.bindPmWindowState('pm', 'session');
-  const receive = (revision, base, mode, reports, extra = {}) => model.applyPmWindowReceiveEvent({
-    kind: 'pm_reports', id: 'pm', session_id: 'session', reports, reports_mode: mode,
-    slice: { epoch: 'server', base_revision: base, revision }, ...extra });
-  receive(1, 0, 'snapshot', [report()]);
-  assert.equal(model.readPmWindowState().windows.pm.reportsCursor.revision, 1);
-  receive(2, 1, 'delta', [report('two')], { ordered_ids: ['one', 'two'], removed_ids: [] });
-  assert.deepEqual(model.readPmWindowState().windows.pm.reports.map(item => item.id), ['one', 'two']);
-  receive(1, 0, 'snapshot', [report('old')]);
-  assert.equal(model.readPmWindowState().windows.pm.reports[1].id, 'two');
-  assert.equal(receive(4, 3, 'delta', [report('gap')]), 'reports');
-  assert.equal(model.readPmWindowState().windows.pm.reportsCursor.revision, 2);
-  receive(4, 0, 'snapshot', [report('tail')]);
-  const history = model.readPmWindowState().windows.pm.reports;
-  receive(4, 4, 'unchanged', [], { current: { observed_at: '2026-10-14T00:00:00Z', stale_minutes: 12 } });
-  assert.equal(model.readPmWindowState().windows.pm.reports, history);
-  assert.equal(model.readPmWindowState().windows.pm.current.stale_minutes, 12);
-  assert.equal(receive(5, 4, 'snapshot', Array.from({ length: 201 }, (_, index) => report(String(index)))), 'reports');
-  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, 'tail');
-  assert.equal(receive(5, 4, 'snapshot', [{ ...report(), body: '界'.repeat(700000) }]), 'reports');
-});
-
-test('Older and Latest replace the visible page and reconnect resets the Reports cursor', () => {
-  const { root, model, requested } = fixture();
-  const before = { created_at: '2026-10-11T00:00:00Z', source: 'legacy', ordinal: 20, id: 'new' };
-  const receive = (mode, reports, cursor) => model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm',
-    session_id: 'session', slice: { epoch: 'server', base_revision: 0, revision: 1 },
-    reports_mode: mode, reports, before: cursor });
-  receive('snapshot', [report('new')], before);
-  const details = root.querySelector('details'); details.setAttribute('open', '');
-  root.querySelector('[aria-label="Older PM reports"]').click();
-  assert.deepEqual(requested, [{ before }]);
-  receive('history', [report('old')], null);
-  assert.equal(root.querySelectorAll('article').length, 1);
-  assert.equal(root.querySelector('article').dataset.reportId, 'old');
-  assert.equal(root.querySelector('[aria-label="Older PM reports"]').hidden, true);
-  receive('unchanged', [], before);
-  assert.equal(model.readPmWindowState().windows.pm.reportsPage, true);
-  root.querySelector('[aria-label="Latest PM reports"]').click();
-  assert.deepEqual(requested.at(-1), { reset: true });
-  receive('snapshot', [report('new')], before);
-  assert.equal(root.querySelector('article').dataset.reportId, 'new');
-  assert.equal(root.querySelector('[aria-label="Latest PM reports"]').hidden, true);
-  assert.equal(root.querySelector('details'), details);
-  assert.equal(details.hasAttribute('open'), true);
-  model.resetPmWindowReports();
-  assert.equal(model.readPmWindowState().windows.pm.reportsCursor, null);
-});
-
-test('Reports request generations preserve paging intent across delayed workers', () => {
-  const model = createPmWindowModel();
-  model.bindPmWindowState('pm', 'session');
-  const poll = model.preparePmReportsRequest('pm');
-  const history = model.preparePmReportsRequest('pm', { before: { id: 'anchor' } });
-  const response = (request, reports, mode) => model.applyPmWindowReceiveEvent({ kind: 'pm_reports', id: 'pm',
-    session_id: 'session', request_id: request.request_id, reports_mode: mode, reports,
-    slice: { epoch: 'server', base_revision: 0, revision: 1 } });
-  response(history, [report('old')], 'history');
-  response(poll, [report('latest')], 'snapshot');
-  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, 'old');
-  const latest = model.preparePmReportsRequest('pm', { reset: true });
-  assert.equal(model.preparePmReportsRequest('pm'), null);
-  response(latest, [report('latest')], 'snapshot');
-  response(history, [report('old')], 'history');
-  assert.equal(model.readPmWindowState().windows.pm.reports[0].id, 'latest');
-  const slowPoll = model.preparePmReportsRequest('pm');
-  assert.equal(model.preparePmReportsRequest('pm'), null);
-  response(slowPoll, [], 'unchanged');
-  assert.ok(model.preparePmReportsRequest('pm'));
-});
 
 test('current summary defaults to collapsed and keeps disclosure across polling per window', () => {
   const { root, update } = fixture();
@@ -258,8 +182,8 @@ test('report updates preserve nodes and scroll, append history, and retain histo
   assert.equal(transcript.scrollTop, 20);
   update([report(), report('two')]);
   assert.equal(root.querySelectorAll('article').length, 2);
-  // Bounded pages may be shorter; revision order identifies a stale read.
-  update([report()], null, null, 1);
+  // Concurrent reads may complete out of order; durable history only appends.
+  update([report()]);
   assert.equal(root.querySelectorAll('article').length, 2);
   update([], 'Reports could not be loaded');
   assert.equal(root.querySelectorAll('article').length, 2);

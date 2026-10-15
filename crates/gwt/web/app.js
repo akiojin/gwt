@@ -1004,9 +1004,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function send(message) {
-        if (message.kind === "load_pm_reports" && message.request_id == null) {
-          return requestPmReports(message.id, { reset: !message.cursor, before: message.before || null });
-        }
         if (isHubNavigationMessage(message.kind)) {
           if (hubSocket?.readyState === WebSocket.OPEN) {
             hubSocket.send(JSON.stringify(message));
@@ -1385,7 +1382,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           },
         });
         projectPageMetadata.resetConnection();
-        resetPmWindowReports();
         setConnectionState(true);
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
@@ -1402,7 +1398,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         syncRunningBranchCleanups();
-        requestVisiblePmReports(true);
+        requestVisiblePmReports();
         requestSupportedAgentRefresh();
       }
 
@@ -5474,8 +5470,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       const pmChatViews = new Map();
-      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState,
-        readPmWindowState, resetPmWindowReports, preparePmReportsRequest } = createPmWindowModel();
+      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       const renderedTerminalPackets = new Map();
       subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
         if (!state) return;
@@ -5531,10 +5526,9 @@ import { createUiStateStore } from "/ui-state-store.js";
         view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
-          onRequestReports: options => requestPmReports(windowData.id, options),
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
-            if (!visible) requestVisiblePmReports(true);
+            if (!visible) requestVisiblePmReports();
             if (visible) requestAnimationFrame(() => {
               scheduleTerminalFit(windowData.id, false);
               activateTerminalOnReveal(windowData.id);
@@ -5550,23 +5544,12 @@ import { createUiStateStore } from "/ui-state-store.js";
         requestVisiblePmReports();
       }
 
-      function requestPmReports(windowId, { reset = false, before = null } = {}) {
-        if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
-        const request = preparePmReportsRequest(windowId, { reset, before });
-        if (!request) return "unavailable";
-        socket.send(JSON.stringify({ kind: "load_pm_reports", ...request }));
-        return "sent";
-      }
-
-      function requestVisiblePmReports(reset = false) {
+      function requestVisiblePmReports() {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
           const view = pmChatViews.get(windowData.id);
           if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
-            const state = readPmWindowState().windows[windowData.id];
-            if (reset || !state?.reportsPage || !state?.reportsCursor) {
-              requestPmReports(windowData.id, { reset });
-            }
+            send({ kind: "load_pm_reports", id: windowData.id });
           }
         }
       }
@@ -6572,7 +6555,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
           case "pm_reports": {
-            if (applyPmWindowReceiveEvent(event) === "reports") requestPmReports(event.id, { reset: true });
+            applyPmWindowReceiveEvent(event);
             break;
           }
           case "pm_status":
@@ -7932,7 +7915,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
         refreshVisibleKnowledgeWindows();
-        requestVisiblePmReports(true);
       });
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {

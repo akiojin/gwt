@@ -20,44 +20,6 @@ impl From<gwt_core::pm_report::PmReport> for PmReportView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SliceCursor {
-    pub epoch: String,
-    pub revision: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SliceRevision {
-    pub epoch: String,
-    pub base_revision: u64,
-    pub revision: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PmReportsMode {
-    #[default]
-    Snapshot,
-    Delta,
-    Unchanged,
-    History,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct PmReportsProjection {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<u64>,
-    pub reports_mode: PmReportsMode,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub slice: Option<SliceRevision>,
-    pub reports: Vec<PmReportView>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub removed_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub ordered_ids: Vec<String>,
-    pub before: Option<gwt_core::pm_report::PmReportsHistoryCursor>,
-}
-
 fn serialize_release_notes_entries<S: serde::Serializer>(
     entries: &[gwt_core::release_notes::ReleaseEntry],
     serializer: S,
@@ -647,12 +609,6 @@ pub enum FrontendEvent {
     /// Read explicitly posted reports for the registered PM window.
     LoadPmReports {
         id: String,
-        #[serde(default)]
-        request_id: Option<u64>,
-        #[serde(default)]
-        cursor: Option<SliceCursor>,
-        #[serde(default)]
-        before: Option<gwt_core::pm_report::PmReportsHistoryCursor>,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -2166,8 +2122,7 @@ pub enum BackendEvent {
     PmReports {
         id: String,
         session_id: Option<String>,
-        #[serde(flatten)]
-        projection: PmReportsProjection,
+        reports: Vec<PmReportView>,
         #[serde(skip_serializing_if = "Option::is_none")]
         current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
         error: Option<String>,
@@ -3856,35 +3811,20 @@ mod tests {
             "kind": "load_pm_reports", "id": "pm"
         }))
         .unwrap();
-        assert!(matches!(request, FrontendEvent::LoadPmReports { id, .. } if id == "pm"));
-        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
-            "kind": "load_pm_reports", "id": "pm", "request_id": 7,
-            "cursor": { "epoch": "server", "revision": 2 }
-        }))
-        .unwrap();
-        assert!(matches!(
-            request,
-            FrontendEvent::LoadPmReports {
-                request_id: Some(7),
-                cursor: Some(super::SliceCursor { revision: 2, .. }),
-                before: None,
-                ..
-            }
-        ));
+        assert!(matches!(request, FrontendEvent::LoadPmReports { id } if id == "pm"));
         let event = BackendEvent::PmReports {
             id: "pm".into(), session_id: Some("session".into()), error: None,
             current: None,
-            projection: super::PmReportsProjection { reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
+            reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
                 id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
                 body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
                 created_at: chrono::Utc::now(),
             }), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
                 "id": "qa", "kind": "qa", "question": "Can we ship?",
                 "body": "**Yes.** Checks passed.", "created_at": "2026-10-13T00:00:00Z"
-            })).unwrap())], ..Default::default() },
+            })).unwrap())],
         };
         let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["reports_mode"], "snapshot");
         let html = value["reports"][0]["body_html"].as_str().unwrap();
         for expected in [
             "<h1>Report</h1>",

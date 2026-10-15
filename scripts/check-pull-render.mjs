@@ -19,7 +19,7 @@ const domCalls = new Set(["append", "appendChild", "prepend", "replaceChildren",
 const dataMethods = new Set(("get set has delete clear push pop shift unshift splice slice map filter find findIndex some every reduce sort concat join includes indexOf trim toLowerCase toUpperCase toString replace split match test startsWith endsWith substring at flat flatMap getAttribute querySelector querySelectorAll").split(" "));
 const callbacks = new Set(("forEach map filter find findIndex some every reduce sort flatMap then catch finally").split(" "));
 const schedules = new Set(["setTimeout", "setInterval", "queueMicrotask", "requestAnimationFrame"]);
-const builtins = new Set(["String", "Number", "Boolean", "parseInt", "parseFloat", "isNaN", "isFinite", "Set", "Map", "WeakSet", "WeakMap", "Error", "TypeError", "AggregateError", "Date", "URL", "RegExp", "TextEncoder"]);
+const builtins = new Set(["String", "Number", "Boolean", "parseInt", "parseFloat", "isNaN", "isFinite", "Set", "Map", "WeakSet", "WeakMap", "Error", "TypeError", "AggregateError", "Date", "URL", "RegExp"]);
 const pureNamespaces = /^(Math|Number|String|Array|JSON|Date|Intl|console|performance)\./;
 const pureObject = /^Object\.(keys|values|entries|fromEntries|freeze|is|hasOwn|create|getPrototypeOf)$/;
 const repoRoot = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
@@ -123,9 +123,6 @@ export function scanModule(source, file, { modules, rootName } = {}) {
         const binding = callee.type === "Identifier" ? resolve(node, callee.name) : {};
         const local = binding.fn;
         const model = callee.object?.type === "Identifier" && resolve(node, callee.object.name).model;
-        const encoding = method === "encode" && callee.object?.type === "NewExpression"
-          && callee.object.callee?.name === "TextEncoder";
-        const socketSend = ["socket.send", "hubSocket.send"].includes(spelling);
         if (domCalls.has(method) || /\.(style|classList)\./.test(spelling)) add("dom-call", node, path, context);
         else if (local) follow(local, path + ">" + names.get(local), context);
         else if (binding.handler) {
@@ -143,7 +140,6 @@ export function scanModule(source, file, { modules, rootName } = {}) {
           && !dataMethods.has(method) && !callbacks.has(method) && method !== "addEventListener"
           && !pureNamespaces.test(spelling) && !pureObject.test(spelling)
           && !builtins.has(callee.name) && !schedules.has(callee.name)
-          && !encoding && !socketSend
           && !["clearTimeout", "clearInterval", "cancelAnimationFrame"].includes(callee.name)) add("unresolved-call", node, path, context);
         const executeCallbacks = callbacks.has(method) || schedules.has(callee.name) || (model && ["update", "subscribe"].includes(method));
         for (const argument of node.arguments) {
