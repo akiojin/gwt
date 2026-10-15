@@ -226,6 +226,8 @@ Write-Output 'GWT5538_DONE'
   $run.Environment['GWT5538_FLEET'] = [string][int][bool]$Fleet
   $run.Environment['GWT_PLAYWRIGHT_NODE_MODULES'] = Join-Path $deps 'node_modules'
   $run.Environment['NODE_OPTIONS'] = "--require `"$($resolvePlaywright.Replace('\', '/'))`""
+  # Preserve canonical evidence capture only in the test runner, not the GUI or agents.
+  if ($env:GWT_HEADED_E2E_REPORT) { $run.Environment['GWT_HEADED_E2E_REPORT'] = $env:GWT_HEADED_E2E_REPORT }
   $run.RedirectStandardOutput = $true
   $run.RedirectStandardError = $true
   $runner = [Diagnostics.Process]::Start($run)
