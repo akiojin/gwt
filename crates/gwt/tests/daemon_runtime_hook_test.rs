@@ -368,6 +368,9 @@ fn forward_owner_uses_persisted_agent_session_id_when_hook_session_id_is_missing
 fn forward_owner_is_fail_open_without_live_target_env() {
     let _lock = env_lock();
     let mut env = EnvGuard::new();
+    env.unset("GWT_SESSION_ID");
+    env.unset("GWT_SESSION_RUNTIME_PATH");
+    env.unset("CODEX_THREAD_ID");
     env.unset("GWT_HOOK_FORWARD_URL");
     env.unset("GWT_HOOK_FORWARD_TOKEN");
 
@@ -388,6 +391,11 @@ fn forward_owner_is_fail_open_without_live_target_env() {
 fn forward_owner_is_fail_open_when_live_target_is_unreachable() {
     let _lock = env_lock();
     let mut env = EnvGuard::new();
+    let home = tempfile::tempdir().expect("isolated hook home");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    env.unset("GWT_SESSION_ID");
+    env.unset("GWT_SESSION_RUNTIME_PATH");
+    env.unset("CODEX_THREAD_ID");
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve loopback port");
     let port = listener.local_addr().expect("listener addr").port();
     drop(listener);
