@@ -169,10 +169,13 @@ pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
             .iter()
             .map(PmReport::from),
     );
-    reports.extend(crate::pm_peer::reports(
-        &crate::pm_peer::project_dir(repo_path),
-        Utc::now(),
-    )?);
+    match crate::pm_peer::reports(&crate::pm_peer::project_dir(repo_path), Utc::now()) {
+        Ok(peer) => reports.extend(peer),
+        Err(error) => tracing::warn!(
+            error = %crate::error_ledger::sanitize_error_message(&error.to_string()),
+            "PM peer store unreadable; peer reports omitted"
+        ),
+    }
     reports.sort_by_key(|report| report.created_at);
     Ok(reports)
 }
@@ -434,6 +437,8 @@ mod tests {
             })
             .join("\n");
         fs::write(&path, format!("{legacy}\n")).unwrap();
+        let peer_path = crate::paths::gwt_home().join("pm-peer-messages.json");
+        fs::write(&peer_path, b"{").unwrap();
         let qa = post_report(
             &repo,
             PmReportKind::Qa,
@@ -451,6 +456,7 @@ mod tests {
                 .is_none());
         }
         assert_eq!(reports[3], qa);
+        assert_eq!(fs::read(&peer_path).unwrap(), b"{");
         assert_eq!(
             serde_json::to_value(&reports[3]).unwrap()["question"],
             "Can we ship?"

@@ -91,6 +91,32 @@ test.describe('PM reports', () => {
       const screenshot = info.outputPath(`pm-peer-reports-${info.project.name}.png`);
       await pane.screenshot({ path: screenshot });
       await info.attach('PM peer reports', { path: screenshot, contentType: 'image/png' });
+      const validPeerStore = readFileSync(storePath);
+      try {
+        writeFileSync(storePath, '{');
+        const nativeBody = `Native report during peer outage ${randomUUID()}`;
+        const nativeEnv = { ...childEnv };
+        delete nativeEnv.GWT_SESSION_ID;
+        const nativeResult = spawnSync(`${ROOT}/target/debug/gwtd`, [], {
+          cwd: ROOT, env: nativeEnv, encoding: 'utf8',
+          input: JSON.stringify({ schema_version: 1, operation: 'pm.report.post', params: {
+            kind: 'progress', body: nativeBody,
+          } }),
+        });
+        expect(nativeResult.status, nativeResult.stderr).toBe(0);
+        expect(JSON.parse(nativeResult.stdout).ok).toBe(true);
+        await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+        await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible();
+        await expect(reports.locator('article').filter({ hasText: nativeBody })).toHaveCount(1);
+        await expect(outgoingReport).toHaveCount(0);
+        await expect(incomingReport).toHaveCount(0);
+      } finally {
+        writeFileSync(seededStorePath, validPeerStore);
+        renameSync(seededStorePath, storePath);
+      }
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await expect(outgoingReport).toHaveCount(1);
+      await expect(incomingReport).toHaveCount(1);
       expect(errors).toEqual([]);
     });
   });

@@ -1630,6 +1630,9 @@ mod tests {
             pm_peer::{self, PeerKind, PeerProject, PeerSend},
             test_support::{ScopedEnvVar, ScopedGwtHome},
         };
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "peer-recipient");

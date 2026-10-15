@@ -5969,6 +5969,8 @@ mod tests {
             CliCommand::Pm(command) => command,
             other => panic!("unexpected report command: {other:?}"),
         };
+        let peer_path = gwt_core::paths::gwt_home().join("pm-peer-messages.json");
+        std::fs::write(&peer_path, b"{").unwrap();
         assert_eq!(
             crate::cli::pm::run(&mut env, capture(), &mut output).unwrap(),
             0
@@ -5980,6 +5982,7 @@ mod tests {
         );
         assert_eq!(saved["instruction"]["id"], saved["report"]["id"]);
         assert_eq!(gwt_core::user_instruction::load(&repo).unwrap().len(), 1);
+        assert_eq!(std::fs::read(&peer_path).unwrap(), b"{");
         let CliCommand::Pm(list) = ok("pm.report.list", json!({})) else {
             panic!("expected PM list")
         };
