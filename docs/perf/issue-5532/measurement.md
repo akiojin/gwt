@@ -55,11 +55,26 @@ the query is pending, local checking/unavailable messages, update failure and
 retry, and reopening during an update without racing a fresh query. Both themes
 must pass with zero console/page errors in canonical verification.
 
-The headed preflight passed both themes. Its first light run reached all feature
+An earlier headed preflight passed both themes. Its first light run reached all feature
 assertions but timed out on a redundant final close used only for cleanup. The
 test now leaves that final cleanup to the page fixture and the wrapper's owned
 process shutdown. The three close/reopen acceptance steps remain unchanged.
 Unrelated `ListIssueMonitor` stalls were recorded separately on Issue #5537;
 the final close failure's direct cause was not established.
+
+The first canonical run then exposed a separate fixture synchronization failure
+in dark mode: the second language selection returned no selected values while
+the previous "Saved" message still satisfied the status assertion. Its trace
+contained no second save acknowledgement, and a reopened window's real Settings
+snapshot arrived after the synthetic autostart status. The fixture now waits for
+a Settings snapshot for the current page (a fresh read for newly created windows)
+and a new save acknowledgement matching
+the requested language. Existing assertions and timeout budgets are unchanged;
+this correction does not alter production Settings behavior.
+
+The same owned backend serves both themes. The second page can restore an
+already-open Settings window, whose focus action sends no additional read.
+That case waits for the current page's initial snapshot; later close/reopen
+steps still require a new snapshot.
 
 User Verification Result: n/a (autonomous)

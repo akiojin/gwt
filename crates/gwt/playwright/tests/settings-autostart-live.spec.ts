@@ -53,8 +53,16 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await page.bringToFront();
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const open = async () => {
+        // A new page can restore the previous theme's Settings window. Focusing
+        // that window sends no read; its initial snapshot is already in flight.
+        const before = await settings.count() === 0
+          ? await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0)
+          : 0;
         await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "system" } })));
         await expect(settings).toBeVisible();
+        await page.waitForFunction(before => ((window as any).__gwtPlaywrightMessages ?? [])
+          .some(({ sequence, payload }: any) => sequence > before && payload.kind === "system_settings"),
+        before, { timeout: 30_000 });
       };
       const close = async () => {
         await settings.getByRole("button", { name: "Close window", exact: true }).click();
@@ -69,6 +77,16 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       const status = panel.locator('[data-role="autostart-settings-status"]');
       const systemStatus = panel.locator('[data-role="system-settings-status"]');
       const language = panel.getByLabel("Output Language", { exact: true });
+      const saveLanguage = async (value: string) => {
+        const before = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+        await language.selectOption(value);
+        await page.waitForFunction(({ before, value }) => ((window as any).__gwtPlaywrightMessages ?? [])
+          .some(({ sequence, payload }: any) => sequence > before
+            && payload.kind === "system_settings_updated" && payload.language === value),
+        { before, value }, { timeout: 30_000 });
+        await expect(systemStatus).toHaveText("Saved system settings.", { timeout: 30_000 });
+        await expect(language).toHaveValue(value);
+      };
 
       await open();
       await expect.poll(() => requests.filter(request => request.kind === "get_autostart_status").length).toBeGreaterThan(0);
@@ -89,9 +107,7 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await expect(language).toBeEnabled();
       const originalLanguage = await language.inputValue();
       const nextLanguage = originalLanguage === "ja" ? "en" : "ja";
-      await language.selectOption(nextLanguage);
-      await expect(systemStatus).toHaveText("Saved system settings.", { timeout: 30_000 });
-      await expect(language).toHaveValue(nextLanguage);
+      await saveLanguage(nextLanguage);
       await expect(status).toHaveText("Checking login launch status…");
       expect(requests.filter(request => request.kind === "get_autostart_status").length,
         "reopening while checking reuses the in-flight query").toBe(queriesBeforeCheckingReopen);
@@ -120,9 +136,7 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await expect.poll(() => requests.filter(request => request.kind === "update_autostart")).toEqual([
         { kind: "update_autostart", enabled: false },
       ]);
-      await language.selectOption(originalLanguage);
-      await expect(systemStatus).toHaveText("Saved system settings.", { timeout: 30_000 });
-      await expect(language).toHaveValue(originalLanguage);
+      await saveLanguage(originalLanguage);
       await expect(status).toHaveText("Saving…");
       reply({ kind: "autostart_error", message: "Fixture login setting denied." });
       await expect(status).toHaveText("Fixture login setting denied.");
