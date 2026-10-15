@@ -2227,11 +2227,11 @@ fn resolve_coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
         return coordination_child_bare_repo(worktree_root);
     }
     note_coordination_git_spawn();
-    let mut cmd = crate::process::hidden_command("git");
-    cmd.args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(worktree_root);
-    crate::process::scrub_git_env(&mut cmd);
-    let output = cmd.output().ok();
+    let output = crate::process::run_git_logged_scrubbed(
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        Some(worktree_root),
+    )
+    .ok();
     if let Some(output) = output.filter(|output| output.status.success()) {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let common_dir = stdout
@@ -7635,6 +7635,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load_reminders_state(&repo, "session-1").unwrap(), updated);
+    }
+
+    #[test]
+    fn startup_common_dir_coordination_reuses_metadata_for_six_requests() {
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "--quiet"]);
+        let expected = dunce::canonicalize(repo.path()).unwrap();
+        COORDINATION_GIT_SPAWNS.with(|count| count.set(0));
+        for _ in 0..6 {
+            assert_eq!(
+                resolve_coordination_repo_root(repo.path()),
+                Some(expected.clone())
+            );
+        }
+        assert_eq!(COORDINATION_GIT_SPAWNS.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn startup_common_dir_coordination_fallback_is_logged_and_scrubs_env() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "--quiet"]);
+        let nested = repo.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        run_git(foreign.path(), &["init", "--quiet"]);
+        let _git_dir = ScopedEnvVar::set("GIT_DIR", foreign.path().join(".git"));
+        let before = crate::process::thread_git_spawn_count();
+        assert_eq!(
+            resolve_coordination_repo_root(&nested),
+            Some(dunce::canonicalize(repo.path()).unwrap())
+        );
+        assert_eq!(crate::process::thread_git_spawn_count() - before, 1);
     }
 
     #[test]

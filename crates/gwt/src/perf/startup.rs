@@ -38,6 +38,9 @@ pub enum StartupPhase {
     WorktreeInventory,
     /// Each logged Git completion during the startup observation window.
     GitCommand,
+    /// Issue #4415: repository identity discovery, counted separately from
+    /// other commands while remaining part of the overall Git totals.
+    GitCommonDir,
     /// Issue #4520 AC-2: one GUI event-loop dispatch that blocked past
     /// [`EVENT_LOOP_STALL_MS`] during the startup observation window.
     EventLoopStall,
@@ -71,6 +74,7 @@ impl StartupPhase {
             Self::TerminalInteractive => "terminal_interactive",
             Self::WorktreeInventory => "worktree_inventory",
             Self::GitCommand => "git_command",
+            Self::GitCommonDir => "git_common_dir",
             Self::EventLoopStall => "event_loop_stall",
         }
     }
@@ -308,7 +312,7 @@ impl StartupRun {
 
     /// Background startup work can outlive restore drain; record completed Git
     /// commands for the first ten minutes without counting phase overlap twice.
-    fn git_command(&self, elapsed_ms: f64, duration_ms: f64) -> Option<PerfRecord> {
+    fn git_command(&self, label: &str, elapsed_ms: f64, duration_ms: f64) -> Option<PerfRecord> {
         if !elapsed_ms.is_finite()
             || !(0.0..=STARTUP_OBSERVATION_MS).contains(&elapsed_ms)
             || !duration_ms.is_finite()
@@ -316,8 +320,16 @@ impl StartupRun {
         {
             return None;
         }
+        let common_dir = label.starts_with("git rev-parse ")
+            && label
+                .split_whitespace()
+                .any(|arg| arg == "--git-common-dir");
         Some(self.sample(
-            StartupPhase::GitCommand,
+            if common_dir {
+                StartupPhase::GitCommonDir
+            } else {
+                StartupPhase::GitCommand
+            },
             (elapsed_ms - duration_ms).max(0.0),
             duration_ms,
             None,
@@ -406,9 +418,9 @@ pub fn begin(started: Instant) {
     }
 }
 
-fn record_git_command(duration_ms: u64) {
+fn record_git_command(label: &str, duration_ms: u64) {
     update(|run, elapsed| {
-        run.git_command(elapsed, duration_ms as f64)
+        run.git_command(label, elapsed, duration_ms as f64)
             .into_iter()
             .collect()
     });
@@ -598,6 +610,9 @@ pub struct StartupReport {
     /// Independent completion totals, excluding overlapping phase/inventory rows.
     pub git_spawn_count: u64,
     pub git_duration_ms: f64,
+    /// Issue #4415: common-directory subprocesses only, including fallbacks.
+    pub git_common_dir_count: usize,
+    pub git_common_dir_ms: f64,
     /// Issue #4520 AC-2: event-loop dispatches that blocked past 100 ms, and
     /// the longest one. Each is also an `event_loop_stall` row in `phases`.
     pub event_loop_stall_count: usize,
@@ -664,11 +679,19 @@ pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
         .filter(|phase| phase.phase == StartupPhase::WorktreeInventory);
     let worktree_inventory_count = inventory.clone().count();
     let worktree_inventory_ms = inventory.map(|phase| phase.duration_ms).sum();
-    let git_commands = phases
-        .iter()
-        .filter(|phase| phase.phase == StartupPhase::GitCommand);
+    let git_commands = phases.iter().filter(|phase| {
+        matches!(
+            phase.phase,
+            StartupPhase::GitCommand | StartupPhase::GitCommonDir
+        )
+    });
     let git_spawn_count = git_commands.clone().count() as u64;
     let git_duration_ms = git_commands.map(|phase| phase.duration_ms).sum();
+    let common_dir = phases
+        .iter()
+        .filter(|phase| phase.phase == StartupPhase::GitCommonDir);
+    let git_common_dir_count = common_dir.clone().count();
+    let git_common_dir_ms = common_dir.fold(0.0, |total, phase| total + phase.duration_ms);
     let stalls = phases
         .iter()
         .filter(|phase| phase.phase == StartupPhase::EventLoopStall);
@@ -688,6 +711,8 @@ pub fn latest_startup(records: &[PerfLogRecord]) -> Option<StartupReport> {
         worktree_inventory_ms,
         git_spawn_count,
         git_duration_ms,
+        git_common_dir_count,
+        git_common_dir_ms,
         event_loop_stall_count,
         event_loop_stall_max_ms,
     })
@@ -702,20 +727,34 @@ mod tests {
             run.phase_with_git(StartupPhase::ProjectStateLoad, 0.0, 500.0, 2, 300.0)
                 .unwrap(),
             run.worktree_inventory(100.0, 200.0).unwrap(),
-            run.git_command(300.0, 200.0).unwrap(),
+            run.git_command(
+                "git rev-parse --path-format=absolute --git-common-dir",
+                300.0,
+                200.0,
+            )
+            .unwrap(),
             run.phase(StartupPhase::RestoreDrain, 0.0, 500.0).unwrap(),
-            run.git_command(700.0, 100.0).unwrap(),
+            run.git_command("git status", 700.0, 100.0).unwrap(),
         ];
-        assert!(run.git_command(600_001.0, 10.0).is_none());
+        assert!(run
+            .git_command("git rev-parse --git-common-dir", 600_001.0, 10.0)
+            .is_none());
         let report =
             latest_startup(&records.into_iter().map(read_record).collect::<Vec<_>>()).unwrap();
         assert_eq!(report.git_spawn_count, 2);
         assert_eq!(report.git_duration_ms, 300.0);
+        assert_eq!(report.git_common_dir_count, 1);
+        assert_eq!(report.git_common_dir_ms, 200.0);
         assert!(!report.missing_phases.contains(&StartupPhase::GitCommand));
         let git = report
             .phases
             .iter()
-            .filter(|phase| phase.phase == StartupPhase::GitCommand)
+            .filter(|phase| {
+                matches!(
+                    phase.phase,
+                    StartupPhase::GitCommand | StartupPhase::GitCommonDir
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(git.len(), 2);
         assert_eq!(
@@ -738,6 +777,10 @@ mod tests {
         assert_eq!(report.phases[0].git_duration_ms, 210.0);
         assert_eq!(report.tray_within_budget, Some(true));
         assert!(!report.missing_phases.contains(&StartupPhase::GitCommand));
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert_eq!(serialized["git_common_dir_count"], 0);
+        assert_eq!(serialized["git_common_dir_ms"], 0.0);
+        assert!(!report.git_common_dir_ms.is_sign_negative());
     }
 
     #[test]
