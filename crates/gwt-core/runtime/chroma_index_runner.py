@@ -22,7 +22,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
 
 def emit(payload: dict) -> None:
@@ -3406,6 +3406,7 @@ def _materialize_file_artifact_pair(
     heavy_target: Optional[str] = None,
     progress_offset: int = 0,
     progress_total: Optional[int] = None,
+    on_checkpoint: Optional[Callable[[int], None]] = None,
 ) -> tuple[int, int, bool]:
     """Build one Base or Overlay artifact pair.
 
@@ -3420,6 +3421,8 @@ def _materialize_file_artifact_pair(
     if _artifact_pair_metadata_is_verified(
         artifact_dir, records, descriptor_identity
     ):
+        if on_checkpoint is not None:
+            on_checkpoint(len(records))
         return 0, len(records), False
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
@@ -3427,6 +3430,8 @@ def _materialize_file_artifact_pair(
         if _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
+            if on_checkpoint is not None:
+                on_checkpoint(len(records))
             return 0, len(records), False
         if not (len(records) == len(identities) == len(manifest_plans)):
             raise ValueError("file-index-v2 artifact plan length mismatch")
@@ -3462,6 +3467,8 @@ def _materialize_file_artifact_pair(
                 )
                 computed += batch_computed
                 hits += batch_hits
+                if on_checkpoint is not None:
+                    on_checkpoint(stop)
                 if heavy_target is not None:
                     _write_heavy_progress(
                         heavy_target,
@@ -4686,6 +4693,23 @@ def _file_index_v2_yielded_result(
     }
 
 
+def _read_file_index_v2_build_progress(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        progress = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(progress, dict)
+        or progress.get("schema_version") != 1
+        or type(progress.get("done")) is not int
+        or type(progress.get("total")) is not int
+        or not 0 <= progress["done"] <= progress["total"]
+        or progress.get("phase") not in ("base", "overlay")
+    ):
+        return None
+    return progress
+
+
 def _action_index_files_protocol_v2(
     project_root: str,
     repo_hash: str,
@@ -4822,6 +4846,34 @@ def _action_index_files_protocol_v2_pinned(
         "build_state": "verified",
     }
     requested = len(base_records) + len(overlay_records)
+    progress_path = (
+        v2_root / "worktrees" / _safe_artifact_id(worktree_hash) / "build-progress.json"
+    )
+    progress = {
+        "schema_version": 1,
+        "base_generation_id": base_generation_id,
+        "overlay_generation_id": overlay_generation_id,
+        "done": 0,
+        "total": requested,
+        "phase": "base" if base_records else "overlay",
+        "resumable": True,
+    }
+    previous_progress = _read_file_index_v2_build_progress(progress_path)
+    if previous_progress is not None and all(
+        previous_progress.get(key) == progress[key]
+        for key in ("base_generation_id", "overlay_generation_id", "total")
+    ):
+        progress.update(previous_progress)
+
+    def checkpoint(done: int, phase: str) -> None:
+        # Cached batches are replayed into staging on resume. Do not make
+        # their already durable CAS progress appear to go backwards.
+        if done >= progress["done"]:
+            progress.update(done=done, phase=phase)
+        progress["updated_at"] = _file_index_timestamp()
+        _write_json_atomic(progress_path, progress)
+
+    checkpoint(0, progress["phase"])
     heavy_target = _heavy_target_stem(repo_hash, scope, worktree_hash)
     base_computed, base_hits, base_yielded = _materialize_file_artifact_pair(
         base_dir,
@@ -4835,6 +4887,7 @@ def _action_index_files_protocol_v2_pinned(
         heavy_target=heavy_target,
         progress_offset=0,
         progress_total=requested,
+        on_checkpoint=lambda done: checkpoint(done, "base"),
     )
     if base_yielded:
         return _file_index_v2_yielded_result(
@@ -4868,6 +4921,7 @@ def _action_index_files_protocol_v2_pinned(
         heavy_target=heavy_target,
         progress_offset=len(base_records),
         progress_total=requested,
+        on_checkpoint=lambda done: checkpoint(len(base_records) + done, "overlay"),
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
@@ -4925,6 +4979,9 @@ def _action_index_files_protocol_v2_pinned(
     }
     if not publication.get("ok"):
         return {**result, **publication, "ok": False}
+    if publication.get("published") or publication.get("already_active"):
+        with contextlib.suppress(OSError):
+            progress_path.unlink()
     result.update(publication)
     return result
 
@@ -9396,6 +9453,10 @@ def _explicit_file_index_v2_status_pinned(
         repair_corruption=False,
     )
     view = selection["view"]
+    progress = _read_file_index_v2_build_progress(
+        resolve_file_index_v2_root(repo_hash, db_root)
+        / "worktrees" / _safe_artifact_id(worktree_hash) / "build-progress.json"
+    )
     if view is not None:
         result: Dict[str, Dict[str, Any]] = {}
         for scope in ("files", "files-docs"):
@@ -9411,6 +9472,8 @@ def _explicit_file_index_v2_status_pinned(
             }
             if selection.get("fallback_source"):
                 status["fallback_source"] = selection["fallback_source"]
+            if progress is not None:
+                status["build_progress"] = progress
             result[scope] = status
         return result
 
@@ -9435,6 +9498,10 @@ def _explicit_file_index_v2_status_pinned(
                 "reason": selection["reason"],
             }
         result[scope] = legacy
+        if progress is not None:
+            result[scope]["build_progress"] = progress
+            if selection["reason"] == "view_head_missing":
+                result[scope]["reason"] = "build_incomplete"
     return result
 
 
