@@ -1,6 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.121.1] - 2026-10-15
+
+### Bug Fixes
+
+- **gui:** Persist agent columns across app restarts
+- **knowledge:** Coalesce event refreshes and skip unchanged associations
+- **knowledge:** Publish event refresh through the view model
+- **knowledge:** Consume event invalidation when starting a load
+- **index:** Yield background embedding after each document
+- **issue-monitor:** Keep scan preparation outside prefs lock
+- **issue-monitor:** Recover silent starts and duplicate window bindings
+- **index:** Build 番兵を回収し検索可能なスコープを返す
+- **index:** Report resumable file builds through v2 status
+- **index:** Reuse a resident runner for repeated searches
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 5395 pull request
+
 ## [9.121.0] - 2026-10-15
 
 ### Bug Fixes
