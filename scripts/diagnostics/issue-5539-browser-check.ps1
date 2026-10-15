@@ -134,6 +134,7 @@ Search route responsiveness acceptance. Eight concurrent semantic searches must 
         source_binary_provenance='Working-tree source digests are informational and do not prove binary/source correspondence. The baseline binary digest identifies the measured pre-fix executable.';
         binaries=@((Get-DigestRecord $gwtBinary), (Get-DigestRecord $gwtdBinary));
         sources=@((Get-DigestRecord "$checkout/crates/gwt/src/index_search.rs"),
+            (Get-DigestRecord "$checkout/crates/gwt/src/index_worker.rs"),
             (Get-DigestRecord "$checkout/crates/gwt-core/runtime/chroma_index_runner.py"));
         harness=@((Get-DigestRecord "$checkout/crates/gwt/playwright/tests/search-route-live.spec.ts"),
             (Get-DigestRecord $PSCommandPath));

@@ -1,0 +1,81 @@
+{
+  "checkout": "E:\\gwt\\work\\issue-5539",
+  "label": "after",
+  "sources": [
+    {
+      "path": "E:\\gwt\\work\\issue-5539\\crates\\gwt\\src\\index_search.rs",
+      "sha256": "15e324979588e45c62f29b31c520ff3a2dd2fa9dd17ed93c6a00a452f34d66aa",
+      "bytes": 149918,
+      "last_write_utc": "2026-10-15T18:24:03.3649873Z"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5539\\crates\\gwt\\src\\index_worker.rs",
+      "sha256": "9d22d3e3e70aefa651e1c4ceb9b7c3049da286dca91b4a1a57b3c5e75911a2bb",
+      "bytes": 202672,
+      "last_write_utc": "2026-10-15T19:33:36.1154446Z"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5539\\crates\\gwt-core\\runtime\\chroma_index_runner.py",
+      "sha256": "91cef99dff5279e124c66f60de442403b70e79f0db6574db82bd8871d62f417f",
+      "bytes": 390415,
+      "last_write_utc": "2026-10-15T18:15:11.5119907Z"
+    }
+  ],
+  "runtime_manifest": {
+    "index_path_policy": {
+      "path": "index_path_policy.json",
+      "sha256_16": "7d1c393e6133a5b0",
+      "versioned_path": "runners/index_path_policy.json"
+    },
+    "requirements": {
+      "path": "project_index_requirements.txt",
+      "sha256_16": "eac269738a090205"
+    },
+    "runner": {
+      "path": "runners/chroma_index_runner-91cef99dff5279e1.py",
+      "sha256_16": "91cef99dff5279e1"
+    },
+    "schema_version": 1,
+    "venv": {
+      "path": "venvs/chroma-venv-eac269738a090205"
+    }
+  },
+  "source_binary_provenance": "Working-tree source digests are informational and do not prove binary/source correspondence. The baseline binary digest identifies the measured pre-fix executable.",
+  "runtime_runner": {
+    "path": "E:\\gwt\\work\\issue-5539\\target\\issue-5539-home-4a7ca315866b492e99cda61396a6f05e\\.gwt\\runtime\\runners\\chroma_index_runner-91cef99dff5279e1.py",
+    "sha256": "91cef99dff5279e124c66f60de442403b70e79f0db6574db82bd8871d62f417f",
+    "bytes": 390415,
+    "last_write_utc": "2026-10-15T19:48:39.6092174Z"
+  },
+  "harness": [
+    {
+      "path": "E:\\gwt\\work\\issue-5539\\crates\\gwt\\playwright\\tests\\search-route-live.spec.ts",
+      "sha256": "5c71ee7f806c03348cb6b15b02014a4083ee818291783225de7e8dbc212a3aa5",
+      "bytes": 14277,
+      "last_write_utc": "2026-10-15T18:56:08.9929783Z"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5539\\scripts\\diagnostics\\issue-5539-browser-check.ps1",
+      "sha256": "7b63186e5658c32b00f8def35bf27f989511848c56dad3603a1e134c3f9c9513",
+      "bytes": 12699,
+      "last_write_utc": "2026-10-15T19:44:49.0693622Z"
+    }
+  ],
+  "binaries": [
+    {
+      "path": "E:\\gwt\\work\\issue-5539\\target\\debug\\gwt.exe",
+      "sha256": "499a83cb840bc8f669fe34cada57b07aac84ad5e13c1c166cdd483321f178cba",
+      "bytes": 105368576,
+      "last_write_utc": "2026-10-15T19:48:16.3040469Z"
+    },
+    {
+      "path": "E:\\gwt\\work\\issue-5539\\target\\debug\\gwtd.exe",
+      "sha256": "4efe3c2cdd1f35a2bdcfa29b99fdf1da32694bebea828cef1b0b57d1f6af585d",
+      "bytes": 64459264,
+      "last_write_utc": "2026-10-15T19:47:32.7291624Z"
+    }
+  ],
+  "captured_utc": "2026-10-15T19:49:35.9832515Z",
+  "head": "91800263ecc62b2480b9b859a032040d9336b2bc",
+  "process_id": 31700
+}
