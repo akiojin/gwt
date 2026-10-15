@@ -1128,6 +1128,10 @@ Issue 内に表示された Agent も含み、PM と Shell はスキップしま
 選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
 再び開けます。
 
+Agent のカードとタブのタイトルは1行表示で、先頭の名前は固定されます。
+作業内容を横にスクロールするか、タイトルへのホバー・キーボードフォーカスで全文を読めます。
+Issue と Project Manager の設定項目も、ホバーとキーボードフォーカスで説明を表示します。
+
 ## Operator デザイン言語 (SPEC-2356)
 
 Operator Design System 採用後、gwt は editorial-industrial 系タイポグラフィ

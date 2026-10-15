@@ -26,6 +26,7 @@ import { createInteractionGuard } from "/interaction-guard.js";
 import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
 import { createUiStateStore } from "./ui-state-store.js";
+import { setControlExplanation } from "./control-explanations.js";
 
 export function renderUpdateSettingsStatus(panel, status) {
   const document = panel.ownerDocument;
@@ -268,12 +269,15 @@ export function renderIssuesSettingsPanel(panel, options) {
     row(launch, name, slot).dataset.settingsLaunchAction = action;
   }
   const max = field(launch, "Max active", "number", status?.max_active_agents ?? 0);
+  const capacityExplanation = "Maximum number of issue agents the monitor may run at once. Auto uses the current recommended capacity; Manual sets a fixed maximum.";
+  setControlExplanation(max, capacityExplanation, "settings-max-active");
   launch.insertBefore(max.closest("label"), launch.querySelector('[data-settings-launch-action="monitor-toggle"]'));
   max.min = "1";
   max.step = "1";
   const mode = document.createElement("select");
   mode.className = "settings-select";
   mode.setAttribute("aria-label", "Max active mode");
+  setControlExplanation(mode, "Choose Automatic capacity from current system limits, or Manual to set a fixed maximum.", "settings-max-active-mode");
   for (const [value, name] of [["auto", "Auto"], ["manual", "Manual"]]) {
     const option = document.createElement("option");
     option.value = value;
@@ -284,6 +288,7 @@ export function renderIssuesSettingsPanel(panel, options) {
   max.disabled = status?.max_active_agents_override == null;
   const capacity = document.createElement("span");
   capacity.className = "settings-issues-capacity";
+  setControlExplanation(capacity, capacityExplanation, "settings-capacity");
   max.replaceWith(capacity);
   capacity.append(mode, max);
   mode.addEventListener("change", () => {
@@ -299,6 +304,8 @@ export function renderIssuesSettingsPanel(panel, options) {
   const replenishment = group("Refill");
   const refill = field(replenishment, "Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
   const limit = field(replenishment, "Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
+  setControlExplanation(refill, "Automatically add eligible issues to the launch queue when it has fewer issues than the refill limit.", "settings-auto-refill");
+  setControlExplanation(limit, "Target number of eligible issues kept in the launch queue by Auto-refill. 0 disables automatic refill.", "settings-refill-limit");
   limit.min = "0";
   limit.step = "1";
   const saveRefill = () => {
@@ -308,7 +315,7 @@ export function renderIssuesSettingsPanel(panel, options) {
   refill.addEventListener("change", saveRefill);
   limit.addEventListener("change", saveRefill);
   const labels = field(group("Target"), "Allowed labels", "text", (status?.allowed_labels || []).join(", "));
-  labels.title = "Comma-separated labels. Only matching issues enter the launch queue.";
+  setControlExplanation(labels, "Comma-separated labels. Only matching issues enter the launch queue.", "settings-allowed-labels");
   labels.addEventListener("change", () => send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: [...new Set(labels.value.split(",").map(v => v.trim()).filter(Boolean))] }));
 }
 
@@ -780,6 +787,7 @@ export function createSettingsSurface({
         }
         positionIssuesLaunchControls(body);
         focusedLaunchControl?.focus({ preventScroll: true });
+        body.querySelector(".issue-bridge-root")?.dispatchEvent(new document.defaultView.Event("control-explanations:refresh"));
       }
       function applyIssueSettingsStatus(status, projectRoot) {
         if (!projectRoot) return;

@@ -6232,6 +6232,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                     workspaceOverviewSurface.deleteState(windowId);
                     clearBranchCleanupForWindow(windowId);
                     clearLocalGeometryEdit(geometrySyncState, windowId);
+                    pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
                     element.remove();
                     windowMap.delete(windowId);
                   });
