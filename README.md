@@ -525,7 +525,10 @@ auto-refill, or admitted with an `urgent` label. Queue membership authorizes the
 readiness, claim, and capacity checks still apply. `Launch now` on a row opens the
 launch flow, which creates the `work/issue-N` branch/worktree at launch time and
 starts the agent with `gwt-execute #N`. Failed launches remain visible on their
-Issue rows.
+Issue rows. Operators can stop a failed launch with `issue.monitor.stop`,
+`params.number`, and `params.reason`, even after its live claim/window identity
+was lost. The saved failed window is used only while it still belongs to that
+Issue; stopping records a persistent hold and returns any pane to close.
 
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent
@@ -1621,6 +1624,15 @@ and stops its owned command tree. Runner death also releases its reservation
 without waiting for the reservation TTL. An interruption is neither PASS nor a
 test failure; rerunning the same matrix creates a fresh attempt. A cancellation
 before the first command starts preserves the previous verification record.
+
+Verification children disable Git terminal prompts and Git Credential Manager
+interaction by default. Authentication that requires a GUI or terminal prompt fails instead
+of waiting for input. Cached credentials remain usable.
+
+For a same-project holder reported as a reclaim candidate, call
+`verify.lease.release` with `params.lease_id` and a nonempty `params.reason`.
+Release confirms that no workload remains before reclaiming the holder. Running
+workloads stay protected; use the caller-owned cancellation above for your own attempt.
 
 Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
 lint, coverage, direct headed browser checks, and pre-push checks run
