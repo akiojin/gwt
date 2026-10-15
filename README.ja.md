@@ -493,6 +493,10 @@ open な GitHub Issue は、明示的な追加、有効な Auto-refill、また�
 準備状態・claim・同時実行数のチェックは引き続き適用されます。行の `Launch now` は
 起動フローを開き、起動時に `work/issue-N` のブランチ/worktree を作成して
 `gwt-execute #N` でエージェントを開始します。起動失敗は Issue 行に残ります。
+live な claim/window の識別情報が失われた場合も、operator は `issue.monitor.stop` に
+`params.number` と `params.reason` を渡して失敗した launch を停止できます。
+保存済みの失敗 window は同じ Issue の所有である場合だけ使用し、永続的な停止状態と
+閉じる対象の pane を返します。
 
 `urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
@@ -1509,6 +1513,14 @@ JSON
 所有する command tree を停止します。runner が終了した場合も予約 TTL を待たずに解放します。
 中断は PASS やテスト失敗とは区別し、同じ行列を再実行すると新しい試行を開始します。
 最初のコマンド開始前に取り消した場合は、以前の検証記録を保持します。
+
+検証の子プロセスでは既定で Git の端末プロンプトと Git Credential Manager の対話を無効にします。
+GUI や端末での認証入力が必要になった場合、入力を待たずにエラーを返します。
+キャッシュ済みの認証情報は引き続き使用できます。
+
+同一プロジェクトの holder が回収候補として報告された場合は、`verify.lease.release` に
+`params.lease_id` と空でない `params.reason` を渡します。作業が残っていないことを
+再確認してから回収します。実行中の workload は保護されるため、自分の試行は上記の取消を使います。
 
 初回の `cargo build -p gwt --bin gwtd`、通常の Cargo build、TDD テスト、
 lint、coverage、直接の headed browser 確認、pre-push 確認は verification

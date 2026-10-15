@@ -1723,7 +1723,11 @@ fn canonical_refusal(lease_id: &str, holder: Option<&str>) -> SpecOpsError {
          Canonical leases are owned by `verify.run` and release when the runner finishes; \
          they cannot be released or extended through the manual API unless the holder is \
          orphaned or an old in-tree driver is stalled with no workload left to run.{holder} \
-         Check `verify.lease.status` for the current holder."
+         Check `verify.lease.status` for the current holder. For a same-project reclaim \
+         candidate, use `verify.lease.release` with `params.lease_id` and `params.reason`. \
+         To stop your own running attempt, get its ID from `verify.status` and call \
+         `verify.cancel` with `params.attempt_id` and `params.reason` from the same \
+         project, worktree, session and execution authority. Other attempts stay protected."
     ))
 }
 
@@ -1744,6 +1748,16 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_refusal_names_the_authorized_recovery_operations() {
+        let error = super::canonical_refusal("held", None).to_string();
+        for operation in ["verify.status", "verify.cancel", "verify.lease.release"] {
+            assert!(error.contains(operation), "{error}");
+        }
+        assert!(error.contains("params.attempt_id"), "{error}");
+        assert!(error.contains("params.reason"), "{error}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_disk_budgets_do_not_require_a_listed_mount() {
@@ -2890,8 +2904,34 @@ mod tests {
         }
 
         #[test]
-        fn a_confirmed_empty_stalled_driver_releases_the_lease() {
+        fn a_confirmed_expired_stalled_driver_unblocks_twelve_waiters() {
             let mut held = hold_lease();
+            // Reproduce Issue #4425 without waiting on a wall clock: an
+            // expired holder, no CPU progress, and twelve queued verifiers.
+            held.lease.as_mut().unwrap().extend_until(0).unwrap();
+            let coordinator = open_coordinator().unwrap();
+            let waiting: Vec<_> = (0..12)
+                .map(|index| {
+                    TargetKey::verification("99a8660247f5bc49", format!("waiting-{index:02}"))
+                })
+                .collect();
+            for key in &waiting {
+                coordinator
+                    .reserve_heavy(
+                        key,
+                        JobPriority::ManualRebuild,
+                        Duration::from_secs(600),
+                        Some("waiting for the stalled holder"),
+                    )
+                    .unwrap();
+            }
+            let before = coordinator.heavy_lease_status().unwrap();
+            assert!(before.expired);
+            assert_eq!(before.queue.len(), 12);
+            let next = waiting
+                .iter()
+                .find(|key| Some(key.file_stem()) == before.queue[0].target)
+                .unwrap();
             let lease_id = held.lease_id.clone();
             let mut reclaimer = ScriptedReclaimer {
                 readings: vec![Some(stalled_driver()), Some(stalled_driver())],
@@ -2911,6 +2951,7 @@ mod tests {
 
             assert_eq!(reclaimer.terminated, vec![(std::process::id(), false)]);
             assert!(!still_held(&lease_id));
+            assert_eq!(coordinator.heavy_lease_status().unwrap().queue.len(), 12);
             let events = open_coordinator().unwrap().lease_events().unwrap();
             let event = events.last().unwrap();
             assert_eq!(event.kind, LeaseEventKind::Reclaimed);
@@ -2919,6 +2960,13 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("all commands exited"));
+            let JobAdmission::Owner(next) = coordinator
+                .request_job(next, JobPriority::ManualRebuild, Duration::from_secs(1))
+                .unwrap()
+            else {
+                panic!("the first waiting verifier must be able to progress");
+            };
+            let _lease = next.acquire_heavy(Duration::from_secs(1)).unwrap();
         }
 
         #[test]
