@@ -54,7 +54,59 @@ function wholeHostCpuRatio(start, end) {
   return ratio;
 }
 
+function browserClockMapping(run) {
+  const timing = run?.timing, brackets = timing?.browser_clock;
+  if (!Number.isFinite(timing?.barrier_at) || !Array.isArray(brackets)
+    || brackets.some(b => !b || ![b.before, b.after, b.browser].every(Number.isFinite) || b.after < b.before)) throw new Error('Browser clock metadata invalid');
+  const hull = (left, right) => {
+    const low = Math.min(left.before - left.browser, right.before - right.browser);
+    const high = Math.max(left.after - left.browser, right.after - right.browser);
+    if (![low, high].every(Number.isFinite) || high - low >= 1000) throw new Error('Browser clock uncertainty invalid');
+    return { low, high };
+  };
+  // Historical artifacts retain their original whole-run interpretation.
+  if (timing.browser_clock_rule === undefined) {
+    if (brackets.length !== 2) throw new Error('Browser clock metadata invalid');
+    const bounds = hull(brackets[0], brackets[1]);
+    return () => bounds;
+  }
+  if (timing.browser_clock_rule !== 'segmented_conservative_hull_v1') throw new Error('Browser clock rule invalid');
+  const rows = run.raw?.seconds?.filter(row => row.status !== 'missing');
+  if (!rows || brackets.length !== rows.length + 2 || !Number.isFinite(timing.ws?.end)
+    || brackets[0].after > timing.barrier_at || brackets.at(-1).before < Math.max(timing.ws.end, timing.barrier_at + run.seconds * 1000)) throw new Error('Browser clock coverage invalid');
+  const intervals = [];
+  brackets.forEach((bracket, index) => {
+    if (!Number.isFinite(bracket.time_origin) || bracket.time_origin <= 0
+      || bracket.time_origin !== brackets[0].time_origin) throw new Error('Browser clock timeOrigin changed or missing');
+    if (index > 0) {
+      const previous = brackets[index - 1];
+      if (bracket.before < previous.after || bracket.browser <= previous.browser) throw new Error('Browser clock ordering invalid');
+      intervals.push(hull(previous, bracket));
+    }
+    if (index > 0 && index < brackets.length - 1) {
+      const row = rows[index - 1];
+      if (![row.cpu_at, row.collected_at].every(Number.isFinite)
+        || bracket.before < row.cpu_at || bracket.after > row.collected_at) throw new Error('Browser clock sample coverage invalid');
+    }
+  });
+  const covered = stamp => Number.isFinite(stamp) && stamp >= brackets[0].browser && stamp <= brackets.at(-1).browser;
+  if (!Array.isArray(run.raw.latency) || run.raw.latency.some(row => ![row.receive, row.dom, row.frame].every(covered))
+    || !Array.isArray(run.raw.long_tasks) || run.raw.long_tasks.some(pair => !Array.isArray(pair) || pair.length !== 2
+      || !Number.isFinite(pair[1]) || pair[1] < 0 || !covered(pair[0]) || !covered(pair[0] + pair[1]))) throw new Error('Browser clock timestamp coverage invalid');
+  return stamp => {
+    if (!covered(stamp)) throw new Error('Browser clock timestamp coverage invalid');
+    let left = 0, right = brackets.length - 1;
+    while (right - left > 1) {
+      const middle = Math.floor((left + right) / 2);
+      if (brackets[middle].browser <= stamp) left = middle;
+      else right = middle;
+    }
+    return intervals[left];
+  };
+}
+
 export function pairedComparison(before, after) {
+  if (before?.timing?.browser_clock_rule !== after?.timing?.browser_clock_rule) throw new Error('Browser clock rules differ');
   const runs = [before, after];
   for (const run of runs) {
     if (run?.comparison_rule !== 'observed_slot_coverage_host_covariates_v1' || run?.seconds !== 1800 || run.raw?.seconds?.length !== 1800) throw new Error('Shared host metadata missing');
@@ -84,11 +136,7 @@ export function pairedComparison(before, after) {
   const mask = before.raw.seconds.map((row, k) => row.status === 'observed' && after.raw.seconds[k].status === 'observed');
   const evidence = runs.map(run => {
     const barrier = run.timing.barrier_at;
-    const brackets = run.timing.browser_clock;
-    if (!Array.isArray(brackets) || brackets.length !== 2 || brackets.some(b => ![b.before, b.after, b.browser].every(Number.isFinite) || b.after < b.before)) throw new Error('Browser clock metadata invalid');
-    const low = Math.min(...brackets.map(b => b.before - b.browser));
-    const high = Math.max(...brackets.map(b => b.after - b.browser));
-    if (!Number.isFinite(barrier) || high - low >= 1000) throw new Error('Browser clock uncertainty invalid');
+    const clockBounds = browserClockMapping(run);
     const metrics = {}, coverage = {};
     for (const [kind, metric, scale] of [['ws', 'ws_payload_bytes_per_second', 1], ['cpu', 'backend_cpu_percent', 100]]) {
       let previous = run.timing[kind].start, counter = run.timing[kind].counter_start ?? 0;
@@ -140,6 +188,7 @@ export function pairedComparison(before, after) {
     const longTasks = { count: 0, duration_ms: 0 }, windowTasks = { count: 0, duration_ms: 0 };
     for (const pair of tasks) {
       if (!Array.isArray(pair) || pair.length !== 2 || !pair.every(Number.isFinite) || pair[1] < 0) throw new Error('Long task metadata invalid');
+      const { low, high } = clockBounds(pair[0]);
       const first = Math.floor((pair[0] + low - barrier) / 1000), last = Math.floor((pair[0] + high - barrier) / 1000);
       if (last >= 0 && first < 1800) { windowTasks.count++; windowTasks.duration_ms += pair[1]; }
       if (last >= 0 && first < 1800) { longTasks.count++; longTasks.duration_ms += pair[1]; }
@@ -156,6 +205,9 @@ export function validateMeasurementTiming(run) {
   if (!ws || !cpu || !Array.isArray(rows) || !Array.isArray(reports)) return ['timing metadata missing'];
   const finite = (...values) => values.every(Number.isFinite);
   const barrier = run.timing.barrier_at;
+  if (run.timing.browser_clock_rule !== undefined) {
+    try { browserClockMapping(run); } catch (error) { reasons.add(error.message); }
+  }
   if (!finite(barrier, ws.start_lateness_ms, cpu.start_lateness_ms)) reasons.add('timing metadata missing');
   if (ws.start < barrier || cpu.start < barrier) reasons.add('barrier clock mismatch');
   if (ws.start - barrier >= 1000 || cpu.start - barrier >= 1000) reasons.add('barrier start missed');

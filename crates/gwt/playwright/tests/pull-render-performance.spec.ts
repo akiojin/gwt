@@ -84,6 +84,46 @@ test.describe('pull-render runner contract', () => {
       assert.throws(() => pairedComparison(a, shortCoverage), /coverage/);
       const clock = run(); clock.timing.browser_clock[1].after += 1000;
       assert.throws(() => pairedComparison(run(), clock), /clock/);
+      const segmented = () => {
+        const value = run();
+        value.timing.browser_clock_rule = 'segmented_conservative_hull_v1';
+        value.timing.ws.end = 1800000;
+        value.timing.browser_clock = [{ before: -2, after: 0, browser: 0, time_origin: 1000 }];
+        value.raw.seconds.forEach((row, k) => {
+          const before = row.cpu_at + 1;
+          value.timing.browser_clock.push({ before, after: before + 2, browser: before - k - 1, time_origin: 1000 });
+          row.collected_at = before + 3;
+        });
+        value.timing.browser_clock.push({ before: 1800100, after: 1800102, browser: 1798300, time_origin: 1000 });
+        value.raw.long_tasks.push([1798240, 60]);
+        value.long_tasks = { count: 2, duration_ms: 120 };
+        return value;
+      };
+      // Total offset drift exceeds one second; each adjacent synchronization hull remains narrow.
+      const segmentedPair = pairedComparison(segmented(), segmented());
+      assert.equal(segmentedPair.runs[0].metrics.dom_latency_ms.count, 9000);
+      assert.equal(segmentedPair.runs[0].long_tasks.count, 1);
+      assert.throws(() => pairedComparison(run(), segmented()), /clock/);
+      for (const corrupt of [
+        value => { value.timing.browser_clock_rule = 'unknown'; },
+        value => { value.timing.browser_clock.splice(2, 1); },
+        value => { value.timing.browser_clock[2].before = value.timing.browser_clock[1].before; },
+        value => { value.timing.browser_clock[2].browser = value.timing.browser_clock[1].browser; },
+        value => { value.timing.browser_clock[2].after = value.timing.browser_clock[2].before - 1; },
+        value => { value.timing.browser_clock[2].time_origin++; },
+        value => { delete value.timing.browser_clock[2].time_origin; },
+        value => { value.timing.browser_clock[2].browser = NaN; },
+        value => { value.timing.browser_clock[1].after = value.timing.browser_clock[1].browser + 998; value.raw.seconds[0].collected_at += 1000; },
+        value => { value.raw.seconds[0].cpu_at = value.timing.browser_clock[1].after; },
+        value => { value.timing.browser_clock[0].after = 1; },
+        value => { value.timing.browser_clock.at(-1).before = 1799999; },
+        value => { value.raw.latency[0].receive = -1; },
+        value => { value.raw.latency.at(-1).frame = 1798301; },
+        value => { value.raw.long_tasks[1] = [1798240, 61]; value.long_tasks.duration_ms = 121; },
+      ]) {
+        const invalid = segmented(); corrupt(invalid);
+        assert.throws(() => pairedComparison(invalid, segmented()), /clock/);
+      }
     `, pathToFileURL(RUNNER).href], { encoding: 'utf8', timeout: 10_000 });
     expect(result.status, result.stderr).toBe(0);
   });
@@ -185,6 +225,16 @@ test.describe('pull-render runner contract', () => {
     expect(validate(outsideWindow)).toContain('Reports completion/window mismatch');
     const missingTimeout = structuredClone(run); delete missingTimeout.report_timings[0].timed_out;
     expect.soft(validate(missingTimeout)).toContain('Reports completion/window mismatch');
+    const synchronized = structuredClone(run);
+    synchronized.timing.browser_clock_rule = 'segmented_conservative_hull_v1';
+    synchronized.timing.browser_clock = [{ before: -1, after: 0, browser: 0, time_origin: 1000 },
+      ...synchronized.raw.seconds.map((row: any, index: number) => ({ before: row.cpu_at, after: row.cpu_at + 0.5,
+        browser: row.cpu_at - index, time_origin: 1000 })),
+      { before: 10010, after: 10011, browser: 10001, time_origin: 1000 }];
+    synchronized.raw.latency = []; synchronized.raw.long_tasks = [];
+    expect(validate(synchronized)).toEqual([]);
+    synchronized.timing.browser_clock[3].time_origin++;
+    expect(validate(synchronized)).toContain('Browser clock timeOrigin changed or missing');
   });
 
   test('overlapping cleanup callers await the same owned child exit', () => {
@@ -402,11 +452,12 @@ function installMeasurementProbe() {
   const received = [0, 0, 0, 0, 0];
   const dom = [0, 0, 0, 0, 0];
   const rendered = [0, 0, 0, 0, 0];
-  const pending = Array.from({ length: 5 }, () => new Map<number, { receive: number; assigned: boolean }>());
-  const raw: Array<{ index: number; sequence: number; visible_sequence: number; receive: number; dom: number; frame: number }> = [];
+  const pending = Array.from({ length: 5 }, () => new Map<number, { receive: number; assigned: boolean; source: string }>());
+  const gaps = Array.from({ length: 5 }, () => new Set<number>());
+  const raw: Array<{ index: number; sequence: number; visible_sequence: number; receive: number; dom: number; frame: number; source: string }> = [];
   const histograms = [new Array(60_001).fill(0), new Array(60_001).fill(0)];
   const totals = [{ count: 0, sum: 0, max: 0 }, { count: 0, sum: 0, max: 0 }];
-  let lost = 0;
+  let snapshotUpdates = 0;
   let dropped = 0;
   let coalesced = 0;
   let longCount = 0;
@@ -452,21 +503,29 @@ function installMeasurementProbe() {
             return;
           }
           if (!active) return;
-          if (payload.kind !== 'terminal_output') return;
+          if (payload.kind !== 'terminal_output' && payload.kind !== 'terminal_snapshot') return;
           const index = ids.indexOf(payload.id);
           if (index < 0) return;
-          const text = tails[index] + atob(payload.data_base64);
+          const snapshot = payload.kind === 'terminal_snapshot';
+          const text = (snapshot ? '' : tails[index]) + atob(payload.data_base64);
           const markers = text.matchAll(/GWT_PULL_5016_(\d)_(\d{4})/g);
           for (const marker of markers) {
             const sequence = Number(marker[2]);
-            if (Number(marker[1]) !== index || sequence <= received[index]) continue;
-            lost += Math.max(0, sequence - received[index] - 1);
-            received[index] = sequence;
+            if (Number(marker[1]) !== index) continue;
+            if (sequence < 1 || sequence > 1800) { dropped++; continue; }
+            // Replays prove only markers actually present in the snapshot.
+            // Never infer all missing updates from its latest sequence alone.
+            if (sequence <= received[index] && !(snapshot && gaps[index].has(sequence))) continue;
+            for (let missing = received[index] + 1; missing < sequence; missing++) gaps[index].add(missing);
+            gaps[index].delete(sequence);
+            received[index] = Math.max(received[index], sequence);
             if (pending[index].size >= 256) { dropped++; continue; }
-            pending[index].set(sequence, { receive: at, assigned: false });
+            if (snapshot) snapshotUpdates++;
+            pending[index].set(sequence, { receive: at, assigned: false, source: payload.kind });
           }
           // Keep marker delimiters only, never the arbitrary body of a frame.
           tails[index] = '';
+          if (snapshot) return;
           for (let size = Math.min(32, text.length); size > 0; size--) {
             const suffix = text.slice(-size);
             if ('GWT_PULL_5016_'.startsWith(suffix) || /^GWT_PULL_5016_[0-4](?:_\d{0,4})?$/.test(suffix)) {
@@ -484,7 +543,7 @@ function installMeasurementProbe() {
       for (const id of ids) if (!document.querySelector(`.workspace-window[data-id="${id}"] .xterm-rows`)) {
         throw new Error('Measurement requires the actual xterm DOM renderer');
       }
-      observer = new MutationObserver(() => {
+      observer = new MutationObserver(mutations => {
         if (!active) return;
         ids.forEach((id, index) => {
           const rows = document.querySelector(`.workspace-window[data-id="${id}"] .xterm-rows`);
@@ -492,13 +551,16 @@ function installMeasurementProbe() {
           const marker = matches.filter(match => Number(match[1]) === index).at(-1);
           if (!marker) return;
           const sequence = Number(marker[2]);
-          if (sequence <= dom[index]) return;
-          if (!pending[index].has(sequence)) { dropped++; return; }
-          dom[index] = sequence;
+          const batch = [...pending[index]].filter(([key, entry]) => key <= sequence && !entry.assigned);
+          if (sequence <= dom[index] && batch.length === 0) return;
+          // A replay can fill an older gap while preserving the latest marker.
+          // Its commit must mutate these rows, not an unrelated canvas node.
+          if (sequence <= dom[index] && !mutations.some(change => rows?.contains(change.target))) return;
+          if (sequence > dom[index] && !pending[index].has(sequence)) { dropped++; return; }
+          dom[index] = Math.max(dom[index], sequence);
           const domAt = performance.now();
           // One latest DOM commit can represent several ordered RAW updates.
           // Keep every update's latency without demanding a paint per packet.
-          const batch = [...pending[index]].filter(([key, entry]) => key <= sequence && !entry.assigned);
           coalesced += Math.max(0, batch.length - 1);
           for (const [, entry] of batch) { entry.assigned = true; add(0, domAt - entry.receive); }
           requestAnimationFrame(() => {
@@ -507,7 +569,7 @@ function installMeasurementProbe() {
             rendered[index] = Math.max(rendered[index], sequence);
             for (const [key, entry] of batch) {
               add(1, frame - entry.receive);
-              raw.push({ index, sequence: key, visible_sequence: sequence, receive: entry.receive, dom: domAt, frame });
+              raw.push({ index, sequence: key, visible_sequence: sequence, receive: entry.receive, dom: domAt, frame, source: entry.source });
               pending[index].delete(key);
             }
             if (raw.length > 9000) { raw.pop(); dropped++; }
@@ -538,7 +600,8 @@ function installMeasurementProbe() {
         return { count: total.count, mean: total.count ? total.sum / total.count : null,
           p50: quantile(0.5), p95: quantile(0.95), max: total.count ? total.max : null };
       };
-      return { received, dom, rendered, lost, dropped, coalesced, raw, domStats: stats(0), frameStats: stats(1),
+      return { received, dom, rendered, lost: gaps.reduce((sum, missing) => sum + missing.size, 0),
+        dropped, snapshot_updates: snapshotUpdates, coalesced, raw, domStats: stats(0), frameStats: stats(1),
         window_metadata: (window as any).__gwtPullRenderWindowMetadata ?? [],
         long_tasks: { count: longCount, duration_ms: longDuration }, long_raw: longRaw };
     },
@@ -608,6 +671,53 @@ test('probe contract still detects a genuinely missing WS update', async ({ page
   expect(result.coalesced).toBe(0);
   expect(result.domStats.count).toBe(1, 'a missing update never receives fabricated latency');
   expect(result.frameStats.count).toBe(1);
+});
+
+test('probe contract recovers only snapshot markers and does not count replay twice', async ({ page }) => {
+  await page.setContent(Array.from({ length: 5 }, (_, index) =>
+    `<div class="workspace-window" data-id="pane${index}"><div class="xterm-rows"></div></div>`).join(''));
+  await page.evaluate(() => { window.WebSocket = class extends EventTarget {} as any; });
+  await page.evaluate(installMeasurementProbe);
+  const result = await page.evaluate(async () => {
+    const probe = (window as any).__gwtPullRenderProbe;
+    probe.start(Array.from({ length: 5 }, (_, index) => `pane${index}`));
+    const socket = new WebSocket('ws://fixture.invalid');
+    const marker = (sequence: number) => `GWT_PULL_5016_0_${String(sequence).padStart(4, '0')}`;
+    const send = (kind: string, text: string) => socket.dispatchEvent(new MessageEvent('message', {
+      data: JSON.stringify({ kind, id: 'pane0', data_base64: btoa(text) }),
+    }));
+    const commit = async (text: string) => {
+      document.querySelector('[data-id="pane0"] .xterm-rows')!.textContent = text;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    };
+    send('terminal_output', marker(1)); send('terminal_output', marker(4));
+    await commit(marker(4));
+    const snapshot = `SNAPSHOT_BODY_MUST_NOT_BE_SAVED ${marker(2)} ${marker(3)} ${marker(4)}`;
+    send('terminal_snapshot', snapshot);
+    document.body.append(document.createElement('aside'));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const snapshotCommitAt = performance.now();
+    await commit(snapshot);
+    send('terminal_snapshot', snapshot);
+    await commit(snapshot);
+    // The next snapshot proves sequence 6, but never proves the missing 5.
+    send('terminal_snapshot', marker(6));
+    await commit(marker(6));
+    // A malformed snapshot remains invalid rather than becoming a recovery.
+    send('terminal_snapshot', marker(0));
+    return { ...probe.stop(), snapshotCommitAt };
+  });
+  expect(result.lost).toBe(1);
+  expect(result.dropped).toBe(1);
+  expect(result.snapshot_updates).toBe(3);
+  expect(result.raw.map((row: any) => row.sequence).sort((a: number, b: number) => a - b)).toEqual([1, 2, 3, 4, 6]);
+  expect(result.domStats.count).toBe(5);
+  expect(result.frameStats.count).toBe(5);
+  expect(result.raw.filter((row: any) => row.source === 'terminal_snapshot')).toHaveLength(3);
+  expect(result.raw.filter((row: any) => row.sequence === 2 || row.sequence === 3)
+    .every((row: any) => row.dom >= result.snapshotCommitAt)).toBe(true);
+  expect(result.raw.every((row: any) => row.receive <= row.dom && row.dom <= row.frame)).toBe(true);
+  expect(JSON.stringify(result)).not.toContain('SNAPSHOT_BODY_MUST_NOT_BE_SAVED');
 });
 
 function numericStats(values: number[]) {
@@ -777,8 +887,8 @@ function wholeHostCpuRatio(start, end) {
 }
 async function browserClock(page: Page) {
   const before = performance.now();
-  const browser = await page.evaluate(() => performance.now());
-  return { before, after: performance.now(), browser };
+  const clock = await page.evaluate(() => ({ browser: performance.now(), time_origin: performance.timeOrigin }));
+  return { before, after: performance.now(), ...clock };
 }
 
 async function launchWorkload(page: Page, branch: string, index: number): Promise<string> {
@@ -899,6 +1009,7 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
     await expect(pm).toHaveCount(1);
     await expect(pm.getByRole('log', { name: 'PM reports' })).toBeVisible();
     const fixedRendererPids = rendererPids((await browserCdp.send('SystemInfo.getProcessInfo')).processInfo);
+    clockBrackets.push(await browserClock(page));
     await page.evaluate(windowIds => (window as any).__gwtPullRenderProbe.start(windowIds), ids);
     const start = Date.now() + 1000;
     barrierAt = performance.now() + (start - Date.now());
@@ -924,7 +1035,6 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
       invalidReasons.push('barrier start missed'); throw new Error('Measurement start missed a sample period');
     }
     const measureStart = barrierAt;
-    clockBrackets.push(await browserClock(page));
     let previousWs = firstWs, previousCpu = firstCpu;
     const env = { ...process.env, HOME: manifest.home, USERPROFILE: manifest.home };
     for (const key of Object.keys(env)) if (key.startsWith('GWT_')) delete env[key];
@@ -965,12 +1075,15 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
       const metrics = await pageCdp.send('Performance.getMetrics');
       const heap = metrics.metrics.find((entry: any) => entry.name === 'JSHeapUsedSize')?.value;
       if (!Number.isFinite(heap)) throw new Error('Renderer heap unavailable');
-      const retention = await page.evaluate(windowIds => ({
+      const clockBefore = performance.now();
+      const { browser_clock: browserReading, ...retention } = await page.evaluate(windowIds => ({
+        browser_clock: { browser: performance.now(), time_origin: performance.timeOrigin },
         report_count: document.querySelectorAll('.pm-chat article').length,
         report_text_bytes: Array.from(document.querySelectorAll('.pm-chat__text')).reduce((sum, node) =>
           sum + new TextEncoder().encode(node.textContent ?? '').byteLength, 0),
         terminal_buffer_lines: windowIds.map(id => (window as any).__gwtTerminalTestApi.metrics(id).bufferLength),
       }), ids);
+      clockBrackets.push({ before: clockBefore, after: performance.now(), ...browserReading });
       const rendererRss = renderers.reduce((sum: number, pid: number) => {
         const row = table.rows.find((entry: any) => entry.pid === pid);
         if (!row) throw new Error('Measured renderer disappeared');
@@ -992,7 +1105,6 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
     await finalWsTask;
     lastWs = frozenWs!;
     elapsed = (lastWs.at - barrierAt) / 1000;
-    clockBrackets.push(await browserClock(page));
     await reportTask;
     await poster.finish();
     await expect.poll(() => Array.from({ length: 5 }, (_, index) =>
@@ -1008,6 +1120,8 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
     await poster?.stop();
     invalidReasons.push(...(poster?.failures ?? []));
     probe = await page.evaluate(() => (window as any).__gwtPullRenderProbe.stop()).catch(() => null);
+    try { clockBrackets.push(await browserClock(page)); }
+    catch { invalidReasons.push('Browser clock final synchronization failed'); }
     const workload = Array.from({ length: 5 }, (_, index) => {
       let record: any = {}; try { record = JSON.parse(readFileSync(join(manifest.agentDir, `${index}.json`), 'utf8')); } catch { /* incomplete evidence */ }
       return { index, pid: record.pid ?? null, sequence: record.sequence ?? 0, bytes: record.bytes ?? 0,
@@ -1031,7 +1145,7 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
         workload: manifest.workload_hash, harness: manifest.harness_hash, fixture: manifest.fixture_hash, contains_5335: manifest.contains_5335 },
       workload, reports_posted: poster?.records.filter(record => record.exit_code === 0 && !record.timed_out).length ?? 0,
       report_timings: poster?.records ?? [], ws_payload_bytes: lastWs.counter - firstWs.counter, samples: rows.length,
-      timing: { barrier_at: barrierAt, browser_clock: clockBrackets,
+      timing: { barrier_at: barrierAt, browser_clock_rule: 'segmented_conservative_hull_v1', browser_clock: clockBrackets,
         ws: { start: firstWs.at, end: lastWs.at, counter_start: firstWs.counter, counter_end: lastWs.counter,
           start_lateness_ms: firstWs.at - barrierAt, wire_start: firstWs.wire, wire_end: lastWs.wire },
         cpu: { start: firstCpu.at, end: lastCpu.at, counter_start: firstCpu.counter, counter_end: lastCpu.counter,
@@ -1044,9 +1158,10 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
         ws_payload_bytes_per_second: rateStatistics(measuredRows.map(row => row.ws_payload_bytes_per_second), firstWs, lastWs),
         dom_latency_ms: probe?.domStats ?? null, render_frame_latency_ms: probe?.frameStats ?? null },
       long_tasks: probe?.long_tasks ?? null, errors: errorCount,
-      lost_markers: probe?.lost ?? 1, dropped_pending: probe?.dropped ?? 1, raw: { seconds: rows, latency: probe?.raw ?? [], long_tasks: probe?.long_raw ?? [] },
+      lost_markers: probe?.lost ?? 1, dropped_pending: probe?.dropped ?? 1, snapshot_updates: probe?.snapshot_updates ?? 0,
+      raw: { seconds: rows, latency: probe?.raw ?? [], long_tasks: probe?.long_raw ?? [] },
       coalesced_updates: probe?.coalesced ?? 0, invalid_reasons: [...new Set(invalidReasons)], evidence_valid: false, cleanup_success: false,
-      latency_semantics: 'native WS message -> latest actual xterm DOM commit of ordered pending updates (including coalesced updates) -> next rAF callback; performance.now clock; no compositor/presentation claim',
+      latency_semantics: 'native WS output or explicit snapshot marker -> actual xterm DOM commit of pending updates (including coalesced updates) -> next rAF callback; tuple source records recovery, never inferred gaps; performance.now clock; no compositor/presentation claim',
       UserVerificationResult: 'n/a (autonomous)', AgentVisualCheck: visualPass ? 'pass' : 'fail', ac17_pass: false };
     writeFileSync(manifest.out, JSON.stringify(report));
     await browserCdp.detach(); await pageCdp.detach();
