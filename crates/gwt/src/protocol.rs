@@ -2241,6 +2241,12 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<u64>,
     },
+    /// Client-scoped failure for the exact Settings candidate save.
+    IssueMonitorProfilesWriteFailed {
+        project_root: String,
+        request_id: u64,
+        message: String,
+    },
     /// Client-scoped failure for one label save; uncertain writes can still commit.
     IssueMonitorAllowedLabelsWriteFailed {
         request_id: u64,
@@ -3151,6 +3157,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_profiles_write_failed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_status",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3632,6 +3643,9 @@ impl BackendEvent {
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
+            BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
+                "issue_monitor_profiles_write_failed"
+            }
             BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
                 "issue_monitor_allowed_labels_write_failed"
             }

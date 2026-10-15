@@ -1,5 +1,8 @@
 # Build this checkout's gwt and gwtd first. Additional Playwright arguments are forwarded.
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments)
+param(
+    [string]$Spec = 'knowledge-load-recovery.spec.ts',
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'This fixture requires Windows and PowerShell 7.' }
@@ -142,6 +145,7 @@ Module._resolveFilename = function(request, parent, ...rest) {
     $runnerEnvironment = @{
         GWT_PLAYWRIGHT_BASE_URL=$checkUrl;GWT_PLAYWRIGHT_PROJECT_KEY=$repoHash;
         GWT_PLAYWRIGHT_PROJECT_ROOT=$repoRoot;GWT_PLAYWRIGHT_CHECKOUT_ROOT=$repoRoot;
+        GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;
         GWT_PLAYWRIGHT_NODE_MODULES=(Join-Path $deps 'node_modules');
         NODE_OPTIONS="--require `"$($resolver.Replace('\', '/'))`" $env:NODE_OPTIONS"
     }
@@ -152,7 +156,7 @@ Module._resolveFilename = function(request, parent, ...rest) {
     Push-Location $repoRoot
     try {
         & node $cli test --config crates/gwt/playwright/playwright.config.ts --workers=1 --headed `
-            --output (Join-Path $checkHome 'playwright') knowledge-load-recovery.spec.ts @PlaywrightArguments
+            --output (Join-Path $checkHome 'playwright') $Spec @PlaywrightArguments
         $exitCode = $LASTEXITCODE
     } finally { Pop-Location }
 } finally {

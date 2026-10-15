@@ -2612,6 +2612,7 @@ fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing(
     let mut seeded = gwt::IssueMonitorPrefs::default();
     seeded.set_launch_profile_pool(vec![pool_profile("claude")]);
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let project_root = repo.display().to_string();
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     for payload in [
@@ -2622,11 +2623,19 @@ fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing(
         let before = fs::read(&prefs_path).expect("read prefs");
         let mut payload = payload;
         payload["kind"] = "issue_monitor_profiles_set".into();
+        payload["request_id"] = 42.into();
         let event = serde_json::from_value(payload).expect("candidate editing event");
         let events = runtime.handle_frontend_event("client-1".into(), event);
         assert!(events.iter().any(|event| matches!(
             &event.event, BackendEvent::IssueMonitorToast { level, .. } if level == "error"
         )));
+        assert!(events.iter().any(|event| {
+            let wire = serde_json::to_value(&event.event).expect("serialize failure");
+            wire["kind"] == "issue_monitor_profiles_write_failed"
+                && wire["request_id"] == 42
+                && wire["project_root"] == project_root
+                && !wire["message"].as_str().unwrap_or_default().is_empty()
+        }));
         assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
     }
 }

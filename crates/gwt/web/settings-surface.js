@@ -291,8 +291,20 @@ export function renderIssuesSettingsPanel(panel, options) {
   labels.addEventListener("change", () => send({ kind: "set_issue_monitor_allowed_labels", allowed_labels: [...new Set(labels.value.split(",").map(v => v.trim()).filter(Boolean))] }));
 }
 
+function renderCandidateSaveError(panel, event) {
+  if (!event || Number(panel.dataset.pendingRequest) !== event.request_id) return;
+  panel.dataset.saving = "false";
+  delete panel.dataset.pendingRequest;
+  const feedback = panel.querySelector("[data-candidate-status]");
+  if (feedback) {
+    feedback.textContent = event.message;
+    feedback.dataset.kind = "error";
+    feedback.setAttribute("role", "alert");
+  }
+}
+
 export function renderAgentsSettingsPanel(panel, options) {
-  const { project, profiles, status, send } = options;
+  const { project, profiles, status, send, availableAgents = null } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.dirty = "false";
@@ -312,6 +324,15 @@ export function renderAgentsSettingsPanel(panel, options) {
     help.textContent += " Loading launch profiles…";
     return;
   }
+  const feedback = document.createElement("p");
+  feedback.className = "settings-status";
+  feedback.dataset.candidateStatus = "";
+  const showFeedback = (message, error = false) => {
+    feedback.textContent = message;
+    feedback.dataset.kind = error ? "error" : "info";
+    feedback.setAttribute("role", error ? "alert" : "status");
+    if (error) panel.dataset.dirty = "true";
+  };
   const rows = [];
   const field = (parent, name, key, value, type = "text", choices = null) => {
     const label = document.createElement("label");
@@ -350,7 +371,12 @@ export function renderAgentsSettingsPanel(panel, options) {
   });
   const submit = next => {
     const value = Number(threshold.value);
-    if (Number.isInteger(value) && value >= 1 && value <= 100) send({ kind: "issue_monitor_profiles_set", profiles: next, usage_threshold_percent: value });
+    if (!Number.isInteger(value) || value < 1 || value > 100) {
+      showFeedback("Usage threshold must be a whole number between 1 and 100.", true);
+      return;
+    }
+    showFeedback("Saving candidates…");
+    send({ kind: "issue_monitor_profiles_set", profiles: next, usage_threshold_percent: value });
   };
   const button = (parent, title, action, callback) => {
     const node = document.createElement("button");
@@ -405,11 +431,25 @@ export function renderAgentsSettingsPanel(panel, options) {
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
-  const candidate = field(add, "Add candidate", "new", "");
-  button(add, "Add candidate", "add-candidate", () => {
+  const remaining = (availableAgents || []).filter(agent => !profiles.some(profile => profile.agent_id === agent.id));
+  const candidate = field(add, "Add candidate", "new", "", "text", ["", ...remaining.map(agent => agent.id)]);
+  candidate.options[0].textContent = "Select an agent…";
+  for (const option of candidate.options) {
+    const agent = remaining.find(agent => agent.id === option.value);
+    if (agent) option.textContent = `${agent.name || agent.id} (${agent.id})`;
+  }
+  const addButton = button(add, "Add candidate", "add-candidate", () => {
     const agent = candidate.value.trim();
-    if (agent && !profiles.some(p => p.agent_id === agent)) submit([...draft(), { agent_id: agent }]);
+    const next = draft();
+    if (!agent) showFeedback("Select an agent to add.", true);
+    else if (next.some(profile => profile.agent_id === agent)) showFeedback(`Agent ${agent} is already in the candidate pool.`, true);
+    else if (!availableAgents?.some(known => known.id === agent)) showFeedback(`Unknown agent: ${agent}. Select a known agent.`, true);
+    else submit([...next, { agent_id: agent }]);
   });
+  candidate.disabled = addButton.disabled = availableAgents === null || remaining.length === 0;
+  showFeedback(availableAgents === null ? "Loading available agents…"
+    : remaining.length === 0 ? "All known agents are already in the candidate pool." : "Select an agent to add.");
+  add.appendChild(feedback);
 }
 
 export function switchSettingsTab(body, target, focus = false) {
@@ -708,6 +748,7 @@ export function createSettingsSurface({
         const current = projectSettingsSnapshot(body);
         const project = { project_root: root, name: body.dataset.settingsProjectName };
         const agentsPanel = body.querySelector("[data-settings-candidates]");
+        if (agentsPanel) renderCandidateSaveError(agentsPanel, current.profilesFailure);
         if (current.profilesRequestId != null
           && Number(agentsPanel?.dataset.pendingRequest) === current.profilesRequestId && agentsPanel?.dataset.saving === "true") {
           agentsPanel.dataset.dirty = "false";
@@ -737,6 +778,10 @@ export function createSettingsSurface({
           if (editing && section === "issues") body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, send: dispatch,
+            availableAgents: supportedAgentsModel.read().agents === null || customAgentsState.loading ? null : [
+              ...supportedAgentsModel.read().agents,
+              ...customAgentsState.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
+            ],
           });
         }
       }
@@ -750,6 +795,12 @@ export function createSettingsSurface({
         if (!root) return;
         issueSettingsModel.update(state => ({ ...state, [root]: {
           ...state[root], profiles: event.profiles, profilesRequestId: event.request_id,
+        } }));
+      }
+      function applyIssueMonitorProfilesError(event) {
+        if (!event.project_root) return;
+        issueSettingsModel.update(state => ({ ...state, [event.project_root]: {
+          ...state[event.project_root], profilesFailure: event,
         } }));
       }
       issueSettingsModel.subscribe(state => state, () => {
@@ -821,7 +872,10 @@ export function createSettingsSurface({
         }));
       }
 
-      supportedAgentsModel.subscribe(state => state, renderSupportedAgentPanels);
+      supportedAgentsModel.subscribe(state => state, () => {
+        renderSupportedAgentPanels();
+        for (const body of settingsWindowBodies) renderProjectSettings(body);
+      });
 
       function requestSupportedAgentRefresh() {
         purgeDetachedSettingsBodies();
@@ -1924,6 +1978,7 @@ export function createSettingsSurface({
       }
 
       function renderSettingsAgentList() {
+        issueSettingsModel.update(state => ({ ...state }));
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
@@ -2150,6 +2205,7 @@ export function createSettingsSurface({
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
+        applyIssueMonitorProfilesError,
         customAgentsState,
         agentBackendsState,
         systemSettingsState,

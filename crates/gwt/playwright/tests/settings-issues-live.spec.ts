@@ -249,7 +249,7 @@ test.describe("Issue #5322 Settings", () => {
         await agents.getByRole("button", { name: "Remove claude", exact: true }).click();
         await expect(agents.locator("fieldset[data-agent-id]")).toHaveCount(1);
         await expect(agents.getByRole("button", { name: "Remove codex", exact: true })).toBeDisabled();
-        await agents.getByLabel("Add candidate candidate", { exact: true }).fill("claude");
+        await agents.getByLabel("Add candidate candidate", { exact: true }).selectOption("claude");
         await agents.getByRole("button", { name: "Add candidate", exact: true }).click();
         await expect(agents.locator("fieldset[data-agent-id]")).toHaveCount(2);
         await agents.getByLabel("Model claude", { exact: true }).fill("sonnet");

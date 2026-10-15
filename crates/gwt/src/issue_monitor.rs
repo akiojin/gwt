@@ -4197,7 +4197,10 @@ fn hold_clock_label(reset_at: &str) -> String {
 /// The monitor needs `skip_permissions_args` to tell a custom agent that can
 /// run unattended from one that cannot. `None` means "do not decide", never
 /// "unsupported".
-fn custom_coding_agent_definition(agent_id: &str) -> Option<gwt_agent::CustomCodingAgent> {
+/// Profile validation shares this lookup to admit only registered custom IDs.
+pub(crate) fn custom_coding_agent_definition(
+    agent_id: &str,
+) -> Option<gwt_agent::CustomCodingAgent> {
     let config_path = gwt_config::Settings::global_config_path()?;
     crate::custom_agents_service::list_custom_agents(&config_path)
         .ok()?

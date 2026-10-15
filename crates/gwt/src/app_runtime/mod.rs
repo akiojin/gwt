@@ -8235,6 +8235,27 @@ impl AppRuntime {
         usage_threshold_percent: Option<u8>,
         request_id: Option<u64>,
     ) -> Vec<OutboundEvent> {
+        let report_failure = |mut events: Vec<OutboundEvent>| {
+            if let Some(request_id) = request_id {
+                let message = events.iter().find_map(|outbound| match &outbound.event {
+                    BackendEvent::IssueMonitorToast { level, message, .. } if level == "error" => {
+                        Some(message.clone())
+                    }
+                    _ => None,
+                });
+                if let Some(message) = message {
+                    events.push(OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorProfilesWriteFailed {
+                            project_root: context.project_root.display().to_string(),
+                            request_id,
+                            message,
+                        },
+                    ));
+                }
+            }
+            events
+        };
         let resolve = |prefs: &gwt::IssueMonitorPrefs| {
             let pool = prefs.launch_profile_pool();
             let (profiles, _) = gwt::merge_issue_monitor_profiles_set(
@@ -8253,13 +8274,13 @@ impl AppRuntime {
         {
             Ok(profiles) => profiles,
             Err(error) => {
-                return self.issue_monitor_control_error_events(
+                return report_failure(self.issue_monitor_control_error_events(
                     Some(&context.project_root),
                     Some(client_id),
                     gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(error),
                     "profiles-set",
                     None,
-                );
+                ));
             }
         };
         let publication = self.publish_project_issue_monitor_control(
@@ -8302,7 +8323,7 @@ impl AppRuntime {
                 ));
             }
         }
-        events
+        report_failure(events)
     }
 
     fn issue_monitor_authorizing_control_result_events(
