@@ -136,6 +136,9 @@ test("same Agents surface keeps the active live host and a preview in the other 
 
 test("Split reconciles arriving views from catalog commits and unsubscribes", async () => {
   const { controller, model, windows, elements, stage, document } = await fixture();
+  const settings = document.createElement("select");
+  settings.innerHTML = '<option value="Normal" disabled>Normal</option><option value="Continue" selected>Continue</option>';
+  elements.get("board").appendChild(settings);
   controller.open("board");
   controller.select("board", 1);
   const second = { id: "second-board", preset: "board" };
@@ -144,6 +147,9 @@ test("Split reconciles arriving views from catalog commits and unsubscribes", as
   elements.set(second.id, element);
   windows.push(second);
   model.update(() => ({ catalog: { version: 1 } }));
+  assert.equal(settings.value, "Continue", "host sync must preserve embedded settings choices");
+  assert.equal(settings.options[0].hasAttribute("disabled"), true);
+  assert.equal(settings.options[1].textContent, "Continue");
   assert.ok(element.closest(".split-pane") === document.querySelectorAll(".split-pane")[1], "catalog commit mounts the arriving view without manual sync");
   assert.equal(document.getElementById("split-surfaces").dataset.catalogVersion, "1");
   controller.dispose();
