@@ -1060,6 +1060,26 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
                 WorkTerminalKind::Discarded => crate::AgentWorkTerminalKind::Discarded,
             },
         };
+        if matches!(close_kind, WorkTerminalKind::Done)
+            && compatibility_authority.is_confirmation_only()
+        {
+            // Issue #5070 / SPEC #3590: an exact canonical Done Work needs
+            // only read-only confirmation under the current identity lease.
+            // Sending another terminal mutation can strand delivered work.
+            let confirmation = if let Some(held_trusted_dir) = held_trusted_dir {
+                crate::agent_project_state::confirm_bound_terminal_compatibility_authority_held_global_lease(
+                    &compatibility_authority,
+                    request,
+                    held_trusted_dir,
+                )
+            } else {
+                crate::agent_project_state::confirm_bound_terminal_compatibility_authority(
+                    &compatibility_authority,
+                    request,
+                )
+            };
+            return confirmation.map_err(|error| terminal_refusal(error.to_string()));
+        }
         let blocked_build_abort = compatibility_authority
             .requires_blocked_build_abort_bridge()
             .map_err(|error| terminal_refusal(error.to_string()))?;
@@ -2411,7 +2431,7 @@ format_version: Some(1),
     }
 
     #[test]
-    fn managed_build_complete_confirms_canonical_done_after_old_host_wrong_terminal() {
+    fn managed_build_complete_confirms_canonical_done_without_another_host_request() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2443,8 +2463,7 @@ format_version: Some(1),
         );
         assert!(fixture.canonical_work().is_terminal());
         assert!(!fixture.canonical_work().discarded);
-        let (_, request) = server.receive();
-        assert_eq!(request["terminal_kind"], "done");
+        server.assert_no_request();
     }
 
     #[test]
@@ -2498,8 +2517,12 @@ format_version: Some(1),
         };
         let before = state_bytes();
         let server = TerminalBridgeServer::start(
-            StatusCode::OK,
-            terminal_receipt(crate::AgentWorkTerminalizationOutcome::NoTarget),
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "transaction_conflict",
+                "reason": "transaction_conflict",
+                "message": "Host workspace transaction failed without committing"
+            }),
         );
         let (code, output) = with_terminal_bridge_env(&fixture, &server, |_| {
             let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
@@ -2540,7 +2563,7 @@ format_version: Some(1),
         });
         assert_eq!(code, 0, "idempotent retry: {output}");
         assert_eq!(state_bytes(), before);
-        server.receive();
+        server.assert_no_request();
     }
 
     #[test]
@@ -2607,7 +2630,7 @@ format_version: Some(1),
             .expect("canonical split-root Work");
         assert!(work.is_terminal());
         assert!(!work.discarded);
-        server.receive();
+        server.assert_no_request();
     }
 
     /// SPEC-3431 (#3425 family): a session without an execution binding can
@@ -3266,6 +3289,20 @@ format_version: Some(1),
         assert!(
             error.contains("outside the canonical Work authority"),
             "{error}"
+        );
+        let cause = "exact Work terminal confirmation would require a new terminal event";
+        let log = std::fs::read_to_string(gwt_core::logging::current_log_file(
+            &gwt_core::paths::gwt_logs_dir(),
+        ))
+        .expect("checkout compatibility failure must persist its cause");
+        assert!(log.contains(cause), "{log}");
+        assert!(
+            log.contains("Host workspace transaction failed without committing"),
+            "{log}"
+        );
+        assert!(
+            !error.contains(cause),
+            "the original cause must stay in the machine log: {error}"
         );
         assert_eq!(
             std::fs::read(&works_path).expect("read active canonical WorkItems"),
