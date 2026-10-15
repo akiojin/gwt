@@ -431,7 +431,20 @@ export function renderAgentsSettingsPanel(panel, options) {
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
-  const remaining = (availableAgents || []).filter(agent => !profiles.some(profile => profile.agent_id === agent.id));
+  // Match resolve_agent_id aliases and the backend's provider comparison.
+  const providerAliases = new Map([
+    ["claudecode", "claude"], ["claude-code", "claude"], ["claude code", "claude"],
+    ["grok build", "grok"], ["grok-build", "grok"],
+    ["antigravity", "agy"], ["antigravity cli", "agy"], ["antigravity-cli", "agy"],
+    ["open-code", "opencode"], ["open-claw", "openclaw"],
+    ["hermes agent", "hermes"], ["hermes-agent", "hermes"],
+    ["copilot", "gh"], ["github copilot", "gh"], ["github-copilot", "gh"],
+  ]);
+  const provider = agentId => {
+    const id = String(agentId ?? "").trim().replace(/[A-Z]/g, character => character.toLowerCase());
+    return providerAliases.get(id) || id;
+  };
+  const remaining = (availableAgents || []).filter(agent => !profiles.some(profile => provider(profile.agent_id) === provider(agent.id)));
   const candidate = field(add, "Add candidate", "new", "", "text", ["", ...remaining.map(agent => agent.id)]);
   candidate.options[0].textContent = "Select an agent…";
   for (const option of candidate.options) {
@@ -442,7 +455,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     const agent = candidate.value.trim();
     const next = draft();
     if (!agent) showFeedback("Select an agent to add.", true);
-    else if (next.some(profile => profile.agent_id === agent)) showFeedback(`Agent ${agent} is already in the candidate pool.`, true);
+    else if (next.some(profile => provider(profile.agent_id) === provider(agent))) showFeedback(`Agent ${agent} is already in the candidate pool.`, true);
     else if (!availableAgents?.some(known => known.id === agent)) showFeedback(`Unknown agent: ${agent}. Select a known agent.`, true);
     else submit([...next, { agent_id: agent }]);
   });

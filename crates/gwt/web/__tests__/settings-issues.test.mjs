@@ -114,19 +114,24 @@ test("Candidates use the known catalog, including custom agents, and explain emp
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex" }],
-    availableAgents: [{ id: "codex", name: "Codex" }, { id: "team-agent", name: "Team agent" }],
+    profiles: [{ agent_id: "ClaudeCode" }],
+    availableAgents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "team-agent", name: "Team agent" }],
     send: message => sent.push(message),
   });
   const picker = panel.querySelector('[aria-label="Add candidate candidate"]');
   assert.equal(picker.localName, "select");
-  assert.deepEqual([...picker.options].map(option => option.value), ["", "team-agent"]);
+  assert.deepEqual([...picker.options].map(option => option.value), ["", "codex", "team-agent"]);
   const add = panel.querySelector('[data-action="add-candidate"]');
   add.click();
   assert.match(panel.querySelector('[role="alert"]').textContent, /Select an agent/);
   picker.querySelector('[value="team-agent"]').selected = true;
   add.click();
-  assert.deepEqual(sent[0].profiles.map(profile => profile.agent_id), ["codex", "team-agent"]);
+  assert.deepEqual(sent[0].profiles.map(profile => profile.agent_id), ["ClaudeCode", "team-agent"]);
+  panel.querySelector('[aria-label="Agent ClaudeCode"]').value = "Codex";
+  picker.querySelector('[value="codex"]').selected = true;
+  add.click();
+  assert.match(panel.querySelector('[role="alert"]').textContent, /already in the candidate pool/);
+  assert.equal(sent.length, 1, "a legacy alias in the draft is already the same provider");
   assert.ok(panel.querySelector(".settings-status"), "feedback uses the shared Settings primitive");
 });
 
@@ -134,7 +139,7 @@ test("Candidates disable addition with an accessible reason when the catalog is 
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex" }], availableAgents: [{ id: "codex", name: "Codex" }],
+    profiles: [{ agent_id: "Codex" }], availableAgents: [{ id: "codex", name: "Codex" }],
     send: () => assert.fail("no available candidate"),
   });
   assert.equal(panel.querySelector('[data-action="add-candidate"]').disabled, true);

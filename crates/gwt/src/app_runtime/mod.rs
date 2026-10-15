@@ -8235,15 +8235,17 @@ impl AppRuntime {
         usage_threshold_percent: Option<u8>,
         request_id: Option<u64>,
     ) -> Vec<OutboundEvent> {
-        let report_failure = |mut events: Vec<OutboundEvent>| {
-            if let Some(request_id) = request_id {
-                let message = events.iter().find_map(|outbound| match &outbound.event {
-                    BackendEvent::IssueMonitorToast { level, message, .. } if level == "error" => {
-                        Some(message.clone())
-                    }
-                    _ => None,
-                });
-                if let Some(message) = message {
+        let report_failure =
+            |runtime: &Self, error: gwt::runtime_daemon_events::IssueMonitorControlPublishError| {
+                let message = error.to_string();
+                let mut events = runtime.issue_monitor_control_error_events(
+                    Some(&context.project_root),
+                    Some(client_id),
+                    error,
+                    "profiles-set",
+                    None,
+                );
+                if let Some(request_id) = request_id {
                     events.push(OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorProfilesWriteFailed {
@@ -8253,9 +8255,8 @@ impl AppRuntime {
                         },
                     ));
                 }
-            }
-            events
-        };
+                events
+            };
         let resolve = |prefs: &gwt::IssueMonitorPrefs| {
             let pool = prefs.launch_profile_pool();
             let (profiles, _) = gwt::merge_issue_monitor_profiles_set(
@@ -8274,13 +8275,10 @@ impl AppRuntime {
         {
             Ok(profiles) => profiles,
             Err(error) => {
-                return report_failure(self.issue_monitor_control_error_events(
-                    Some(&context.project_root),
-                    Some(client_id),
+                return report_failure(
+                    self,
                     gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(error),
-                    "profiles-set",
-                    None,
-                ));
+                );
             }
         };
         let publication = self.publish_project_issue_monitor_control(
@@ -8290,40 +8288,45 @@ impl AppRuntime {
                 "usage_threshold_percent": usage_threshold_percent,
             }}),
         );
-        let mut events = self.issue_monitor_authorizing_control_result_events(
-            context,
-            client_id,
-            publication,
-            "profiles-set",
-            |monitor| {
-                // Re-resolve omitted fields against the locked current prefs;
-                // a concurrent settings save must not be replaced by our read.
-                let profiles = resolve(&monitor.prefs())?;
-                monitor
-                    .advance_effect_authority_epoch()
-                    .ok_or_else(|| "authority epoch exhausted".to_string())?;
-                monitor.set_launch_profile_pool(profiles);
-                if let Some(percent) = usage_threshold_percent {
-                    monitor.set_launch_usage_threshold_percent(percent);
-                }
-                Ok(())
-            },
-        );
-        if !events.iter().any(|outbound| {
-            matches!(&outbound.event, BackendEvent::IssueMonitorToast { level, .. } if level == "error")
-        }) {
-            if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
-                events.push(OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::IssueMonitorProfiles {
-                        project_root: context.project_root.display().to_string(),
-                        profiles: prefs.launch_profile_pool(),
-                        request_id,
-                    },
-                ));
-            }
+        let outcome = match publication {
+            Ok(()) => Ok(None),
+            Err(error) if error.allows_local_fallback() => self
+                .commit_local_issue_monitor_authorizing_control(context, |monitor| {
+                    // Re-resolve omitted fields against the locked current prefs;
+                    // a concurrent settings save must not be replaced by our read.
+                    let profiles = resolve(&monitor.prefs())?;
+                    monitor
+                        .advance_effect_authority_epoch()
+                        .ok_or_else(|| "authority epoch exhausted".to_string())?;
+                    monitor.set_launch_profile_pool(profiles);
+                    if let Some(percent) = usage_threshold_percent {
+                        monitor.set_launch_usage_threshold_percent(percent);
+                    }
+                    Ok(())
+                })
+                .map(|(monitor, ())| Some(monitor)),
+            Err(error) => Err(error),
+        };
+        let mut events = match outcome {
+            Ok(None) => Vec::new(),
+            Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
+                Some(client_id),
+                Some(&context.project_root),
+                monitor,
+            ),
+            Err(error) => return report_failure(self, error),
+        };
+        if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorProfiles {
+                    project_root: context.project_root.display().to_string(),
+                    profiles: prefs.launch_profile_pool(),
+                    request_id,
+                },
+            ));
         }
-        report_failure(events)
+        events
     }
 
     fn issue_monitor_authorizing_control_result_events(

@@ -19,7 +19,7 @@ test("candidate selection rejects unknown and duplicate drafts and explains an e
     (window as any).renderCandidates = (availableAgents: Array<{ id: string; name: string }> | null) => {
       renderAgentsSettingsPanel(document.getElementById("candidates"), {
         project: { project_root: "/fixture", name: "Fixture" },
-        profiles: [{ agent_id: "claude", model: "preserved-model" }],
+        profiles: [{ agent_id: "ClaudeCode", model: "preserved-model" }],
         status: { usage_threshold_percent: 80 },
         availableAgents,
         send: (message: unknown) => (window as any).candidateRequests.push(message),
@@ -32,25 +32,29 @@ test("candidate selection rejects unknown and duplicate drafts and explains an e
   const add = pool.getByRole("button", { name: "Add candidate", exact: true });
   await expect(candidate).toHaveJSProperty("tagName", "SELECT");
   await expect(candidate.locator('option[value=""]')).toHaveText("Select an agent…");
+  await expect(candidate.locator('option[value="claude"]')).toHaveCount(0);
   await add.click();
   await expect(pool.getByRole("alert")).toHaveText("Select an agent to add.");
   expect(await page.evaluate(() => (window as any).candidateRequests)).toEqual([]);
   // A native select prevents arbitrary typing. Even a tampered option must
   // be rejected locally rather than dispatching a save that cannot succeed.
-  for (const id of ["unknown-agent", "claude"]) {
+  for (const [id, message] of [
+    ["unknown-agent", "Unknown agent: unknown-agent. Select a known agent."],
+    ["claude", "Agent claude is already in the candidate pool."],
+  ]) {
     await candidate.evaluate((select, id) => {
       select.appendChild(new Option(id, id));
     }, id);
     await candidate.selectOption(id);
     await add.click();
-    await expect(pool.getByRole("alert")).toBeVisible();
+    await expect(pool.getByRole("alert")).toHaveText(message);
     expect(await page.evaluate(() => (window as any).candidateRequests)).toEqual([]);
   }
   await candidate.selectOption("codex");
-  await pool.getByLabel("Agent claude", { exact: true }).fill("codex");
+  await pool.getByLabel("Agent ClaudeCode", { exact: true }).fill("Codex");
   await add.click();
-  await expect(pool.getByRole("alert")).toBeVisible();
-  await expect(pool.getByLabel("Model claude", { exact: true })).toHaveValue("preserved-model");
+  await expect(pool.getByRole("alert")).toHaveText("Agent codex is already in the candidate pool.");
+  await expect(pool.getByLabel("Model ClaudeCode", { exact: true })).toHaveValue("preserved-model");
   expect(await page.evaluate(() => (window as any).candidateRequests)).toEqual([]);
 
   await page.evaluate(() => (window as any).renderCandidates([{ id: "claude", name: "Claude Code" }]));
