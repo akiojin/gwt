@@ -534,17 +534,23 @@ export function createSettingsSurface({
         systemSettingsState.autostartInstallPath = event.install_path || "";
         systemSettingsState.autostartLoaded = true;
         systemSettingsState.autostartPending = false;
-        systemSettingsState.statusMessage = statusMessage;
-        systemSettingsState.statusKind = statusMessage ? "success" : "";
+        systemSettingsState.autostartChecking = false;
+        systemSettingsState.autostartStatusMessage = statusMessage;
+        systemSettingsState.autostartStatusKind = statusMessage ? "success" : "";
       }
 
       function applyAutostartError(event) {
-        systemSettingsState.autostartEnabled =
-          systemSettingsState.autostartPreviousEnabled === true;
+        if (systemSettingsState.autostartPending) {
+          systemSettingsState.autostartEnabled =
+            systemSettingsState.autostartPreviousEnabled === true;
+        }
         systemSettingsState.autostartPending = false;
-        systemSettingsState.statusMessage =
-          event.message || "Failed to update login launch setting.";
-        systemSettingsState.statusKind = "error";
+        systemSettingsState.autostartChecking = false;
+        systemSettingsState.autostartStatusMessage = event.message ||
+          (systemSettingsState.autostartLoaded
+            ? "Failed to update login launch setting."
+            : "Failed to check login launch status.");
+        systemSettingsState.autostartStatusKind = "error";
       }
 
       // SPEC #1921 Phase 86 (#3813): the backend echoes the complete agent
@@ -705,6 +711,9 @@ export function createSettingsSurface({
         autostartInstallPath: "",
         autostartLoaded: false,
         autostartPending: false,
+        autostartChecking: false,
+        autostartStatusMessage: "",
+        autostartStatusKind: "",
         loaded: false,
         statusMessage: "",
         statusKind: "",
@@ -1085,6 +1094,13 @@ export function createSettingsSurface({
           send({ kind: "get_issue_monitor_profiles" });
         }
 
+        const shouldRequestAutostartStatus = !systemSettingsState.autostartPending
+          && !systemSettingsState.autostartChecking;
+        if (shouldRequestAutostartStatus) {
+          systemSettingsState.autostartChecking = true;
+          systemSettingsState.autostartStatusMessage = "";
+          systemSettingsState.autostartStatusKind = "";
+        }
         renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
         send({ kind: "list_supported_agents" });
@@ -1096,7 +1112,9 @@ export function createSettingsSurface({
         send({ kind: "get_update_settings" });
         // SPEC-2963: also fetch remote Board provider sign-in state.
         send({ kind: "get_board_auth_status" });
-        send({ kind: "get_autostart_status" });
+        if (shouldRequestAutostartStatus) {
+          send({ kind: "get_autostart_status" });
+        }
 
         renderSettingsAgentList();
         if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
@@ -1893,15 +1911,17 @@ export function createSettingsSurface({
         autostartCheckbox.className = "settings-checkbox";
         autostartCheckbox.id = "settings-system-autostart";
         autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
-        autostartCheckbox.disabled = systemSettingsState.autostartPending === true;
+        autostartCheckbox.disabled = !systemSettingsState.autostartLoaded ||
+          systemSettingsState.autostartChecking === true ||
+          systemSettingsState.autostartPending === true;
         autostartCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
           systemSettingsState.autostartPreviousEnabled =
             systemSettingsState.autostartEnabled === true;
           systemSettingsState.autostartEnabled = next;
           systemSettingsState.autostartPending = true;
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
+          systemSettingsState.autostartStatusMessage = "Saving…";
+          systemSettingsState.autostartStatusKind = "info";
           renderSystemPanelInAllSettingsWindows();
           send({ kind: "update_autostart", enabled: next });
         });
@@ -1929,16 +1949,38 @@ export function createSettingsSurface({
           autostartSection.appendChild(autostartDetail);
         }
 
+        const autostartStatus = document.createElement("p");
+        autostartStatus.className = "settings-status";
+        autostartStatus.dataset.role = "autostart-settings-status";
+        autostartStatus.setAttribute("role", "status");
+        autostartStatus.setAttribute("aria-live", "polite");
+        if (systemSettingsState.autostartPending) {
+          autostartStatus.textContent = "Saving…";
+          autostartStatus.dataset.kind = "info";
+        } else if (systemSettingsState.autostartChecking) {
+          autostartStatus.textContent = "Checking login launch status…";
+          autostartStatus.dataset.kind = "info";
+        } else {
+          const message = systemSettingsState.autostartStatusMessage || "";
+          autostartStatus.textContent = !systemSettingsState.autostartLoaded && message
+            ? `Login launch status unavailable. ${message}`
+            : message;
+          if (systemSettingsState.autostartStatusKind) {
+            autostartStatus.dataset.kind = systemSettingsState.autostartStatusKind;
+          }
+        }
+        autostartSection.appendChild(autostartStatus);
+
         const status = document.createElement("p");
         status.className = "settings-status";
         status.dataset.role = "system-settings-status";
-        autostartSection.appendChild(status);
 
         panel.appendChild(section);
         panel.appendChild(trustSection);
         panel.appendChild(resourceSection);
         panel.appendChild(boardSection);
         panel.appendChild(autostartSection);
+        panel.appendChild(status);
         scopeSettingsControlIds(panel);
         renderSystemPanelStatus(panel);
       }
