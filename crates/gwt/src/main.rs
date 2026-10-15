@@ -4726,6 +4726,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            pending_runtime_outputs: HashMap::new(),
             remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -10999,6 +11000,11 @@ fn main() -> std::io::Result<()> {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
+        if let Some(app) = app.as_mut() {
+            clients.dispatch(app.flush_runtime_output_batches(std::time::Instant::now()));
+            *control_flow = app.next_runtime_output_deadline()
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
+        }
         let event = match event {
             Event::UserEvent(UserEvent::DrainAppEvents) => {
                 let Some(event) = proxy.take_next() else { return; };
@@ -12411,6 +12417,11 @@ fn main() -> std::io::Result<()> {
                 );
             }
             _ => {}
+        }
+        if matches!(*control_flow, ControlFlow::Wait) {
+            if let Some(deadline) = app.next_runtime_output_deadline() {
+                *control_flow = ControlFlow::WaitUntil(deadline);
+            }
         }
     });
 }

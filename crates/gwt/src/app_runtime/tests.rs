@@ -1481,6 +1481,7 @@ fn sample_runtime_with_events(
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_output_bytes: HashMap::new(),
+        pending_runtime_outputs: HashMap::new(),
         remote_terminal_previews: HashMap::new(),
         window_last_output_at: HashMap::new(),
         window_hook_states: HashMap::new(),
@@ -1526,6 +1527,15 @@ fn sample_runtime_with_events(
 /// release path itself is generated from one shared list, so these stand in for
 /// every entry on it.
 fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
+    if let Some(incarnation) = runtime.runtimes.get(window_id).map(|pane| pane.incarnation) {
+        runtime.handle_runtime_output_event(
+            window_id.to_string(),
+            incarnation,
+            b"pending".to_vec(),
+            1,
+        );
+        assert!(runtime.pending_runtime_outputs.contains_key(window_id));
+    }
     let address = runtime.window_lookup[window_id].clone();
     let project_root = runtime
         .tab(&address.tab_id)

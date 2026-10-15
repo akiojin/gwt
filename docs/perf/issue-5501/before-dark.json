@@ -1,0 +1,2494 @@
+{
+  "label": "before",
+  "theme": "dark",
+  "process_id": 41116,
+  "sample_seconds": 10.58,
+  "daemon_pid": 27432,
+  "daemon_probe": "running pid=27432 bind=\\\\.\\pipe\\gwtd-62981d9f2e69f576-e4f269bf94b7620b version=9.122.0 probe=ok uptime=0s channels=0 connections=1\n",
+  "daemon_panes": [
+    {
+      "id": "terminal-output-5501::shell-1",
+      "frames": 33,
+      "bytes": 18711,
+      "previews": 33
+    },
+    {
+      "id": "terminal-output-5501::shell-2",
+      "frames": 32,
+      "bytes": 18144,
+      "previews": 32
+    },
+    {
+      "id": "terminal-output-5501::shell-3",
+      "frames": 32,
+      "bytes": 18144,
+      "previews": 32
+    },
+    {
+      "id": "terminal-output-5501::shell-4",
+      "frames": 30,
+      "bytes": 17010,
+      "previews": 30
+    },
+    {
+      "id": "terminal-output-5501::shell-5",
+      "frames": 31,
+      "bytes": 17577,
+      "previews": 31
+    },
+    {
+      "id": "terminal-output-5501::shell-6",
+      "frames": 34,
+      "bytes": 19278,
+      "previews": 34
+    },
+    {
+      "id": "terminal-output-5501::shell-7",
+      "frames": 32,
+      "bytes": 18144,
+      "previews": 32
+    },
+    {
+      "id": "terminal-output-5501::shell-8",
+      "frames": 30,
+      "bytes": 17010,
+      "previews": 30
+    }
+  ],
+  "workload": {
+    "panes": 8,
+    "redraw_interval_ms": 20,
+    "payload_padding_bytes": 512,
+    "command": "node -e \"let n=0;process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write('\\x1b[2J\\x1b[H');const timer=setInterval(()=>process.stdout.write('\\x1b[HGWT_'+'BATCHING_5501_RUN:'+String(n++).padStart(8,'0')+' '+('|/-'.charAt(n%3))+'x'.repeat(512)+String(n).padStart(8,'0')),20);process.stdin.on('data',k=>{if(k.includes(113)){clearInterval(timer);process.stdout.write('\\x1b[2J\\x1b[HGWT_'+'BATCHING_5501_DONE\\r\\n');process.exit(0)}})\"",
+    "stop_input": "q"
+  },
+  "cpu": {
+    "main": {
+      "id": 25248,
+      "name": "main",
+      "cpu_seconds": 1.53125
+    },
+    "publish_worker": {
+      "id": 39180,
+      "name": "gwt-runtime-daemon-publish-worker",
+      "cpu_seconds": 3.8125
+    }
+  },
+  "panes": [
+    {
+      "id": "terminal-output-5501::shell-1",
+      "raw_chunks": 183,
+      "raw_bytes": 103761,
+      "previews": 182,
+      "last_raw_age_ms": 19
+    },
+    {
+      "id": "terminal-output-5501::shell-2",
+      "raw_chunks": 182,
+      "raw_bytes": 103194,
+      "previews": 178,
+      "last_raw_age_ms": 19
+    },
+    {
+      "id": "terminal-output-5501::shell-3",
+      "raw_chunks": 186,
+      "raw_bytes": 105462,
+      "previews": 184,
+      "last_raw_age_ms": 19
+    },
+    {
+      "id": "terminal-output-5501::shell-4",
+      "raw_chunks": 184,
+      "raw_bytes": 104328,
+      "previews": 183,
+      "last_raw_age_ms": 20
+    },
+    {
+      "id": "terminal-output-5501::shell-5",
+      "raw_chunks": 187,
+      "raw_bytes": 106029,
+      "previews": 185,
+      "last_raw_age_ms": 7
+    },
+    {
+      "id": "terminal-output-5501::shell-6",
+      "raw_chunks": 182,
+      "raw_bytes": 103194,
+      "previews": 179,
+      "last_raw_age_ms": 7
+    },
+    {
+      "id": "terminal-output-5501::shell-7",
+      "raw_chunks": 184,
+      "raw_bytes": 104328,
+      "previews": 183,
+      "last_raw_age_ms": 7
+    },
+    {
+      "id": "terminal-output-5501::shell-8",
+      "raw_chunks": 181,
+      "raw_bytes": 102627,
+      "previews": 179,
+      "last_raw_age_ms": 6
+    }
+  ],
+  "traffic_samples": [
+    {
+      "at": 1792054991993,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 333,
+          "raw_bytes": 169032,
+          "previews": 325,
+          "last_raw_at": 1792054991986
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 332,
+          "raw_bytes": 164663,
+          "previews": 320,
+          "last_raw_at": 1792054991986
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 337,
+          "raw_bytes": 170547,
+          "previews": 325,
+          "last_raw_at": 1792054991977
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 334,
+          "raw_bytes": 166342,
+          "previews": 319,
+          "last_raw_at": 1792054991939
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 322,
+          "raw_bytes": 171923,
+          "previews": 316,
+          "last_raw_at": 1792054991916
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 343,
+          "raw_bytes": 180693,
+          "previews": 334,
+          "last_raw_at": 1792054991977
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 343,
+          "raw_bytes": 182138,
+          "previews": 337,
+          "last_raw_at": 1792054991918
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 334,
+          "raw_bytes": 177673,
+          "previews": 327,
+          "last_raw_at": 1792054991932
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 130,
+          "bytes": 54568,
+          "previews": 130
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 137,
+          "bytes": 54098,
+          "previews": 137
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 136,
+          "bytes": 56580,
+          "previews": 136
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 136,
+          "bytes": 54076,
+          "previews": 136
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 129,
+          "bytes": 62492,
+          "previews": 129
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 141,
+          "bytes": 66242,
+          "previews": 141
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 141,
+          "bytes": 67604,
+          "previews": 141
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 135,
+          "bytes": 64840,
+          "previews": 135
+        }
+      }
+    },
+    {
+      "at": 1792054992998,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 347,
+          "raw_bytes": 176970,
+          "previews": 339,
+          "last_raw_at": 1792054992991
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 348,
+          "raw_bytes": 173735,
+          "previews": 336,
+          "last_raw_at": 1792054992991
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 351,
+          "raw_bytes": 178485,
+          "previews": 339,
+          "last_raw_at": 1792054992990
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 350,
+          "raw_bytes": 175414,
+          "previews": 335,
+          "last_raw_at": 1792054992976
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 337,
+          "raw_bytes": 180428,
+          "previews": 331,
+          "last_raw_at": 1792054992990
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 357,
+          "raw_bytes": 188631,
+          "previews": 348,
+          "last_raw_at": 1792054992990
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 359,
+          "raw_bytes": 191210,
+          "previews": 353,
+          "last_raw_at": 1792054992990
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 349,
+          "raw_bytes": 186178,
+          "previews": 342,
+          "last_raw_at": 1792054992990
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 138,
+          "bytes": 59104,
+          "previews": 138
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 145,
+          "bytes": 58634,
+          "previews": 145
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 145,
+          "bytes": 61683,
+          "previews": 145
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 142,
+          "bytes": 57478,
+          "previews": 142
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 135,
+          "bytes": 65894,
+          "previews": 135
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 147,
+          "bytes": 69644,
+          "previews": 147
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 148,
+          "bytes": 71573,
+          "previews": 148
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 142,
+          "bytes": 68809,
+          "previews": 142
+        }
+      }
+    },
+    {
+      "at": 1792054994157,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 365,
+          "raw_bytes": 187176,
+          "previews": 357,
+          "last_raw_at": 1792054993821
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 364,
+          "raw_bytes": 182807,
+          "previews": 352,
+          "last_raw_at": 1792054993823
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 368,
+          "raw_bytes": 188124,
+          "previews": 356,
+          "last_raw_at": 1792054993834
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 368,
+          "raw_bytes": 185620,
+          "previews": 353,
+          "last_raw_at": 1792054993834
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 354,
+          "raw_bytes": 190067,
+          "previews": 348,
+          "last_raw_at": 1792054993835
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 375,
+          "raw_bytes": 198837,
+          "previews": 366,
+          "last_raw_at": 1792054993824
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 375,
+          "raw_bytes": 200282,
+          "previews": 369,
+          "last_raw_at": 1792054993834
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 366,
+          "raw_bytes": 195817,
+          "previews": 359,
+          "last_raw_at": 1792054993834
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 148,
+          "bytes": 64774,
+          "previews": 148
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 155,
+          "bytes": 64304,
+          "previews": 155
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 155,
+          "bytes": 67353,
+          "previews": 155
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 151,
+          "bytes": 62581,
+          "previews": 151
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 143,
+          "bytes": 70430,
+          "previews": 143
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 159,
+          "bytes": 76448,
+          "previews": 159
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 157,
+          "bytes": 76676,
+          "previews": 157
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 152,
+          "bytes": 74479,
+          "previews": 152
+        }
+      }
+    },
+    {
+      "at": 1792054995344,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 385,
+          "raw_bytes": 198516,
+          "previews": 376,
+          "last_raw_at": 1792054995031
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 384,
+          "raw_bytes": 194147,
+          "previews": 370,
+          "last_raw_at": 1792054995034
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 388,
+          "raw_bytes": 199464,
+          "previews": 376,
+          "last_raw_at": 1792054995034
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 386,
+          "raw_bytes": 195826,
+          "previews": 371,
+          "last_raw_at": 1792054995016
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 373,
+          "raw_bytes": 200840,
+          "previews": 366,
+          "last_raw_at": 1792054995034
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 394,
+          "raw_bytes": 209610,
+          "previews": 384,
+          "last_raw_at": 1792054995030
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 394,
+          "raw_bytes": 211055,
+          "previews": 387,
+          "last_raw_at": 1792054995030
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 386,
+          "raw_bytes": 207157,
+          "previews": 378,
+          "last_raw_at": 1792054995034
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 157,
+          "bytes": 69877,
+          "previews": 157
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 164,
+          "bytes": 69407,
+          "previews": 164
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 164,
+          "bytes": 72456,
+          "previews": 164
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 160,
+          "bytes": 67684,
+          "previews": 160
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 155,
+          "bytes": 77234,
+          "previews": 155
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 169,
+          "bytes": 82118,
+          "previews": 169
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 167,
+          "bytes": 82346,
+          "previews": 167
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 161,
+          "bytes": 79582,
+          "previews": 161
+        }
+      }
+    },
+    {
+      "at": 1792054996353,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 407,
+          "raw_bytes": 210990,
+          "previews": 398,
+          "last_raw_at": 1792054996338
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 407,
+          "raw_bytes": 207188,
+          "previews": 392,
+          "last_raw_at": 1792054996338
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 413,
+          "raw_bytes": 213639,
+          "previews": 399,
+          "last_raw_at": 1792054996320
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 410,
+          "raw_bytes": 209434,
+          "previews": 394,
+          "last_raw_at": 1792054996332
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 398,
+          "raw_bytes": 215015,
+          "previews": 390,
+          "last_raw_at": 1792054996316
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 415,
+          "raw_bytes": 221517,
+          "previews": 404,
+          "last_raw_at": 1792054996320
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 417,
+          "raw_bytes": 224096,
+          "previews": 410,
+          "last_raw_at": 1792054996337
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 406,
+          "raw_bytes": 218497,
+          "previews": 397,
+          "last_raw_at": 1792054996320
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 163,
+          "bytes": 73279,
+          "previews": 163
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 169,
+          "bytes": 72242,
+          "previews": 169
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 168,
+          "bytes": 74724,
+          "previews": 168
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 166,
+          "bytes": 71086,
+          "previews": 166
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 160,
+          "bytes": 80069,
+          "previews": 160
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 175,
+          "bytes": 85520,
+          "previews": 175
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 173,
+          "bytes": 85748,
+          "previews": 173
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 165,
+          "bytes": 81850,
+          "previews": 165
+        }
+      }
+    },
+    {
+      "at": 1792054997356,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 428,
+          "raw_bytes": 222897,
+          "previews": 419,
+          "last_raw_at": 1792054997315
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 427,
+          "raw_bytes": 218528,
+          "previews": 412,
+          "last_raw_at": 1792054997331
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 436,
+          "raw_bytes": 226680,
+          "previews": 422,
+          "last_raw_at": 1792054997335
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 431,
+          "raw_bytes": 221341,
+          "previews": 415,
+          "last_raw_at": 1792054997331
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 420,
+          "raw_bytes": 227489,
+          "previews": 412,
+          "last_raw_at": 1792054997318
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 438,
+          "raw_bytes": 234558,
+          "previews": 426,
+          "last_raw_at": 1792054997331
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 441,
+          "raw_bytes": 237704,
+          "previews": 434,
+          "last_raw_at": 1792054997331
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 428,
+          "raw_bytes": 230971,
+          "previews": 419,
+          "last_raw_at": 1792054997331
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 163,
+          "bytes": 73279,
+          "previews": 163
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 169,
+          "bytes": 72242,
+          "previews": 169
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 168,
+          "bytes": 74724,
+          "previews": 168
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 166,
+          "bytes": 71086,
+          "previews": 166
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 160,
+          "bytes": 80069,
+          "previews": 160
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 175,
+          "bytes": 85520,
+          "previews": 175
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 173,
+          "bytes": 85748,
+          "previews": 173
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 165,
+          "bytes": 81850,
+          "previews": 165
+        }
+      }
+    },
+    {
+      "at": 1792054998356,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 446,
+          "raw_bytes": 233103,
+          "previews": 437,
+          "last_raw_at": 1792054998353
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 445,
+          "raw_bytes": 228734,
+          "previews": 429,
+          "last_raw_at": 1792054998330
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 454,
+          "raw_bytes": 236886,
+          "previews": 440,
+          "last_raw_at": 1792054998352
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 448,
+          "raw_bytes": 230980,
+          "previews": 432,
+          "last_raw_at": 1792054998330
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 438,
+          "raw_bytes": 237695,
+          "previews": 430,
+          "last_raw_at": 1792054998330
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 456,
+          "raw_bytes": 244764,
+          "previews": 444,
+          "last_raw_at": 1792054998330
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 459,
+          "raw_bytes": 247910,
+          "previews": 452,
+          "last_raw_at": 1792054998352
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 445,
+          "raw_bytes": 240610,
+          "previews": 436,
+          "last_raw_at": 1792054998330
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 163,
+          "bytes": 73279,
+          "previews": 163
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 169,
+          "bytes": 72242,
+          "previews": 169
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 168,
+          "bytes": 74724,
+          "previews": 168
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 166,
+          "bytes": 71086,
+          "previews": 166
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 160,
+          "bytes": 80069,
+          "previews": 160
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 175,
+          "bytes": 85520,
+          "previews": 175
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 173,
+          "bytes": 85748,
+          "previews": 173
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 165,
+          "bytes": 81850,
+          "previews": 165
+        }
+      }
+    },
+    {
+      "at": 1792054999501,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 465,
+          "raw_bytes": 243876,
+          "previews": 456,
+          "last_raw_at": 1792054999168
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 465,
+          "raw_bytes": 240074,
+          "previews": 449,
+          "last_raw_at": 1792054999200
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 473,
+          "raw_bytes": 247659,
+          "previews": 459,
+          "last_raw_at": 1792054999200
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 468,
+          "raw_bytes": 242320,
+          "previews": 452,
+          "last_raw_at": 1792054999206
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 459,
+          "raw_bytes": 249602,
+          "previews": 451,
+          "last_raw_at": 1792054999200
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 476,
+          "raw_bytes": 256104,
+          "previews": 464,
+          "last_raw_at": 1792054999208
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 478,
+          "raw_bytes": 258683,
+          "previews": 471,
+          "last_raw_at": 1792054999208
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 466,
+          "raw_bytes": 252517,
+          "previews": 457,
+          "last_raw_at": 1792054999192
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 163,
+          "bytes": 73279,
+          "previews": 163
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 169,
+          "bytes": 72242,
+          "previews": 169
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 168,
+          "bytes": 74724,
+          "previews": 168
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 166,
+          "bytes": 71086,
+          "previews": 166
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 160,
+          "bytes": 80069,
+          "previews": 160
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 175,
+          "bytes": 85520,
+          "previews": 175
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 173,
+          "bytes": 85748,
+          "previews": 173
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 165,
+          "bytes": 81850,
+          "previews": 165
+        }
+      }
+    },
+    {
+      "at": 1792055000689,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 488,
+          "raw_bytes": 256917,
+          "previews": 479,
+          "last_raw_at": 1792055000429
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 487,
+          "raw_bytes": 252548,
+          "previews": 471,
+          "last_raw_at": 1792055000419
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 495,
+          "raw_bytes": 260133,
+          "previews": 481,
+          "last_raw_at": 1792055000418
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 490,
+          "raw_bytes": 254794,
+          "previews": 474,
+          "last_raw_at": 1792055000412
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 481,
+          "raw_bytes": 262076,
+          "previews": 473,
+          "last_raw_at": 1792055000419
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 498,
+          "raw_bytes": 268578,
+          "previews": 486,
+          "last_raw_at": 1792055000428
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 500,
+          "raw_bytes": 271157,
+          "previews": 493,
+          "last_raw_at": 1792055000412
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 488,
+          "raw_bytes": 264991,
+          "previews": 479,
+          "last_raw_at": 1792055000419
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 163,
+          "bytes": 73279,
+          "previews": 163
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 169,
+          "bytes": 72242,
+          "previews": 169
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 168,
+          "bytes": 74724,
+          "previews": 168
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 166,
+          "bytes": 71086,
+          "previews": 166
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 160,
+          "bytes": 80069,
+          "previews": 160
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 175,
+          "bytes": 85520,
+          "previews": 175
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 173,
+          "bytes": 85748,
+          "previews": 173
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 165,
+          "bytes": 81850,
+          "previews": 165
+        }
+      }
+    },
+    {
+      "at": 1792055001885,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 510,
+          "raw_bytes": 269391,
+          "previews": 501,
+          "last_raw_at": 1792055001597
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 508,
+          "raw_bytes": 264455,
+          "previews": 492,
+          "last_raw_at": 1792055001597
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 517,
+          "raw_bytes": 272607,
+          "previews": 503,
+          "last_raw_at": 1792055001597
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 512,
+          "raw_bytes": 267268,
+          "previews": 496,
+          "last_raw_at": 1792055001597
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 503,
+          "raw_bytes": 274550,
+          "previews": 495,
+          "last_raw_at": 1792055001597
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 519,
+          "raw_bytes": 280485,
+          "previews": 507,
+          "last_raw_at": 1792055001597
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 520,
+          "raw_bytes": 282497,
+          "previews": 513,
+          "last_raw_at": 1792055001578
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 509,
+          "raw_bytes": 276898,
+          "previews": 500,
+          "last_raw_at": 1792055001578
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 163,
+          "bytes": 73279,
+          "previews": 163
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 169,
+          "bytes": 72242,
+          "previews": 169
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 168,
+          "bytes": 74724,
+          "previews": 168
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 166,
+          "bytes": 71086,
+          "previews": 166
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 160,
+          "bytes": 80069,
+          "previews": 160
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 175,
+          "bytes": 85520,
+          "previews": 175
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 173,
+          "bytes": 85748,
+          "previews": 173
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 165,
+          "bytes": 81850,
+          "previews": 165
+        }
+      }
+    },
+    {
+      "at": 1792055002066,
+      "panes": {
+        "terminal-output-5501::shell-1": {
+          "raw_chunks": 516,
+          "raw_bytes": 272793,
+          "previews": 507,
+          "last_raw_at": 1792055002047
+        },
+        "terminal-output-5501::shell-2": {
+          "raw_chunks": 514,
+          "raw_bytes": 267857,
+          "previews": 498,
+          "last_raw_at": 1792055002047
+        },
+        "terminal-output-5501::shell-3": {
+          "raw_chunks": 523,
+          "raw_bytes": 276009,
+          "previews": 509,
+          "last_raw_at": 1792055002047
+        },
+        "terminal-output-5501::shell-4": {
+          "raw_chunks": 518,
+          "raw_bytes": 270670,
+          "previews": 502,
+          "last_raw_at": 1792055002046
+        },
+        "terminal-output-5501::shell-5": {
+          "raw_chunks": 509,
+          "raw_bytes": 277952,
+          "previews": 501,
+          "last_raw_at": 1792055002059
+        },
+        "terminal-output-5501::shell-6": {
+          "raw_chunks": 525,
+          "raw_bytes": 283887,
+          "previews": 513,
+          "last_raw_at": 1792055002059
+        },
+        "terminal-output-5501::shell-7": {
+          "raw_chunks": 527,
+          "raw_bytes": 286466,
+          "previews": 520,
+          "last_raw_at": 1792055002059
+        },
+        "terminal-output-5501::shell-8": {
+          "raw_chunks": 515,
+          "raw_bytes": 280300,
+          "previews": 506,
+          "last_raw_at": 1792055002060
+        }
+      },
+      "daemon": {
+        "terminal-output-5501::shell-1": {
+          "frames": 163,
+          "bytes": 73279,
+          "previews": 163
+        },
+        "terminal-output-5501::shell-2": {
+          "frames": 169,
+          "bytes": 72242,
+          "previews": 169
+        },
+        "terminal-output-5501::shell-3": {
+          "frames": 168,
+          "bytes": 74724,
+          "previews": 168
+        },
+        "terminal-output-5501::shell-4": {
+          "frames": 166,
+          "bytes": 71086,
+          "previews": 166
+        },
+        "terminal-output-5501::shell-5": {
+          "frames": 160,
+          "bytes": 80069,
+          "previews": 160
+        },
+        "terminal-output-5501::shell-6": {
+          "frames": 175,
+          "bytes": 85520,
+          "previews": 175
+        },
+        "terminal-output-5501::shell-7": {
+          "frames": 173,
+          "bytes": 85748,
+          "previews": 173
+        },
+        "terminal-output-5501::shell-8": {
+          "frames": 165,
+          "bytes": 81850,
+          "previews": 165
+        }
+      }
+    }
+  ],
+  "native_thread_snapshots": {
+    "start": {
+      "phase": "start",
+      "process_id": 41116,
+      "timestamp_utc": "2026-10-15T09:03:11.4683275Z",
+      "threads": [
+        {
+          "id": 25248,
+          "name": "main",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285264471494",
+          "kernel_seconds": 0.671875,
+          "user_seconds": 2.890625
+        },
+        {
+          "id": 41728,
+          "name": "tracing-appender",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285264880093",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 6612,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265670363",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32096,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265671266",
+          "kernel_seconds": 0.09375,
+          "user_seconds": 0
+        },
+        {
+          "id": 27032,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265671630",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 34212,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265671930",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 11188,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265672258",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 16388,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265673398",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 33656,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265675075",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 18276,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265675773",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 3376,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265676213",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 36628,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265676558",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 35780,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265676850",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 41880,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265677164",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32212,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265677581",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 7892,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265677888",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 12036,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265678971",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28860,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265679999",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 40596,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265680330",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 40660,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265680619",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 37440,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265680934",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28884,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265681226",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 6264,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265681527",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 9820,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265682060",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 23296,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265682372",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 40232,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265683934",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 26816,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265684617",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28848,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265684991",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 27700,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265685330",
+          "kernel_seconds": 1.71875,
+          "user_seconds": 15.40625
+        },
+        {
+          "id": 15668,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265686002",
+          "kernel_seconds": 0.515625,
+          "user_seconds": 0.34375
+        },
+        {
+          "id": 41188,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265686337",
+          "kernel_seconds": 0.296875,
+          "user_seconds": 0.09375
+        },
+        {
+          "id": 3828,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265686697",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 37768,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265687049",
+          "kernel_seconds": 1.109375,
+          "user_seconds": 0.4375
+        },
+        {
+          "id": 40712,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265687451",
+          "kernel_seconds": 0.578125,
+          "user_seconds": 0.40625
+        },
+        {
+          "id": 38916,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265811315",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 41044,
+          "name": "issue-monitor-scheduled-tick",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265820693",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32976,
+          "name": "issue-monitor-claim-renewal-tick",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265821679",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 37368,
+          "name": "runtime-daemon-ensure-tick",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265822154",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 5192,
+          "name": "terminal-convergence-tick",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265822664",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28728,
+          "name": "gwt-verification-cap-relief",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265920868",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 24136,
+          "name": "gwt-agent-capacity",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265921548",
+          "kernel_seconds": 1.109375,
+          "user_seconds": 0.109375
+        },
+        {
+          "id": 37884,
+          "name": "gwt-monitor-runtime",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265922399",
+          "kernel_seconds": 1.15625,
+          "user_seconds": 0.140625
+        },
+        {
+          "id": 30844,
+          "name": "gwt-index-refresh-drain",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265934580",
+          "kernel_seconds": 0.046875,
+          "user_seconds": 0.046875
+        },
+        {
+          "id": 40952,
+          "name": "frontend-dispatch-warnings",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285266873664",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 39864,
+          "name": "frontend-dispatch-watchdog",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285266874505",
+          "kernel_seconds": 0.078125,
+          "user_seconds": 0.0625
+        },
+        {
+          "id": 34948,
+          "name": "runtime-namespace-gc",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285273860714",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 38436,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285274946470",
+          "kernel_seconds": 0,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 35564,
+          "name": "gwt-pane-close-process-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285274947097",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 4136,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294679687",
+          "kernel_seconds": 1.625,
+          "user_seconds": 1.03125
+        },
+        {
+          "id": 10244,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294893492",
+          "kernel_seconds": 7.828125,
+          "user_seconds": 15.640625
+        },
+        {
+          "id": 2232,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294905501",
+          "kernel_seconds": 1.390625,
+          "user_seconds": 1.5
+        },
+        {
+          "id": 30676,
+          "name": "gwt-board-watch-issue-5501",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294922453",
+          "kernel_seconds": 0,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 33848,
+          "name": "gwt-workspace-watch-issue-5501",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294926128",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28256,
+          "name": "gwt-daemon-subscriber",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294966983",
+          "kernel_seconds": 0.046875,
+          "user_seconds": 0.125
+        },
+        {
+          "id": 24024,
+          "name": "notify-rs debouncer loop",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294995388",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 30420,
+          "name": "notify-rs windows loop",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294996273",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 41400,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285296247893",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 33192,
+          "name": "notify-rs debouncer loop",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285318976178",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 16496,
+          "name": "notify-rs windows loop",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285318977064",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 28600,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285338992192",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 6352,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285413182353",
+          "kernel_seconds": 0,
+          "user_seconds": 0.078125
+        },
+        {
+          "id": 4692,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285413183026",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 39180,
+          "name": "gwt-runtime-daemon-publish-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285413658450",
+          "kernel_seconds": 1.609375,
+          "user_seconds": 3.671875
+        },
+        {
+          "id": 39812,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285461812730",
+          "kernel_seconds": 0,
+          "user_seconds": 0.0625
+        },
+        {
+          "id": 41104,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285461813277",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 16760,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285509842404",
+          "kernel_seconds": 0,
+          "user_seconds": 0.078125
+        },
+        {
+          "id": 39408,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285509842880",
+          "kernel_seconds": 0.03125,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 1848,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285545716328",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 39692,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285545716880",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 14312,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285580841864",
+          "kernel_seconds": 0,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 28576,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285580842412",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32064,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285596243773",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32944,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285597195810",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32852,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285613485985",
+          "kernel_seconds": 0.03125,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 12724,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285613486546",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 14956,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285639402668",
+          "kernel_seconds": 0,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 24440,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285639403215",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 14844,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285674985842",
+          "kernel_seconds": 0,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 31196,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285674986345",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 29664,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285676357469",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 39240,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285676358343",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 31868,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285866033002",
+          "kernel_seconds": 0.046875,
+          "user_seconds": 0.015625
+        }
+      ]
+    },
+    "end": {
+      "phase": "end",
+      "process_id": 41116,
+      "timestamp_utc": "2026-10-15T09:03:22.0484290Z",
+      "threads": [
+        {
+          "id": 25248,
+          "name": "main",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285264471494",
+          "kernel_seconds": 0.9375,
+          "user_seconds": 4.15625
+        },
+        {
+          "id": 41728,
+          "name": "tracing-appender",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285264880093",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 6612,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265670363",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32096,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265671266",
+          "kernel_seconds": 0.09375,
+          "user_seconds": 0
+        },
+        {
+          "id": 27032,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265671630",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 34212,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265671930",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 11188,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265672258",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 16388,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265673398",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 33656,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265675075",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 18276,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265675773",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 3376,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265676213",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 36628,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265676558",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 35780,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265676850",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 41880,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265677164",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32212,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265677581",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 7892,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265677888",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 12036,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265678971",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28860,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265679999",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 40596,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265680330",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 40660,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265680619",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 37440,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265680934",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28884,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265681226",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 6264,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265681527",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 9820,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265682060",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 23296,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265682372",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 40232,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265683934",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 26816,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265684617",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28848,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265684991",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 27700,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265685330",
+          "kernel_seconds": 2.34375,
+          "user_seconds": 18.78125
+        },
+        {
+          "id": 15668,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265686002",
+          "kernel_seconds": 0.671875,
+          "user_seconds": 0.484375
+        },
+        {
+          "id": 41188,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265686337",
+          "kernel_seconds": 0.296875,
+          "user_seconds": 0.09375
+        },
+        {
+          "id": 3828,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265686697",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 37768,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265687049",
+          "kernel_seconds": 1.328125,
+          "user_seconds": 0.6875
+        },
+        {
+          "id": 40712,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265687451",
+          "kernel_seconds": 0.75,
+          "user_seconds": 0.46875
+        },
+        {
+          "id": 38916,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265811315",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 41044,
+          "name": "issue-monitor-scheduled-tick",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265820693",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32976,
+          "name": "issue-monitor-claim-renewal-tick",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265821679",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 37368,
+          "name": "runtime-daemon-ensure-tick",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265822154",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 5192,
+          "name": "terminal-convergence-tick",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265822664",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28728,
+          "name": "gwt-verification-cap-relief",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265920868",
+          "kernel_seconds": 0.03125,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 24136,
+          "name": "gwt-agent-capacity",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265921548",
+          "kernel_seconds": 1.21875,
+          "user_seconds": 0.171875
+        },
+        {
+          "id": 37884,
+          "name": "gwt-monitor-runtime",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265922399",
+          "kernel_seconds": 1.328125,
+          "user_seconds": 0.171875
+        },
+        {
+          "id": 30844,
+          "name": "gwt-index-refresh-drain",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285265934580",
+          "kernel_seconds": 0.4375,
+          "user_seconds": 0.09375
+        },
+        {
+          "id": 40952,
+          "name": "frontend-dispatch-warnings",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285266873664",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 39864,
+          "name": "frontend-dispatch-watchdog",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285266874505",
+          "kernel_seconds": 0.109375,
+          "user_seconds": 0.0625
+        },
+        {
+          "id": 34948,
+          "name": "runtime-namespace-gc",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285273860714",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 38436,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285274946470",
+          "kernel_seconds": 0,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 35564,
+          "name": "gwt-pane-close-process-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285274947097",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 4136,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294679687",
+          "kernel_seconds": 1.984375,
+          "user_seconds": 1.125
+        },
+        {
+          "id": 10244,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294893492",
+          "kernel_seconds": 9.5,
+          "user_seconds": 18.171875
+        },
+        {
+          "id": 2232,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294905501",
+          "kernel_seconds": 1.546875,
+          "user_seconds": 1.625
+        },
+        {
+          "id": 30676,
+          "name": "gwt-board-watch-issue-5501",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294922453",
+          "kernel_seconds": 0,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 33848,
+          "name": "gwt-workspace-watch-issue-5501",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294926128",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 28256,
+          "name": "gwt-daemon-subscriber",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294966983",
+          "kernel_seconds": 0.046875,
+          "user_seconds": 0.140625
+        },
+        {
+          "id": 24024,
+          "name": "notify-rs debouncer loop",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294995388",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 30420,
+          "name": "notify-rs windows loop",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285294996273",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 41400,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285296247893",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 33192,
+          "name": "notify-rs debouncer loop",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285318976178",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 16496,
+          "name": "notify-rs windows loop",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285318977064",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 28600,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285338992192",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 6352,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285413182353",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.09375
+        },
+        {
+          "id": 4692,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285413183026",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 39180,
+          "name": "gwt-runtime-daemon-publish-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285413658450",
+          "kernel_seconds": 2.765625,
+          "user_seconds": 6.328125
+        },
+        {
+          "id": 39812,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285461812730",
+          "kernel_seconds": 0,
+          "user_seconds": 0.078125
+        },
+        {
+          "id": 41104,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285461813277",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.046875
+        },
+        {
+          "id": 16760,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285509842404",
+          "kernel_seconds": 0,
+          "user_seconds": 0.140625
+        },
+        {
+          "id": 39408,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285509842880",
+          "kernel_seconds": 0.03125,
+          "user_seconds": 0.015625
+        },
+        {
+          "id": 1848,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285545716328",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 39692,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285545716880",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 14312,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285580841864",
+          "kernel_seconds": 0,
+          "user_seconds": 0.03125
+        },
+        {
+          "id": 28576,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285580842412",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32064,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285596243773",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32944,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285597195810",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 32852,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285613485985",
+          "kernel_seconds": 0.046875,
+          "user_seconds": 0.046875
+        },
+        {
+          "id": 12724,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285613486546",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0
+        },
+        {
+          "id": 14956,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285639402668",
+          "kernel_seconds": 0,
+          "user_seconds": 0.0625
+        },
+        {
+          "id": 24440,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285639403215",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 14844,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285674985842",
+          "kernel_seconds": 0.015625,
+          "user_seconds": 0.0625
+        },
+        {
+          "id": 31196,
+          "name": "",
+          "description_hresult": 268435456,
+          "created_file_time": "134365285674986345",
+          "kernel_seconds": 0,
+          "user_seconds": 0
+        },
+        {
+          "id": 16980,
+          "name": "tokio-rt-worker",
+          "description_hresult": 268435456,
+          "created_file_time": "134365286015955468",
+          "kernel_seconds": 0.0625,
+          "user_seconds": 0
+        }
+      ]
+    }
+  }
+}
