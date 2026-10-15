@@ -274,6 +274,18 @@ test("tray Open Project URL starts the existing picker once, after frontend read
   assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
 });
 
+test("tray Open Project discards its queued picker when the initial connection fails", () => {
+  const { document, sockets, timers } = fixture("?action=open-folder");
+  const open = document.querySelector('[data-hub-action="open-folder"]');
+  sockets[0].handlers.close();
+  assert.equal(open.textContent, "Open Folder…");
+  timers.at(-1)();
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
+  open.click();
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: "open_project_dialog" });
+});
+
 test("tray Clone URL opens the existing accessible clone dialog without starting a clone", () => {
   const { document, sockets } = fixture("?action=clone");
   assert.equal(document.querySelector('#clone-project-modal').classList.contains("open"), true);

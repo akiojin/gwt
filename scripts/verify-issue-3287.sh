@@ -247,4 +247,8 @@ GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
   bash "$REPO_ROOT/scripts/run-visual-tests.sh" \
     --workers=1 crates/gwt/playwright/tests/project-hub.spec.ts "$@"
 
-kill -0 "$CHECK_KEEPALIVE_PID"
+if ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then
+  cat "$CHECK_HOME/keepalive.log" >&2
+  echo 'browser-check Hub connection dropped during the suite' >&2
+  exit 1
+fi

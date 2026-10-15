@@ -46,7 +46,7 @@ export function createHubApp({ document: doc, window: win }) {
   let cloneState = initialCloneState();
   let socket = null;
   let reconnectTimer = null;
-  const queued = [];
+  let queued = [];
 
   const root = node("main", "gwt-hub");
   root.dataset.hub = "";
@@ -330,6 +330,8 @@ export function createHubApp({ document: doc, window: win }) {
       if (socket !== connection) return;
       closeController.connectionLost();
       picker.connectionLost();
+      queued = queued.filter(({ kind }) =>
+        !["open_project_dialog", "select_clone_project_parent"].includes(kind));
       reconnectTimer = win.setTimeout(connect, 1000);
     });
   }
