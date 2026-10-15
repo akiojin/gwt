@@ -161,11 +161,15 @@ custom agents.
 
 **Settings > Supported Agents** shows the complete catalog, installation status,
 and installed versions. Install missing CLIs there; update actions appear when
-npm metadata confirms a newer version. Agents without supported version metadata
-show that limitation and require manual updates.
+official distribution metadata confirms a newer version: npm for Codex, Grok,
+OpenCode and OpenClaw, and the platform manifest for Antigravity. Claude native
+and Hermes require manual updates because their effective update channel cannot
+be verified. `gh copilot` also requires manual updates because the detected
+distribution may differ from the extension updater's target. The row explains
+these limitations. Metadata failures disable updates and show the reason.
 
 Automatic agent updates are off by default. When enabled, gwt checks installed
-npm agents at the next app startup and updates only known newer versions, with
+agents with a verified update route at the next app startup and updates only known newer versions, with
 no live agent panes (including the Project Manager) or pending launches. Manual
 installs and updates also require those agents to be closed. Missing agents are
 never installed automatically.
@@ -429,11 +433,14 @@ Common windows include:
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
   Application settings and project settings are labeled separately. Open
   `Issues` for Autonomous, Max active, queue refill and allowed labels, or
-  `Agents` to edit launch profiles and candidate order/preferences. Each
-  project section names its target project; the Issue window's ⚙ opens its
-  `Issues` section. `System > Auto-apply updates` applies across all projects
+  the same Issues section to edit launch profiles and candidate order/preferences.
+  Settings has grouped Application/Project navigation and names the target project.
+  `System > Auto-apply updates` applies across all projects
   when at least one open project has Autonomous enabled. Legacy project
   values migrate once: any enabled value enables the application setting.
+  System shows the saved and effective values and pending-update blockers.
+  Change the preference in the GUI; agents can read it with
+  `update.settings.status`. It is no longer an Issue Monitor setting.
 - `PR` — pull-request workflow surface; detailed list support depends on the
   cache-backed PR source as it lands
 
@@ -441,6 +448,12 @@ Common windows include:
 coordination surface agents use to expose status, decisions, handoffs, and
 requests. The Work Item Knowledge Bridge uses the local Issue cache and semantic
 index rather than rendering direct GitHub API responses in the frontend.
+
+Each worker Agent chooses a short memorable name when it starts. Its badge,
+window title, Fleet, and Kanban cards use that name; duplicate choices receive
+a numeric suffix. The name stays the same through restore and in-place restart.
+Until naming finishes, the badge reads `Naming…`. The resident PM keeps its own
+fixed identity.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -453,7 +466,7 @@ Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
 ## Issue surface and Issue Monitor
 
-Open `Issue` from Add Window to browse cached GitHub Issues in four columns:
+Open **Settings → Project → Issues**, or use the **Issues** rail shortcut, to browse cached GitHub Issues in four columns:
 Backlog, Queued, Active, and Done. Each row preserves its execution state and
 actions. Drag Backlog items into Queued to schedule them, drag them back to remove
 them, or reorder items within Queued. Selecting multiple items sends one queue
@@ -464,8 +477,9 @@ Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
 a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
 appear red; error details and history stay in the notification center. Use ⚙ to
-open and focus **Settings → Issues** for Max active, Auto-refill, its limit and
-Allowed labels; candidate profiles live in **Settings → Agents**. Auto-refill is
+expand the settings rows in the same pane for Max active, Auto-refill, its limit,
+Allowed labels and candidate profiles. Auto-apply updates is in **System**. Select **Manual** to edit
+Max active; **Auto** displays the calculated value without editing. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
 
@@ -1113,9 +1127,11 @@ PM Q&A posts include an `instruction` object with the full `original`, `kind`
 redacted before storage. Memory search includes the saved originals and outcomes;
 active standing instructions are reloaded at PM startup and each turn.
 
-The **PM の現在** card stays above the report history. It separates the PM's
-explanation from observed active windows, queue head, human handoffs, release PR,
-and pending update. Unavailable observations are shown as unknown. The PM updates
+The **PM status** card and report history share one scroll area. The card starts
+with a compact summary; expand it to see **PM notes** and **Live facts**, and each
+window keeps its disclosure state while polling. Live facts show active windows,
+queue head, human handoffs, release PR, and pending update. Unavailable observations
+are shown as **Unknown**. UI labels stay English; authored content keeps its language. The PM updates
 its explanation with `pm.status.set`: supply 1–3 `items` (`kind`: `working` or
 `waiting`, `text`, and RFC3339 `started_at`), `next_trigger`, and optional
 `user_action`. Set `stale_after_minutes` to change the default 15-minute warning.
@@ -1145,10 +1161,15 @@ an entry removes its copied policy on the next refresh.
 - Use `Tile` to arrange windows on a grid
 - Use `Stack` to cascade windows with overlap
 - Use `Align` to arrange windows on a grid without changing their size
-- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle Canvas Agent
-  windows by activity: running/starting first, waiting/idle next, then the
-  remaining Agents. Non-Agent surfaces are skipped, hidden Agent tabs are
-  activated when selected, and the focused Agent is recentered
+
+## Agent Navigation
+
+Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual
+Agent tabs by activity: running/starting first, waiting/idle next, then the
+remaining Agents. Agents shown inside Issues are included; PM and Shell
+windows are skipped. Cycling keeps the split view and focuses the selected
+terminal for input. Closing the selected tab returns to All agents without stopping the
+agent; cycling can reopen the same terminal.
 
 ## Operator Design Language (SPEC-2356)
 

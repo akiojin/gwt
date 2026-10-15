@@ -623,6 +623,9 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, window_id) =
         apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let workspace = &mut runtime.tab_mut("tab-1").unwrap().workspace;
+    workspace.set_session_id("agent-1", Some("session-1".into()));
+    workspace.set_agent_name("agent-1", Some("Falcon".into()));
     // Materialize an old cache first. The watcher payload remains the source
     // for title sync, and the cache-only Work broadcast must merge the fresh
     // payload rather than replaying this stale snapshot.
@@ -650,18 +653,21 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
         .chain(cached_view.unassigned_agents.iter_mut())
     {
         if agent.session_id == "session-1" {
+            agent.agent_name = Some("Falcon".into());
             agent.sessions = vec![retained_session.clone()];
         }
     }
     for work in &mut cached_view.active_works {
         for agent in &mut work.agents {
             if agent.session_id == "session-1" {
+                agent.agent_name = Some("Falcon".into());
                 agent.sessions = vec![retained_session.clone()];
             }
         }
         for child in &mut work.works {
             for agent in &mut child.agents {
                 if agent.session_id == "session-1" {
+                    agent.agent_name = Some("Falcon".into());
                     agent.sessions = vec![retained_session.clone()];
                 }
             }
@@ -726,6 +732,7 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
         agent.current_focus.as_deref() == Some("Fresh watcher focus")
             && agent.title_summary.as_deref() == Some("Fresh watcher purpose")
             && agent.status_category == "blocked"
+            && agent.agent_name.as_deref() == Some("Falcon")
             && agent.sessions.is_empty()
     }));
     assert!(runtime
@@ -737,7 +744,10 @@ fn apply_workspace_projection_title_sync_emits_active_work_projection_for_active
         .into_iter()
         .flat_map(|projection| projection.agents.iter())
         .filter(|agent| agent.session_id == "session-1")
-        .all(|agent| agent.sessions == [retained_session.clone()]));
+        .all(|agent| {
+            agent.agent_name.as_deref() == Some("Falcon")
+                && agent.sessions == [retained_session.clone()]
+        }));
     let all_session_ids = active_work
         .agents
         .iter()
@@ -779,6 +789,9 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
     fs::create_dir_all(&repo).expect("create repo");
     let (mut runtime, window_id) =
         apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    let workspace = &mut runtime.tab_mut("tab-1").unwrap().workspace;
+    workspace.set_session_id("agent-1", Some("session-added".into()));
+    workspace.set_agent_name("agent-1", Some("Falcon".into()));
     assert!(runtime
         .project_state_for_tab("tab-1")
         .unwrap()
@@ -793,7 +806,7 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
         Some("Fresh cold-cache focus"),
     );
     projection.agents[0].session_id = "session-added".to_string();
-    projection.agents[0].window_id = Some("tab-1::added".to_string());
+    projection.agents[0].window_id = Some(window_id);
 
     let events = commit_workspace_watcher_update(&mut runtime, &repo, &projection);
 
@@ -804,6 +817,16 @@ fn workspace_projection_changed_initializes_cold_cache_from_authoritative_member
             _ => None,
         })
         .expect("expected bounded ActiveWorkProjection patch");
+    assert_eq!(
+        active_work
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-added")
+            .expect("authoritative Agent")
+            .agent_name
+            .as_deref(),
+        Some("Falcon")
+    );
     let session_ids = active_work
         .agents
         .iter()

@@ -49,6 +49,38 @@ fn mk_snapshot(number: u64, body: String) -> IssueSnapshot {
     }
 }
 
+#[test]
+fn cache_revision_changes_only_with_persisted_content() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    assert_eq!(cache.revision().unwrap(), "");
+    let mut snapshot = mk_snapshot(42, "body".into());
+    cache.write_snapshot(&snapshot).unwrap();
+    let initial = cache.revision().unwrap();
+    assert!(!initial.is_empty());
+    cache.write_snapshot_with_receipt(&snapshot).unwrap();
+    assert_eq!(cache.revision().unwrap(), initial);
+    snapshot.body = "changed body".into();
+    let generation = cache.current_generation(snapshot.number).unwrap();
+    cache
+        .write_snapshot_if_generation(&snapshot, generation.as_ref())
+        .unwrap();
+    let changed = cache.revision().unwrap();
+    assert_ne!(changed, initial);
+    cache
+        .apply_phase_change(snapshot.number, vec!["phase/done".into()])
+        .unwrap();
+    let phase = cache.revision().unwrap();
+    assert_ne!(phase, changed);
+    cache
+        .apply_phase_change(snapshot.number, vec!["phase/done".into()])
+        .unwrap();
+    assert_eq!(cache.revision().unwrap(), phase);
+    // The probe reads only the marker, even when a full entry is unreadable.
+    fs::remove_file(tmp.path().join("42/body.md")).unwrap();
+    assert_eq!(cache.revision().unwrap(), phase);
+}
+
 // RED-50: write_snapshot creates per-issue directory and files
 #[test]
 fn red_50_write_snapshot_creates_directory_layout() {

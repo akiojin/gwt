@@ -325,6 +325,60 @@ mod tests {
     }
 
     #[test]
+    fn shared_load_at_2500_sessions_reparses_only_changed_files() {
+        let tmp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir(&sessions_dir).unwrap();
+        let mut session = crate::Session::new(
+            tmp.path().join("project"),
+            "work/fixture",
+            crate::AgentId::Codex,
+        );
+        for index in 0..2500 {
+            session.id = format!("fixture-{index:04}");
+            std::fs::write(
+                sessions_dir.join(format!("{}.toml", session.id)),
+                toml::to_string(&session).unwrap(),
+            )
+            .unwrap();
+        }
+
+        for expected_attempts in [2500, 0, 0] {
+            let before = with_shared_cache(&sessions_dir, |cache| cache.parse_count).0;
+            assert_eq!(load_sessions(&sessions_dir).unwrap().len(), 2500);
+            let attempts = with_shared_cache(&sessions_dir, |cache| cache.parse_count).0 - before;
+            assert_eq!(attempts, expected_attempts);
+            println!("shared ledger: sessions=2500, parse_attempts={attempts}");
+        }
+
+        // A size change guarantees invalidation even on coarse timestamp filesystems.
+        session.model = Some("changed-model".to_string());
+        std::fs::write(
+            sessions_dir.join(format!("{}.toml", session.id)),
+            toml::to_string(&session).unwrap(),
+        )
+        .unwrap();
+        let before = with_shared_cache(&sessions_dir, |cache| cache.parse_count).0;
+        let updated = load_sessions(&sessions_dir).unwrap();
+        assert_eq!(updated.len(), 2500);
+        assert_eq!(
+            with_shared_cache(&sessions_dir, |cache| cache.parse_count).0 - before,
+            1
+        );
+        assert_eq!(
+            updated
+                .iter()
+                .find(|entry| entry.id == session.id)
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("changed-model"),
+        );
+        println!("shared ledger: sessions=2500, changed=1, parse_attempts=1");
+    }
+
+    #[test]
     fn changed_file_is_reparsed_and_reflects_new_content() {
         let tmp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());

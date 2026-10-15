@@ -552,6 +552,11 @@ pub enum FrontendEvent {
         rows: u16,
     },
     ListWindows,
+    /// Authenticated Agent-only self-naming; the principal supplies all scope.
+    PaneName {
+        candidate: String,
+        request_id: String,
+    },
     UpdateWindowGeometry {
         id: String,
         geometry: WindowGeometry,
@@ -734,6 +739,10 @@ pub enum FrontendEvent {
     /// immediately. Reply is [`BackendEvent::ProcessConsoleSnapshot`].
     LoadProcessConsole {
         id: String,
+    },
+    CheckKnowledgeRevision {
+        id: String,
+        knowledge_kind: KnowledgeKind,
     },
     LoadKnowledgeBridge {
         id: String,
@@ -981,9 +990,10 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
-    /// Issue #5322: update the global auto-apply-updates preference shared
-    /// by every project and the Hub.
-    SetIssueMonitorAutoApplyUpdates {
+    /// Read app-wide update preference and the requesting project's drain.
+    GetUpdateSettings,
+    /// GUI-only app-wide update preference shared by projects and the Hub.
+    SetAutoApplyUpdates {
         enabled: bool,
     },
     /// Read the current project's complete saved launch profile pool.
@@ -1518,6 +1528,8 @@ pub struct ActiveWorkAgentView {
     pub window_id: Option<String>,
     pub agent_id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
     pub affiliation_status: String,
     pub workspace_id: Option<String>,
     pub status_category: String,
@@ -2133,6 +2145,13 @@ pub enum BackendEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retryable: Option<bool>,
     },
+    /// Origin-connection-only result for an authenticated self-naming request.
+    PaneNameResult {
+        request_id: String,
+        ok: bool,
+        agent_name: Option<String>,
+        error: Option<String>,
+    },
     /// Client-scoped reply to [`FrontendEvent::PaneSendInput`]
     /// (SPEC-3050 FR-005: failures must be explicit, never silent).
     PaneSendResult {
@@ -2392,14 +2411,24 @@ pub enum BackendEvent {
         id: String,
         lines: Vec<gwt_core::process_console::ProcessLine>,
     },
+    KnowledgeRevision {
+        id: String,
+        knowledge_kind: KnowledgeKind,
+        revision: Option<String>,
+    },
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
         request_id: Option<u64>,
+        /// Content revision of the enriched list, independent of selection.
+        #[serde(default)]
+        revision: String,
         entries: Vec<KnowledgeListItem>,
         selected_number: Option<u64>,
         empty_message: Option<String>,
         refresh_enabled: bool,
+        #[serde(default)]
+        cache_revision: Option<String>,
     },
     KnowledgeSearchResults {
         id: String,
@@ -2763,6 +2792,11 @@ pub enum BackendEvent {
         message: String,
         recovery: String,
     },
+    /// Update-domain preference and current-project drain snapshot.
+    UpdateSettings {
+        project_root: Option<String>,
+        status: crate::update_settings::Status,
+    },
     /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
     /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
     /// (`auto` / `en` / `ja`). The frontend mirrors this value into the
@@ -3075,6 +3109,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "pane_name_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "pane_send_result",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3228,6 +3267,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "knowledge_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_revision",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
@@ -3484,6 +3528,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
+        "update_settings",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "system_settings",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3573,6 +3622,7 @@ impl BackendEvent {
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::PaneNameResult { .. } => "pane_name_result",
             BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
             BackendEvent::IssueMonitorScanRequestResult { .. } => {
                 "issue_monitor_scan_request_result"
@@ -3610,6 +3660,7 @@ impl BackendEvent {
             BackendEvent::ProcessLine { .. } => "process_line",
             BackendEvent::ProcessConsoleSnapshot { .. } => "process_console_snapshot",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
+            BackendEvent::KnowledgeRevision { .. } => "knowledge_revision",
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
             BackendEvent::ProjectIndexSearchResults { .. } => "project_index_search_results",
             BackendEvent::ProjectIndexSearchError { .. } => "project_index_search_error",
@@ -3669,6 +3720,7 @@ impl BackendEvent {
             BackendEvent::MigrationProgress { .. } => "migration_progress",
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
+            BackendEvent::UpdateSettings { .. } => "update_settings",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
             BackendEvent::ProjectBoardConfig { .. } => "project_board_config",
@@ -4781,6 +4833,7 @@ mod tests {
                     window_id: Some("tab-1::agent-1".to_string()),
                     agent_id: "codex".to_string(),
                     display_name: "Codex".to_string(),
+                    agent_name: None,
                     affiliation_status: "assigned".to_string(),
                     workspace_id: Some("work-1".to_string()),
                     status_category: "active".to_string(),
@@ -4799,6 +4852,17 @@ mod tests {
         };
 
         let value = serde_json::to_value(&event).expect("serialize active work projection");
+
+        let mut legacy_agent = value.pointer("/projection/agents/0").unwrap().clone();
+        legacy_agent.as_object_mut().unwrap().remove("agent_name");
+        let legacy: super::ActiveWorkAgentView = serde_json::from_value(legacy_agent.clone())
+            .expect("legacy Active Work agent without an assigned name");
+        assert!(serde_json::to_value(legacy).unwrap()["agent_name"].is_null());
+        let mut named_agent = legacy_agent;
+        named_agent["agent_name"] = Value::String("Aster".to_string());
+        let named: super::ActiveWorkAgentView =
+            serde_json::from_value(named_agent).expect("named Active Work agent");
+        assert_eq!(serde_json::to_value(named).unwrap()["agent_name"], "Aster");
 
         assert_eq!(
             value.get("kind"),

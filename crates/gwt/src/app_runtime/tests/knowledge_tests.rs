@@ -14,7 +14,7 @@ fn app_runtime_report_knowledge_error_journals_only_valid_issue_window_failures(
         "tab-1",
         "issue-1",
         repo.clone(),
-        WindowPreset::Issue,
+        WindowPreset::Settings,
         WindowProcessStatus::Ready,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -90,7 +90,7 @@ fn app_runtime_knowledge_search_transient_failure_stays_silent_with_retry_direct
         "tab-1",
         "issue-1",
         repo,
-        WindowPreset::Issue,
+        WindowPreset::Settings,
         WindowProcessStatus::Ready,
     );
     let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -223,7 +223,7 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
         "tab-1",
         "issue-1",
         repo.clone(),
-        WindowPreset::Issue,
+        WindowPreset::Settings,
         WindowProcessStatus::Ready,
     );
     let (mut runtime, recorded_events) =

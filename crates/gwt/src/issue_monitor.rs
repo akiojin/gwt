@@ -1153,10 +1153,6 @@ pub struct IssueMonitorPrefs {
     /// `None` follows `autonomous_mode`; `Some` is an explicit override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_close_merged_issues: Option<bool>,
-    /// Legacy migration input. Runtime authorization uses the app-wide
-    /// preference in global config, never this project value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: deliveries already settled (closed / annotated), so
     /// the same merge is never settled twice after a human reopen.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1298,7 +1294,6 @@ impl Default for IssueMonitorPrefs {
             closure_records: Vec::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
-            auto_apply_updates: None,
             merged_issue_settlements: Vec::new(),
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: Vec::new(),
@@ -3483,10 +3478,6 @@ pub struct IssueMonitorStatusView {
     /// SPEC #3200 T-048/FR-001: whether unattended autonomous mode is enabled.
     #[serde(default)]
     pub autonomous_mode: bool,
-    /// App-wide preference. Autonomous-project eligibility is checked by
-    /// the application runtime separately from this saved-setting projection.
-    #[serde(default)]
-    pub auto_apply_updates: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
     /// Issue #4037 AC-6: the update drain, if raised.
@@ -3685,11 +3676,6 @@ pub struct IssueMonitorAgentStatus {
     #[serde(default)]
     pub gui_status: Option<IssueMonitorStatusView>,
     pub autonomous_mode: bool,
-    /// Compatibility projection of the app-wide saved setting.
-    #[serde(default)]
-    pub auto_apply_updates: Option<bool>,
-    #[serde(default)]
-    pub auto_apply_updates_effective: Option<bool>,
     pub has_launch_profile: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
@@ -4756,9 +4742,6 @@ pub struct IssueMonitorState {
     /// Issue #3917 AC-5: auto-close override; `None` follows `autonomous_mode`.
     #[serde(default)]
     auto_close_merged_issues: Option<bool>,
-    /// Issue #3906 AC-1: auto-apply override; `None` follows `autonomous_mode`.
-    #[serde(default)]
-    auto_apply_updates: Option<bool>,
     /// Issue #3917 AC-4: settled deliveries keyed by Issue number.
     #[serde(default)]
     merged_issue_settlements: BTreeMap<u64, MergedIssueSettlement>,
@@ -5912,7 +5895,7 @@ fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPref
         return Ok(IssueMonitorPrefs::default());
     }
     let content = fs::read_to_string(path)?;
-    serde_json::from_str(&content).map_err(|error| {
+    crate::update_settings::decode_project_prefs(&content).map_err(|error| {
         let kind = match error.classify() {
             serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
                 io::ErrorKind::InvalidData
@@ -6025,6 +6008,7 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
+    crate::update_settings::migrate_before_project_save(path, false)?;
     durable_atomic_write(path, content.as_bytes())?;
     // Issue #3883 AC-2: keep the generation this commit just made readable from
     // somewhere the canonical file's own corruption cannot reach. The recovery
@@ -6052,7 +6036,7 @@ fn committed_prefs_generation_path(path: &Path) -> std::path::PathBuf {
 fn last_committed_prefs_generation(path: &Path) -> Option<IssueMonitorPrefs> {
     let sidecar = committed_prefs_generation_path(path);
     let content = fs::read_to_string(&sidecar).ok()?;
-    serde_json::from_str(&content).ok()
+    crate::update_settings::decode_project_prefs(&content).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6605,6 +6589,9 @@ pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
             Err(error) => return Err(error),
         };
         let result = mutation(&mut prefs);
+        if recovery.as_ref().is_some_and(|(_, _, restored)| !*restored) {
+            crate::update_settings::migrate_before_project_save(path, true)?;
+        }
         save_issue_monitor_prefs_unlocked(path, &prefs)?;
         if let Some((quarantine, error, restored_generation)) = recovery {
             tracing::warn!(
@@ -7141,7 +7128,6 @@ impl IssueMonitorState {
             closure_held: BTreeSet::new(),
             autonomous_mode: false,
             auto_close_merged_issues: None,
-            auto_apply_updates: None,
             merged_issue_settlements: BTreeMap::new(),
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
@@ -7313,7 +7299,6 @@ impl IssueMonitorState {
         }
         state.autonomous_mode = prefs.autonomous_mode;
         state.auto_close_merged_issues = prefs.auto_close_merged_issues;
-        state.auto_apply_updates = prefs.auto_apply_updates;
         for settlement in prefs.merged_issue_settlements {
             state
                 .merged_issue_settlements
@@ -7429,7 +7414,6 @@ impl IssueMonitorState {
             closure_records: self.closure_records.values().cloned().collect(),
             autonomous_mode: self.autonomous_mode,
             auto_close_merged_issues: self.auto_close_merged_issues,
-            auto_apply_updates: self.auto_apply_updates,
             merged_issue_settlements: self.merged_issue_settlements.values().cloned().collect(),
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
@@ -10314,7 +10298,6 @@ impl IssueMonitorState {
             self.candidate_pool_degradation = disk.candidate_pool_degradation.clone();
         }
         self.auto_close_merged_issues = disk.auto_close_merged_issues;
-        self.auto_apply_updates = disk.auto_apply_updates;
         if crate::update_settings::configured().is_ok_and(|value| value == Some(false)) {
             self.release_disabled_automatic_update_drain();
         }
@@ -12451,7 +12434,6 @@ impl IssueMonitorState {
                 issue_monitor_launch_profile_pool_summary(&self.launch_profiles)
             },
             autonomous_mode: self.autonomous_mode,
-            auto_apply_updates: self.auto_apply_updates_enabled(),
             quota_hold,
             update_drain: self.update_drain.clone(),
             update_drain_release: self
@@ -12729,8 +12711,6 @@ impl IssueMonitorState {
             enabled: self.config.enabled,
             gui_status: Some(status.clone()),
             autonomous_mode: self.autonomous_mode,
-            auto_apply_updates: self.auto_apply_updates(),
-            auto_apply_updates_effective: Some(status.auto_apply_updates),
             has_launch_profile: self.has_launch_profile(),
             quota_hold: status.quota_hold.clone(),
             update_drain: status.update_drain.clone(),
@@ -13199,41 +13179,11 @@ impl IssueMonitorState {
         Some(next_epoch)
     }
 
-    /// Compatibility accessor for the app-wide saved setting.
-    pub fn auto_apply_updates(&self) -> Option<bool> {
-        Some(crate::update_settings::enabled())
-    }
-
-    /// App-wide automatic-update preference. The runtime additionally
-    /// requires at least one open autonomous project before automatic work.
-    pub fn auto_apply_updates_enabled(&self) -> bool {
-        crate::update_settings::enabled()
-    }
-
-    /// Change the auto-apply override. Unlike the auto-close override this
-    /// authorizes no remote effect, so no authority epoch advances.
-    /// Issue #5062 AC-1: turning automatic apply off also releases the `Auto`
-    /// drain that was waiting to apply, so admission resumes on the next scan.
-    /// The staged update stays for the manual button; a `Manual` drain is the
-    /// operator's own hold and is left alone.
-    pub fn set_auto_apply_updates(&mut self, value: Option<bool>) -> io::Result<()> {
-        if !crate::update_settings::set(value)? {
-            self.release_disabled_automatic_update_drain();
-        }
-        Ok(())
-    }
-
     fn release_disabled_automatic_update_drain(&mut self) {
         if self.update_drain.as_ref().is_some_and(|drain| {
-            drain
-                .automatic
-                .or(self.auto_apply_updates)
-                .unwrap_or(self.autonomous_mode)
-        }) && self
-            .update_drain
-            .as_ref()
-            .is_some_and(|drain| drain.reason == IssueMonitorUpdateDrainReason::Auto)
-        {
+            drain.reason == IssueMonitorUpdateDrainReason::Auto
+                && drain.automatic.unwrap_or(self.autonomous_mode)
+        }) {
             self.clear_update_drain();
         }
     }
@@ -13449,9 +13399,7 @@ impl IssueMonitorState {
     /// keeps the SPEC #3165 human-gated behavior exactly.
     pub fn set_autonomous_mode(&mut self, enabled: bool) {
         if self.autonomous_mode != enabled {
-            self.capture_legacy_update_drain_origin(
-                self.auto_apply_updates.unwrap_or(self.autonomous_mode),
-            );
+            self.capture_legacy_update_drain_origin(self.autonomous_mode);
         }
         self.autonomous_mode = enabled;
     }
@@ -13930,7 +13878,6 @@ impl IssueMonitorState {
 
     pub fn set_autonomous_mode_with_effect_revocation(&mut self, enabled: bool) -> Option<u64> {
         let previous_mode = self.autonomous_mode;
-        let automatic = self.auto_apply_updates.unwrap_or(previous_mode);
         let epoch = advance_autonomous_effect_authority(
             &mut self.autonomous_mode,
             &mut self.effect_authority_epoch,
@@ -13938,7 +13885,7 @@ impl IssueMonitorState {
             enabled,
         )?;
         if previous_mode != enabled {
-            self.capture_legacy_update_drain_origin(automatic);
+            self.capture_legacy_update_drain_origin(previous_mode);
         }
         Some(epoch)
     }
@@ -22461,8 +22408,6 @@ mod tests {
                 enabled: true,
                 gui_status: Some(monitor.status_view_at("2026-08-03T00:00:00Z")),
                 autonomous_mode: false,
-                auto_apply_updates: Some(false),
-                auto_apply_updates_effective: Some(false),
                 has_launch_profile: false,
                 quota_hold: None,
                 update_drain: None,
@@ -39852,91 +39797,80 @@ mod tests {
     }
 
     #[test]
-    fn auto_apply_updates_uses_one_global_value_and_migrates_legacy_on_once() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let projects = gwt_core::paths::gwt_projects_dir();
-        for (name, prefs) in [
-            ("attended", serde_json::json!({"auto_apply_updates": false})),
-            ("autonomous", serde_json::json!({"autonomous_mode": true})),
-        ] {
-            let dir = projects.join(name).join("project-state");
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("issue-monitor.json"), prefs.to_string()).unwrap();
-        }
-        let config_path = gwt_core::paths::gwt_config_path();
-        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(&config_path, "# preserved comment\n[future]\nvalue = 7\n").unwrap();
-        let mut first = IssueMonitorState::new(IssueMonitorConfig::default());
-        first.set_auto_apply_updates(None).unwrap();
-        let config = fs::read_to_string(&config_path).unwrap();
-        assert!(config.contains("# preserved comment") && config.contains("[future]"));
-        assert!(
-            first.auto_apply_updates_enabled(),
-            "any legacy ON migrates to global ON"
-        );
-        let mut second = IssueMonitorState::with_prefs(
-            IssueMonitorConfig::default(),
-            IssueMonitorPrefs {
-                auto_apply_updates: Some(false),
-                ..Default::default()
-            },
-        );
-        assert!(
-            second.status_view().auto_apply_updates,
-            "project overrides no longer own this value"
-        );
-        first.set_auto_apply_updates(Some(false)).unwrap();
-        assert!(!second.status_view().auto_apply_updates);
-        second.set_auto_apply_updates(Some(true)).unwrap();
-        assert!(first.status_view().auto_apply_updates);
-        first.set_auto_apply_updates(Some(false)).unwrap();
-        let mut restored = IssueMonitorState::new(IssueMonitorConfig::default());
-        restored.set_auto_apply_updates(None).unwrap();
-        assert!(
-            !restored.auto_apply_updates_enabled(),
-            "legacy ON must not re-enable explicit global OFF"
-        );
+    fn prefs_omit_legacy_auto_apply_updates() {
+        let mut stored = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+        stored["auto_apply_updates"] = serde_json::json!(true);
+        let prefs: IssueMonitorPrefs = serde_json::from_value(stored).unwrap();
+        let serialized = serde_json::to_value(prefs).unwrap();
+        assert!(serialized.get("auto_apply_updates").is_none());
     }
 
     #[test]
-    fn auto_apply_updates_is_global_and_does_not_authorize_autonomous_mode() {
+    fn load_captures_legacy_auto_update_drain_origin() {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        // The global preference and autonomous authorization are independent.
-        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
-        assert_eq!(monitor.auto_apply_updates(), Some(false));
-        assert!(!monitor.auto_apply_updates_enabled());
-        assert!(!monitor.status_view().auto_apply_updates);
-        assert!(monitor
-            .set_autonomous_mode_with_effect_revocation(true)
-            .is_some());
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).unwrap();
+        let path = issue_monitor_prefs_path_for_repo_path(&project_root);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut stored = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+        stored["autonomous_mode"] = serde_json::json!(true);
+        stored["auto_apply_updates"] = serde_json::json!(false);
+        stored["update_drain"] = serde_json::json!({
+            "reason": "auto", "version": "9.110.0", "since": "2026-10-05T19:10:00Z"
+        });
+        fs::write(&path, stored.to_string()).unwrap();
+
+        let prefs = load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(prefs.update_drain.as_ref().unwrap().automatic, Some(false));
+
+        fs::write(committed_prefs_generation_path(&path), stored.to_string()).unwrap();
+        fs::write(&path, "{").unwrap();
+        assert_eq!(crate::update_settings::configured().unwrap(), None);
+        let (recovered, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(crate::update_settings::configured().unwrap(), Some(false));
+        assert_eq!(
+            recovered.update_drain.as_ref().unwrap().automatic,
+            Some(false)
+        );
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), recovered.clone());
+        monitor.rebase_daemon_driver_prefs(&recovered);
         assert!(
-            !monitor.auto_apply_updates_enabled(),
-            "autonomous mode does not override global OFF"
-        );
-        monitor.set_auto_apply_updates(Some(true)).unwrap();
-        assert!(monitor.status_view().auto_apply_updates);
-
-        let epoch = monitor.effect_authority_epoch();
-        monitor.set_auto_apply_updates(Some(false)).unwrap();
-        assert!(!monitor.auto_apply_updates_enabled());
-        assert_eq!(
-            monitor.effect_authority_epoch(),
-            epoch,
-            "the override authorizes no remote effect, so no grant is revoked"
+            monitor.update_drain().is_some(),
+            "recovery preserves manual drain origin"
         );
 
-        let prefs = monitor.prefs();
-        assert_eq!(
-            prefs.auto_apply_updates, None,
-            "global setter leaves legacy project input untouched"
-        );
-        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
-        assert_eq!(restored.auto_apply_updates(), Some(false));
-        assert!(restored.autonomous_mode());
-        assert!(!restored.auto_apply_updates_enabled());
-        assert!(!restored.status_view().auto_apply_updates);
+        for other_project_on in [false, true] {
+            fs::remove_file(gwt_core::paths::gwt_config_path()).unwrap();
+            fs::remove_file(committed_prefs_generation_path(&path)).unwrap();
+            fs::write(&path, "{").unwrap();
+            if other_project_on {
+                let other_path = gwt_core::paths::gwt_projects_dir()
+                    .join("other/project-state/issue-monitor.json");
+                fs::create_dir_all(other_path.parent().unwrap()).unwrap();
+                let mut other = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+                other["auto_apply_updates"] = serde_json::json!(true);
+                fs::write(other_path, other.to_string()).unwrap();
+            }
+            let (reset, ()) = mutate_issue_monitor_prefs_recovering(
+                &path,
+                &IssueMonitorPrefs::recovery_default(),
+                |prefs| prefs.autonomous_mode = true,
+            )
+            .unwrap();
+            assert!(reset.last_prefs_reset.is_some());
+            assert_eq!(
+                crate::update_settings::configured().unwrap(),
+                Some(other_project_on)
+            );
+            assert_eq!(crate::update_settings::migrate().unwrap(), other_project_on);
+        }
     }
 
     /// Issue #5062 AC-1: turning automatic apply off releases the `Auto`
@@ -39954,9 +39888,11 @@ mod tests {
             now,
             Some(true),
         );
-        monitor.set_auto_apply_updates(Some(true)).unwrap();
+        crate::update_settings::set(Some(true)).unwrap();
+        monitor.rebase_daemon_driver_prefs(&monitor.prefs());
         assert!(monitor.update_drain().is_some(), "turning it on keeps it");
-        monitor.set_auto_apply_updates(Some(false)).unwrap();
+        crate::update_settings::set(Some(false)).unwrap();
+        monitor.rebase_daemon_driver_prefs(&monitor.prefs());
         assert!(monitor.update_drain().is_none());
         assert!(monitor.prefs().update_drain.is_none());
 
@@ -39970,7 +39906,8 @@ mod tests {
             } else {
                 monitor.set_autonomous_mode(false);
             }
-            monitor.set_auto_apply_updates(Some(false)).unwrap();
+            crate::update_settings::set(Some(false)).unwrap();
+            monitor.rebase_daemon_driver_prefs(&monitor.prefs());
             assert!(
                 monitor.update_drain().is_none(),
                 "turning autonomous mode off must preserve a legacy automatic drain's origin"
@@ -39981,19 +39918,25 @@ mod tests {
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
                 autonomous_mode: true,
-                auto_apply_updates: Some(false),
                 ..Default::default()
             },
         );
-        legacy_manual.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.110.0", now);
-        legacy_manual.set_auto_apply_updates(Some(false)).unwrap();
+        legacy_manual.set_update_drain_with_origin(
+            IssueMonitorUpdateDrainReason::Auto,
+            "9.110.0",
+            now,
+            Some(false),
+        );
+        crate::update_settings::set(Some(false)).unwrap();
+        legacy_manual.rebase_daemon_driver_prefs(&legacy_manual.prefs());
         assert!(
             legacy_manual.update_drain().is_some(),
             "a legacy manual-click drain honors its project's explicit auto-apply OFF"
         );
 
         monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.110.0", now);
-        monitor.set_auto_apply_updates(Some(false)).unwrap();
+        crate::update_settings::set(Some(false)).unwrap();
+        monitor.rebase_daemon_driver_prefs(&monitor.prefs());
         assert_eq!(
             monitor.update_drain().map(|drain| drain.reason),
             Some(IssueMonitorUpdateDrainReason::Manual)

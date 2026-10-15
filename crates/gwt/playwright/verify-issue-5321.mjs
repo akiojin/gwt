@@ -1,5 +1,5 @@
 // Issue #5321: checkout assets, fresh HOME, real headed Chromium.
-// Fixtures: [--suites queue,preview,kanban] [--before] [Playwright arguments]
+// Fixtures: [--suites queue,preview,kanban,rail] [--before] [Playwright arguments]
 // Backend: --live --suites <candidates|labels|tiers|capacity> --project=chromium-<dark|light> [Playwright arguments]
 // Both modes accept --skip-build after the checkout binaries are freshly built.
 import { spawn } from "node:child_process";
@@ -17,7 +17,7 @@ const live = args.includes("--live");
 const suiteFiles = live ? {
   candidates: "issue-monitor-candidate-pool-live.spec.ts", labels: "issue-monitor-labels-live.spec.ts",
   tiers: "issue-monitor-auto-tiers-live.spec.ts", capacity: "issue-monitor-capacity-live.spec.ts",
-} : { queue: "issue-queue-kanban.spec.ts", preview: "issue-preview.spec.ts", kanban: "kanban.spec.ts" };
+} : { queue: "issue-queue-kanban.spec.ts", preview: "issue-preview.spec.ts", kanban: "kanban.spec.ts", rail: "surface-rail.spec.ts" };
 const playwrightArgs = [];
 let requestedSuites;
 for (let index = 0; index < args.length; index++) {

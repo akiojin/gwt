@@ -108,7 +108,8 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
             FrontendEvent::ArrangeWindows { .. }
             | FrontendEvent::UpdateWindowGeometry { .. }
             | FrontendEvent::UpdateTerminalGrid { .. } => AppEventPriority::Layout,
-            FrontendEvent::LoadKnowledgeBridge { .. } => AppEventPriority::Background,
+            FrontendEvent::LoadKnowledgeBridge { .. }
+            | FrontendEvent::CheckKnowledgeRevision { .. } => AppEventPriority::Background,
             _ => AppEventPriority::Foreground,
         },
         UserEvent::AgentFrontend { .. }
@@ -8624,7 +8625,6 @@ impl AppRuntime {
                         .gui_status
                         .map(|mut status| {
                             self.retain_missing_issue_monitor_capacity(project_root, &mut status);
-                            status.auto_apply_updates = gwt::update_settings::enabled();
                             self.remember_issue_monitor_status(Some(project_root), &status);
                             vec![OutboundEvent::reply(
                                 client_id,
@@ -9773,6 +9773,32 @@ impl AppRuntime {
         events
     }
 
+    fn enrich_update_drain_blockers(&self, drain: &mut gwt::IssueMonitorUpdateDrain) {
+        drain.blocking.retain(|blocker| {
+            !matches!(blocker, gwt::update_drain::UpdateBlocker::ActivePane { .. })
+        });
+        if let Some(host_blockers) = &self.update_drain_host_blockers {
+            drain.blocking.retain(|blocker| {
+                !matches!(
+                    blocker,
+                    gwt::update_drain::UpdateBlocker::ActiveExecution { .. }
+                        | gwt::update_drain::UpdateBlocker::HeldVerificationLease { .. }
+                )
+            });
+            drain.blocking.extend(host_blockers.iter().cloned());
+        }
+        let (panes, _) = self.capture_update_quiescence_inputs();
+        let snapshot = gwt::update_drain::UpdateQuiescenceSnapshot {
+            panes,
+            ..Default::default()
+        };
+        let mut blocking = gwt::update_drain::update_quiescence(&snapshot)
+            .err()
+            .unwrap_or_default();
+        blocking.append(&mut drain.blocking);
+        drain.blocking = blocking;
+    }
+
     pub(crate) fn issue_monitor_daemon_status_events(
         &self,
         project_root: &Path,
@@ -9780,29 +9806,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.retain_missing_issue_monitor_capacity(project_root, &mut status);
         if let Some(drain) = status.update_drain.as_mut() {
-            drain.blocking.retain(|blocker| {
-                !matches!(blocker, gwt::update_drain::UpdateBlocker::ActivePane { .. })
-            });
-            if let Some(host_blockers) = &self.update_drain_host_blockers {
-                drain.blocking.retain(|blocker| {
-                    !matches!(
-                        blocker,
-                        gwt::update_drain::UpdateBlocker::ActiveExecution { .. }
-                            | gwt::update_drain::UpdateBlocker::HeldVerificationLease { .. }
-                    )
-                });
-                drain.blocking.extend(host_blockers.iter().cloned());
-            }
-            let (panes, _) = self.capture_update_quiescence_inputs();
-            let snapshot = gwt::update_drain::UpdateQuiescenceSnapshot {
-                panes,
-                ..Default::default()
-            };
-            let mut blocking = gwt::update_drain::update_quiescence(&snapshot)
-                .err()
-                .unwrap_or_default();
-            blocking.append(&mut drain.blocking);
-            drain.blocking = blocking;
+            self.enrich_update_drain_blockers(drain);
         }
         self.replace_knowledge_terminal_queue(project_root, &status.terminal_queue);
         let Some(context) = self.project_context_for_root(project_root) else {
@@ -10625,12 +10629,7 @@ impl AppRuntime {
                     .iter()
                     .filter_map(|context| self.project_auto_update_drain(context))
                     .filter(|(_, drain)| drain.version == *version)
-                    .all(|(prefs, drain)| {
-                        drain
-                            .automatic
-                            .or(prefs.auto_apply_updates)
-                            .unwrap_or(prefs.autonomous_mode)
-                    });
+                    .all(|(prefs, drain)| drain.automatic.unwrap_or(prefs.autonomous_mode));
                 self.proxy.send(UserEvent::ApplyUpdateDrained {
                     version: version.clone(),
                     automatic,
@@ -10652,12 +10651,7 @@ impl AppRuntime {
             }
             return Vec::new();
         };
-        if drain
-            .automatic
-            .or(prefs.auto_apply_updates)
-            .unwrap_or(prefs.autonomous_mode)
-            && !self.automatic_updates_enabled()
-        {
+        if drain.automatic.unwrap_or(prefs.autonomous_mode) && !self.automatic_updates_enabled() {
             return self.release_update_auto_apply_for_project(context, &drain.version);
         }
         let outcome = gwt::update_drain::update_quiescence(&observation.snapshot);
@@ -11150,6 +11144,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::CheckKnowledgeRevision { id, .. }
             | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
@@ -11300,7 +11295,7 @@ impl AppRuntime {
                 self.apply_update_restart_now_events(&client_id)
             }
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
-            FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+            FrontendEvent::SetAutoApplyUpdates { enabled } => {
                 self.set_global_auto_apply_updates_events(&client_id, enabled)
             }
             FrontendEvent::OpenUpdateLog { log_path } => {
@@ -11368,6 +11363,12 @@ impl AppRuntime {
             } => {
                 self.spawn_agent_backend_connection_probe(client_id, agent, base_url, api_key);
                 Vec::new()
+            }
+            FrontendEvent::GetUpdateSettings => {
+                vec![OutboundEvent::reply(
+                    &client_id,
+                    self.update_settings_event(None),
+                )]
             }
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
@@ -11498,6 +11499,7 @@ impl AppRuntime {
             | FrontendEvent::LoadLogs { id, .. }
             | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
+            | FrontendEvent::CheckKnowledgeRevision { id, .. }
             | FrontendEvent::ReportKnowledgeError { id, .. }
             | FrontendEvent::SearchKnowledgeBridge { id, .. }
             | FrontendEvent::SearchProjectIndex { id, .. }
@@ -11754,6 +11756,7 @@ impl AppRuntime {
             FrontendEvent::LoadPmReports { id } => {
                 self.load_pm_reports_events(context, client_id, &id)
             }
+            FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
@@ -11900,6 +11903,9 @@ impl AppRuntime {
             FrontendEvent::LoadProfile { id } => self.load_profile_events(&client_id, &id),
             FrontendEvent::LoadLogs { id, scope } => {
                 self.load_logs_scoped_events(&client_id, &id, scope)
+            }
+            FrontendEvent::CheckKnowledgeRevision { id, knowledge_kind } => {
+                self.check_knowledge_revision_events(&client_id, &id, knowledge_kind)
             }
             FrontendEvent::LoadKnowledgeBridge {
                 id,
@@ -12237,7 +12243,7 @@ impl AppRuntime {
                     },
                 )
             }
-            FrontendEvent::SetIssueMonitorAutoApplyUpdates { enabled } => {
+            FrontendEvent::SetAutoApplyUpdates { enabled } => {
                 self.set_global_auto_apply_updates_events(&client_id, enabled)
             }
             FrontendEvent::SetIssueMonitorAllowedLabels {
@@ -12538,6 +12544,10 @@ impl AppRuntime {
             FrontendEvent::StartMigration { tab_id } => self.start_migration_events(&tab_id),
             FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
             FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),
+            FrontendEvent::GetUpdateSettings => vec![OutboundEvent::reply(
+                &client_id,
+                self.update_settings_event(Some(&context.project_root)),
+            )],
             FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
             FrontendEvent::GetBoardAuthStatus => self.board_auth_status_events(client_id, None),
             FrontendEvent::BoardProviderSignIn { provider } => {
@@ -12949,6 +12959,91 @@ impl AppRuntime {
                         responder: None,
                     },
                 )
+            }
+            AgentFrontendRequest::Name {
+                candidate,
+                request_id,
+            } => {
+                let assignment = (|| {
+                    let window_id = self.agent_principal_session_window(&principal)?;
+                    let address = self
+                        .window_lookup
+                        .get(&window_id)
+                        .cloned()
+                        .ok_or_else(|| "Agent window is missing".to_string())?;
+                    let tab = self
+                        .tab(&address.tab_id)
+                        .ok_or_else(|| "Project is closed".to_string())?;
+                    let window = tab
+                        .workspace
+                        .window(&address.raw_id)
+                        .ok_or_else(|| "Agent window is missing".to_string())?;
+                    if self
+                        .pm_session_for_root(&tab.project_root)
+                        .is_some_and(|pm| pm == principal.session_id())
+                        || window.is_pm
+                    {
+                        return Err("PM windows keep their fixed identity".to_string());
+                    }
+                    let already_named = window.agent_name.is_some();
+                    let reserved = self
+                        .tabs
+                        .iter()
+                        .flat_map(|tab| {
+                            let pm = self.pm_session_for_root(&tab.project_root);
+                            tab.workspace
+                                .persisted()
+                                .windows
+                                .iter()
+                                .filter(move |window| {
+                                    crate::runtime_support::window_is_agent_pane(window)
+                                        && !window.is_pm
+                                        && !pm.is_some_and(|pm| {
+                                            window.session_id.as_ref() == Some(pm)
+                                        })
+                                })
+                                .filter_map(|window| window.agent_name.clone())
+                        })
+                        .collect::<HashSet<_>>();
+                    let assigned = self
+                        .tab_mut(&address.tab_id)
+                        .ok_or_else(|| "Project is closed".to_string())?
+                        .workspace
+                        .assign_agent_name(&address.raw_id, &candidate, &reserved)?;
+                    Ok((assigned, address.tab_id, already_named))
+                })();
+                match assignment {
+                    Ok((assigned, tab_id, already_named)) => {
+                        let mut events = vec![OutboundEvent::reply(
+                            client_id,
+                            BackendEvent::PaneNameResult {
+                                request_id,
+                                ok: true,
+                                agent_name: Some(assigned),
+                                error: None,
+                            },
+                        )];
+                        if !already_named {
+                            if let Err(error) = self.persist() {
+                                tracing::warn!(%error, "failed to persist Agent identity");
+                            }
+                            if let Some(context) = self.project_context(&tab_id) {
+                                events.push(self.workspace_state_broadcast(&context));
+                                self.refresh_agent_name_projection(&tab_id);
+                            }
+                        }
+                        events
+                    }
+                    Err(error) => vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::PaneNameResult {
+                            request_id,
+                            ok: false,
+                            agent_name: None,
+                            error: Some(error),
+                        },
+                    )],
+                }
             }
             AgentFrontendRequest::SendInput { text } => {
                 let window_id = match self.agent_principal_session_window(&principal) {

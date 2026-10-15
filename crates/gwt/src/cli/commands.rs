@@ -231,9 +231,6 @@ pub enum IssueCommand {
         /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
         /// stored value untouched).
         auto_close_merged_issues: Option<bool>,
-        /// Issue #3906 AC-1: explicit auto-apply-updates override (`None`
-        /// leaves the stored value untouched).
-        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
         /// Issue #4037 AC-5: raise (`true`, recorded as a manual drain) or

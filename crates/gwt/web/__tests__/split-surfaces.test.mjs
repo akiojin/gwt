@@ -23,7 +23,7 @@ async function fixture() {
   const { document, window } = parseHTML(html);
   const stage = document.getElementById("canvas-stage");
   const windows = [
-    { id: "issues", preset: "issue" },
+    { id: "issues", preset: "settings" },
     { id: "board", preset: "board" },
     { id: "settings", preset: "settings" },
     { id: "a", preset: "agent" },
@@ -89,11 +89,14 @@ test("two panes select independently, preserve live nodes and restore canvas geo
 test("same non-Agent surfaces use distinct live windows and request only the missing view", async () => {
   for (const surface of ["issues", "board", "settings"]) {
     const { controller, document, windows, elements, stage, opened } = await fixture();
+    if (surface === "issues" || surface === "settings") {
+      windows.splice(windows.findIndex(w => w.id === (surface === "issues" ? "settings" : "issues")), 1);
+    }
     controller.open(surface);
     assert.equal(controller.select(surface, 1), true);
     controller.sync();
     assert.deepEqual(opened, [surface]);
-    const second = { id: `${surface}-second`, preset: surface === "issues" ? "issue" : surface };
+    const second = { id: `${surface}-second`, preset: surface === "issues" ? "settings" : surface };
     const element = document.createElement("div");
     stage.appendChild(element);
     elements.set(second.id, element);
@@ -160,7 +163,8 @@ test("Agents hosts its dedicated grid and releases it when switching surfaces", 
 test("a missing surface requests the existing launcher once and mounts the arriving window", async () => {
   const { controller, windows, opened } = await fixture();
   windows.splice(windows.findIndex((w) => w.id === "settings"), 1);
-  controller.open("issues");
+  windows.splice(windows.findIndex((w) => w.id === "issues"), 1);
+  controller.open("agents");
   controller.select("settings", 1);
   controller.sync();
   controller.sync();

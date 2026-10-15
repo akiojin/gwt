@@ -64,7 +64,7 @@ test.describe("Issue Monitor automatic tiers", () => {
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await expect(page.locator("#close-project-button")).toBeVisible();
-      const issueWindows = page.locator('.workspace-window[data-preset="issue"]');
+      const issueWindows = page.locator('.workspace-window[data-preset="settings"]');
       let windowId = await issueWindows.count() ? await issueWindows.first().getAttribute("data-id") : null;
       const createdWindow = !windowId;
       if (!windowId) {
@@ -98,6 +98,8 @@ test.describe("Issue Monitor automatic tiers", () => {
         await expect(settingsWindow.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
         const issues = settingsWindow.locator('[data-settings-panel="issues"]');
         await expect(issues).toBeVisible();
+        await expect(settingsWindow).toHaveCount(1);
+        await expect(issues.locator(".settings-issues-options")).toHaveAttribute("open", "");
         await expect(issues.getByLabel("Max active", { exact: true })).toHaveValue(String(status.max_active_agents));
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
         await page.screenshot({ path: join(CHECK_HOME, `auto-tiers-${testInfo.project.name}.png`), fullPage: true });

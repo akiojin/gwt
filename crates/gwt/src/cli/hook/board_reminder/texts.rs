@@ -250,9 +250,9 @@ pub(super) fn narrative_language_tag(lang: &str) -> &'static str {
 
 pub(super) const TITLE_SUMMARY_REQUIRED_REMINDER: &str = "# Agent Title — set it before you respond\n\
 \n\
-This Agent window has no `title-summary` yet. Before you start responding to the user, your **first action** must set this window's work purpose as its title-summary. This is not optional.\n\
+This Agent window has no `title-summary` yet. After your first action (`pane.name`), set this window's work purpose as its title-summary before responding to the user. This is not optional.\n\
 \n\
-Run this first:\n\
+Run this immediately after `pane.name`:\n\
   gwtd <<'JSON'\n\
   {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<short work purpose>\",\"current_focus\":\"<current work focus>\"}}\n\
   JSON\n\
