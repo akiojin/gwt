@@ -28,7 +28,14 @@ fn issue_3713_plugin_external_skill_conflicts_are_advisory_and_enumerated_in_hoo
         serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
     )
     .unwrap();
-    let health = read_managed_hook_health(&ManagedHookHealthInput::new(root.path()));
+    let input = ManagedHookHealthInput {
+        worktree_root: root.path().to_path_buf(),
+        // This advisory-only fixture must not inherit a live Session's runtime.
+        runtime_state_path: None,
+        profile_path: None,
+        expected_hook_bin: None,
+    };
+    let health = read_managed_hook_health(&input);
     assert_eq!(health.status, ManagedHookHealthStatus::Inactive);
     let health = serde_json::to_value(health).unwrap();
     let audit = &health["external_skill_conflicts"];
@@ -44,10 +51,7 @@ fn issue_3713_plugin_external_skill_conflicts_are_advisory_and_enumerated_in_hoo
         .unwrap()
         .ends_with("commands/ship.md"));
     fs::write(plugin.join("ship.md"), "Run `gh pr view 17`.\n").unwrap();
-    let refreshed = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
-        root.path(),
-    )))
-    .unwrap();
+    let refreshed = serde_json::to_value(read_managed_hook_health(&input)).unwrap();
     assert_eq!(
         refreshed["external_skill_conflicts"]["conflict_count"], 0,
         "changed external instructions must invalidate cached diagnosis"
@@ -57,10 +61,7 @@ fn issue_3713_plugin_external_skill_conflicts_are_advisory_and_enumerated_in_hoo
         "Run `gh issue comment 17 --body done`.\n",
     )
     .unwrap();
-    let refreshed = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
-        root.path(),
-    )))
-    .unwrap();
+    let refreshed = serde_json::to_value(read_managed_hook_health(&input)).unwrap();
     assert_eq!(
         refreshed["external_skill_conflicts"]["conflict_count"], 1,
         "new command files must invalidate cached diagnosis"
