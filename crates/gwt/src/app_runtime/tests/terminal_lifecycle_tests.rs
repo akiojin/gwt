@@ -3231,6 +3231,114 @@ fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
 }
 
 #[test]
+fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let chunks: [&[u8]; 2] = [
+        b"Would you like to run the following command?\r\n\r\ncargo test\r\n",
+        b"> 1. Yes, proceed\r\n  2. No, and tell Codex what to do differently\r\nPress enter to confirm or esc to cancel\r\n",
+    ];
+    let mut bytes = Vec::new();
+    let mut deadline = None;
+    for chunk in chunks {
+        let seq = {
+            let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
+            pane.process_bytes(chunk);
+            pane.output_seq()
+        };
+        bytes.extend_from_slice(chunk);
+        let events =
+            runtime.handle_runtime_output_event(id.clone(), incarnation, chunk.to_vec(), seq);
+        assert_eq!(events.len(), 1, "only raw output is immediate");
+        assert_eq!(events[0].terminal_stream_seq, Some(seq));
+        assert!(
+            matches!(&events[0].event, BackendEvent::TerminalOutput { data_base64, .. }
+            if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == chunk)
+        );
+        let next = runtime
+            .next_runtime_output_deadline()
+            .expect("flush scheduled");
+        assert_eq!(
+            *deadline.get_or_insert(next),
+            next,
+            "continuous output cannot postpone the flush"
+        );
+    }
+    assert_eq!(runtime.pending_runtime_outputs[&id].data, bytes);
+    let deadline = deadline.unwrap();
+    assert!(runtime
+        .flush_runtime_output_batches(deadline - Duration::from_millis(100))
+        .is_empty());
+    assert!(!runtime.window_approval_waiting.contains_key(&id));
+    let events = runtime.flush_runtime_output_batches(deadline);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::TerminalPreview { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        runtime.window_approval_waiting.contains_key(&id),
+        "the same latest screen detects approval"
+    );
+    assert!(
+        runtime.next_runtime_output_deadline().is_none(),
+        "no idle wakeups after the final chunk"
+    );
+    assert!(runtime
+        .flush_runtime_output_batches(deadline + Duration::from_secs(1))
+        .is_empty());
+}
+
+#[test]
+fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let old = runtime.runtimes[&id].incarnation;
+    runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1);
+    runtime.runtimes.get_mut(&id).unwrap().incarnation += 1;
+    let deadline = runtime.next_runtime_output_deadline().unwrap();
+    assert!(runtime.flush_runtime_output_batches(deadline).is_empty());
+    let current = runtime.runtimes[&id].incarnation;
+    runtime.runtimes[&id]
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(b"final output");
+    runtime.handle_runtime_output_event(id.clone(), current, b"final output".to_vec(), 2);
+    let events = runtime.handle_runtime_status_event(
+        id.clone(),
+        current,
+        WindowProcessStatus::Running,
+        None,
+        false,
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text == "final output")));
+    assert!(runtime.next_runtime_output_deadline().is_none());
+}
+
+#[test]
 fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -3283,6 +3391,17 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
         b"bytes".to_vec(),
         Some("  remote\n\nlast".into()),
     );
+    let intermediate =
+        runtime.handle_daemon_runtime_output(id.clone(), b"next chunk".to_vec(), None);
+    assert_eq!(
+        intermediate.len(),
+        1,
+        "an intermediate relay frame only streams bytes"
+    );
+    assert!(matches!(
+        intermediate[0].event,
+        BackendEvent::TerminalOutput { .. }
+    ));
     let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
     for events in [live, sync] {
         assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { id: pane, text } if pane == &id && text == "  remote\n\nlast")));

@@ -238,8 +238,27 @@ pub fn pending(project_dir: &Path) -> io::Result<Vec<PeerMessage>> {
 
 /// Deterministic one-line Reports, without a second write or duplicate append.
 pub fn reports(project_dir: &Path, now: DateTime<Utc>) -> io::Result<Vec<PmReport>> {
-    Ok(load()?
-        .messages
+    reports_with_deadline(project_dir, now).map(|(reports, _)| reports)
+}
+
+/// The next clock-only change to a report; readers need not reload idle stores.
+pub fn reports_with_deadline(
+    project_dir: &Path,
+    now: DateTime<Utc>,
+) -> io::Result<(Vec<PmReport>, Option<DateTime<Utc>>)> {
+    let messages = load()?.messages;
+    let deadline = messages
+        .iter()
+        .filter(|message| {
+            message.from.project_dir == project_dir
+                && message.kind == PeerKind::Request
+                && message.answered_by.is_none()
+                && message.unavailable.is_none()
+                && message.expires_at > now
+        })
+        .map(|message| message.expires_at)
+        .min();
+    let reports = messages
         .into_iter()
         .filter_map(|message| {
             let sent = message.from.project_dir == project_dir;
@@ -280,5 +299,6 @@ pub fn reports(project_dir: &Path, now: DateTime<Utc>) -> io::Result<Vec<PmRepor
                 created_at: message.created_at,
             })
         })
-        .collect())
+        .collect();
+    Ok((reports, deadline))
 }

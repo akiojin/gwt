@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.123.1] - 2026-10-15
+
+### Bug Fixes
+
+- **startup:** Reuse common-dir metadata and record git costs
+- **test:** Forward canonical headed flags to Playwright
+
+### Miscellaneous Tasks
+
+- **work:** Record startup resolver delivery evidence
+
+### Performance
+
+- **terminal:** Batch output and reuse daemon connections
+- **pm:** Cache unchanged reports and current facts
+- **gui:** Stop idle clock frames and pane status polling
+
+### Testing
+
+- **startup:** Count unlogged common-dir processes in paired runs
+- **startup:** Preserve canonical browser runner arguments
+- **paths:** Isolate remaining home-dependent path readers
+- **gui:** Remeasure issue titles after detail replacement
+- **gui:** Isolate projection fingerprint plugin inventory
+
 ## [9.123.0] - 2026-10-15
 
 ### Bug Fixes
