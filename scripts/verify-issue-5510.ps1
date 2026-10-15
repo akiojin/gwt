@@ -259,7 +259,7 @@ try {
     $resident = Get-Process -Id $receipt.pid -ErrorAction SilentlyContinue
     if ($resident) {
       $created = $resident.StartTime.ToUniversalTime()
-      $lockTime = [DateTime]::Parse($receipt.started_at).ToUniversalTime()
+      $lockTime = ([DateTime]$receipt.started_at).ToUniversalTime()
       if ($resident.Path -ne $residentExecutable -or $created -lt $fixtureStarted -or $created -gt $lockTime -or ($lockTime - $created).TotalSeconds -gt 120) {
         throw 'Resident ownership receipt did not match; refusing cleanup.'
       }

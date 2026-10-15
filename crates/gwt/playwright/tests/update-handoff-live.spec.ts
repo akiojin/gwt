@@ -77,7 +77,8 @@ test.describe("Issue #5510 resident Windows update handoff", () => {
       expect(await sha256(installed), `${binary} private install equals checkout bytes`).toBe(fixture.source_sha256[binary]);
       expect(await sha256(source), `${binary} checkout source remains unchanged`).toBe(fixture.source_sha256[binary]);
     }
-    expect(alive(fixture.smoke_pid), "browser-check no-tray smoke was cleaned up").toBe(false);
+    // The owner verifies smoke exit through its Process handle before disposal.
+    // A later PID-only lookup can observe a different process after PID reuse.
     expect((await json(join(fixture.preferences, "issue-monitor.json"))).enabled).toBe(false);
     expect((await json(join(fixture.preferences, "pm.json"))).settings.auto_start).toBe(false);
     const theme = info.project.name.endsWith("light") ? "light" : "dark";
