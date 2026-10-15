@@ -20,7 +20,7 @@ def corpus(tmp_path, monkeypatch):
     ledger = state / "pm-reports.jsonl"
     report = {
         "id": "digest-one", "kind": "progress",
-        "body": "Delivered watcher repair #5429 and https://github.com/example/repo/issues/5430.",
+        "body": "Delivered watcher repair #5429 and https://github.com/example/repo/issues/5430 via PR #5487 and pUlL rEqUeSt #5488.",
         "created_at": "2026-10-15T01:02:03Z",
     }
     ledger.write_text(json.dumps(report) + "\n", encoding="utf-8")

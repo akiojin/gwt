@@ -5990,10 +5990,11 @@ def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dic
                 seen.add(report["id"])
                 report["source"] = "pm_report"
                 report["issue_numbers"] = sorted({
-                    int(first or second) for first, second in re.findall(
-                        r"(?<!\w)#([1-9]\d*)\b|/issues/([1-9]\d*)\b",
+                    int(number) for prefix, number in re.findall(
+                        r"((?<!\w)(?:PR|pull\s+request)\s*#|(?<!\w)#|/issues/)([1-9]\d*)\b",
                         f"{report.get('question') or ''}\n{report['body']}",
-                    )
+                        flags=re.IGNORECASE,
+                    ) if prefix.lower() in {"#", "/issues/"}
                 })
                 reports.append(report)
             entries.append({
