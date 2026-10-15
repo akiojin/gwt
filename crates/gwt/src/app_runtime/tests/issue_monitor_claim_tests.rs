@@ -3775,6 +3775,180 @@ fn local_fallback_transaction_preserves_the_background_worker_deadline() {
 }
 
 #[test]
+fn gui_scan_preparation_does_not_hold_the_prefs_lock() {
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::fmt().with_test_writer().finish());
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = gwt::IssueMonitorPrefs::default();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+
+    let prepare = |proposal: &mut gwt::IssueMonitorState| {
+        // Observe a deliberately slow read phase without asserting its
+        // wall-clock duration. The lock assertion is independent of time.
+        let preparing = Instant::now();
+        thread::sleep(Duration::from_secs(1));
+        tracing::info!(
+            preparation_ms = preparing.elapsed().as_secs_f64() * 1000.0,
+            "Issue #5447 controlled scan preparation"
+        );
+        let lock = gwt_core::operation_deadline::NamedFileLock::try_acquire(
+            &prefs_path.with_extension("lock"),
+            "gui_scan_test",
+        );
+        proposal.set_enabled(true);
+        match lock {
+            Ok(lock) => {
+                lock.unlock().unwrap();
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    assert!(
+        super::super::rebase_mutate_and_persist_issue_monitor_state(
+            &prefs_path,
+            &mut monitor,
+            prepare,
+        )
+        .unwrap(),
+        "observer scan preparation must leave the writer lock available"
+    );
+    assert!(
+        super::super::prepare_and_persist_issue_monitor_scan_without_authority_fence(
+            &prefs_path,
+            &mut monitor,
+            prepare,
+        )
+        .unwrap(),
+        "fallback scan preparation must leave the writer lock available"
+    );
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap().enabled);
+}
+
+#[test]
+fn gui_scan_rejects_a_snapshot_changed_during_preparation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = gwt::IssueMonitorPrefs::default();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+
+    let error = super::super::rebase_mutate_and_persist_issue_monitor_state(
+        &prefs_path,
+        &mut monitor,
+        |proposal| {
+            gwt::try_mutate_issue_monitor_prefs(&prefs_path, |disk| {
+                disk.priority_order = vec![5447];
+                Ok(())
+            })
+            .expect("a daemon commit must be able to run during GUI preparation");
+            proposal.set_enabled(true);
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert!(!persisted.enabled);
+    assert_eq!(persisted.priority_order, vec![5447]);
+    assert_eq!(monitor.prefs(), persisted);
+}
+
+#[test]
+fn gui_scan_rechecks_daemon_authority_after_preparation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = gwt::IssueMonitorPrefs::default();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let before = fs::read(&prefs_path).unwrap();
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+
+    let error = super::super::prepare_and_persist_issue_monitor_scan_without_authority_fence(
+        &prefs_path,
+        &mut monitor,
+        |proposal| {
+            gwt::persist_issue_monitor_authority_fence(
+                &prefs_path,
+                &gwt::IssueMonitorAuthorityFence::current_process(),
+            )
+            .unwrap();
+            proposal.set_enabled(true);
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(fs::read(&prefs_path).unwrap(), before);
+    assert!(!monitor.prefs().enabled);
+}
+
+#[test]
+fn gui_scan_retries_a_concurrent_control_without_waiting_for_the_next_scan() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let _budget = super::super::ScopedLocalIssueMonitorPrefsTimeout::set(
+        super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let prefs = gwt::IssueMonitorPrefs {
+        launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: "tab-1::agent-42".to_string(),
+        }],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    let now = "2026-10-15T00:00:00Z";
+    monitor.record_window_snapshot(gwt::IssueMonitorWindowSnapshot {
+        project_tab_id: "tab-1".to_string(),
+        observed_at: now.to_string(),
+        windows: Vec::new(),
+    });
+    let mut attempts = 0;
+
+    super::super::prepare_and_persist_issue_monitor_scan_without_authority_fence(
+        &prefs_path,
+        &mut monitor,
+        |proposal| {
+            attempts += 1;
+            assert_eq!(
+                proposal.classify_idle_windows(&BTreeMap::new(), now).len(),
+                1,
+                "each attempt must retain the observed canvas for slot recovery",
+            );
+            if attempts == 1 {
+                gwt::try_mutate_issue_monitor_prefs(&prefs_path, |disk| {
+                    disk.priority_order = vec![5447];
+                    Ok(())
+                })
+                .unwrap();
+            }
+            proposal.set_enabled(true);
+        },
+    )
+    .unwrap();
+
+    assert_eq!(attempts, 2);
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    assert_eq!(persisted.priority_order, vec![5447]);
+    assert!(persisted.enabled);
+    assert_eq!(monitor.prefs(), persisted);
+}
+
+#[test]
 fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline() {
     let _env_lock = env_test_lock()
         .lock()

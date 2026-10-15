@@ -6387,6 +6387,7 @@ pub fn clear_issue_monitor_authority_fence(
     })
 }
 
+#[track_caller]
 fn with_issue_monitor_prefs_lock<T>(
     path: &Path,
     operation: impl FnOnce() -> io::Result<T>,
@@ -6394,6 +6395,7 @@ fn with_issue_monitor_prefs_lock<T>(
     with_issue_monitor_prefs_lock_observed(path, || {}, operation)
 }
 
+#[track_caller]
 fn with_issue_monitor_prefs_lock_observed<T>(
     path: &Path,
     on_first_contention: impl FnMut(),
@@ -6414,13 +6416,27 @@ fn with_issue_monitor_prefs_lock_observed<T>(
     // `authority recovery is blocked` shape. Name the holder so the refusal says
     // which process is holding it rather than only that a deadline expired. The
     // caller's own contention observer is preserved.
+    let caller = std::panic::Location::caller();
+    let waiting = std::time::Instant::now();
     let lock = gwt_core::operation_deadline::NamedFileLock::acquire_observed(
         &path.with_extension("lock"),
         "issue_monitor_prefs",
         on_first_contention,
     )?;
+    let wait_ms = waiting.elapsed().as_secs_f64() * 1000.0;
+    let held = std::time::Instant::now();
     let result = operation();
     let unlock_result = lock.unlock();
+    tracing::info!(
+        target: "gwt.issue_monitor.prefs",
+        caller = %caller,
+        path = %path.display(),
+        pid = std::process::id(),
+        wait_ms,
+        held_ms = held.elapsed().as_secs_f64() * 1000.0,
+        success = result.is_ok() && unlock_result.is_ok(),
+        "Issue Monitor prefs lock released"
+    );
     match (result, unlock_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
@@ -6466,6 +6482,7 @@ pub fn load_issue_monitor_prefs_for_running_version(path: &Path) -> io::Result<I
 /// latest committed snapshot under the same lock and malformed JSON cannot
 /// permanently block future writes. [`mutate_issue_monitor_prefs`] remains
 /// available for deliberately fail-closed callers and tests.
+#[track_caller]
 pub fn save_issue_monitor_prefs(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     with_issue_monitor_prefs_lock(path, || save_issue_monitor_prefs_unlocked(path, prefs))
 }
@@ -6474,6 +6491,7 @@ pub fn save_issue_monitor_prefs(path: &Path, prefs: &IssueMonitorPrefs) -> io::R
 /// unique-scratch atomic save, returning both the committed snapshot and the
 /// mutation's result. The closure must not call [`save_issue_monitor_prefs`]
 /// recursively because this transaction already owns the sibling lock.
+#[track_caller]
 pub fn mutate_issue_monitor_prefs<T>(
     path: &Path,
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
@@ -6491,6 +6509,7 @@ pub fn mutate_issue_monitor_prefs<T>(
 /// durable atomic writer. Returning `Err` from `mutation`, or returning the
 /// same typed preferences unchanged, leaves the canonical bytes untouched and
 /// creates no scratch write.
+#[track_caller]
 pub fn try_mutate_issue_monitor_prefs<T>(
     path: &Path,
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
@@ -6511,6 +6530,7 @@ pub fn try_mutate_issue_monitor_prefs<T>(
 /// before this closure acquires the lock wins; the fallback then returns an
 /// error before mutation or save. If the fallback wins, startup waits and sees
 /// its committed prefs after the lock is released.
+#[track_caller]
 pub fn try_mutate_issue_monitor_prefs_without_authority_fence<T>(
     path: &Path,
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
@@ -6541,6 +6561,7 @@ pub fn try_mutate_issue_monitor_prefs_without_authority_fence<T>(
 /// data errors and other I/O errors remain fail-closed. Callers should pass
 /// their latest valid in-memory prefs; callers without one should explicitly
 /// pass [`IssueMonitorPrefs::recovery_default`].
+#[track_caller]
 pub fn mutate_issue_monitor_prefs_recovering<T>(
     path: &Path,
     recovery_baseline: &IssueMonitorPrefs,
@@ -6549,6 +6570,7 @@ pub fn mutate_issue_monitor_prefs_recovering<T>(
     mutate_issue_monitor_prefs_recovering_observed(path, recovery_baseline, || {}, mutation)
 }
 
+#[track_caller]
 pub(crate) fn mutate_issue_monitor_prefs_recovering_observed<T>(
     path: &Path,
     recovery_baseline: &IssueMonitorPrefs,
