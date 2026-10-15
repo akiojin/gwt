@@ -4268,13 +4268,11 @@ mod tests {
         assert!(usage.contains("BackendEvent::ProviderUsage {"));
         assert!(usage.contains("sessions: snapshot.sessions"));
         let runtime = include_str!("app_runtime/runtime_events.rs");
-        for event in ["LogEntryAppended"] {
-            assert!(
-                runtime.contains(&format!("BackendEvent::{event}"))
-                    && runtime.contains("project_events_for_open_surface"),
-                "diagnostics must be delivered only to projects with an open consumer: {event}"
-            );
-        }
+        assert!(
+            runtime.contains("BackendEvent::LogEntryAppended")
+                && runtime.contains("project_events_for_open_surface"),
+            "diagnostics must be delivered only to projects with an open Logs consumer"
+        );
     }
 
     #[test]

@@ -27,8 +27,8 @@ Agent workspace を materialize するために worktree を使いますが、�
 - **Managed workflow skills** — discussion、Issue routing、planning、
   TDD implementation、PR、architecture review、project search、agent 管理用の
   bundled `gwt-*` skills を使えます。
-- **Operator canvas** — Agent、Board、Issue、SPEC、Logs、Profile、
-  File Tree、Branches、PR surface を mission-control 風 workspace に並べられます。
+- **Operator canvas** — Agent、Board、Logs、Profile、Index、Settings の
+  surface を mission-control 風 workspace に並べられます。
 
 ## インストール
 
@@ -400,7 +400,6 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
 - `Profile` — environment/profile 管理
-- `File Tree` — 実リポジトリの read-only tree
 - `Branches` — branch 確認、filter、cleanup、Git detail
 - `Settings` — application と agent の設定。`System` タブで Workspace summary
   と Board 投稿本文の出力言語を `Auto / English / 日本語` から選択できます
@@ -417,7 +416,6 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   System には保存値・有効値と、更新の保留理由も表示します。変更は GUI から
   行い、エージェントは `update.settings.status` で読み取れます。
   この設定は Issue Monitor の設定から除外されています。
-- `PR` — pull-request workflow surface。詳細な一覧機能は cache-backed PR source の整備に依存します
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
 Agent が status、decision、handoff、request を外部化する coordination surface です。
