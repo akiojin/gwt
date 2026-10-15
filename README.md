@@ -703,11 +703,13 @@ does not bypass the unchecked checklist. Auto-close follows the
 monitor only records a `merge 済み・close 待ち` comment. An Issue a human
 reopened is never closed again by the same merge.
 
-To find completed Issues whose body still has unchecked acceptance criteria,
+To find completed Issues that still have unchecked acceptance criteria,
 run `node scripts/audit-closed-acceptance.mjs OWNER/REPOSITORY` from this checkout.
 The read-only audit uses `gh` to fetch all closed-Issue pages and prints a JSON
 list with each Issue's number, URL, and unchecked criteria. It excludes pull
-requests and Issues closed as not planned.
+requests and Issues closed as not planned. For comment-resident SPECs it reads
+the referenced `spec` comments, including split sections, and reports unreadable
+sections as errors rather than silently skipping them.
 
 Unattended lifecycle events (merge completed, retry scheduled, gate passed,
 needs-human escalations) surface as toasts and accumulate in a persistent,
