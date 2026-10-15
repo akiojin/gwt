@@ -116,9 +116,6 @@ impl KnowledgeRelatedSnapshotCache {
     }
 
     fn reserve_generation(&mut self, project_root: &Path, kind: KnowledgeKind) -> Option<u64> {
-        if !matches!(kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
-            return None;
-        }
         if self.next_generation == u64::MAX {
             self.entries.clear();
             self.next_generation = 0;
@@ -430,7 +427,7 @@ mod related_snapshot_cache_tests {
     }
 
     #[test]
-    fn pr_reservation_and_snapshot_miss_do_not_mutate_issue_snapshot() {
+    fn snapshot_miss_does_not_mutate_issue_snapshot() {
         let directory = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
         let root = directory.path().join("repo");
@@ -444,70 +441,11 @@ mod related_snapshot_cache_tests {
         assert!(cache.replace_if_current(&root, KnowledgeKind::Issue, generation, snapshot(42),));
         let scans_before = cache.full_scan_count();
 
-        assert_eq!(cache.reserve_generation(&root, KnowledgeKind::Pr), None);
         assert!(cache.get(&other, KnowledgeKind::Issue).is_none());
         assert_eq!(cache.full_scan_count(), scans_before);
         assert!(cache
             .get(&root, KnowledgeKind::Issue)
             .is_some_and(|snapshot| snapshot.contains_key(&42)));
-    }
-
-    #[test]
-    fn pr_full_augmentation_preserves_baseline_view_without_publishing_a_snapshot() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(directory.path());
-        let root = directory.path().join("repo");
-        let sessions_dir = directory.path().join("sessions");
-        let issue_link_cache_dir = directory.path().join("cache");
-        std::fs::create_dir_all(&root).expect("create repo");
-        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
-        std::fs::create_dir_all(&issue_link_cache_dir).expect("create cache dir");
-        let snapshots = KnowledgeRelatedSnapshot::default();
-        let generation =
-            reserve_related_snapshot_generation(&snapshots, &root, KnowledgeKind::Issue)
-                .expect("issue generation");
-        assert!(snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace_if_current(&root, KnowledgeKind::Issue, generation, snapshot(42),));
-        let mut pr_view = gwt::load_knowledge_bridge(&root, KnowledgeKind::Pr, Some(77), false)
-            .expect("disabled PR view");
-        let baseline_view = pr_view.clone();
-        let scans_before = snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .full_scan_count();
-
-        augment_and_publish_knowledge_bridge_related_works(
-            &root,
-            &sessions_dir,
-            &issue_link_cache_dir,
-            &mut pr_view,
-            &snapshots,
-            None,
-        );
-
-        assert_eq!(
-            pr_view, baseline_view,
-            "PR full-load augmentation must preserve its existing disabled view"
-        );
-        let mut cache = snapshots
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(
-            cache.full_scan_count(),
-            scans_before + 1,
-            "PR full load must retain the pre-existing augmentation pass"
-        );
-        assert!(cache.get(&root, KnowledgeKind::Pr).is_none());
-        assert!(cache
-            .get(&root, KnowledgeKind::Issue)
-            .is_some_and(|snapshot| snapshot.contains_key(&42)));
-        assert_eq!(
-            cache.entry_count(),
-            1,
-            "PR augmentation must not publish or replace an Issue/SPEC snapshot"
-        );
     }
 
     #[test]
@@ -986,9 +924,6 @@ fn apply_latest_knowledge_bridge_related_works(
     view: &mut gwt::KnowledgeBridgeView,
     related_snapshot: &KnowledgeRelatedSnapshot,
 ) {
-    if !matches!(view.kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
-        return;
-    }
     let snapshot = related_snapshot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1003,9 +938,6 @@ fn apply_latest_knowledge_monitor_projection(
     view: &mut gwt::KnowledgeBridgeView,
     monitor_snapshot: &KnowledgeMonitorSnapshot,
 ) {
-    if !matches!(view.kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
-        return;
-    }
     let snapshot = monitor_snapshot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1053,9 +985,6 @@ fn augment_knowledge_bridge_related_works(
     sessions: &[gwt_agent::Session],
     issue_by_branch: &HashMap<String, u64>,
 ) -> HashMap<u64, Vec<gwt::KnowledgeRelatedWorkView>> {
-    if !matches!(view.kind, KnowledgeKind::Issue | KnowledgeKind::Spec) {
-        return HashMap::new();
-    }
     let relevant_numbers = view
         .entries
         .iter()

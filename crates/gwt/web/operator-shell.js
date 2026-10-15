@@ -1323,7 +1323,6 @@ function createActionRegistry(doc) {
     { id: "pm-settings", label: "Project Manager settings", hint: "Agent · auto start", group: "Navigate", handler: dispatch("pm-settings") },
     { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
     { id: "open-branches", label: "Open Issues", hint: "Issues and other work", group: "Spawn", handler: dispatch("open-branches") },
-    { id: "open-files", label: "Open File Tree", group: "Spawn", handler: dispatch("open-files") },
     { id: "open-index", label: "Open Index search", group: "Spawn", handler: dispatch("open-index") },
     { id: "theme-cycle", label: "Cycle theme (auto → dark → light)", group: "View", handler: dispatch("theme-cycle") },
   ];

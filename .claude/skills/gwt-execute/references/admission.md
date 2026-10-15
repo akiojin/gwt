@@ -18,6 +18,14 @@ the contention is resolved. There is no manual acquire loop or
 fixed retry schedule. `verify.lease.release` remains available to drain a
 legacy holder.
 
+`deferred` is a temporary wait, not a verification failure or a terminal outcome.
+While the verification tool process is alive, keep polling that same invocation.
+After `deferred`, retry `verify.run` with the identical full requested matrix,
+or declare an active wait through `issue.monitor.wait` with explicit `params.number`
+for the owner Issue, `params.reason`, and `params.resume_condition`. Keep ownership
+until that condition is met. On a resume notification, retry the same matrix;
+do not leave the owner idle. Never use `execution.blocked` or `build.abort` for ordinary admission contention.
+
 Retry with the identical full requested matrix, never a caller-built subset.
 Automatic resume requires valid admission-deferred evidence and exact matches
 for owner, session, execution authority digest, verification plan content hash,

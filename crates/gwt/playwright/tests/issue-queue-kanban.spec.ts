@@ -489,7 +489,7 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
   // A headed browser retains its physical pointer across reload. Keep this
   // notification journey clear of an unrelated card-hover explanation.
   await page.mouse.move(1590, 1090);
-  await expect(page.locator('.issue-control-explanation[role="tooltip"]')).not.toBeVisible();
+  await expect(page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]')).not.toBeVisible();
   await loadBadge.click();
   await expect(loadNotice).toBeFocused();
   await expect(loadNotice).toContainText("Issue cache read failed");
@@ -518,7 +518,7 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
   await expect(renderBadge).toBeVisible();
   await expect(page.locator(".knowledge-list")).not.toContainText("Issue card render failed");
   await page.mouse.move(1590, 1090);
-  await expect(page.locator('.issue-control-explanation[role="tooltip"]')).not.toBeVisible();
+  await expect(page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]')).not.toBeVisible();
   await renderBadge.click();
   await expect(renderNotice).toBeFocused();
   await expect(renderNotice).toContainText("Issue card render failed");
@@ -588,7 +588,7 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
 });
 
 test("T-7a: current labels explain themselves with keyboard focus and hover", async ({ page }) => {
-  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  const popup = page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]');
   const controlMessages = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
     message.kind.startsWith("set_issue_monitor_") || message.kind.startsWith("issue_monitor_queue_")
       || message.kind === "update_viewport"));
@@ -738,7 +738,7 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
   await expect(chips).toHaveText(["Min tier 0", "2 agent failures → ≥ tier 1"]);
   await expect(row(page, 4).locator('[data-kind="tier"]')).toHaveCount(0);
   const select = row(page, 3).locator(".knowledge-row-select");
-  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  const popup = page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]');
   await page.mouse.move(1590, 1090);
   await select.focus();
   await expect(popup).toContainText("zero-based");
@@ -771,7 +771,7 @@ test("T-7b.2b.2: Running tier uses exact live window and clears stale explanatio
   await confirm(page, [3, 4], { tier_facts: facts });
   const chip = row(page, 5).locator('[data-key="tier-running"]');
   const select = row(page, 5).locator(".knowledge-row-select");
-  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  const popup = page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]');
   await expect(chip).toHaveText("Running tier 0");
   await expect(select.locator('[tabindex="0"]')).toHaveCount(0);
   // Settle the existing preview's initial agent uptime projection before pressing a row.
