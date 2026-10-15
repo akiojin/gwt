@@ -29,7 +29,7 @@ const REPEATS: usize = 5;
 const POLL: Duration = Duration::from_millis(100);
 const TIMEOUT: Duration = Duration::from_secs(60);
 const OPEN: usize = 1001;
-const QUIT: usize = 1004;
+const QUIT: usize = 1005;
 type Hwnd = *mut c_void;
 
 #[link(name = "user32")]
@@ -302,7 +302,8 @@ fn startup_metric_and_native_command_contract() {
     for item in [
         "let tray_open",
         "let tray_copy_url =",
-        "let tray_about",
+        "let tray_open_project",
+        "let tray_clone",
         "let tray_quit",
     ] {
         let position = menu.find(item).expect("native menu item construction");

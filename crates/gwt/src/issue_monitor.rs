@@ -342,9 +342,9 @@ pub enum IssueMonitorEffectPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MergedIssueSettlementAction {
-    /// Every acceptance criterion is checked, or the remainder was delegated
-    /// to another Issue: post the close comment and close (AC-1 / AC-2).
+    /// Every acceptance criterion is checked: post the close comment and close.
     Close {
+        /// Legacy journal field; delegation no longer authorizes a close.
         #[serde(default)]
         delegated: bool,
     },
@@ -354,8 +354,8 @@ pub enum MergedIssueSettlementAction {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unmet: Vec<String>,
     },
-    /// Unchecked criteria without a delegation record: comment and hand the
-    /// Issue to a human (AC-2). An empty list means the block is missing.
+    /// Unchecked criteria: comment and hand the Issue to a human.
+    /// An empty list means the block is missing.
     UnmetAcceptance {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unmet: Vec<String>,
@@ -382,39 +382,14 @@ pub struct MergedIssueSettlement {
     pub settled_at: String,
 }
 
-/// Phrases that record "the remaining acceptance criteria were delegated to
-/// another Issue" in a PR body or Issue comment (Issue #3917 AC-2). Matched
-/// case-insensitively as substrings.
-const MERGED_ISSUE_DELEGATION_MARKERS: &[&str] = &[
-    "残 ac は別 issue に委譲",
-    "残acは別issueに委譲",
-    "remaining acceptance criteria delegated",
-    "remaining ac delegated",
-];
-
-/// Whether any text carries a delegation record.
-pub fn delegation_recorded<'a>(texts: impl IntoIterator<Item = &'a str>) -> bool {
-    texts.into_iter().any(|text| {
-        let lower = text.to_lowercase();
-        MERGED_ISSUE_DELEGATION_MARKERS
-            .iter()
-            .any(|marker| lower.contains(marker))
-    })
-}
-
 /// Issue #3917: decide what settling a merged delivery does for `issue`.
 ///
-/// Pure. `delegation_evidence` is consulted only when unchecked criteria
-/// remain and auto-close is on, so callers can defer the PR-body / comment
-/// readback to that case; `None` from it means the evidence could not be read
-/// and the decision is deferred to a later scan. Returns `None` when nothing
-/// must happen: the Issue is already closed, it is a `gwt-spec` Issue whose
-/// tasks are not all complete (AC-3: phase merges never settle the SPEC), or
-/// the evidence is unavailable.
+/// Pure and syntactic: Issue #5126 forbids substituting PR prose or delegation
+/// for unchecked criteria. Returns `None` for a closed Issue or a `gwt-spec`
+/// Issue whose tasks are not all complete (phase merges never settle the SPEC).
 pub fn decide_merged_issue_settlement(
     issue: &IssueMonitorIssue,
     auto_close: bool,
-    delegation_evidence: impl FnOnce(&[String]) -> Option<bool>,
 ) -> Option<MergedIssueSettlementAction> {
     if issue.state != IssueMonitorIssueState::Open {
         return None;
@@ -439,9 +414,6 @@ pub fn decide_merged_issue_settlement(
     }
     if criteria.all_checked() {
         return Some(MergedIssueSettlementAction::Close { delegated: false });
-    }
-    if criteria.machine_checkable && delegation_evidence(&unmet)? {
-        return Some(MergedIssueSettlementAction::Close { delegated: true });
     }
     Some(MergedIssueSettlementAction::UnmetAcceptance { unmet })
 }
@@ -13272,6 +13244,14 @@ impl IssueMonitorState {
             .unwrap_or(self.autonomous_mode)
     }
 
+    /// A failed independent review vetoes even a previously journaled close.
+    pub fn merged_issue_close_allowed(&self, issue_number: u64) -> bool {
+        self.auto_close_merged_issues_enabled()
+            && self
+                .autonomous_record(issue_number)
+                .is_none_or(|record| record.review_passed != Some(false))
+    }
+
     /// Change the auto-close override. Like the autonomous toggle, a change
     /// advances the effect authority so unsubmitted settlement grants are
     /// revoked and an in-flight one cannot close under stale authority.
@@ -17960,6 +17940,19 @@ impl IssueMonitorState {
         evidence: IssueCompletionEvidence,
         live_pane: bool,
     ) -> bool {
+        // Issue #5126: merge is not acceptance evidence. Preserve a failed
+        // independent review before completion cleanup can erase its veto.
+        if self
+            .autonomous_record(issue_number)
+            .is_some_and(|record| record.review_passed == Some(false))
+        {
+            self.escalate_to_needs_human(
+                issue_number,
+                NeedsHumanKind::UserChoiceRequired,
+                "merged delivery has a failed independent acceptance review; resolve the review before closing",
+            );
+            return false;
+        }
         let issue = self.inbox_item(issue_number).map(|item| item.issue.clone());
         let decision = issue
             .as_ref()
@@ -39705,6 +39698,34 @@ mod tests {
         assert_eq!(monitor.attempt_count(42), 0);
     }
 
+    #[test]
+    fn merged_delivery_with_failed_review_keeps_acceptance_unmet() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.set_auto_close_merged_issues_with_effect_revocation(Some(true));
+        scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
+        monitor.begin_review(42, 7, "aaa");
+        assert!(monitor.merged_issue_close_allowed(42));
+        monitor.record_review_verdict(42, false);
+        assert!(!monitor.merged_issue_close_allowed(42));
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "Issue #5126: checked boxes cannot override a failed independent review"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().review_passed,
+            Some(false)
+        );
+        let deliveries = BTreeMap::from([(
+            "work/issue-42".to_string(),
+            merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+        )]);
+        assert!(monitor
+            .merged_issue_settlement_candidates(&deliveries)
+            .is_empty());
+    }
+
     /// Issue #3959 AC-5: a `needs_human` park stamped by the pre-#3930
     /// classifier outlives the classifier — nothing re-evaluates a park, so
     /// #3864 and 33 companions stayed quarantined across the very release that
@@ -40210,11 +40231,11 @@ mod tests {
         use MergedIssueSettlementAction::{AwaitClose, Close, UnmetAcceptance};
         let all_checked = checked_issue(42);
         assert_eq!(
-            decide_merged_issue_settlement(&all_checked, true, |_| panic!("no evidence needed")),
+            decide_merged_issue_settlement(&all_checked, true),
             Some(Close { delegated: false })
         );
         assert_eq!(
-            decide_merged_issue_settlement(&all_checked, false, |_| panic!("off mode never reads")),
+            decide_merged_issue_settlement(&all_checked, false),
             Some(AwaitClose { unmet: vec![] }),
             "AC-5: auto-close off records the merge without closing"
         );
@@ -40223,26 +40244,13 @@ mod tests {
         unmet.body =
             Some("## Acceptance Criteria\n- [x] AC-1: done\n- [ ] AC-2: later\n".to_string());
         assert_eq!(
-            decide_merged_issue_settlement(&unmet, true, |ids| {
-                assert_eq!(ids, ["AC-2"]);
-                Some(true)
-            }),
-            Some(Close { delegated: true }),
-            "AC-2: a delegation record closes despite unchecked criteria"
-        );
-        assert_eq!(
-            decide_merged_issue_settlement(&unmet, true, |_| Some(false)),
+            decide_merged_issue_settlement(&unmet, true),
             Some(UnmetAcceptance {
                 unmet: vec!["AC-2".to_string()]
             })
         );
         assert_eq!(
-            decide_merged_issue_settlement(&unmet, true, |_| None),
-            None,
-            "unreadable evidence defers the decision instead of escalating"
-        );
-        assert_eq!(
-            decide_merged_issue_settlement(&unmet, false, |_| panic!("off mode never reads")),
+            decide_merged_issue_settlement(&unmet, false),
             Some(AwaitClose {
                 unmet: vec!["AC-2".to_string()]
             })
@@ -40250,7 +40258,7 @@ mod tests {
 
         let no_block = issue(44);
         assert_eq!(
-            decide_merged_issue_settlement(&no_block, true, |_| Some(false)),
+            decide_merged_issue_settlement(&no_block, true),
             Some(UnmetAcceptance { unmet: vec![] }),
             "a missing AC block is never vacuously satisfied"
         );
@@ -40262,7 +40270,7 @@ mod tests {
         );
         spec_open.body = all_checked.body.clone();
         assert_eq!(
-            decide_merged_issue_settlement(&spec_open, true, |_| Some(true)),
+            decide_merged_issue_settlement(&spec_open, true),
             None,
             "AC-3: a phase merge of a gwt-spec Issue never settles"
         );
@@ -40273,29 +40281,17 @@ mod tests {
         );
         spec_done.body = all_checked.body.clone();
         assert_eq!(
-            decide_merged_issue_settlement(&spec_done, true, |_| Some(true)),
+            decide_merged_issue_settlement(&spec_done, true),
             Some(Close { delegated: false })
         );
 
         let mut closed = checked_issue(47);
         closed.state = IssueMonitorIssueState::Closed;
         assert_eq!(
-            decide_merged_issue_settlement(&closed, true, |_| Some(true)),
+            decide_merged_issue_settlement(&closed, true),
             None,
             "an already closed Issue has nothing to settle"
         );
-    }
-
-    #[test]
-    fn delegation_marker_is_recognized_in_pr_body_or_comments() {
-        assert!(delegation_recorded([
-            "残 AC は別 Issue に委譲しました (#99)"
-        ]));
-        assert!(delegation_recorded([
-            "Remaining acceptance criteria delegated to #99"
-        ]));
-        assert!(!delegation_recorded(["all done"]));
-        assert!(!delegation_recorded(std::iter::empty::<&str>()));
     }
 
     #[test]

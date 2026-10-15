@@ -94,7 +94,7 @@ export function createSplitSurfaces({
       const surface = selections[index];
       const changedSurface = pane.dataset.surface !== surface;
       pane.dataset.surface = surface;
-      for (const option of pane.querySelectorAll("option")) {
+      for (const option of pane.querySelector(".split-pane__header select").options) {
         option.selected = option.value === surface;
         option.disabled = false;
         option.textContent = SURFACES[option.value];
