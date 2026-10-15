@@ -1781,6 +1781,9 @@ export function createBoardLogsSurface({
                   && String(entry.author_kind || "").toLowerCase() === "user"
                   && String(entry.body || "").trim() === pendingSubmit.body;
               });
+            // Preserve the requested cursor until its page arrives. Evicting it
+            // for a live push would leave a hole between history and this window.
+            if (state.loadingOlder && addedEntry) state.hasNewerEntries = true;
             const acceptedEntries = state.hasNewerEntries && !state.resetToLatest
               ? incomingEntries.filter((entry) => existingEntryIds.has(entry.id))
               : incomingEntries;

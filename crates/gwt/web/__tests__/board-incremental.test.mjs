@@ -128,3 +128,15 @@ test("Board latest reload waits for pending history instead of merging disjoint 
   assert.equal(state.entries[0].id, "post-2000");
   assert.equal(state.hasNewerEntries, false);
 });
+
+test("Board live pushes preserve an in-flight history cursor without leaving an entry gap", () => {
+  const { surface, state, receive } = fixture();
+  receive(Array.from({ length: 1000 }, (_, i) => longRunEntry(1000 + i)), true);
+  surface.requestOlderBoardEntries("board");
+  receive([longRunEntry(2000)]);
+  surface.applyBoardLogsReceiveEvent({ kind: "board_history_page", id: "board",
+    entries: Array.from({ length: 50 }, (_, i) => longRunEntry(950 + i)), has_more_before: true });
+  assert.deepEqual(state.entries.map((entry) => entry.id),
+    Array.from({ length: 1000 }, (_, i) => `post-${950 + i}`));
+  assert.equal(state.hasNewerEntries, true);
+});
