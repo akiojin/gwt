@@ -30,8 +30,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator canvas** — arrange Agent, Board, Issue, SPEC, Logs, Profile,
-  File Tree, Branches, and PR surfaces in one mission-control style workspace.
+- **Operator canvas** — arrange Agent, Board, Logs, Profile, Index, and
+  Settings surfaces in one mission-control style workspace.
 
 ## Install
 
@@ -423,7 +423,6 @@ Common windows include:
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
 - `Profile` — environment/profile management
-- `File Tree` — live read-only repository tree
 - `Branches` — branch inspection, filtering, cleanup, and Git details
 - `Settings` — application and agent configuration. The `System` tab lets
   you choose the narrative output language (Auto / English / 日本語) used
@@ -442,8 +441,6 @@ Common windows include:
   Change the preference in the GUI or ask the PM to use `update.settings.set`
   with `auto_apply_updates`; `update.settings.status` reports its state.
   It is no longer an Issue Monitor setting.
-- `PR` — pull-request workflow surface; detailed list support depends on the
-  cache-backed PR source as it lands
 
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
@@ -526,7 +523,10 @@ auto-refill, or admitted with an `urgent` label. Queue membership authorizes the
 readiness, claim, and capacity checks still apply. `Launch now` on a row opens the
 launch flow, which creates the `work/issue-N` branch/worktree at launch time and
 starts the agent with `gwt-execute #N`. Failed launches remain visible on their
-Issue rows.
+Issue rows. Operators can stop a failed launch with `issue.monitor.stop`,
+`params.number`, and `params.reason`, even after its live claim/window identity
+was lost. The saved failed window is used only while it still belongs to that
+Issue; stopping records a persistent hold and returns any pane to close.
 
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent
@@ -704,11 +704,13 @@ does not bypass the unchecked checklist. Auto-close follows the
 monitor only records a `merge 済み・close 待ち` comment. An Issue a human
 reopened is never closed again by the same merge.
 
-To find completed Issues whose body still has unchecked acceptance criteria,
+To find completed Issues that still have unchecked acceptance criteria,
 run `node scripts/audit-closed-acceptance.mjs OWNER/REPOSITORY` from this checkout.
 The read-only audit uses `gh` to fetch all closed-Issue pages and prints a JSON
 list with each Issue's number, URL, and unchecked criteria. It excludes pull
-requests and Issues closed as not planned.
+requests and Issues closed as not planned. For comment-resident SPECs it reads
+the referenced `spec` comments, including split sections, and reports unreadable
+sections as errors rather than silently skipping them.
 
 Unattended lifecycle events (merge completed, retry scheduled, gate passed,
 needs-human escalations) surface as toasts and accumulate in a persistent,
@@ -809,12 +811,15 @@ gwt keeps project knowledge close to the agent workspace:
 - JSON operation `issue.spec.read` reads GitHub Issue-backed SPECs from the local cache.
 - JSON operations `issue.view` and `issue.comments` provide cache-backed Issue
   access through the gwt CLI surface.
-- `gwt-search` searches SPECs, Issues, source files, and docs through the shared
+- `gwt-search` searches SPECs, Issues, source files, docs, and PM Reports through the shared
   ChromaDB runtime. Missing indexes are built on demand, and the desktop app can
   repair the managed Python search runtime when needed.
   During an Issue index rebuild, searches use the last published generation.
   Multi-scope searches return available results and report excluded scopes with
   their reasons; JSON responses include `partial` and `unavailable_scopes`.
+  Select `reports` to find durable digest and Q&A reports, including questions,
+  answers, and Issue references. The Index window shows the report kind, date,
+  and related Issues, and **Open** returns to the PM's Reports view.
 - The Work Item Knowledge Bridge combines cache-backed list/detail views for
   plain and `gwt-spec` tagged Issues with semantic ranking, exact-match
   priority, and match percentages.
@@ -1242,6 +1247,10 @@ windows are skipped. Cycling keeps the split view and focuses the selected
 terminal for input. Closing the selected tab returns to All agents without stopping the
 agent; cycling can reopen the same terminal.
 
+Agent card and tab titles stay on one line with the name fixed at the start.
+Scroll the purpose horizontally, or hover or keyboard-focus the title to read it in full.
+Issue and Project Manager settings also explain their controls on hover and keyboard focus.
+
 ## Operator Design Language (SPEC-2356)
 
 Starting with the Operator Design System update, gwt is themed as a single
@@ -1651,6 +1660,15 @@ and stops its owned command tree. Runner death also releases its reservation
 without waiting for the reservation TTL. An interruption is neither PASS nor a
 test failure; rerunning the same matrix creates a fresh attempt. A cancellation
 before the first command starts preserves the previous verification record.
+
+Verification children disable Git terminal prompts and Git Credential Manager
+interaction by default. Authentication that requires a GUI or terminal prompt fails instead
+of waiting for input. Cached credentials remain usable.
+
+For a same-project holder reported as a reclaim candidate, call
+`verify.lease.release` with `params.lease_id` and a nonempty `params.reason`.
+Release confirms that no workload remains before reclaiming the holder. Running
+workloads stay protected; use the caller-owned cancellation above for your own attempt.
 
 Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
 lint, coverage, direct headed browser checks, and pre-push checks run

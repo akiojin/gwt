@@ -107,8 +107,7 @@ impl OutboundEvent {
         assert!(
             matches!(
                 &event,
-                BackendEvent::ProcessLine { .. }
-                    | BackendEvent::LogEntryAppended { .. }
+                BackendEvent::LogEntryAppended { .. }
                     | BackendEvent::RuntimeHealth { .. }
                     | BackendEvent::ProviderUsage { .. }
                     | BackendEvent::BoardAuthStatus { .. }

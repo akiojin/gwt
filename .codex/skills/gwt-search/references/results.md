@@ -9,8 +9,12 @@
 ```
 
 - `target` is a kind-tagged locator (`issue`, `spec`, `memory`, `discussion`,
-  `board`, `file`) for follow-up reads with JSON operations such as
+  `board`, `file`, `report`) for follow-up reads with JSON operations such as
   `issue.spec.read`, file paths, or memory headings.
+- Reports include `report_id`, `created_at`, `report_type` (`digest` or `qa`),
+  `source_kind` (the original report kind), `question`, `body`, and
+  `issue_numbers` in their target. The subtitle shows kind, date, and related
+  Issues; the Index window's Open action returns to the PM Reports view.
 - In `all_terms` mode, results may carry `matched_terms` / `missing_terms`,
   and semantic non-strict hits arrive in `suggestions`.
 - The JSON envelope entrypoint always returns the machine-readable envelope

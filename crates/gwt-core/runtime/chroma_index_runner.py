@@ -1364,7 +1364,7 @@ MANIFEST_FILENAME = "manifest.json"
 LOCK_FILENAME = ".lock"
 META_FILENAME = "meta.json"
 
-V2_SCOPES = ("issues", "specs", "memory", "discussions", "board", "works", "files", "files-docs")
+V2_SCOPES = ("issues", "specs", "memory", "discussions", "board", "works", "reports", "files", "files-docs")
 WORKTREE_SCOPED = {"files", "files-docs"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
@@ -1375,6 +1375,7 @@ V2_MEMORY_COLLECTION = "memory"
 V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
 V2_WORKS_COLLECTION = "works"
+V2_REPORTS_COLLECTION = "reports"
 
 FILE_INDEX_V2_LAYOUT_VERSION = 2
 FILE_INDEX_V2_WRITER_PROTOCOL = "file-index-v2"
@@ -1432,7 +1433,7 @@ def resolve_db_path(
     root = (db_root or gwt_index_root()).resolve()
     repo_dir = root / repo_hash
 
-    if scope in {"issues", "specs", "memory", "discussions", "board", "works"}:
+    if scope in {"issues", "specs", "memory", "discussions", "board", "works", "reports"}:
         return repo_dir / scope
 
     return repo_dir / "worktrees" / worktree_hash / scope
@@ -2116,6 +2117,7 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
         "discussions",
         "board",
         "works",
+        "reports",
     ):
         return worktree_dir.parent / f"manifest-{scope}.json"
     return worktree_dir / f"manifest-{scope}.json"
@@ -5946,6 +5948,108 @@ def action_index_memory_v2(
     )
 
 
+def _load_report_records(repo_hash: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Read posted Reports and instruction-backed Q&A for this project only.
+
+    Peer-message projections are not PM report posts and are outside this
+    corpus. Reject incomplete/corrupt ledgers before changing the active index.
+    """
+    if not repo_hash:
+        return [], []
+    source = _gwt_home() / "projects" / repo_hash / "project-state" / "pm-reports.jsonl"
+    reports = []
+    entries = []
+    try:
+        content = source.read_bytes()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise ValueError(f"invalid PM report corpus: {source}: {error}") from error
+    else:
+        try:
+            text = content.decode("utf-8")
+            if text and not text.endswith("\n"):
+                raise ValueError("incomplete PM report record (missing newline)")
+            seen = set()
+            for line in text.split("\n"):
+                if not line.strip():
+                    continue
+                report = json.loads(line, parse_constant=_reject_non_json_constant)
+                if (
+                    not isinstance(report, dict)
+                    or any(not isinstance(report.get(field), str) for field in (
+                        "id", "kind", "body", "created_at"
+                    ))
+                    or not report["id"] or report["id"] in seen
+                    or report["kind"] not in {"progress", "decision", "blocker", "qa"}
+                    or (report.get("question") is not None and not isinstance(report["question"], str))
+                ):
+                    raise ValueError("invalid PM report record")
+                if datetime.datetime.fromisoformat(report["created_at"].replace("Z", "+00:00")).tzinfo is None:
+                    raise ValueError("PM report timestamp requires timezone")
+                seen.add(report["id"])
+                report["source"] = "pm_report"
+                report["issue_numbers"] = sorted({
+                    int(number) for prefix, number in re.findall(
+                        r"((?<!\w)(?:PR|pull\s+request)\s*#|(?<!\w)#|/issues/)([1-9]\d*)\b",
+                        f"{report.get('question') or ''}\n{report['body']}",
+                        flags=re.IGNORECASE,
+                    ) if prefix.lower() in {"#", "/issues/"}
+                })
+                reports.append(report)
+            entries.append({
+                "path": str(source), "mtime": int(source.stat().st_mtime),
+                "size": len(content), "content_hash": hashlib.sha256(content).hexdigest(),
+            })
+        except (OSError, UnicodeDecodeError, ValueError) as error:
+            raise ValueError(f"invalid PM report corpus: {source}: {error}") from error
+
+    instructions, instruction_entries = _load_user_instruction_records(repo_hash)
+    entries.extend(instruction_entries)
+    for instruction in instructions:
+        meta = instruction["metadata"]
+        reports.append({
+            "id": meta["instruction_id"], "source": "user_instruction", "kind": "qa",
+            "created_at": meta["created_at"], "question": meta["summary"], "body": meta["answer"],
+            "issue_numbers": json.loads(meta["issue_numbers"]),
+            "instruction_document": instruction["document"],
+        })
+    records = []
+    for report in reports:
+        question, body = report.get("question") or "", report["body"]
+        records.append({
+            "id": f"report-{report['source']}-{report['id']}",
+            "document": "\n".join([
+                report["kind"], report["created_at"], question, body,
+                " ".join(f"#{number}" for number in report["issue_numbers"]),
+                report.get("instruction_document", ""),
+            ]),
+            "metadata": {
+                "report_id": report["id"], "source": report["source"],
+                "kind": report["kind"], "report_type": "qa" if report["kind"] == "qa" else "digest",
+                "created_at": report["created_at"], "question": question, "body": body,
+                "title": question or next(iter(body.splitlines()), "")[:160],
+                "issue_numbers": json.dumps(report["issue_numbers"]),
+            },
+        })
+    entries.sort(key=lambda entry: entry["path"])
+    return records, entries
+
+
+def action_index_reports_v2(
+    repo_hash: str,
+    project_root: Optional[str],
+    mode: str = "full",
+    db_root: Optional[Path] = None,
+    qos: str = "interactive",
+) -> dict:
+    """Index one document per posted report using the shared document diff."""
+    records, entries = _load_report_records(repo_hash)
+    return _index_repo_records_v2(
+        repo_hash, "reports", records, entries, mode, db_root, project_root, qos,
+    )
+
+
 def _extract_discussion_field(body: str, field: str) -> str:
     match = re.search(rf"(?m)^{re.escape(field)}:[ \t]*([^\r\n]*)", body)
     return match.group(1).strip() if match else ""
@@ -7087,6 +7191,8 @@ def _scope_meta_path(
         return resolve_db_path(repo_hash, None, "board", db_root=db_root) / META_FILENAME
     if scope == "works":
         return resolve_db_path(repo_hash, None, "works", db_root=db_root) / META_FILENAME
+    if scope == "reports":
+        return resolve_db_path(repo_hash, None, "reports", db_root=db_root) / META_FILENAME
     if scope in WORKTREE_SCOPED:
         worktree_dir = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root).parent
         return worktree_dir / META_FILENAME
@@ -7160,6 +7266,7 @@ def _scope_collection_name(scope: str) -> str:
         "discussions": V2_DISCUSSIONS_COLLECTION,
         "board": V2_BOARD_COLLECTION,
         "works": V2_WORKS_COLLECTION,
+        "reports": V2_REPORTS_COLLECTION,
     }[scope]
 
 
@@ -7243,6 +7350,15 @@ def _scope_status_v2(
     elif scope == "works":
         documents, _ = _load_work_documents(repo_hash, source_root)
         source_document_count = len({record["id"] for record in _build_work_records(documents)})
+    elif scope == "reports":
+        try:
+            records, _ = _load_report_records(repo_hash)
+        except ValueError:
+            # Preserve the last verified store; indexing and multi-scope
+            # freshness checks still validate corrupt source data strictly.
+            pass
+        else:
+            source_document_count = len({record["id"] for record in records})
 
     reason = "ready"
     healthy = True
@@ -7284,7 +7400,7 @@ def _scope_status_v2(
         reason = "count_mismatch"
         healthy = False
         repair_required = True
-    elif scope not in ("specs", "memory", "discussions", "board", "works") and document_count != manifest_count:
+    elif scope not in ("specs", "memory", "discussions", "board", "works", "reports") and document_count != manifest_count:
         reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
         healthy = False
         repair_required = True
@@ -8031,6 +8147,25 @@ def _format_work_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return formatted
 
 
+def _format_report_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Preserve report identity, answer, and references in the search wire."""
+    formatted = []
+    for item in items:
+        meta = item.get("metadata") or {}
+        if not meta.get("report_id"):
+            continue
+        result = {field: meta.get(field, "") for field in (
+            "report_id", "source", "kind", "report_type", "created_at", "title", "body"
+        )}
+        result.update({
+            "question": meta.get("question") or None,
+            "issue_numbers": json.loads(meta.get("issue_numbers", "[]")),
+            "distance": _wire_distance(item.get("distance")),
+        })
+        formatted.append(_attach_match_fields(result, item))
+    return formatted
+
+
 def _scope_result_key(scope: str) -> str:
     return {
         "files": "results",
@@ -8041,6 +8176,7 @@ def _scope_result_key(scope: str) -> str:
         "discussions": "discussionResults",
         "board": "boardResults",
         "works": "workResults",
+        "reports": "reportResults",
     }[scope]
 
 
@@ -8061,6 +8197,8 @@ def _format_scope_results(
         return _format_board_results(items)[:n_results]
     if scope == "works":
         return _format_work_results(items)[:n_results]
+    if scope == "reports":
+        return _format_report_results(items)[:n_results]
     return _format_issue_results(items)[:n_results]
 
 
@@ -8116,6 +8254,7 @@ def action_search_v2(
         "search-discussions": "discussions",
         "search-board": "board",
         "search-works": "works",
+        "search-reports": "reports",
     }
     if action not in scope_for_action:
         return {"ok": False, "error_code": "BAD_ARGS", "error": f"unknown action {action}"}
@@ -8222,6 +8361,13 @@ def action_search_v2(
                 mode="full",
                 db_root=db_root,
             )
+        elif scope == "reports":
+            build = action_index_reports_v2(
+                repo_hash=repo_hash,
+                project_root=project_root,
+                mode="full",
+                db_root=db_root,
+            )
         else:
             build = action_index_files_v2(
                 project_root=project_root,
@@ -8321,6 +8467,22 @@ def _classify_scope_for_search(
         indexed_hashes = {
             entry["path"]: entry["content_hash"]
             for entry in read_manifest(db_path, scope="memory") if "content_hash" in entry
+        }
+        if current_hashes != indexed_hashes:
+            return "stale", health
+    if scope == "reports":
+        try:
+            _, entries = _load_report_records(repo_hash)
+        except ValueError:
+            # Invalid Reports must not abort healthy scopes in the same batch.
+            return "corrupt", {
+                **health, "healthy": False, "repair_required": True, "reason": "source_invalid",
+            }
+        current_hashes = {entry["path"]: entry["content_hash"] for entry in entries}
+        db_path = resolve_db_path(repo_hash, None, scope, db_root=db_root)
+        indexed_hashes = {
+            entry["path"]: entry["content_hash"]
+            for entry in read_manifest(db_path, scope=scope) if "content_hash" in entry
         }
         if current_hashes != indexed_hashes:
             return "stale", health
@@ -8990,6 +9152,7 @@ def _action_search_multi_v2_pinned(
         "discussions",
         "board",
         "works",
+        "reports",
         "files",
         "files-docs",
     }
@@ -9325,6 +9488,7 @@ def action_status_v2(
         "discussions": _scope_status_v2(repo_hash, None, "discussions", db_root=db_root),
         "board": _scope_status_v2(repo_hash, None, "board", db_root=db_root),
         "works": _scope_status_v2(repo_hash, None, "works", db_root=db_root),
+        "reports": _scope_status_v2(repo_hash, None, "reports", db_root=db_root),
     }
     if worktree_hash:
         if file_index_protocol == "v2":
@@ -9558,6 +9722,8 @@ def parse_args() -> argparse.Namespace:
             "search-board",
             "index-works",
             "search-works",
+            "index-reports",
+            "search-reports",
             "search-multi",
             "serve-search-worker",
         ],
@@ -9573,7 +9739,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default="",
-        choices=["", "issues", "specs", "files", "files-docs", "memory", "discussions", "board", "works"],
+        choices=["", "issues", "specs", "files", "files-docs", "memory", "discussions", "board", "works", "reports"],
     )
     parser.add_argument("--scopes", default="")
     parser.add_argument("--match-mode", default="semantic", choices=["semantic", "all_terms"])
@@ -9732,6 +9898,18 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             )
             return 0
 
+        if action == "index-reports":
+            emit(
+                action_index_reports_v2(
+                    repo_hash=repo_hash,
+                    project_root=args.project_root or None,
+                    mode=args.mode,
+                    db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
+                )
+            )
+            return 0
+
         if action == "search-multi":
             if not args.query:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
@@ -9761,6 +9939,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             "search-discussions",
             "search-board",
             "search-works",
+            "search-reports",
         ):
             if not args.query:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})

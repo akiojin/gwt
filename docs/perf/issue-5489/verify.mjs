@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -10,16 +10,21 @@ const read = (name) => readFileSync(new URL(name, import.meta.url), 'utf8').repl
 const rows = (name) => read(name).trim().split(/\r?\n/).map(JSON.parse);
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 const median = (values) => values.toSorted((a, b) => a - b)[Math.floor(values.length / 2)];
-const gitSource = (name) => execFileSync('git', ['show', `${historicalRef}:crates/gwt/src/${name}`], { cwd: repo });
-const currentSource = (name) => readFileSync(new URL(`../../../crates/gwt/src/${name}`, import.meta.url));
+const gitSource = (name, ref) => execFileSync('git', ['show', `${ref}:crates/gwt/src/${name}`], { cwd: repo, maxBuffer: 4 * 1024 * 1024 });
+function verifySource(hash, name, ref) {
+  const source = gitSource(name, ref);
+  // The recorded Windows checkout used CRLF for some files; preserve those raw digests.
+  const crlf = source.toString('utf8').replace(/\r?\n/g, '\r\n');
+  assert.ok(hash === digest(source) || hash === digest(crlf), `${name}: measured source must match ${ref}`);
+}
 
-function verify(prefix, sourceHash, monitorHash) {
+function verify(prefix, sourceRef) {
   const comparison = rows(`${prefix}comparison.jsonl`);
   const breakdown = rows(`${prefix}breakdown.jsonl`);
   const evidenceContexts = [];
   for (const file of ['comparison.jsonl', 'breakdown.jsonl']) {
     const context = JSON.parse(read(`${prefix}${file}.context.json`));
-    assert.equal(context.current_sha256, sourceHash, `${prefix}${file}: measured source must match`);
+    verifySource(context.current_sha256, 'session_inventory.rs', sourceRef);
     assert.equal(context.roots.length, 5);
     assert.equal(context.instrumented, file === 'breakdown.jsonl');
     evidenceContexts.push(context);
@@ -48,8 +53,8 @@ function verify(prefix, sourceHash, monitorHash) {
 
   const worker = rows(`${prefix}worker-comparison.jsonl`);
   const workerContext = JSON.parse(read(`${prefix}worker-comparison.jsonl.context.json`));
-  assert.equal(workerContext.current_sha256, sourceHash);
-  assert.equal(workerContext.monitor_current_sha256, monitorHash);
+  verifySource(workerContext.current_sha256, 'session_inventory.rs', sourceRef);
+  verifySource(workerContext.monitor_current_sha256, 'monitor_duplicate_runtime.rs', sourceRef);
   evidenceContexts.push(workerContext);
   const manifestName = workerContext.prefs_manifest ?? `${prefix}worker-prefs-manifest.json`;
   assert.equal(manifestName, `${prefix}worker-prefs-manifest.json`);
@@ -76,7 +81,7 @@ function verify(prefix, sourceHash, monitorHash) {
     return ticks.reduce((sum, row) => sum + row.thread_cpu_seconds, 0)
       / ticks.reduce((sum, row) => sum + row.elapsed_seconds, 0);
   });
-  console.log(`${prefix || historicalRef} worker: ${workerMedians.join(' -> ')} CPU seconds/tick; AC-3 target met: ${workerMedians[1] <= workerMedians[0] / 2}`);
+  console.log(`${prefix || historicalRef} worker: ${workerMedians.join(' -> ')} CPU seconds/tick; isolated worker threshold met: ${workerMedians[1] <= workerMedians[0] / 2}`);
 
   if (prefix) {
     assert.ok(workerMedians[1] <= workerMedians[0] / 2, 'integrated worker CPU/tick is at most half');
@@ -85,10 +90,9 @@ function verify(prefix, sourceHash, monitorHash) {
     const libraryHashes = evidenceContexts.map((context) => context.gwt_library_sha256);
     assert.ok(libraryHashes.every((hash) => /^[a-f0-9]{64}$/.test(hash)), 'library digest provenance');
     assert.equal(new Set(libraryHashes).size, 1, 'all integrated probes use the same library');
-    const sharedHash = digest(currentSource('issue_monitor.rs'));
     for (const context of evidenceContexts) {
-      assert.equal(context.shared_issue_monitor_sha256, sharedHash);
-      assert.ok(/^[a-f0-9]{40}$/.test(context.source_commit));
+      assert.equal(context.source_commit, sourceRef, 'all integrated probes use the measured commit');
+      verifySource(context.shared_issue_monitor_sha256, 'issue_monitor.rs', sourceRef);
       assert.ok(context.dependency_base_commit.startsWith('4cb8fe4a0'));
       assert.deepEqual(context.dependencies, ['Issue #5498 / PR #5511', 'Issue #5499 / PR #5508']);
       execFileSync('git', ['merge-base', '--is-ancestor', context.dependency_base_commit, context.source_commit], { cwd: repo });
@@ -96,7 +100,56 @@ function verify(prefix, sourceHash, monitorHash) {
   }
 }
 
-verify('', digest(gitSource('session_inventory.rs')), digest(gitSource('monitor_duplicate_runtime.rs')));
+verify('', historicalRef);
 if (!process.argv.includes('--historical-only')) {
-  verify('integrated-', digest(currentSource('session_inventory.rs')), digest(currentSource('monitor_duplicate_runtime.rs')));
+  const measuredRef = JSON.parse(read('integrated-comparison.jsonl.context.json')).source_commit;
+  assert.match(measuredRef, /^[a-f0-9]{40}$/, 'measured source commit is required');
+  verify('integrated-', measuredRef);
+  const before = JSON.parse(read('deployed-v9.123.1-baseline.json'));
+  const after = process.argv.includes('--deployed-after') ? JSON.parse(read('deployed-gui-after.json')) : null;
+  const fix = '2b6ca0eca084db53ed381a09a85c7d8eb4e2acf0';
+  for (const sample of [before, ...(after ? [after] : [])]) {
+    assert.equal(sample.issue, 5489);
+    const observedAt = Date.parse(sample.observed_at);
+    const startedAt = Date.parse(sample.gui_started_at);
+    assert.ok(Number.isFinite(observedAt) && Number.isFinite(startedAt), 'GUI observation and start timestamps are required');
+    assert.ok(startedAt <= observedAt, 'GUI must start before its observation');
+    assert.ok(sample.elapsed_seconds >= 30);
+    assert.equal(sample.roots.length, 5);
+    assert.equal(sample.monitor.name, 'gwt-monitor-runtime');
+    assert.ok(sample.monitor.cpu_seconds > 0);
+    assert.equal(sample.monitor.cpu_seconds, sample.monitor.cpu_after_seconds - sample.monitor.cpu_before_seconds);
+    assert.equal(sample.monitor.cores, sample.monitor.cpu_seconds / sample.elapsed_seconds);
+    for (const side of ['before', 'after']) {
+      const count = sample[`panes_${side}`].filter((pane) => /\trunning\t/.test(pane) && /\trole=implementation_agent(?:\t|$)/.test(pane)).length;
+      assert.equal(sample[`implementation_panes_${side}`], count);
+    }
+  }
+  const beforeTag = `v${before.gui_version}`;
+  assert.equal(spawnSync('git', ['merge-base', '--is-ancestor', fix, beforeTag], { cwd: repo }).status, 1, 'deployed baseline predates the census fix');
+  console.log(`PASS deployed baseline ${before.gui_version}: Monitor ${before.monitor.cores} cores; release predates census fix`);
+  const wait = JSON.parse(read('deployment-wait.json'));
+  assert.equal(wait.gui_version, before.gui_version);
+  assert.equal(wait.auto_apply_updates, true);
+  assert.equal(wait.release_tag, `v${wait.update_cache.latest_version}`);
+  assert.equal(wait.release_commit, execFileSync('git', ['rev-parse', `${wait.release_tag}^{commit}`], { cwd: repo, encoding: 'utf8' }).trim());
+  assert.equal(wait.fix_commit, fix);
+  execFileSync('git', ['merge-base', '--is-ancestor', fix, wait.release_commit], { cwd: repo });
+  const normalizedRoots = (roots) => [...new Set(roots.map((root) => root.replaceAll('\\', '/').toLowerCase()))].sort();
+  assert.deepEqual(normalizedRoots(wait.refusals.map((row) => row.project_root)), normalizedRoots(before.roots));
+  assert.ok(wait.refusals.every((row) => `v${row.version}` === wait.release_tag && row.stage === 'pending_refused' && /elevated permissions|Administrator privileges/.test(row.reason)));
+  console.log(`PASS deployment boundary: ${wait.release_tag} contains census fix; administrator refusal recorded for all five roots`);
+  if (after) {
+    assert.ok(Date.parse(before.observed_at) < Date.parse(after.observed_at), 'after observation must follow the baseline');
+    assert.equal(after.release_tag, `v${after.gui_version}`);
+    assert.equal(after.release_commit, execFileSync('git', ['rev-parse', `${after.release_tag}^{commit}`], { cwd: repo, encoding: 'utf8' }).trim());
+    assert.equal(after.census_fix_commit, fix);
+    assert.equal(after.includes_census_fix, true);
+    execFileSync('git', ['merge-base', '--is-ancestor', fix, after.release_commit], { cwd: repo });
+    assert.deepEqual(after.roots, before.roots, 'same five real project roots');
+    assert.ok(after.monitor.cores <= before.monitor.cores / 2, 'deployed Monitor average CPU is at most half');
+    console.log(`PASS deployed GUI ${before.gui_version} -> ${after.gui_version}: Monitor ${before.monitor.cores} -> ${after.monitor.cores} cores (${((1 - after.monitor.cores / before.monitor.cores) * 100).toFixed(2)}% lower); observational fleet comparison`);
+  } else {
+    console.log('PENDING AC-3: deployed GUI after is unmeasured; require --deployed-after after the fleet update');
+  }
 }

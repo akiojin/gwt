@@ -113,6 +113,7 @@ pub(super) fn previous_external_terminations(
 pub(super) struct Watchdog {
     child: Child,
     pipe: Option<ChildStdin>,
+    detached: bool,
 }
 
 impl Watchdog {
@@ -133,7 +134,11 @@ impl Watchdog {
             .stderr(Stdio::null())
             .spawn()?;
         let pipe = child.stdin.take();
-        let mut watchdog = Self { child, pipe };
+        let mut watchdog = Self {
+            child,
+            pipe,
+            detached: false,
+        };
         let pipe = watchdog.pipe.as_mut().expect("piped stdin");
         pipe.write_all(token.as_bytes())?;
         pipe.write_all(b"\n")?;
@@ -147,6 +152,31 @@ impl Watchdog {
         }
         Ok(watchdog)
     }
+
+    /// Leave the already authenticated companion observing capacity after a
+    /// bounded deferral. It holds no lease and never executes the matrix.
+    pub(super) fn resume_after_deferral(&mut self) -> io::Result<()> {
+        if std::env::var_os(gwt_agent::GWT_PANE_WS_URL_ENV).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "self-pane endpoint unavailable",
+            ));
+        }
+        self.pipe.as_mut().expect("watchdog pipe").write_all(b"D")?;
+        drop(self.pipe.take());
+        self.detached = true;
+        Ok(())
+    }
+
+    /// Observe the original pane without blocking the admitted command or its
+    /// return. Keep the pipe open so runner death and cancellation still settle.
+    pub(super) fn resume_when_idle(&mut self) -> io::Result<()> {
+        if !self.detached && std::env::var_os(gwt_agent::GWT_PANE_WS_URL_ENV).is_some() {
+            self.pipe.as_mut().expect("watchdog pipe").write_all(b"A")?;
+            self.detached = true;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Watchdog {
@@ -156,7 +186,9 @@ impl Drop for Watchdog {
             // process death. A killed runner cannot send this byte.
             let _ = pipe.write_all(b"R");
         }
-        let _ = self.child.wait();
+        if !self.detached {
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -176,11 +208,32 @@ pub fn run_watchdog(worktree: &Path, record_id: &str) -> io::Result<()> {
     }
     io::stdout().write_all(READY.as_bytes())?;
     io::stdout().flush()?;
-    let mut returned = [0];
-    let normal_return = input.read(&mut returned)? != 0;
     if record_id.starts_with("vat-") {
-        super::cancellation::settle_watchdog(worktree, record_id, token, normal_return)
+        std::thread::scope(|scope| {
+            let mut observer = None;
+            loop {
+                let mut returned = [0];
+                let normal_return = input.read(&mut returned)? != 0;
+                if normal_return && returned[0] == b'A' {
+                    if observer.is_none() {
+                        observer = Some(scope.spawn(|| {
+                            if let Err(error) = super::admission_resume::run_admitted(worktree, record_id, token) {
+                                tracing::warn!(%error, "verification admission resume notification failed");
+                            }
+                        }));
+                    }
+                    continue;
+                }
+                super::cancellation::settle_watchdog(worktree, record_id, token, normal_return)?;
+                if !normal_return || returned[0] == b'D' {
+                    super::admission_resume::run(worktree, record_id, token)?;
+                }
+                return Ok(());
+            }
+        })
     } else {
+        let mut returned = [0];
+        let normal_return = input.read(&mut returned)? != 0;
         settle_interrupted(worktree, record_id, token, normal_return)
     }
 }

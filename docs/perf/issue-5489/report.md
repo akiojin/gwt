@@ -137,7 +137,47 @@ warm 時の decode CPU のゼロは OS CPU counter の分解能による値で�
 
 統合後 worker の CPU 中央値は `89.83%` 減、平均使用コアは `67.14%` 減で、**この実 fleet を読む隔離 worker の前後比較では半減を確認した**。最初の after tick の warm-up コスト `1.640625 CPU 秒` も 3 点に含む。これは Issue #5498 / Issue #5499 を含む統合条件での結果であり、Issue #5489 単独の成果へ帰属させない。配布版 GUI 自体の差替え・修正後 60 分観測は行っていない。
 
-`node docs/perf/issue-5489/verify.mjs` は旧証跡を `git show a96ce624e` の source hash と照合し、新証跡を現在の source hash と照合する。統合後には同一 library digest、依存 commit の祖先関係、前後の 5 prefs hash、census / worker CPU 中央値と worker 平均コアの半減も検査する。
+`node docs/perf/issue-5489/verify.mjs` は旧証跡を `git show a96ce624e` の source hash と照合し、統合後の証跡を context に記録された測定 commit `598b8f0ff5c1222d2c26f684269ce828f5218c2d` と照合する。測定時のファイルには LF と Windows checkout の CRLF が混在するため、Git blob またはその CRLF checkout 表現の SHA-256 が保存済み digest と一致することを要求する。統合後には同一 library digest、依存 commit の祖先関係、前後の 5 prefs hash、census / worker CPU 中央値と worker 平均コアの半減も検査する。
+
+## 配信済み source と実 GUI の版
+
+PR #5507 は `2026-10-15T12:45:56Z` に merge され、merge commit は `2b6ca0eca084db53ed381a09a85c7d8eb4e2acf0`、最終 head は `046b38b98d4ed238a9e06abacdca51a619f3b743`。再実行時の `origin/develop` にこの commit と既存の全 producing commit が含まれ、branch に未配信 source は無かった。AC-1 の census 内訳と AC-2 の回帰は配信済み source の証拠として扱う。同 head の [Test (Rust)](https://github.com/akiojin/gwt/actions/runs/38732203668/job/116423867533)、[Test (Rust, Windows)](https://github.com/akiojin/gwt/actions/runs/38732203668/job/116423694434)、[coverage / Rust Coverage](https://github.com/akiojin/gwt/actions/runs/38732203522/job/116423167416) はすべて SUCCESS。これは配送 head の既存 CI 証跡であり、今回の session での fresh 実行とは区別する。
+
+稼働 GUI の `v9.123.1` は tag commit `fcd7823b0f1f99cf057775c1e8966edb62786964`（`12:03:44Z`）で、上記 merge より前である。同 tag の `reconcile_project` には root ごとの `observe_sessions` が残る。`git merge-base --is-ancestor 2b6ca0eca v9.123.1` は exit 1。GUI が更新されたという事実だけでは今回の修正後とは判定できない。
+
+[deployed-v9.123.1-baseline.json](deployed-v9.123.1-baseline.json) は `13:07:54Z` に開始した追加の修正前記録。PID `6372`、TID `7604` の `gwt-monitor-runtime` で、`GetThreadDescription` と保持した同一 thread handle の `GetThreadTimes` を使った。終了した thread は観測失敗とし、TID の再利用を別 thread の CPU として数えない。30.9205409 秒で Monitor CPU は 9.9375 秒、0.321388 コア。GUI 全体は 2.148147 コア、implementation agent は区間前後とも 12 窓、runtime は 375 namespaces / 3,812 files。既存 baseline の 11 窓・699 namespaces との条件差を残し、この時点間の差を修正の改善率には使わない。
+
+collector は今後の観測に release tag / commit と fix commit の祖先関係も保存する。`verify.mjs` の隔離 worker 出力は `isolated worker threshold met` と表記し、実 GUI の AC-3 達成を意味する出力にしない。実 GUI の修正後記録は、fix commit を含む配布版で取得してから判定する。
+
+`v9.123.2` は `13:40:39Z` に公開され、tag は修正を含み、対象 census / Monitor source も checkout と一致する。再実行環境の GUI 自動適用設定は root の `auto_apply_updates = true`（canonical `update.settings.status` でも確認）。別の `[agent].auto_update = false` は外部 CLI maintenance の設定であり、GUI 更新を無効にする値ではない（`app_runtime/agent_maintenance.rs` の `start_agent_auto_update`）。
+
+[deployment-wait.json](deployment-wait.json) は更新 cache と各実 5 root の拒否原記録を保存したもの。`13:55:31Z` に `v9.123.2` を検出したが、`13:55:35Z` に `pending_refused`、`Administrator privileges required; the update stays staged` となった。管理者権限での適用を agent が代行せず、Board escalation `206976b5-a230-4c76-adf7-5674d7108ca5` / Issue #5489 comment `6193825907` で PM に調整を引き継いだ。設定・GUI 停止の操作は行っていない。**実 GUI の修正後 CPU は未測定、AC-3 は未チェックである。**
+
+`node docs/perf/issue-5489/verify.mjs` は配信済みの census / 隔離 worker 証拠と新しい修正前 raw の整合性を検証する。after を指定しない成功は AC-3 の完了を意味せず、`PENDING AC-3` を出力する。`node docs/perf/issue-5489/verify.mjs --deployed-after` は after 記録なしで失敗し、版への fix 包含・同じ実 5 root・Monitor 平均コア半減をすべて要求する。
+
+## 更新後の実 GUI 比較（2026-10-15T14:19Z）
+
+PM による通常更新後、Velden が既存 collector を読み取り専用で実行し、[deployed-gui-after.json](deployed-gui-after.json) を取得した。GUI は PID `36240`、起動 `14:11:46.6269894Z`、version `9.123.2`、release commit `4c909ebe1e428cf668f76142e46eabda0b3c4baf`。collector と verifier の双方が、release tag に fix commit `2b6ca0eca084db53ed381a09a85c7d8eb4e2acf0` が含まれることを確認した。GUI・agent の起動、停止、設定変更はこの観測では行っていない。上記の更新拒否は更新前の履歴であり、現時点の blocker ではない。
+
+| 条件 | 修正前 v9.123.1 | 修正後 v9.123.2 |
+| --- | ---: | ---: |
+| 観測開始（UTC） | 13:07:54 | 14:19:44 |
+| 観測時間（秒） | 30.9205409 | 30.2322192 |
+| named Monitor thread CPU（秒） | 9.9375 | 4.109375 |
+| Monitor 平均使用コア | 0.3213883 | 0.1359270 |
+| GUI 全体の平均使用コア | 2.1481473 | 2.0544101 |
+| implementation agent 窓（区間前後とも） | 12 | 8 |
+| runtime namespaces / files | 375 / 3,812 | 375 / 3,867 |
+
+実 5 root は前後で完全一致し、保持した同一 thread handle で測った `gwt-monitor-runtime` の平均使用コアは **57.71% 減**だった。`node docs/perf/issue-5489/verify.mjs --deployed-after` はこれを含む全 assertion に PASS した。AC-3 の実 fleet の半減を直接観測した証拠であるが、窓数、ファイル数、経過時刻と他の配布済み修正が異なるため、Issue #5489 単独の因果効果とは主張しない。同条件での因果比較は上記の交互 census / 隔離 worker 証拠で補完する。
+
+独立レビューで、verifier が観測時刻を検査せず、after を GUI 起動前の時刻へ変えても PASS することを再現した（RED）。日時の parse 可能性、GUI 起動後の観測、baseline より後の after という assertion を追加し、不正な時系列の拒否と元の raw の PASS を確認した（GREEN）。raw は検査前後で同一 bytes に復元した。
+
+配送中に `origin/develop` の `issue_monitor.rs` が別件の settlement 修正で更新された。既存 verifier は測定時の保存 hash を現在の全ファイルと比較していたため、過去の正しい証跡を誤拒否した。最新 base のファイルを置いた隔離コピーで RED を再現し、照合先を記録済みの測定 commit に固定して GREEN を確認した。保存 digest の改変は引き続き拒否する。実稼働版への fix 包含、日時、実 5 root と CPU 半減の検査も維持する。新しい runtime の性能を測ったという主張は加えない。
+
+今回の最小 Plan は、Goal: 未配信の collector / baseline と実 GUI after を検証・配信すること、Acceptance criteria: 修正版の包含・実 5 root の一致・named Monitor CPU 半減を専用 verifier で再検査し、fresh `verify.run` と必須 CI 後に develop へマージすること。Non-goals / What stays untouched: runtime の追加最適化、GUI の設定・再起動、別 owner の修正、Issue #5385 の 60 分計測。新しい probe や runtime 修正を加える案と比較し、既存 collector と verifier の再利用を採用した。source の根本修正は既に配信済みで、残る受け入れ要件は実 GUI の観測だからである。
+
+Issue #5385 の 7〜8 窓 / 60 分再測定にはこの raw と版包含証明を引き継ぐ。GUI 全体はなお約 2.05 コアであり、family 全体の平均 1 コア未満という予算達成は主張しない。AC の確定は今回の証跡も `origin/develop` に含まれることを確認してから行う。
 
 ## 比較の限界と引継ぎ
 

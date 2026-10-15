@@ -267,7 +267,10 @@ test.describe("Agent title role and worktree badges", () => {
 
     await expectWorktreeChromeNotToOverflow(page, false);
     await page.setViewportSize({ width: 640, height: 720 });
-    await expectWorktreeChromeNotToOverflow(page, true);
+    // Resize reframes the focused window on the next animation frame.
+    await expect(async () => {
+      await expectWorktreeChromeNotToOverflow(page, true);
+    }).toPass();
   });
 });
 

@@ -2664,6 +2664,14 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
     let target_session_id = "session-ws-target";
     let caller_binding = materialize_active_agent_pane_binding(&project, caller_session_id);
 
+    // Keep first-use Board migration and Git discovery outside the bridge's
+    // request latency measurement. Close still performs its ordinary Board check.
+    {
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        gwt_core::coordination::ensure_repo_local_files(&project)
+            .expect("prepare Board before measuring pane bridge");
+    }
+
     let mut tab = sample_project_tab(
         "tab-project",
         "Repo",

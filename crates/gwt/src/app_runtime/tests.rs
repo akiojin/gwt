@@ -1511,7 +1511,6 @@ fn sample_runtime_with_events(
         pty_writers,
         attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
         persist_dispatcher,
-        file_tree_worktree_roots: HashMap::new(),
 
         server_url: None,
         usage_refresh: None,

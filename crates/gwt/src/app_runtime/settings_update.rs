@@ -570,12 +570,16 @@ impl AppRuntime {
     }
 
     pub(super) fn autostart_status_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {
-        vec![OutboundEvent::reply(
-            client_id,
-            autostart_status_event_from_result(
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event = autostart_status_event_from_result(
                 gwt::cli::tray::autostart::AutostartManager::status(),
-            ),
-        )]
+            );
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+        Vec::new()
     }
 
     pub(super) fn autostart_update_events(
@@ -583,20 +587,26 @@ impl AppRuntime {
         client_id: ClientId,
         enabled: bool,
     ) -> Vec<OutboundEvent> {
-        let result = if enabled {
-            gwt::cli::tray::autostart::AutostartManager::install()
-        } else {
-            gwt::cli::tray::autostart::AutostartManager::uninstall()
-        };
-        let event = match result {
-            Ok(()) => autostart_status_event_from_result(
-                gwt::cli::tray::autostart::AutostartManager::status(),
-            ),
-            Err(error) => BackendEvent::AutostartError {
-                message: error.to_string(),
-            },
-        };
-        vec![OutboundEvent::reply(client_id, event)]
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let result = if enabled {
+                gwt::cli::tray::autostart::AutostartManager::install()
+            } else {
+                gwt::cli::tray::autostart::AutostartManager::uninstall()
+            };
+            let event = match result {
+                Ok(()) => autostart_status_event_from_result(
+                    gwt::cli::tray::autostart::AutostartManager::status(),
+                ),
+                Err(error) => BackendEvent::AutostartError {
+                    message: error.to_string(),
+                },
+            };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
+        Vec::new()
     }
 
     pub(super) fn custom_agent_reply_with_cache_refresh(

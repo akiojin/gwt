@@ -4169,7 +4169,10 @@ fn hold_clock_label(reset_at: &str) -> String {
 /// The monitor needs `skip_permissions_args` to tell a custom agent that can
 /// run unattended from one that cannot. `None` means "do not decide", never
 /// "unsupported".
-fn custom_coding_agent_definition(agent_id: &str) -> Option<gwt_agent::CustomCodingAgent> {
+/// Profile validation shares this lookup to admit only registered custom IDs.
+pub(crate) fn custom_coding_agent_definition(
+    agent_id: &str,
+) -> Option<gwt_agent::CustomCodingAgent> {
     let config_path = gwt_config::Settings::global_config_path()?;
     crate::custom_agents_service::list_custom_agents(&config_path)
         .ok()?
@@ -14210,6 +14213,26 @@ impl IssueMonitorState {
         // Issue #4117 AC-2: the verdict is the review window's last act; its
         // slot is free even though the idle pane is closed a scan later.
         self.forget_review_window(issue_number);
+        // A close worker may already be doing remote readback. Preserve the
+        // veto now instead of waiting for its settlement to mark work done.
+        if !passed
+            && self.pending_effects.iter().any(|effect| {
+                matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::SettleMergedIssue {
+                        issue_number: owner,
+                        action: MergedIssueSettlementAction::Close { .. },
+                        ..
+                    } if *owner == issue_number
+                )
+            })
+        {
+            self.escalate_to_needs_human(
+                issue_number,
+                NeedsHumanKind::UserChoiceRequired,
+                "merged delivery has a failed independent acceptance review; resolve the review before closing",
+            );
+        }
     }
 
     /// Issue #4117: live independent review windows, ordered by Issue.
@@ -18796,6 +18819,34 @@ impl IssueMonitorState {
 
         let live_window = match self.resolve_exact_launch(target, StopIdentityMatch::Operator) {
             Ok(window_id) => window_id,
+            Err(IssueMonitorStopMismatch::NotRunning)
+                if self.failed_issues.contains_key(&issue_number)
+                    && !self.active_launches.contains(&issue_number)
+                    && !self.launched_claims.contains_key(&issue_number)
+                    && !self.launched_windows.contains_key(&issue_number)
+                    && self.pending_launch_delivery_id(issue_number).is_none()
+                    && target.claim_id.is_none()
+                    && target.delivery_id.is_none()
+                    && target.window_id.is_none()
+                    && !self.merged_issues.contains(&issue_number)
+                    && !self.issue_is_closed(issue_number)
+                    && !matches!(
+                        self.inbox_item(issue_number).map(|item| item.state),
+                        Some(MonitorInboxState::Merged | MonitorInboxState::Released)
+                    ) =>
+            {
+                // Issue #4425 AC-4: failure consumes the live identity. Recover
+                // only its durable owner, never a caller-supplied pane.
+                let window_id = self.failed_windows.get(&issue_number).cloned();
+                if window_id.as_deref().is_some_and(|window_id| {
+                    self.conflicting_launch_window_owner(issue_number, window_id)
+                        .is_some()
+                }) {
+                    return self
+                        .refuse_stop(issue_number, IssueMonitorStopMismatch::WindowMismatch);
+                }
+                window_id
+            }
             Err(mismatch) => return self.refuse_stop(issue_number, mismatch),
         };
 
@@ -19008,7 +19059,10 @@ impl IssueMonitorState {
     }
 
     fn revoke_launch_binding(&mut self, issue_number: u64) {
-        if let Some(window_id) = self.launched_window_id(issue_number) {
+        if let Some(window_id) = self
+            .launched_window_id(issue_number)
+            .or_else(|| self.failed_windows.get(&issue_number).cloned())
+        {
             self.launch_bindings.retain(|window, bound_issue| {
                 *bound_issue != issue_number || !issue_monitor_window_ids_match(window, &window_id)
             });
@@ -28878,6 +28932,76 @@ mod tests {
         monitor.failed_issues.remove(&99);
         assert_eq!(monitor.status_view().last_error, None);
         assert_ne!(monitor.status_view().state, "error");
+    }
+
+    /// Issue #4425 AC-4: a failed launch loses its live identity before the
+    /// operator can stop it. Its durable failure still identifies the owner.
+    #[test]
+    fn issue_4425_stop_recovers_a_failed_launch_by_issue_number() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor.record_launch_failed_at(
+            42,
+            "launch driver stopped responding",
+            "2026-09-15T15:00:00Z",
+        );
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(!monitor.launch_identity(42).active);
+        assert_eq!(monitor.live_claim_id(42), None);
+        assert_eq!(monitor.launched_window_id(42), None);
+        let attempts = monitor.attempt_count(42);
+        let mut daemon = monitor.clone();
+
+        assert_eq!(
+            monitor.stop_only(
+                &IssueMonitorStopTarget {
+                    issue_number: 42,
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                "recover unresponsive launch",
+                "2026-09-15T15:20:00Z",
+            ),
+            IssueMonitorStopOutcome::Stopped {
+                window_id: "tab-1::agent-42".into(),
+            }
+        );
+        daemon.rebase_daemon_driver_prefs(&monitor.prefs());
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+        assert_eq!(
+            restored.stop_only_reason(42).as_deref(),
+            Some("recover unresponsive launch")
+        );
+        assert_eq!(restored.attempt_count(42), attempts);
+        assert!(!restored.launch_bindings.contains_key("tab-1::agent-42"));
+        assert_eq!(restored.requeue_window("tab-1::agent-42"), None);
+        assert!(!restored.queued_issue_numbers().contains(&42));
+    }
+
+    #[test]
+    fn issue_4425_stop_refuses_a_failed_window_rebound_to_another_issue() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor.record_launch_failed_at(42, "launch failed", "2026-09-15T15:00:00Z");
+        monitor.launch_bindings.insert("tab-1::agent-42".into(), 43);
+        let before = monitor.prefs();
+
+        assert_eq!(
+            monitor.stop_only(
+                &IssueMonitorStopTarget {
+                    issue_number: 42,
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                "recover unresponsive launch",
+                "2026-09-15T15:20:00Z",
+            ),
+            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::WindowMismatch)
+        );
+        assert_eq!(monitor.prefs(), before);
+        assert_eq!(monitor.launch_bindings.get("tab-1::agent-42"), Some(&43));
     }
 
     /// SPEC-3431 FR-033: every identity component must match exactly, and a
@@ -39705,8 +39829,18 @@ mod tests {
         scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
         monitor.begin_review(42, 7, "aaa");
         assert!(monitor.merged_issue_close_allowed(42));
+        assert!(monitor.propose_merged_issue_settlement(
+            42,
+            &merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+            MergedIssueSettlementAction::Close { delegated: false },
+        ));
         monitor.record_review_verdict(42, false);
         assert!(!monitor.merged_issue_close_allowed(42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "a failed review must park a pending close before its worker finishes"
+        );
         monitor.record_merged(42);
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
