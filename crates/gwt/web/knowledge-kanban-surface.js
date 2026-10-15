@@ -983,7 +983,18 @@ export function createKnowledgeKanbanSurface({
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
       let relatedWorkRefreshTimer = null;
-      let monitorProjectionRefreshTimer = null;
+      // Issue #5395: display/activity updates do not invalidate Issue correlation.
+      function workAssociationKey(projection, kind) {
+        return JSON.stringify((projection?.active_works || [])
+          .filter(work => kind === "pr" ? work.pr_number != null : work.linked_issue_numbers?.length)
+          .map(work => [
+            work.id, normalizeWorkBranch(work.branch),
+            kind === "pr" ? work.pr_number ?? null
+              : [...new Set(work.linked_issue_numbers || [])].sort((a, b) => a - b),
+          ]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+      }
+      let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.(), "issue");
+      let prWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.(), "pr");
       const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, status: {
         enabled: false,
         state: "disabled",
@@ -1003,6 +1014,8 @@ export function createKnowledgeKanbanSurface({
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
       const issueDetailRenderKeys = new WeakMap();
+      // Receive publishes invalidation; the view owns projection/layout reads.
+      const knowledgeEventRefreshModel = createUiStateStore({ kind: null, revision: 0 });
       const knowledgeAutoRefreshModel = createUiStateStore({ revision: 0 });
       const knowledgeCompletionViewModel = createUiStateStore({ windowId: null });
 
@@ -1288,20 +1301,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function scheduleIssueMonitorProjectionRefresh() {
-        if (monitorProjectionRefreshTimer !== null) {
-          clearTimeout(monitorProjectionRefreshTimer);
-        }
-        monitorProjectionRefreshTimer = setTimeout(() => {
-          monitorProjectionRefreshTimer = null;
-          for (const [windowId, state] of knowledgeBridgeStateMap) {
-            if (
-              normalizeKnowledgeKind(state.kind) === "issue" &&
-              workspaceWindowById(windowId)
-            ) {
-              requestKnowledgeBridge(windowId, "issue", false);
-            }
-          }
-        }, 75);
+        knowledgeEventRefreshModel.update(model => ({ kind: "monitor", revision: model.revision + 1 }));
       }
 
       // SPEC #3885 Phase 5 (T-033 / FR-022): "+ New" registers an Issue from a
@@ -1673,6 +1673,8 @@ export function createKnowledgeKanbanSurface({
             dndSnapshot: null,
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
+            eventRefreshDirty: false,
+            workSnapshotDirty: false,
             autoRefreshDirty: false,
             autoRefreshChanged: false,
             autoRefreshRevision: null,
@@ -1838,10 +1840,10 @@ export function createKnowledgeKanbanSurface({
         }
         if (
           knowledgeBridgeStateMap.size === 0 &&
-          monitorProjectionRefreshTimer !== null
+          relatedWorkRefreshTimer !== null
         ) {
-          clearTimeout(monitorProjectionRefreshTimer);
-          monitorProjectionRefreshTimer = null;
+          clearTimeout(relatedWorkRefreshTimer);
+          relatedWorkRefreshTimer = null;
         }
       }
 
@@ -1911,6 +1913,7 @@ export function createKnowledgeKanbanSurface({
           requestKnowledgeBridge(windowId, knowledgeKind, true);
           return true;
         }
+        resumeKnowledgeEventRefresh();
         return false;
       }
 
@@ -1920,6 +1923,9 @@ export function createKnowledgeKanbanSurface({
           state.queuedLoadRefresh = state.queuedLoadRefresh || Boolean(refresh);
           return;
         }
+        // Any newly dispatched load covers earlier event invalidation, including
+        // a hidden window's event when its cache revision changed on reveal.
+        state.eventRefreshDirty = false;
         if (state.pendingSearchTimer !== null) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
@@ -1958,7 +1964,39 @@ export function createKnowledgeKanbanSurface({
         scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
-      function scheduleKnowledgeRelatedWorkRefresh() {
+      function scheduleKnowledgeRelatedWorkRefresh(forceReload = false) {
+        knowledgeEventRefreshModel.update(model => ({ kind: "projection", forceReload, revision: model.revision + 1 }));
+      }
+
+      function refreshKnowledgeWorkSnapshot(forceReload) {
+        const projection = getActiveWorkProjection?.();
+        const issueKey = workAssociationKey(projection, "issue");
+        const prKey = workAssociationKey(projection, "pr");
+        for (const state of knowledgeBridgeStateMap.values()) {
+          state.eventRefreshDirty ||= forceReload || (normalizeKnowledgeKind(state.kind) === "pr"
+            ? prKey !== prWorkAssociationKey : issueKey !== issueWorkAssociationKey);
+          state.workSnapshotDirty = true;
+        }
+        issueWorkAssociationKey = issueKey;
+        prWorkAssociationKey = prKey;
+        scheduleKnowledgeEventRefresh();
+      }
+
+      function updateKnowledgeWorkSnapshot(state) {
+        if (!state.detail?.related_works) return;
+        state.detail.related_works = state.detail.related_works.map(work => {
+          const live = issueWorkRowForEntry(getActiveWorkProjection?.(), { related_work_refs: [work] });
+          if (!live) return work;
+          return { ...work, title: live.title, status_category: live.status_category,
+            branch: live.branch, worktree_path: live.worktree_path, updated_at: live.updated_at,
+            agents: (work.agents || []).map(agent => {
+              const current = live.agents?.find(item => item.session_id === agent.session_id);
+              return current ? { ...agent, ...current } : agent;
+            }) };
+        });
+      }
+
+      function scheduleKnowledgeEventRefresh() {
         if (relatedWorkRefreshTimer !== null) {
           clearTimeout(relatedWorkRefreshTimer);
         }
@@ -1969,13 +2007,32 @@ export function createKnowledgeKanbanSurface({
             if (!windowData) {
               continue;
             }
-            const knowledgeKind = state.kind || knowledgeKindForPreset(windowData.preset);
-            if (!knowledgeKind) {
-              continue;
+            if (!isKnowledgeWindowVisible(windowId)) continue;
+            if (state.workSnapshotDirty) {
+              state.workSnapshotDirty = false;
+              updateKnowledgeWorkSnapshot(state);
+              renderKnowledgeBridge(windowId);
             }
-            requestKnowledgeBridge(windowId, knowledgeKind, false);
+            if (state.eventRefreshDirty && !state.loading) {
+              state.eventRefreshDirty = false;
+              requestKnowledgeBridge(windowId, state.kind, false);
+            }
           }
-        }, 150);
+        }, 2000);
+      }
+
+      // Called after document, project-tab, and window visibility has settled.
+      function resumeKnowledgeEventRefresh() {
+        knowledgeEventRefreshModel.update(model => ({ kind: "resume", revision: model.revision + 1 }));
+      }
+
+      function resumeVisibleKnowledgeEventRefresh() {
+        if (relatedWorkRefreshTimer !== null) return;
+        if ([...knowledgeBridgeStateMap].some(([id, state]) =>
+          isKnowledgeWindowVisible(id) &&
+          (state.workSnapshotDirty || (state.eventRefreshDirty && !state.loading)))) {
+          scheduleKnowledgeEventRefresh();
+        }
       }
 
       // AS-17.7 (T-953): immediate local fallback rows for a query — match
@@ -5375,6 +5432,16 @@ export function createKnowledgeKanbanSurface({
       }
 
       issueMonitorModel.subscribe(model => model.status, syncIssueMonitorErrorReport);
+      knowledgeEventRefreshModel.subscribe(model => model, ({ kind, forceReload }) => {
+        if (kind === "projection") refreshKnowledgeWorkSnapshot(forceReload);
+        if (kind === "monitor") {
+          for (const state of knowledgeBridgeStateMap.values()) {
+            if (normalizeKnowledgeKind(state.kind) === "issue") state.eventRefreshDirty = true;
+          }
+          scheduleKnowledgeEventRefresh();
+        }
+        if (kind === "resume") resumeVisibleKnowledgeEventRefresh();
+      });
       knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
       // List completion publishes data in receive; the synchronous view owns
       // both the full rebuild and revision-preserving selection updates.
@@ -5445,6 +5512,7 @@ export function createKnowledgeKanbanSurface({
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
         scheduleKnowledgeRelatedWorkRefresh,
+        resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,

@@ -48,6 +48,68 @@ test.describe("Issue Bridge load recovery", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("Issue #5395: projection snapshots update Related Work and hidden event bursts reload once on reveal", async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { includeRelatedWork: true, theme });
+    // With browser-check, every asset is served by the fresh checkout process.
+    await page.goto(liveBase ? new URL("p/0123456789abcdef", liveBase).href : APP_URL);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const loads = () => page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "load_knowledge_bridge").length);
+    const work = { id: "related-work-1", title: "Before snapshot", status_category: "idle",
+      branch: "work/issue-related-resume", worktree_path: "/fixture/work/issue-related-resume",
+      linked_issue_numbers: [3096], active_agents: 0, blocked_agents: 0,
+      agents: [], works: [], lifecycle_state: "active", board_refs: [] };
+    const beforeAssociation = await loads();
+    await page.evaluate(work => window.__issueBridgeFixtureSocket.emit({
+      kind: "active_work_projection", projection: { active_works: [work] },
+    }), work);
+    await expect.poll(loads).toBe(beforeAssociation + 1);
+    await page.locator(".knowledge-row[data-issue-number='3096']").click();
+    await expect(page.locator(".knowledge-related-work-title")).toBeVisible();
+    const beforeStatus = await loads();
+    await page.evaluate(work => window.__issueBridgeFixtureSocket.emit({
+      kind: "active_work_projection", projection: { active_works: [{ ...work, title: "After snapshot", status_category: "active" }] },
+    }), work);
+    await expect(page.locator(".knowledge-related-work-title")).toHaveText("After snapshot");
+    expect(await loads()).toBe(beforeStatus);
+    for (const hiddenBy of ["minimized", "inactive tab"]) {
+      const beforeHidden = await loads();
+      await page.evaluate(hiddenBy => {
+        const state = window.__issueBridgeWorkspaceState;
+        const issue = state.workspace.tabs[0].workspace.windows[0];
+        issue.minimized = hiddenBy === "minimized";
+        issue.tab_group_id = hiddenBy === "inactive tab" ? "knowledge-tabs" : null;
+        issue.tab_group_active = false;
+        window.__issueBridgeFixtureSocket.emit(state);
+        for (let agent = 0; agent < 8; agent++) {
+          window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_launch_failed" });
+          window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_inbox", items: [] });
+        }
+      }, hiddenBy);
+      await page.waitForTimeout(2200); // observe the complete real two-second debounce
+      expect(await loads()).toBe(beforeHidden);
+      await page.evaluate(() => {
+        const state = window.__issueBridgeWorkspaceState;
+        const issue = state.workspace.tabs[0].workspace.windows[0];
+        issue.minimized = false;
+        issue.tab_group_active = true;
+        window.__issueBridgeFixtureSocket.emit(state);
+      });
+      await expect.poll(loads).toBe(beforeHidden + 1);
+    }
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
+    expect(errors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("knowledge-event-refresh.png") });
+  });
+
   test("renders cached issues as an Issue list instead of lifecycle Kanban", async ({
     page,
   }) => {
@@ -2160,6 +2222,7 @@ async function installIssueBridgeBackend(
           this.url = url;
           this.readyState = FixtureWebSocket.CONNECTING;
           window.__issueBridgeFixtureSocket = this;
+          window.__issueBridgeWorkspaceState = workspaceState;
           setTimeout(() => {
             this.readyState = FixtureWebSocket.OPEN;
             this.dispatchEvent(new Event("open"));

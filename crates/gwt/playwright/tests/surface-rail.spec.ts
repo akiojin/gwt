@@ -193,7 +193,7 @@ test.describe("Surface rail", () => {
     expect(errors).toEqual([]);
   });
 
-  test("Agents uses equal columns, keyboard spin control, live output and per-session input", async ({ page }, testInfo) => {
+  test("Agents uses equal columns, keyboard spin control, live output and per-session input", async ({ page, browser }, testInfo) => {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(String(error)));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -219,6 +219,26 @@ test.describe("Surface rail", () => {
     await expect(columns).toHaveValue("4");
     await columns.press("ArrowDown");
     await expect(columns).toHaveValue("3");
+    await page.locator('.op-rail__surface[data-surface="board"]').click();
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await expect(columns).toHaveValue("3");
+    await page.reload();
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await expect(columns).toHaveValue("3");
+    await expect(page.locator(".agents-grid")).toHaveCSS("grid-template-columns", /^\S+ \S+ \S+$/);
+    await page.screenshot({ path: testInfo.outputPath("agents-columns-restored.png") });
+    const reopened = await browser.newContext({ storageState: await page.context().storageState(),
+      colorScheme: testInfo.project.use.colorScheme, viewport: testInfo.project.use.viewport });
+    try {
+      const restored = await reopened.newPage();
+      restored.on("pageerror", error => errors.push(String(error)));
+      restored.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      await installSurfaceAssets(restored);
+      await installSurfaceRailBackend(restored);
+      await restored.goto(surfaceAppUrl);
+      await restored.locator('.op-rail__surface[data-surface="agents"]').click();
+      await expect(restored.getByRole("spinbutton", { name: "Agent columns" })).toHaveValue("3");
+    } finally { await reopened.close(); }
     await columns.fill("2");
     await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "terminal_output", id: "agent-one", data_base64: btoa("LIVE AGENT OUTPUT\r\n") }));
     await expect(tiles.first().locator(".xterm-rows")).toContainText("LIVE AGENT OUTPUT");

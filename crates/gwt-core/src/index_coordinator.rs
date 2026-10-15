@@ -50,7 +50,9 @@ pub const INDEX_HEAVY_LEASE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 pub const SEARCH_SCOPE: &str = "search";
 /// SC-065: how long an interactive search waits for the heavy lease before
 /// its admission is treated as a stall. A running background build yields at
-/// its 16-document checkpoint, so a handover fits well inside this budget;
+/// its next document checkpoint (Issue #5431). A single encode and runner
+/// startup are non-interruptible, so this remains a bounded wait, not a
+/// guarantee about model latency;
 /// the search hard limit is 30 s, which leaves room for the query itself.
 pub const INTERACTIVE_SEARCH_ADMISSION_DEADLINE: Duration = Duration::from_secs(10);
 /// TTL horizon on an interactive search's heavy lease (FR-417). A query
