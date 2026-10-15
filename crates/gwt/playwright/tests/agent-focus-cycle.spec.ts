@@ -13,6 +13,11 @@ type SentMessage = {
   data?: string;
 };
 
+const agentNames: Record<string, string> = {
+  "agent-running": "Aster", "agent-waiting": "Birch", "agent-stopped-tab-peer": "Cedar",
+  "agent-live-future": "Dune", "agent-starting-hidden": "Elm",
+};
+
 test.describe("Agent-prioritized focus cycling", () => {
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
 
@@ -50,7 +55,10 @@ test.describe("Agent-prioritized focus cycling", () => {
     // A live runtime update moves this earlier workspace entry into the active
     // bucket. Its next neighbor is now running, rather than stopped.
     await page.evaluate(() => (window as any).__emitAgentFocusCycleFutureState("running"));
-    await expect(agentTile(page, "agent-live-future").locator(".agent-tile__header span")).toHaveText("Interactive");
+    await expect(windowById(page, "agent-live-future").locator(".status-chip"))
+      .toHaveAttribute("aria-label", /^Running: .*focus-cycle runtime running$/);
+    await expect(windowById(page, "agent-live-future").locator(".title-text"))
+      .toHaveAttribute("title", "focus-cycle snapshot running");
     await pressFocusCycle(page, "ArrowRight", "Control");
     await expectAgentTabFocus(page, "agent-running");
     await expect.poll(() => focusTargets(page)).toEqual([
@@ -61,8 +69,8 @@ test.describe("Agent-prioritized focus cycling", () => {
     await expect(page.locator('.agent-tile[data-agent-id="pm-window"]')).toHaveCount(0);
     await expect(page.locator('.agent-tile[data-agent-id="shell-topmost"]')).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Close agent-running tab", exact: true }).click();
-    await expect(page.getByRole("tab", { name: "agent-running", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Close Aster tab", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "Aster", exact: true })).toHaveCount(0);
     await expect(page.getByRole("tab", { name: "All agents", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("tab", { name: "All agents", exact: true })).toBeFocused();
     await page.evaluate(() => (window as any).__agentFocusCycleSocket().emit({
@@ -159,7 +167,7 @@ function agentTile(page: Page, id: string) {
 }
 
 async function expectAgentTabFocus(page: Page, id: string): Promise<void> {
-  await expect(page.getByRole("tab", { name: id, exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: agentNames[id], exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(agentTile(page, id)).toBeVisible();
   await expect(agentTile(page, id).locator(".xterm-helper-textarea")).toBeFocused();
 }
@@ -203,7 +211,7 @@ async function settleAndClearMessages(page: Page): Promise<void> {
 }
 
 async function installFocusCycleBackend(page: Page): Promise<void> {
-  await page.addInitScript(() => {
+  await page.addInitScript(names => {
     const canvasWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
       title: id,
@@ -220,6 +228,7 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
       dynamic_title: null,
       dynamic_title_detail: null,
       agent_id: id,
+      agent_name: names[id] || null,
       session_id: `${id}-session`,
       agent_color: "cyan",
       tab_group_id: null,
@@ -311,13 +320,19 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
       },
     });
     (window as any).__agentFocusCycleActivationReleased = false;
-    (window as any).__emitAgentFocusCycleFutureState = (status = "future-state") => {
-      return socket?.emit({
+    (window as any).__emitAgentFocusCycleFutureState = async (status = "future-state") => {
+      const target = windows.find(windowData => windowData.id === "agent-live-future")!;
+      target.status = status;
+      await socket?.emit({
         kind: "terminal_status",
         id: "agent-live-future",
         status,
-        detail: "future runtime fixture",
+        detail: `focus-cycle runtime ${status}`,
       });
+      // Focus echoes must agree with this runtime update, including when the
+      // receive dispatcher coalesces an earlier workspace snapshot.
+      target.dynamic_title_detail = `focus-cycle snapshot ${status}`;
+      return socket?.emit(workspaceState());
     };
     (window as any).__releaseAgentFocusCycleActivation = () => {
       (window as any).__agentFocusCycleActivationReleased = true;
@@ -417,5 +432,5 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
     // Retain a reference so the fixture socket is not eligible for collection
     // in engines that aggressively collect detached EventTargets.
     (window as any).__agentFocusCycleSocket = () => socket;
-  });
+  }, agentNames);
 }

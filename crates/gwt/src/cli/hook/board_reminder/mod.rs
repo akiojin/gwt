@@ -290,13 +290,30 @@ fn append_title_summary_required_context(
     let required = texts::title_summary_required_reminder(language);
     match output {
         // SPEC-2359 Phase W-11 (US-58 / FR-347): prepend so the
-        // "set a provisional purpose before responding" instruction is the
-        // first thing the agent sees, ahead of the board reminder.
+        // purpose instruction precedes the board reminder; the pane naming
+        // instruction is prepended after both.
         HookOutput::HookSpecificAdditionalContext { event, text } => {
             HookOutput::hook_specific_additional_context(event, format!("{required}\n\n{text}"))
         }
         // Inject even when there is no board reminder this turn, so a fresh
         // agent's first UserPromptSubmit always carries the title instruction.
+        HookOutput::Silent => HookOutput::hook_specific_additional_context(event, required),
+        other => other,
+    }
+}
+
+fn prepend_pane_name_first_action_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+) -> HookOutput {
+    if event == IntentBoundaryEvent::Stop {
+        return output;
+    }
+    let required = gwt_skills::coordination_guidance::PANE_NAME_FIRST_ACTION_GUIDANCE_EN;
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, format!("{required}\n{text}"))
+        }
         HookOutput::Silent => HookOutput::hook_specific_additional_context(event, required),
         other => other,
     }
@@ -851,6 +868,12 @@ pub fn compute_plan(
     if retry_board_cursor {
         plan.next_reminders.last_injected_at = previous_last_injected_at;
     }
+    if emit_work_state_reminders {
+        // Naming is idempotent and the assigned name belongs to the window,
+        // not this Session snapshot. Only live producing sessions can call it;
+        // keep it ahead of the Work purpose reminder without nagging settled ones.
+        plan.output = prepend_pane_name_first_action_context(plan.output, intent_event);
+    }
 
     Ok(Some(plan))
 }
@@ -1066,6 +1089,45 @@ mod tests {
         e
     }
 
+    #[test]
+    fn ordinary_agents_are_told_to_name_themselves_before_work() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home_guard = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session = make_session(&repo, "work", "Codex");
+        save_projection(
+            &repo,
+            vec![WorkspaceAgentSummary {
+                title_summary: None,
+                ..workspace_agent(
+                    &session.id,
+                    Some("workspace-current"),
+                    WorkspaceAgentAffiliationStatus::Assigned,
+                )
+            }],
+        );
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            let plan = compute_plan(event, &session, Utc::now())
+                .expect("plan")
+                .expect("some plan");
+            let text = additional_context(&plan.output);
+            assert!(
+                text.contains(r#""operation":"pane.name""#),
+                "{event}: {text}"
+            );
+            assert!(text.contains("one-word ASCII English proper-name candidate"));
+            assert!(text.contains("already assigned"));
+            assert!(text
+                .contains(gwt_skills::coordination_guidance::PANE_NAME_FIRST_ACTION_GUIDANCE_EN));
+            assert!(
+                text.find(r#""operation":"pane.name""#)
+                    < text.find(r#""operation":"workspace.update""#),
+                "naming must precede the purpose update: {text}"
+            );
+        }
+    }
+
     /// SPEC-3431 FR-064: the resident PM gets no Work-state reminders.
     ///
     /// The title demand ("set title-summary as your first action, this is not
@@ -1102,6 +1164,10 @@ mod tests {
             HookOutput::HookSpecificAdditionalContext { text, .. } => text.clone(),
             other => panic!("expected additional context, got {other:?}"),
         };
+        assert!(
+            !text.contains("pane.name"),
+            "the PM must not be told to name itself:\n{text}"
+        );
         assert!(
             !text.contains("title-summary"),
             "the PM must not be told to set a work purpose:\n{text}"

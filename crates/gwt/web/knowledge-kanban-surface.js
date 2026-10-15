@@ -598,6 +598,7 @@ export function createKnowledgeKanbanSurface({
   createKnowledgeMarkdownBody,
   windowMap,
   workspaceWindowById,
+  isKnowledgeWindowVisible = () => true,
   getWorkspaceWindows,
   windowCatalogModel,
   pendingIndexOpenTargetsByPreset,
@@ -612,6 +613,7 @@ export function createKnowledgeKanbanSurface({
   // runtime factory is the shared one from app.js; `readOnly` keeps every input
   // path unattached. `windowizeIssuePreviewWindow` performs the Canvas handoff.
   createTerminalRuntime,
+  isAgentsSurfaceMounted = () => false,
   windowDisplayTitle,
   windowRoleBadgeLabel,
   windowizeIssuePreviewWindow,
@@ -729,6 +731,9 @@ export function createKnowledgeKanbanSurface({
         };
         const over = event => {
           if (dragging || event.buttons) return;
+          // Hiding a dismissed tooltip exposes the control underneath it;
+          // that hit-test change is not a new pointer entry by the user.
+          if (popup.hidden && popup.contains(event.relatedTarget)) return;
           const node = target(event);
           if (!node || node.contains(event.relatedTarget)) return;
           hovered = node;
@@ -998,6 +1003,8 @@ export function createKnowledgeKanbanSurface({
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
       const issueDetailRenderKeys = new WeakMap();
+      const knowledgeAutoRefreshModel = createUiStateStore({ revision: 0 });
+      const knowledgeCompletionViewModel = createUiStateStore({ windowId: null });
 
       function issueMonitorStateText(state) {
         switch (String(state || "")) {
@@ -1426,9 +1433,9 @@ export function createKnowledgeKanbanSurface({
           bar
             .querySelector(`[data-action="${action}"]`)
             ?.addEventListener("click", () => {
-              if (action === "monitor-settings") {
+              if (action === "monitor-settings" && !body.closest(".settings-root")) {
                 document.dispatchEvent(new document.defaultView.CustomEvent("settings:open", { detail: { section: "issues" } }));
-              } else {
+              } else if (action === "monitor-setup") {
                 send({ kind: "issue_monitor_configure_profile" });
               }
             });
@@ -1666,6 +1673,11 @@ export function createKnowledgeKanbanSurface({
             dndSnapshot: null,
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
+            autoRefreshDirty: false,
+            autoRefreshChanged: false,
+            autoRefreshRevision: null,
+            revisionPending: false,
+            cacheRevision: null,
           });
         }
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -1714,11 +1726,48 @@ export function createKnowledgeKanbanSurface({
             state.autoRefreshTimer = null;
             return;
           }
-          if (!state.refreshEnabled || knowledgeAutoRefreshIsBusy(state)) {
-            return;
-          }
-          requestKnowledgeBridge(windowId, knowledgeKind, false);
+          state.autoRefreshDirty = true;
+          refreshVisibleKnowledgeWindows();
         }, KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS);
+      }
+
+      function knowledgeWindowIsVisible(windowId) {
+        const data = workspaceWindowById(windowId);
+        const element = windowMap.get(windowId);
+        return Boolean(data && element && !document.hidden && !data.minimized &&
+          (!data.tab_group_id || data.tab_group_active) &&
+          !element.closest?.("[hidden]") && isKnowledgeWindowVisible(windowId));
+      }
+
+      function refreshVisibleKnowledgeWindows() {
+        knowledgeAutoRefreshModel.update(model => ({ revision: model.revision + 1 }));
+      }
+
+      function flushVisibleKnowledgeWindows() {
+        for (const [windowId, state] of knowledgeBridgeStateMap) {
+          if (!state.autoRefreshDirty || state.revisionPending || !state.refreshEnabled ||
+              knowledgeAutoRefreshIsBusy(state) || !knowledgeWindowIsVisible(windowId)) continue;
+          state.autoRefreshDirty = false;
+          if (state.autoRefreshChanged) {
+            state.autoRefreshChanged = false;
+            requestKnowledgeBridge(windowId, state.kind, false);
+            continue;
+          }
+          state.revisionPending = true;
+          send({ kind: "check_knowledge_revision", id: windowId, knowledge_kind: state.kind });
+        }
+      }
+
+      function applyKnowledgeCacheRevision(event) {
+        const state = knowledgeBridgeStateMap.get(event.id);
+        if (!state || !state.revisionPending ||
+            normalizeKnowledgeKind(event.knowledge_kind) !== normalizeKnowledgeKind(state.kind)) return;
+        state.revisionPending = false;
+        if (event.revision !== null && event.revision === state.cacheRevision) return;
+        state.autoRefreshChanged = true;
+        state.autoRefreshRevision = event.revision ?? null;
+        state.autoRefreshDirty = true;
+        refreshVisibleKnowledgeWindows();
       }
 
       function readKanbanHideDonePreference() {
@@ -2169,6 +2218,10 @@ export function createKnowledgeKanbanSurface({
       // reconnect restarts a degraded still-open window/query at 5 seconds.
       function handleKnowledgeTransportChange(online) {
         for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+          if (!online && state.revisionPending) {
+            state.revisionPending = false;
+            state.autoRefreshDirty = true;
+          }
           if (!isSilentSemanticKind(state.kind)) {
             continue;
           }
@@ -2218,6 +2271,7 @@ export function createKnowledgeKanbanSurface({
           state.semanticRetryIndex = 0;
           scheduleKnowledgeSemanticRetry(windowId, state.kind, state);
         }
+        if (online) refreshVisibleKnowledgeWindows();
       }
 
       function sendKnowledgeSemanticSearch(windowId, intent) {
@@ -3672,6 +3726,13 @@ export function createKnowledgeKanbanSurface({
         windowMap.get(windowId)?.querySelector(`.knowledge-row[data-issue-number="${state.selectedNumber}"] .knowledge-row-select`)?.focus();
       }
 
+      function focusIssuePreview(windowId, element) {
+        const detail = element.querySelector(".knowledge-detail-pane");
+        const explanations = issueControlExplanations.get(windowId);
+        if (explanations) explanations.restoreFocus(detail, false);
+        else detail?.focus();
+      }
+
       function renderIssueDetailPane(windowId, state, detailPane, { agentPreview = true } = {}) {
         // #5396: list/status refreshes and duplicate detail replies must retain
         // the native disclosure, scroll and focus state of an unchanged preview.
@@ -3685,9 +3746,19 @@ export function createKnowledgeKanbanSurface({
         const attention = work ? workAttentionFor?.(work) || null : null;
         const faces = entry ? issueRowFaces(windowId, entry, work) : {};
         const queue = canonicalQueuedKnowledgeEntries(state);
+        const relatedWorks = state.detail?.related_works || [];
+        const liveSessions = buildKnowledgeRelatedLiveSessionWindowsByConversation(relatedWorks);
+        const relatedActions = relatedWorks.flatMap(relatedWork =>
+          (relatedWork.agents || []).flatMap(agent =>
+            (agent.sessions || []).map(session => [
+              isKnowledgeRelatedResumePending(agent.session_id),
+              findKnowledgeRelatedLiveWindow(agent, session, liveSessions)?.id || null,
+            ])));
         const key = JSON.stringify([
           state.detail, state.detailLoading, state.selectedNumber, state.previewHidden,
           state.issueDetailView, agentPreview, state.error, entry, work, attention,
+          relatedActions,
+          agentPreview && state.issueDetailView === "output" && Boolean(isAgentsSurfaceMounted()),
           queue.findIndex(item => item.number === entry?.number), queue.length,
           [faces.inlineWindow, faces.canvasWindow].map(target => target ? [
             target.id, target.status, windowDisplayTitle?.(target) || target.title,
@@ -4917,6 +4988,10 @@ export function createKnowledgeKanbanSurface({
       // moved verbatim from app.js; the case arms in app.js delegate here.
       function applyKnowledgeReceiveEvent(event) {
         switch (event.kind) {
+          case "knowledge_revision": {
+            applyKnowledgeCacheRevision(event);
+            break;
+          }
           case "terminal_preview": {
             terminalPreviewText.set(event.id, event.text);
             for (const element of windowMap.values()) {
@@ -4974,6 +5049,12 @@ export function createKnowledgeKanbanSurface({
               state.selectedNumber &&
               incomingEntries.some((entry) => entry.number === state.selectedNumber);
             state.baseEntries = incomingEntries;
+            state.cacheRevision = event.cache_revision ?? null;
+            if (state.autoRefreshChanged && state.cacheRevision !== null &&
+                state.cacheRevision === state.autoRefreshRevision) {
+              state.autoRefreshChanged = false;
+              state.autoRefreshDirty = false;
+            }
             state.baseEmptyMessage = event.empty_message || "";
             if (!queuedQuery) {
               state.entries = state.baseEntries.slice();
@@ -4997,16 +5078,9 @@ export function createKnowledgeKanbanSurface({
             state.refreshedAt = Date.now();
             state.error = "";
             const renderCompletion = () => {
-              if (!unchangedEntries) {
-                renderKnowledgeBridge(event.id);
-                return;
-              }
-              const refresh = windowMap.get(event.id)?.querySelector("[data-action='refresh-knowledge']");
-              if (refresh) {
-                refresh.disabled = !state.refreshEnabled ||
-                  (state.loading && !knowledgeEntriesAreEmpty(state));
-              }
-              renderKnowledgeSelection(event.id, state, previousNumber);
+              knowledgeCompletionViewModel.update(() => ({
+                windowId: event.id, unchangedEntries, previousNumber,
+              }));
             };
             if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
               renderCompletion();
@@ -5301,6 +5375,23 @@ export function createKnowledgeKanbanSurface({
       }
 
       issueMonitorModel.subscribe(model => model.status, syncIssueMonitorErrorReport);
+      knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
+      // List completion publishes data in receive; the synchronous view owns
+      // both the full rebuild and revision-preserving selection updates.
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber }) => {
+        const state = knowledgeBridgeStateMap.get(windowId);
+        if (!state) return;
+        if (!unchangedEntries) {
+          renderKnowledgeBridge(windowId);
+          return;
+        }
+        const refresh = windowMap.get(windowId)?.querySelector("[data-action='refresh-knowledge']");
+        if (refresh) {
+          refresh.disabled = !state.refreshEnabled ||
+            (state.loading && !knowledgeEntriesAreEmpty(state));
+        }
+        renderKnowledgeSelection(windowId, state, previousNumber);
+      });
       issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly, focusPreview }) => {
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -5323,7 +5414,7 @@ export function createKnowledgeKanbanSurface({
               }
             }
             publishIssueControlExplanations(windowId, focus);
-            if (focusPreview) element.querySelector(".knowledge-detail-pane")?.focus();
+            if (focusPreview) focusIssuePreview(windowId, element);
           } else {
             renderIssueKnowledgeBridge(windowId, element, state);
           }
@@ -5365,9 +5456,11 @@ export function createKnowledgeKanbanSurface({
         renderKanbanDrawerBody,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyKnowledgeCacheRevision,
         applyIssueMonitorStatus,
         applyIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
+        refreshVisibleKnowledgeWindows,
       };
 }

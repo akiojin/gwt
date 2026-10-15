@@ -156,12 +156,14 @@ gwt は次の組み込みエージェントに対応しています。Launch Age
 
 **Settings > Supported Agents** では、全対応エージェントの導入状態と
 インストール済みバージョンを確認し、未導入の CLI をインストールできます。
-npm の情報で新しいバージョンを確認できた場合は更新操作が表示されます。
-最新バージョンの取得に対応していないエージェントにはその理由を表示し、
-更新は手動で行います。
+公式配布元の情報で新しいバージョンを確認できた場合は更新操作が表示されます。
+Codex・Grok・OpenCode・OpenClaw は npm、Antigravity は platform manifest を照会します。
+Claude native と Hermes は実効更新チャネルを検証できないため、理由を表示し、
+更新は手動で行います。`gh copilot` も、検出した配布物と extension updater の対象が
+一致すると保証できないため手動更新とします。取得に失敗した場合も理由を表示して更新操作を無効にします。
 
 エージェントの自動更新は既定で無効です。有効にすると、次回の gwt 起動時に
-インストール済みの npm エージェントを確認し、新しいバージョンが分かるものだけを
+更新経路を検証できるインストール済みエージェントを確認し、新しいバージョンが分かるものだけを
 更新します。PM を含む稼働中のエージェント窓や起動待ちがない場合に限り適用します。
 手動のインストール・更新でも、先に稼働中のエージェントを閉じてください。
 未導入のエージェントを自動でインストールすることはありません。
@@ -392,7 +394,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
   Work Item view を開きます。Issue Monitor の自動起動はキャンバスにウィンドウを
-  開かず、Issue ウィンドウの右ペインに読み取り専用でミラー表示されます。入力
+  開かず、Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
   したいときは `Windowize` で通常のウィンドウにできます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
@@ -406,10 +408,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   バック)。設定はグローバルで `~/.gwt/config.toml` の `[ai].language` に保存
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
   アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
-  Autonomous、Max active、キュー補充、許可ラベルを、`Agents` では起動
-  プロファイルと候補の順序・優先条件を編集できます。プロジェクト欄には
-  編集対象の名前を表示し、Issue ウィンドウの ⚙ からその `Issues` 欄を
-  開けます。`System > Auto-apply updates` は全プロジェクト共通で、開いて
+  Autonomous、Max active、キュー補充、許可ラベル、起動プロファイルと候補の
+  順序・優先条件を同じ欄で編集できます。Settings は Application / Project の
+  左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
+  `System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
   System には保存値・有効値と、更新の保留理由も表示します。変更は GUI から
@@ -422,6 +424,11 @@ Agent が status、decision、handoff、request を外部化する coordination 
 Work Item Knowledge Bridge は frontend から GitHub API response を直接描画せず、
 ローカル Issue cache と semantic index を使います。
 
+作業 Agent は起動時に短く覚えやすい固有名を選び、バッジ・ウィンドウタイトル・
+Fleet・Kanban カードに表示します。候補が重複すると数字の接尾辞が付きます。
+名前は復元・その場での再起動をまたいで維持され、確定前のバッジは `Naming…` です。
+常駐 PM は独自の固定表示を維持します。
+
 Windows の Host 起動では、Launch Agent で Command Prompt、Windows PowerShell、
 PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ内のシェルを使います。
 
@@ -432,7 +439,7 @@ Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
 ## Issue サーフェスと Issue Monitor
 
-Add Window から `Issue` を開くと、キャッシュ済み GitHub Issue を Backlog / Queued /
+**Settings → Project → Issues**、または左ナビの **Issues** から、キャッシュ済み GitHub Issue を Backlog / Queued /
 Active / Done の 4 列で表示します。各行の実行状態と操作はそのまま利用できます。
 Backlog から Queued へドラッグすると実行対象に追加され、逆方向でキューから外れます。
 Queued 内では順序を変更でき、複数選択の移動は 1 回のキュー操作で送信されます。
@@ -442,9 +449,9 @@ Queued には `auto-refill` などの追加元も表示されます。
 検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
-エラーの詳細と履歴は通知センターで確認できます。⚙ で **Settings → Issues** を開いて
-フォーカスを移し、Max active、Auto-refill と上限、Allowed labels を設定します。
-候補プロファイルは **Settings → Agents** にあります。Auto-refill は**既定で OFF**です。
+エラーの詳細と履歴は通知センターで確認できます。⚙ で同じペインの設定行を展開し、
+Max active、Auto-refill と上限、Allowed labels、候補プロファイルを設定します。Auto-apply updates は **System** で設定します。
+Max active は **Manual** に切り替えると数値を編集でき、**Auto** では計算値を表示します。Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
 空のキューから新しい作業は起動せず、実行中の作業は継続します。
 

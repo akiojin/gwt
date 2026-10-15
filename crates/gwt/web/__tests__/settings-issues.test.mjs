@@ -35,23 +35,51 @@ test("Issues Settings keeps labels and values together and sends existing projec
     else control.value = value;
     control.dispatchEvent(new Event("change"));
   };
-  change("Autonomous", true);
   change("Max active", "6");
-  panel.querySelector('[data-action="settings-use-auto"]').click();
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  assert.equal(mode.value, "manual");
+  mode.querySelector('[value="auto"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
   change("Auto-refill", true);
   change("Refill limit", "5");
   change("Allowed labels", "auto-merge, bug");
-  panel.querySelector('[data-action="settings-monitor-stop"]').click();
   assert.deepEqual(sent, [
-    { kind: "set_issue_monitor_autonomous_mode", enabled: true },
     { kind: "set_issue_monitor_max_active_agents", max_active_agents: 6 },
     { kind: "set_issue_monitor_max_active_agents", max_active_agents: null },
     { kind: "set_issue_monitor_auto_refill", enabled: true, limit: 3 },
     { kind: "set_issue_monitor_auto_refill", enabled: true, limit: 5 },
     { kind: "set_issue_monitor_allowed_labels", allowed_labels: ["auto-merge", "bug"] },
-    { kind: "set_issue_monitor_enabled", enabled: false },
   ]);
-  assert.equal(panel.querySelector('[aria-label="Max active"]').closest("label").textContent.includes("Manual"), true);
+  assert.equal(panel.querySelector('[aria-label="Autonomous"]'), null, "the summary owns Autonomous once");
+});
+
+test("Auto capacity is read-only until Manual is selected", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 4, max_active_agents_override: null }, send: m => sent.push(m) });
+  const max = panel.querySelector('[aria-label="Max active"]');
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  assert.equal(max.disabled, true);
+  assert.equal(mode.value, "auto");
+  mode.querySelector('[value="manual"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 4 }]);
+});
+
+test("Manual starts at one when Auto has no available capacity", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 0, max_active_agents_override: null }, send: m => sent.push(m) });
+  const max = panel.querySelector('[aria-label="Max active"]');
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  assert.equal(max.value, "0", "Auto still displays its effective capacity");
+  mode.querySelector('[value="manual"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  assert.equal(max.disabled, false);
+  assert.equal(max.value, "1");
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 }]);
 });
 
 test("Agents Settings edits full profiles while preserving runtime fields and project isolation", () => {
@@ -86,10 +114,13 @@ test("section-addressed Settings selects and focuses the requested project panel
   const { document, CustomEvent } = parseHTML('<html><body><div id="settings"><button class="settings-tab" data-settings-tab="issues"></button><section class="settings-panel" data-settings-panel="issues"></section></div></body></html>');
   const body = document.getElementById("settings");
   body.dataset.settingsProjectRoot = "/A";
+  body.dataset.settingsWindowId = "settings-A";
   const unbound = body.cloneNode(true);
   delete unbound.dataset.settingsProjectRoot;
   document.body.prepend(unbound);
   const panel = body.querySelector("section");
+  let selectedSection;
+  body.addEventListener("settings:section-changed", event => { selectedSection = event.detail; });
   let focused = 0, scrollOptions, spawned = 0;
   panel.focus = () => focused++;
   panel.scrollIntoView = options => { scrollOptions = options; };
@@ -102,11 +133,14 @@ test("section-addressed Settings selects and focuses the requested project panel
   assert.equal(focused, 1);
   assert.deepEqual(scrollOptions, { block: "start" });
   assert.equal(spawned, 1);
+  assert.deepEqual(selectedSection, { windowId: "settings-A", section: "issues" });
 });
 
 test("Settings declares app/project scope and the global update condition using existing primitives", () => {
   assert.match(source, /buildSettingsTab\("issues", "Issues"/);
-  assert.match(source, /buildSettingsTab\("agents", "Agents"/);
+  assert.match(source, /settings-issues-options/);
+  assert.match(source, /mountIssues\(windowData, issuesHost\)/);
+  assert.match(source, /aria-orientation.*vertical/);
   assert.match(source, /Application settings/);
   assert.match(source, /Auto-apply updates/);
   assert.match(source, /at least one open project.*Autonomous/);

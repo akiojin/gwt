@@ -1,5 +1,11 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+
+const configuredUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
+const liveUrl = configuredUrl
+  ? new URL(new URL(configuredUrl).pathname === "/" ? new URL(APP_URL).pathname : new URL(configuredUrl).pathname, configuredUrl).toString()
+  : undefined;
+const errors = new WeakMap<Page, string[]>();
 
 // SPEC-2356 Anshin Addendum — Phase 2 activity surfacing + mission convergence.
 //
@@ -27,13 +33,24 @@ import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
 test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
+  test.beforeEach(async ({ page }, info) => {
+    const captured: string[] = [];
+    errors.set(page, captured);
+    page.on("pageerror", error => captured.push(error.message));
+    page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), info.project.name.includes("light") ? "light" : "dark");
+  });
+  test.afterEach(async ({ page }, info) => {
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+    expect(errors.get(page), "zero console/page errors").toEqual([]);
+  });
 
   test("FR-047: MISSION cell trends done/agents and flips complete on convergence", async ({
     page,
   }) => {
-    await installEmbeddedRoutes(page);
+    if (!liveUrl) await installEmbeddedRoutes(page);
     await installPhase2Backend(page);
-    await page.goto(APP_URL);
+    await page.goto(liveUrl || APP_URL);
 
     // Three agent panes boot "running" -> telemetry active -> 0/3, not complete.
     const mission = page.locator("#op-strip-mission");
@@ -61,9 +78,9 @@ test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
   test("FR-045: dynamic_title_detail surfaces in the minimap tooltip and the switcher row", async ({
     page,
   }) => {
-    await installEmbeddedRoutes(page);
+    if (!liveUrl) await installEmbeddedRoutes(page);
     await installPhase2Backend(page);
-    await page.goto(APP_URL);
+    await page.goto(liveUrl || APP_URL);
 
     // (a) Fleet Minimap cell tooltip keeps the dynamic detail and appends the
     // worktree-form label supplied by the visual-identity contract.
@@ -75,7 +92,7 @@ test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
     await expect(detailCell).toHaveCount(1);
     await expect(detailCell).toHaveAttribute(
       "title",
-      "Refactor auth · editing src/auth/login.rs - Unknown worktree form",
+      "Cedar — Refactor auth · editing src/auth/login.rs - Cedar — Unknown worktree form",
     );
     await expect(detailCell).toHaveAttribute(
       "data-worktree-label",
@@ -88,7 +105,7 @@ test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
     const panel = page.locator("#window-list-panel");
     await expect(panel).toBeVisible();
     const row = panel
-      .locator(".window-list-row", { hasText: "Refactor auth" })
+      .locator(".window-list-row", { hasText: "Cedar — Refactor auth" })
       .first();
     await expect(row).toBeVisible();
     await expect(row.locator(".window-list-activity")).toHaveText(
@@ -119,6 +136,7 @@ async function installPhase2Backend(page) {
         dynamic_title: null,
         dynamic_title_detail: null,
         agent_id: id,
+        agent_name: { "agent-1": "Aster", "agent-2": "Birch", "agent-3": "Cedar" }[id],
         agent_color: "cyan",
         tab_group_id: null,
         tab_group_active: false,

@@ -2388,9 +2388,9 @@ fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
     );
     assert!(
         html.contains(
-            "[\"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
+            "[\"settings\", \"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
         ) && html.contains("return \"issue\";"),
-        "expected legacy SPEC, Issue Monitor and Workspace presets to open the unified Issue view",
+        "expected Settings and legacy aliases to share Issue knowledge contracts",
     );
 }
 

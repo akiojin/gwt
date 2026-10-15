@@ -103,7 +103,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
   panel.appendChild(automaticLabel);
   const help = document.createElement("p");
   help.className = "settings-help";
-  help.textContent = "At the next app startup, update installed npm agents with a known newer version. "
+  help.textContent = "At the next app startup, update installed agents with a verified update route and a known newer version. "
     + "Updates require no open agent windows or pending launches, including the Project Manager. "
     + "Nothing is installed automatically. Manual installs and updates are refused while agent windows are running; "
     + "close them and retry. Update failures leave launches available.";
@@ -252,30 +252,31 @@ export function renderIssuesSettingsPanel(panel, options) {
     section.appendChild(label);
     return input;
   };
-  const button = (name, action, callback) => {
-    const node = document.createElement("button");
-    node.type = "button";
-    node.className = "wizard-button";
-    node.dataset.action = action;
-    node.textContent = name;
-    node.addEventListener("click", callback);
-    section.appendChild(node);
-    return node;
-  };
-  const autonomous = field("Autonomous", "checkbox", status?.autonomous_mode);
-  autonomous.addEventListener("change", () => send({ kind: "set_issue_monitor_autonomous_mode", enabled: autonomous.checked }));
   const max = field("Max active", "number", status?.max_active_agents ?? 0);
   max.min = "1";
   max.step = "1";
-  const mode = document.createElement("span");
-  mode.textContent = status?.max_active_agents_override == null ? "Auto" : "Manual";
-  max.closest("label").appendChild(mode);
+  const mode = document.createElement("select");
+  mode.className = "settings-select";
+  mode.setAttribute("aria-label", "Max active mode");
+  for (const [value, name] of [["auto", "Auto"], ["manual", "Manual"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = name;
+    option.selected = value === (status?.max_active_agents_override == null ? "auto" : "manual");
+    mode.appendChild(option);
+  }
+  max.disabled = status?.max_active_agents_override == null;
+  max.closest("label").insertBefore(mode, max);
+  mode.addEventListener("change", () => {
+    max.disabled = mode.value === "auto";
+    if (!max.disabled && !(Number.isInteger(Number(max.value)) && Number(max.value) > 0)) max.value = "1";
+    send({ kind: "set_issue_monitor_max_active_agents",
+      max_active_agents: mode.value === "auto" ? null : Number(max.value) });
+  });
   max.addEventListener("change", () => {
     const value = Number(max.value);
-    if (Number.isInteger(value) && value > 0) send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: value });
+    if (!max.disabled && Number.isInteger(value) && value > 0) send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: value });
   });
-  button("Use Auto", "settings-use-auto", () => send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: null }));
-  button(status?.enabled ? "Stop" : "Start", "settings-monitor-stop", () => send({ kind: "set_issue_monitor_enabled", enabled: !status?.enabled }));
   const refill = field("Auto-refill", "checkbox", status?.terminal_queue_auto_refill);
   const limit = field("Refill limit", "number", status?.terminal_queue_auto_refill_limit ?? 3);
   limit.min = "0";
@@ -412,6 +413,13 @@ export function renderAgentsSettingsPanel(panel, options) {
 }
 
 export function switchSettingsTab(body, target, focus = false) {
+  const showCandidates = target === "agents";
+  if (showCandidates) target = "issues";
+  body.dataset.settingsSection = target;
+  if (showCandidates) {
+    const disclosure = body.querySelector(".settings-issues-options");
+    if (disclosure) disclosure.open = true;
+  }
   const tabs = body.querySelectorAll(".settings-tab");
   tabs.forEach((tab) => {
     const isSelected = tab.dataset.settingsTab === target;
@@ -423,10 +431,14 @@ export function switchSettingsTab(body, target, focus = false) {
     panel.classList.toggle("hidden", panel.dataset.settingsPanel !== target);
     if (focus && panel.dataset.settingsPanel === target) {
       panel.tabIndex = -1;
-      panel.scrollIntoView?.({ block: "start" });
-      panel.focus({ preventScroll: true });
+      const destination = showCandidates ? panel.querySelector("[data-settings-candidates]") || panel : panel;
+      destination.tabIndex = -1;
+      destination.scrollIntoView?.({ block: "start" });
+      destination.focus({ preventScroll: true });
     }
   });
+  body.dispatchEvent(new body.ownerDocument.defaultView.CustomEvent("settings:section-changed", { bubbles: true,
+    detail: { windowId: body.dataset.settingsWindowId, section: target } }));
 }
 
 export function installSettingsOpenHandler(options) {
@@ -466,6 +478,7 @@ export function createSettingsSurface({
   renderUsagePanel,
   indexStatusByProjectRoot,
   pmSettingsPanel,
+  mountIssues,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
       // Output Language `<select>`. Backend echoes `system_settings`
@@ -694,13 +707,13 @@ export function createSettingsSurface({
         const root = body.dataset.settingsProjectRoot || "";
         const current = projectSettingsSnapshot(body);
         const project = { project_root: root, name: body.dataset.settingsProjectName };
-        const agentsPanel = body.querySelector('[data-settings-panel="agents"]');
+        const agentsPanel = body.querySelector("[data-settings-candidates]");
         if (current.profilesRequestId != null
           && Number(agentsPanel?.dataset.pendingRequest) === current.profilesRequestId && agentsPanel?.dataset.saving === "true") {
           agentsPanel.dataset.dirty = "false";
           agentsPanel.dataset.saving = "false";
           delete agentsPanel.dataset.pendingRequest;
-          body.querySelector('[data-settings-tab="agents"]')?.focus();
+          body.querySelector('[data-settings-tab="issues"]')?.focus();
         }
         const dispatch = message => {
           // Project WebSockets own mutation authority. Never replay this
@@ -708,7 +721,7 @@ export function createSettingsSurface({
           if (!root || activeProjectTab()?.project_root !== root) return;
           if (message.kind === "issue_monitor_profiles_set") {
             message.request_id = ++nextProfilesRequest;
-            const panel = body.querySelector('[data-settings-panel="agents"]');
+            const panel = body.querySelector("[data-settings-candidates]");
             if (panel) {
               panel.dataset.dirty = "true";
               panel.dataset.saving = "true";
@@ -718,7 +731,7 @@ export function createSettingsSurface({
           send(message);
         };
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
-          const panel = body.querySelector(`[data-settings-panel="${section}"]`);
+          const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
           const editing = panel?.contains(document.activeElement)
             && document.activeElement?.matches("input:not([type=checkbox]), select, textarea");
           if (editing && section === "issues") body.dataset.issuesRenderDeferred = "true";
@@ -839,6 +852,8 @@ export function createSettingsSurface({
         purgeDetachedSettingsBodies();
         while (body.firstChild) body.removeChild(body.firstChild);
         const project = activeProjectTab();
+        body.dataset.settingsSection = "issues";
+        body.dataset.settingsWindowId = windowData.id;
         body.dataset.settingsProjectRoot = project?.project_root || "";
         body.dataset.settingsProjectName = project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "No project";
 
@@ -853,9 +868,11 @@ export function createSettingsSurface({
         const tabs = document.createElement("nav");
         tabs.className = "settings-tabs";
         tabs.setAttribute("role", "tablist");
+        tabs.setAttribute("aria-orientation", "vertical");
+        tabs.setAttribute("aria-label", "Settings sections");
         const appScope = createNode("span", "settings-label", "Application settings");
         tabs.appendChild(appScope);
-        tabs.appendChild(buildSettingsTab("system", "System", true, windowData.id));
+        tabs.appendChild(buildSettingsTab("system", "System", false, windowData.id));
         tabs.appendChild(
           buildSettingsTab("supported-agents", "Supported Agents", false, windowData.id),
         );
@@ -882,18 +899,16 @@ export function createSettingsSurface({
           buildSettingsTab("usage", "Usage & Limits", false, windowData.id),
         );
         tabs.appendChild(createNode("span", "settings-label", `Project settings · ${body.dataset.settingsProjectName}`));
-        tabs.appendChild(buildSettingsTab("issues", "Issues", false, windowData.id));
-        tabs.appendChild(buildSettingsTab("agents", "Agents", false, windowData.id));
+        tabs.appendChild(buildSettingsTab("issues", "Issues", true, windowData.id));
         // PM settings are also project-owned; keep all project tabs together.
         tabs.appendChild(tabs.querySelector('[data-settings-tab="project-manager"]'));
 
         toolbar.appendChild(heading);
-        toolbar.appendChild(tabs);
 
         const bodyEl = createDiv("settings-body");
 
         const panelSystem = document.createElement("section");
-        panelSystem.className = "settings-panel";
+        panelSystem.className = "settings-panel hidden";
         panelSystem.setAttribute("role", "tabpanel");
         panelSystem.dataset.settingsPanel = "system";
         linkSettingsPanel(panelSystem, windowData.id, "system");
@@ -961,18 +976,39 @@ export function createSettingsSurface({
         bodyEl.appendChild(panelAgents);
         bodyEl.appendChild(panelBackends);
         bodyEl.appendChild(panelUsage);
-        for (const target of ["issues", "agents"]) {
-          const panel = document.createElement("section");
-          panel.className = "settings-panel hidden";
-          panel.setAttribute("role", "tabpanel");
-          panel.dataset.settingsPanel = target;
-          linkSettingsPanel(panel, windowData.id, target);
-          bodyEl.appendChild(panel);
-        }
+        const panelIssues = document.createElement("section");
+        panelIssues.className = "settings-panel settings-issues-panel";
+        panelIssues.setAttribute("role", "tabpanel");
+        panelIssues.dataset.settingsPanel = "issues";
+        linkSettingsPanel(panelIssues, windowData.id, "issues");
+        bodyEl.appendChild(panelIssues);
+        const issuesHost = createDiv("settings-issues-host surface-knowledge");
+        panelIssues.appendChild(issuesHost);
 
+        const layout = createDiv("settings-layout");
+        layout.appendChild(tabs);
+        layout.appendChild(bodyEl);
         root.appendChild(toolbar);
-        root.appendChild(bodyEl);
+        root.appendChild(layout);
         body.appendChild(root);
+        mountIssues(windowData, issuesHost);
+        const issuesRoot = issuesHost.querySelector(".issue-bridge-root");
+        const issuesOptions = document.createElement("details");
+        issuesOptions.className = "settings-issues-options";
+        const summary = document.createElement("summary");
+        summary.textContent = "Settings · Capacity, refill, labels and candidates";
+        issuesOptions.appendChild(summary);
+        const controls = createDiv();
+        controls.dataset.settingsIssuesControls = "";
+        issuesOptions.appendChild(controls);
+        const candidates = createDiv();
+        candidates.dataset.settingsCandidates = "";
+        issuesOptions.appendChild(candidates);
+        issuesRoot.querySelector(".knowledge-monitor-bar").after(issuesOptions);
+        const gear = issuesRoot.querySelector('[data-action="monitor-settings"]');
+        gear.setAttribute("aria-expanded", "false");
+        issuesOptions.addEventListener("toggle", () => gear.setAttribute("aria-expanded", String(issuesOptions.open)));
+        gear.addEventListener("click", () => { issuesOptions.open = !issuesOptions.open; });
 
         tabs.addEventListener("click", (e) => {
           const btn = e.target.closest("[data-settings-tab]");
@@ -1034,10 +1070,8 @@ export function createSettingsSurface({
 
         // Honour any pending settings:open dispatch (e.g. from the badge
         // click) by switching to the requested tab once the panel is mounted.
-        if (pendingSettingsTabTarget) {
-          switchSettingsTab(body, pendingSettingsTabTarget, true);
-          pendingSettingsTabTarget = null;
-        }
+        switchSettingsTab(body, pendingSettingsTabTarget || "issues", Boolean(pendingSettingsTabTarget));
+        pendingSettingsTabTarget = null;
       }
 
       let pendingSettingsTabTarget = null;

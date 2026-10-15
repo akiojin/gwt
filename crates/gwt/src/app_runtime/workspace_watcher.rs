@@ -16,6 +16,7 @@ pub(crate) struct WorkspaceProjectionPatchInput {
     pub(crate) fresh: Box<gwt_core::workspace_projection::WorkspaceProjection>,
     pub(crate) sessions: Vec<ActiveAgentSession>,
     pub(crate) windows: WorkspaceWindowTitles,
+    pub(crate) agent_names: HashMap<String, String>,
     pub(crate) window_generations: HashMap<String, u64>,
 }
 
@@ -230,6 +231,7 @@ pub(crate) fn prepare_workspace_projection_patch(
             projection
         }
     };
+    super::attach_agent_names(&mut projection, &input.agent_names);
     let history_routes = input
         .cached
         .as_ref()
@@ -345,6 +347,7 @@ mod tests {
             fresh: Box::new(fresh),
             sessions: Vec::new(),
             windows: HashMap::new(),
+            agent_names: HashMap::new(),
             window_generations: HashMap::new(),
         })
         .expect("prepare patch");

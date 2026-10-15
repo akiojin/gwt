@@ -683,6 +683,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             .target(format!("{work_id} ({close_kind})")),
         // SPEC-3050: log the injection request without its text payload —
         // the injected line lands in the PTY transcript anyway.
+        FrontendEvent::PaneName { .. } => return None,
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
         }
@@ -804,7 +805,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::PasteImageUploaded { .. }
         | FrontendEvent::AttachmentUploadFailed { .. }
         | FrontendEvent::AttachFiles { .. }
-        | FrontendEvent::ReportKnowledgeError { .. } => return None,
+        | FrontendEvent::ReportKnowledgeError { .. }
+        | FrontendEvent::CheckKnowledgeRevision { .. } => return None,
     };
     Some(log)
 }

@@ -9,7 +9,7 @@ import { parse } from "acorn";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootPattern = /^(receive|apply.*ReceiveEvent|applyIssueMonitorStatus|applyIssueMonitorInbox|applyProviderUsageUi)$/;
@@ -55,7 +55,7 @@ export function scanModule(source, file, { modules, rootName } = {}) {
     scopes.set(node, current);
     if (node.type === "ImportDeclaration") {
       for (const specifier of node.specifiers) if (specifier.type === "ImportSpecifier") current.bindings.set(specifier.local.name,
-        { imported: specifier.imported.name, module: join(dirname(file), node.source.value.replace(/^\//, "")) });
+        { imported: specifier.imported.name, module: posix.join(posix.dirname(file), node.source.value.replace(/^\//, "")) });
     }
     if (node.type === "VariableDeclarator" && node.id.type === "Identifier") {
       const fn = functionPattern.test(node.init?.type || "") ? node.init : null;
