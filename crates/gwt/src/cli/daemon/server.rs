@@ -4734,6 +4734,37 @@ fn execute_issue_monitor_effect(
                             *pr_number,
                             merge_sha.as_deref(),
                             action,
+                            || {
+                                let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(
+                                    &scope.project_root,
+                                );
+                                let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(
+                                    |error| {
+                                        OwnerMutationError::PreSubmit(ApiError::Unexpected(
+                                            format!(
+                                            "cannot recheck merged-issue close authority: {error}"
+                                        ),
+                                        ))
+                                    },
+                                )?;
+                                if prefs.enabled
+                                    && prefs.effect_authority_epoch == effect.authority_epoch
+                                    && prefs
+                                        .auto_close_merged_issues
+                                        .unwrap_or(prefs.autonomous_mode)
+                                    && !prefs.autonomous_records.iter().any(|record| {
+                                        record.issue_number == *issue_number
+                                            && record.review_passed == Some(false)
+                                    })
+                                {
+                                    Ok(())
+                                } else {
+                                    Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+                                        "merged-issue close authority revoked or independent review failed"
+                                            .to_string(),
+                                    )))
+                                }
+                            },
                         )
                     }
                     Err(error) => Err(OwnerMutationError::PreSubmit(

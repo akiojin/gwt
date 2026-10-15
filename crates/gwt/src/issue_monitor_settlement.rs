@@ -248,6 +248,7 @@ pub fn render_issue_delivery_warning(
 /// Run one settlement against GitHub. Idempotent per delivery: a retry that
 /// finds its marker comment skips the comment, and a close that finds the
 /// Issue already closed reports `already_closed` instead of mutating.
+#[allow(clippy::too_many_arguments)] // Keep the delivery identity and final close guard explicit.
 pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
     client: &C,
     repository: &RepositoryIdentity,
@@ -256,6 +257,7 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
     pr_number: u64,
     merge_sha: Option<&str>,
     action: &MergedIssueSettlementAction,
+    close_guard: impl FnOnce() -> OwnerMutationResult<()>,
 ) -> OwnerMutationResult<MergedIssueSettlementOutcome> {
     let number = IssueNumber(issue_number);
     let snapshot = match client.fetch(number, None) {
@@ -295,7 +297,11 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
             .collect::<Vec<_>>();
         gwt_github::SpecBody::parse(&snapshot.body, &comments)
             .map(|spec| crate::issue_monitor_worker::acceptance_source_text(&snapshot.body, &spec))
-            .unwrap_or_else(|_| snapshot.body.clone())
+            .map_err(|error| {
+                OwnerMutationError::PreSubmit(gwt_github::ApiError::Unexpected(format!(
+                    "cannot read merged Issue acceptance criteria: {error}"
+                )))
+            })?
     } else {
         snapshot.body.clone()
     };
@@ -354,6 +360,9 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
     let closed = if wants_close {
         let deadline =
             ResolutionDeadline::new(SETTLEMENT_CONNECT_TIMEOUT, SETTLEMENT_TOTAL_TIMEOUT);
+        // Network readback and comments may outlive the dispatch-time verdict.
+        // Recheck authority at the last boundary before submitting the close.
+        close_guard()?;
         client.close_issue_verified(repository, number, &deadline)?;
         true
     } else {
@@ -467,6 +476,7 @@ mod tests {
             7,
             Some("abc123"),
             &MergedIssueSettlementAction::Close { delegated: false },
+            || Ok(()),
         )
         .expect("settled");
         assert_eq!(
@@ -509,6 +519,7 @@ mod tests {
             7,
             Some("abc123"),
             &MergedIssueSettlementAction::Close { delegated: true },
+            || Ok(()),
         )
         .expect("settled");
         assert!(!outcome.commented, "marker present: no duplicate comment");
@@ -536,6 +547,7 @@ mod tests {
             7,
             Some("abc123"),
             &MergedIssueSettlementAction::Close { delegated: true },
+            || Ok(()),
         )
         .expect("unchecked acceptance is handed off");
         assert!(!outcome.closed);
@@ -544,6 +556,66 @@ mod tests {
         assert!(client.comments(IssueNumber(42)).iter().any(|comment| {
             comment.body.contains("needs_human") && comment.body.contains("AC-1")
         }));
+        // A stale close cannot trust checked summary ACs when the routed SPEC
+        // no longer parses (the candidate scanner also fails this closed).
+        let client = FakeIssueClient::new();
+        seed_open_issue(&client, 42, vec![]);
+        let FetchResult::Updated(mut snapshot) = client.fetch(IssueNumber(42), None).unwrap()
+        else {
+            panic!("snapshot")
+        };
+        snapshot.labels = vec!["gwt-spec".to_string()];
+        snapshot
+            .body
+            .push_str("\n<!-- gwt-spec id=42 version=1 -->\n<!-- sections:\nspec=comment:99\n-->");
+        client.seed(snapshot);
+        let unreadable = settle_merged_issue(
+            &client,
+            &repository(),
+            repo.path(),
+            42,
+            7,
+            Some("abc123"),
+            &MergedIssueSettlementAction::Close { delegated: false },
+            || Ok(()),
+        );
+        let unreadable_mutations = client.owner_mutation_count();
+
+        // A review may fail after the executor read the checked checklist.
+        // The guard must run after all readback/comments and before the close.
+        let client = FakeIssueClient::new();
+        seed_open_issue(&client, 42, vec![]);
+        let revoked = settle_merged_issue(
+            &client,
+            &repository(),
+            repo.path(),
+            42,
+            7,
+            Some("abc123"),
+            &MergedIssueSettlementAction::Close { delegated: false },
+            || {
+                assert!(!client.comments(IssueNumber(42)).is_empty());
+                Err(OwnerMutationError::PreSubmit(
+                    gwt_github::ApiError::Unexpected(
+                        "failed independent acceptance review".to_string(),
+                    ),
+                ))
+            },
+        );
+        assert_eq!(
+            (
+                matches!(unreadable, Err(OwnerMutationError::PreSubmit(_))),
+                matches!(revoked, Err(OwnerMutationError::PreSubmit(_))),
+            ),
+            (true, true),
+            "unreadable SPEC and revoked review must both refuse the close"
+        );
+        assert_eq!(unreadable_mutations, 0);
+        assert_eq!(client.owner_mutation_count(), 0);
+        assert!(matches!(
+            client.fetch(IssueNumber(42), None).unwrap(),
+            FetchResult::Updated(snapshot) if snapshot.state == IssueState::Open
+        ));
     }
 
     #[test]
@@ -562,6 +634,7 @@ mod tests {
             &MergedIssueSettlementAction::UnmetAcceptance {
                 unmet: vec!["AC-2".to_string()],
             },
+            || Ok(()),
         )
         .expect("commented");
         assert_eq!(
@@ -588,6 +661,7 @@ mod tests {
             8,
             Some("def456"),
             &MergedIssueSettlementAction::AwaitClose { unmet: vec![] },
+            || Ok(()),
         )
         .expect("commented");
         assert!(awaiting.commented && !awaiting.closed);
@@ -620,6 +694,7 @@ mod tests {
             7,
             Some("abc123"),
             &MergedIssueSettlementAction::Close { delegated: false },
+            || Ok(()),
         )
         .expect("no-op");
         assert_eq!(
@@ -647,6 +722,7 @@ mod tests {
             7,
             None,
             &MergedIssueSettlementAction::Close { delegated: false },
+            || Ok(()),
         )
         .expect_err("missing issue");
         assert!(
@@ -712,6 +788,7 @@ mod tests {
             7,
             Some("abc123"),
             &MergedIssueSettlementAction::Close { delegated: false },
+            || Ok(()),
         )
         .expect("warned then closed");
         assert!(outcome.closed);
@@ -782,6 +859,7 @@ mod tests {
                 7,
                 Some("abc123"),
                 &action,
+                || Ok(()),
             )
             .expect("settled")
         };
@@ -833,6 +911,7 @@ mod tests {
             7,
             Some("abc123"),
             &MergedIssueSettlementAction::Close { delegated: false },
+            || Ok(()),
         )
         .is_err());
         assert_eq!(client.owner_mutation_count(), 0);

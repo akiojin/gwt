@@ -14210,6 +14210,26 @@ impl IssueMonitorState {
         // Issue #4117 AC-2: the verdict is the review window's last act; its
         // slot is free even though the idle pane is closed a scan later.
         self.forget_review_window(issue_number);
+        // A close worker may already be doing remote readback. Preserve the
+        // veto now instead of waiting for its settlement to mark work done.
+        if !passed
+            && self.pending_effects.iter().any(|effect| {
+                matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::SettleMergedIssue {
+                        issue_number: owner,
+                        action: MergedIssueSettlementAction::Close { .. },
+                        ..
+                    } if *owner == issue_number
+                )
+            })
+        {
+            self.escalate_to_needs_human(
+                issue_number,
+                NeedsHumanKind::UserChoiceRequired,
+                "merged delivery has a failed independent acceptance review; resolve the review before closing",
+            );
+        }
     }
 
     /// Issue #4117: live independent review windows, ordered by Issue.
@@ -39705,8 +39725,18 @@ mod tests {
         scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
         monitor.begin_review(42, 7, "aaa");
         assert!(monitor.merged_issue_close_allowed(42));
+        assert!(monitor.propose_merged_issue_settlement(
+            42,
+            &merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+            MergedIssueSettlementAction::Close { delegated: false },
+        ));
         monitor.record_review_verdict(42, false);
         assert!(!monitor.merged_issue_close_allowed(42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "a failed review must park a pending close before its worker finishes"
+        );
         monitor.record_merged(42);
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),

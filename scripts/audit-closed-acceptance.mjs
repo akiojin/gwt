@@ -46,21 +46,52 @@ export function auditClosedAcceptance(repository, spawn = spawnSync) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
     throw new Error("Usage: node scripts/audit-closed-acceptance.mjs <owner/repository>");
   }
-  const result = spawn("gh", [
-    "api", "--method", "GET", `repos/${repository}/issues?state=closed&per_page=100`,
-    "--paginate", "--slurp",
-  ], { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(result.stderr?.trim() || `gh exited ${result.status}`);
-  const pages = JSON.parse(result.stdout);
+  const read = (endpoint, extra = []) => {
+    const result = spawn("gh", ["api", "--method", "GET", `repos/${repository}/${endpoint}`, ...extra],
+      { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(result.stderr?.trim() || `gh exited ${result.status}`);
+    return JSON.parse(result.stdout);
+  };
+  const pages = read("issues?state=closed&per_page=100", ["--paginate", "--slurp"]);
   if (!Array.isArray(pages) || !pages.every(Array.isArray)) {
     throw new Error("Expected page arrays from gh api --paginate --slurp");
   }
   return pages.flat().flatMap((issue) => {
     if (issue.pull_request || issue.state !== "closed" || issue.state_reason !== "completed") return [];
-    const unchecked = uncheckedAcceptance(issue.body ?? "");
+    const unchecked = uncheckedAcceptance(acceptanceSource(issue, read));
     return unchecked.length ? [{ number: issue.number, url: issue.html_url, unchecked }] : [];
   });
+}
+
+// Follow the SPEC routing index, never stale/unreferenced artifact comments.
+function acceptanceSource(issue, read) {
+  const body = issue.body ?? "";
+  const isSpec = issue.labels?.some((label) =>
+    (typeof label === "string" ? label : label.name)?.toLowerCase() === "gwt-spec");
+  if (!isSpec) return body;
+  const index = body.match(/<!--\s*sections:\s*([\s\S]*?)-->/)?.[1];
+  const route = index?.match(/^\s*spec\s*=\s*(.*?)\s*$/m)?.[1];
+  if (!route || route === "body") return body;
+  const chunks = route.split(",").map((entry) => {
+    const id = entry.trim().match(/^comment:(\d+)$/)?.[1];
+    if (!id) throw new Error(`Issue #${issue.number}: invalid SPEC comment route`);
+    const comment = read(`issues/comments/${id}`);
+    const section = comment.body?.match(/<!--\s*artifact:spec\s+BEGIN(?:\s+part=(\d+)\/(\d+))?\s*-->([\s\S]*?)<!--\s*artifact:spec\s+END(?:\s+part=(\d+)\/(\d+))?\s*-->/);
+    if (!section) throw new Error(`Issue #${issue.number}: missing SPEC section in comment:${id}`);
+    if (section[1] !== section[4] || section[2] !== section[5]) {
+      throw new Error(`Issue #${issue.number}: inconsistent SPEC part markers`);
+    }
+    return { part: Number(section[1] ?? 0), total: Number(section[2] ?? 0), text: section[3] };
+  });
+  // Legacy unmarked multi-comment sections preserve routing order.
+  if (chunks.some((chunk) => chunk.part || chunk.total)) {
+    chunks.sort((a, b) => a.part - b.part);
+    if (chunks.some((chunk, i) => chunk.total !== chunks.length || chunk.part !== i + 1)) {
+      throw new Error(`Issue #${issue.number}: incomplete SPEC parts`);
+    }
+  }
+  return `${body}\n\n${chunks.map((chunk) => chunk.text).join("\n")}`;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

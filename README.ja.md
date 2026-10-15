@@ -647,11 +647,13 @@ SHA を含むコメントを投稿して Issue を close します。未達の�
 `merge 済み・close 待ち` コメントの記録のみ）。人間が reopen した Issue を同じ
 merge で再度 close することはありません。
 
-完了として close 済みでも本文に未チェックの受け入れ基準が残る Issue は、
+完了として close 済みでも未チェックの受け入れ基準が残る Issue は、
 この checkout で `node scripts/audit-closed-acceptance.mjs OWNER/REPOSITORY` を
 実行すると列挙できます。読み取り専用の監査が `gh` で閉じた Issue の全ページを
 取得し、Issue 番号・URL・未チェック基準の JSON 一覧を出力します。PR と
-「対応しない」として閉じた Issue は除外します。
+「対応しない」として閉じた Issue は除外します。コメント保存の SPEC は参照先の
+`spec` コメント（分割 section を含む）を読み、読めない section は黙って飛ばさず
+エラーとして報告します。
 
 無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
 NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
