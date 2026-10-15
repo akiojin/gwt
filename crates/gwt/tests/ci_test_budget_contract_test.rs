@@ -257,7 +257,7 @@ fn hosted_windows_startup_selects_only_the_native_command_contract() {
         .expect("Windows startup contract step");
     assert!(step.contains("run: node scripts/ci-windows-tests.mjs run gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture"));
     assert_eq!(timeout_minutes(&step), Some(1));
-    assert!(step.contains("if: ${{ matrix.shard == 'contracts' }}"));
+    assert!(!step.contains("if:"));
     assert!(
         !step.contains("--ignored"),
         "the selected test is not ignored"
@@ -285,7 +285,7 @@ fn startup_git_budget_is_required_on_linux_and_windows() {
         .expect("Windows must run the existing 1500-session Git budget test");
     assert!(step.contains("run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1"));
     assert!(!step.contains("continue-on-error:"));
-    assert!(step.contains("if: ${{ matrix.shard == 'contracts' }}"));
+    assert!(!step.contains("if:"));
 }
 
 #[test]
@@ -422,7 +422,6 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
 
     let workflow = read(TEST_WORKFLOW);
     let job = job_body(&workflow, "  test-windows-rust:");
-    let producer = job_body(&workflow, "  test-windows-regression-build:");
     let warm = job_body(&workflow, "  test-windows-warm:");
     assert_eq!(
         workflow
@@ -430,21 +429,15 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
             .count(),
         1
     );
-    assert!(producer.contains("ci-windows-tests.mjs build default"));
-    assert!(producer.contains("name: windows-regression-tests"));
-    assert!(producer.contains("if-no-files-found: error"));
-    for path in [
-        "target/ci-windows-tests-default.json",
-        "target/debug/deps/*.exe",
-        "target/debug/deps/*.dll",
-        "target/debug/*.exe",
-    ] {
-        assert!(producer.contains(path), "share required artifact {path}");
-    }
-    assert!(job.contains("name: windows-regression-tests"));
+    assert_eq!(job.matches("ci-windows-tests.mjs build default").count(), 1);
     assert!(
-        !job.contains("cargo test") && !job.contains("ci-windows-tests.mjs build"),
-        "every regression shard must execute shared binaries without rebuilding"
+        job.find("ci-windows-tests.mjs build default").unwrap()
+            < job.find("ci-windows-tests.mjs run ").unwrap()
+    );
+    assert!(!workflow.contains("test-windows-regression-build:"));
+    assert!(
+        !job.contains("cargo test"),
+        "regression filters must execute built binaries without recompiling"
     );
     assert_eq!(
         workflow.matches("ci-windows-tests.mjs build warm").count(),
@@ -461,27 +454,10 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
 
     let doc: Value = serde_yaml::from_str(&workflow).expect("Test workflow");
     let regressions = &doc["jobs"]["test-windows-rust"];
-    assert_eq!(
-        regressions["needs"],
-        serde_yaml::from_str::<Value>("[source-sync, test-windows-regression-build]").unwrap()
-    );
-    assert_eq!(regressions["strategy"]["fail-fast"].as_bool(), Some(false));
-    let shards: Vec<_> = regressions["strategy"]["matrix"]["shard"]
-        .as_sequence()
-        .expect("contracts and five independent driver shards")
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect();
-    assert_eq!(
-        shards,
-        [
-            "contracts",
-            "driver-1",
-            "driver-2",
-            "driver-3",
-            "driver-4",
-            "driver-5"
-        ]
+    assert_eq!(regressions["needs"].as_str(), Some("source-sync"));
+    assert!(
+        regressions["strategy"].is_null(),
+        "one regression runner shares its build"
     );
     let steps = regressions["steps"].as_sequence().unwrap();
     let driver = steps
@@ -491,29 +467,48 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
                 .as_str()
                 .is_some_and(|run| run.contains("verification_driver_cli_test::"))
         })
-        .expect("five driver shards must retain all ten real-artifact repetitions");
-    assert_eq!(
-        driver["if"].as_str(),
-        Some("${{ startsWith(matrix.shard, 'driver-') }}")
-    );
+        .expect("five workers must retain all ten real-artifact repetitions");
+    assert!(driver["if"].is_null());
     let driver_run = driver["run"].as_str().unwrap();
+    assert!(driver_run.contains("1..5 | ForEach-Object"));
+    assert!(driver_run.contains("Start-Job"));
     assert!(driver_run.contains("$attempt -le 2"));
     assert!(driver_run.contains("verification_driver_cli_test:: -- --test-threads=1"));
     assert!(driver_run.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
-    assert!(driver_run.contains("if ($env:REGRESSION_SHARD -eq 'driver-1') {"));
     assert!(driver_run.contains("cli::verification_record::driver:: -- --test-threads=1"));
+    assert_eq!(
+        driver_run
+            .matches("cli::verification_record::driver::")
+            .count(),
+        1
+    );
+    assert!(
+        driver_run
+            .find("cli::verification_record::driver::")
+            .unwrap()
+            < driver_run.find("Start-Job").unwrap()
+    );
+    assert!(
+        driver_run.contains("throw"),
+        "native command failures must fail their worker"
+    );
+    assert!(driver_run.contains("Wait-Job") && driver_run.contains("Receive-Job"));
+    assert!(
+        driver_run.contains(".State -ne 'Completed'")
+            || driver_run.contains("Where-Object State -ne Completed")
+    );
+    assert!(
+        driver_run.contains("exit 1"),
+        "any failed worker must fail the required job"
+    );
     for step in steps {
         let Some(run) = step["run"].as_str() else {
             continue;
         };
-        if run.contains("ci-windows-tests.mjs run ")
-            && !run.contains("verification_driver_cli_test::")
-            && !run.contains("cli::verification_record::driver::")
-        {
-            assert_eq!(
-                step["if"].as_str(),
-                Some("${{ matrix.shard == 'contracts' }}"),
-                "ordinary contracts must run once, separate from driver repetition"
+        if run.contains("ci-windows-tests.mjs run ") {
+            assert!(
+                step["if"].is_null(),
+                "all regression contracts must run unconditionally"
             );
         }
     }

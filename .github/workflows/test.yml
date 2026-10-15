@@ -616,26 +616,7 @@ jobs:
         with:
           name: windows-core-tests
           path: target
-      # Issue #5030: five full-suite passes do not measure the intermittent
-      # registration-departure race. Repeat its entire integration target at
-      # default parallelism, retaining all outcomes even after a failure.
-      - name: Measure index coordinator stability over twenty runs
-        if: ${{ matrix.run == 1 }}
-        shell: pwsh
-        run: |
-          Remove-Item Env:RUST_TEST_THREADS -ErrorAction SilentlyContinue
-          $failures = 0
-          1..20 | ForEach-Object {
-            Write-Host "index coordinator run $_ of 20"
-            node scripts/ci-windows-tests.mjs run-core-index
-            if ($LASTEXITCODE -ne 0) { $failures++ }
-          }
-          Write-Host "index coordinator: $failures failures out of 20 runs"
-          if ($failures -ne 0) { exit 1 }
-        timeout-minutes: 15
       - name: Run the complete gwt-core suite at default parallelism
-        # Run the deterministic unit regression even if the integration
-        # measurement above records an intermittent failure.
         if: ${{ !cancelled() }}
         shell: pwsh
         env:
@@ -648,10 +629,47 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         timeout-minutes: 30
 
-  test-windows-regression-build:
-    name: Build Windows regression artifacts
+  # Issue #5030: keep twenty consecutive runs on one native host, independent
+  # of the five full-suite passes so neither delays the other after compilation.
+  test-windows-index-stability:
+    name: Windows index coordinator stability (20 runs)
+    if: ${{ !cancelled() && needs.test-windows-core-build.result == 'success' }}
+    needs: [source-sync, test-windows-core-build]
     concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-regression-build
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-index-stability
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-core-tests
+          path: target
+      # Issue #5030: five full-suite passes do not measure the intermittent
+      # registration-departure race. Repeat its entire integration target at
+      # default parallelism, retaining all outcomes even after a failure.
+      - name: Measure index coordinator stability over twenty runs
+        shell: pwsh
+        run: |
+          Remove-Item Env:RUST_TEST_THREADS -ErrorAction SilentlyContinue
+          $failures = 0
+          1..20 | ForEach-Object {
+            Write-Host "index coordinator run $_ of 20"
+            node scripts/ci-windows-tests.mjs run-core-index
+            if ($LASTEXITCODE -ne 0) { $failures++ }
+          }
+          Write-Host "index coordinator: $failures failures out of 20 runs"
+          if ($failures -ne 0) { exit 1 }
+        timeout-minutes: 15
+
+  test-windows-rust:
+    name: Test (Windows regressions)
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-rust
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
     needs: source-sync
     if: ${{ !cancelled() }}
@@ -672,69 +690,29 @@ jobs:
       - name: Build Windows regression targets once
         run: node scripts/ci-windows-tests.mjs build default
         timeout-minutes: 30
-      - uses: actions/upload-artifact@v7
-        with:
-          name: windows-regression-tests
-          path: |
-            target/ci-windows-tests-default.json
-            target/debug/deps/*.exe
-            target/debug/deps/*.dll
-            target/debug/*.exe
-            target/debug/*.dll
-          if-no-files-found: error
-          compression-level: 1
-          retention-days: 1
-
-  test-windows-rust:
-    name: Test (Windows regressions)
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-${{ matrix.shard }}-test-windows-rust
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: [source-sync, test-windows-regression-build]
-    if: ${{ !cancelled() && needs.test-windows-regression-build.result == 'success' }}
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [contracts, driver-1, driver-2, driver-3, driver-4, driver-5]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-      - uses: actions/download-artifact@v8
-        with:
-          name: windows-regression-tests
-          path: target
       - name: Run targeted issue cache refresh regression
-        if: ${{ matrix.shard == 'contracts' }}
         run: node scripts/ci-windows-tests.mjs run gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact
         timeout-minutes: 15
       - name: Run managed hook self-heal regressions
-        if: ${{ matrix.shard == 'contracts' }}
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1
         timeout-minutes: 15
       - name: Run GUI dispatch stall diagnostic regressions
-        if: ${{ matrix.shard == 'contracts' }}
         run: |
           node scripts/ci-windows-tests.mjs run gwt bin gwt dispatch_watchdog::tests:: -- --test-threads=1
         timeout-minutes: 15
       - name: Run priority roundtrip from Normal and BelowNormal launchers
-        if: ${{ matrix.shard == 'contracts' }}
         run: node scripts/ci-windows-tests.mjs run gwt-core test process_priority_roundtrip -- --nocapture
         timeout-minutes: 15
       - name: Run shared Windows process resolver tests
-        if: ${{ matrix.shard == 'contracts' }}
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run gwt-core test windows_process_resolver
           node scripts/ci-windows-tests.mjs run gwt-core test process_adapter_parity
         timeout-minutes: 15
       - name: Run real Claude probe caller regressions
-        if: ${{ matrix.shard == 'contracts' }}
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run gwt-core test windows_claude_user_agent
@@ -744,11 +722,9 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt bin gwt command_prompt_agent_wrapper
         timeout-minutes: 15
       - name: Run Windows PTY resolver adapter tests
-        if: ${{ matrix.shard == 'contracts' }}
         run: node scripts/ci-windows-tests.mjs run gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1
         timeout-minutes: 15
       - name: Run inherited Claude session environment regressions
-        if: ${{ matrix.shard == 'contracts' }}
         run: node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1
         timeout-minutes: 15
       # Issue #3631: a GUI-subsystem PTY start gate is never attached to the
@@ -756,7 +732,6 @@ jobs:
       # Windows Terminal window. Both guards are Windows-only and would be
       # skipped by the Linux workspace run.
       - name: Run Windows PTY start-gate console contracts
-        if: ${{ matrix.shard == 'contracts' }}
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1
@@ -764,7 +739,6 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt-terminal test pty_start_gate_test -- --test-threads=1
         timeout-minutes: 15
       - name: Run Issue Monitor scheduled driver contracts
-        if: ${{ matrix.shard == 'contracts' }}
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run gwt bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1
@@ -775,7 +749,6 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt lib gwt local_fallback_lease -- --test-threads=1
         timeout-minutes: 15
       - name: Run Issue Monitor launch_now control-path contracts
-        if: ${{ matrix.shard == 'contracts' }}
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1
@@ -789,11 +762,9 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::agent_issue_monitor_scan_ -- --test-threads=1
         timeout-minutes: 15
       - name: Run agent process resolver caller contracts
-        if: ${{ matrix.shard == 'contracts' }}
         run: 'node scripts/ci-windows-tests.mjs run gwt test runtime_tests agent_process_resolution_contract_test::'
         timeout-minutes: 15
       - name: Run Windows runtime daemon named-pipe transport contracts
-        if: ${{ matrix.shard == 'contracts' }}
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::daemon::transport -- --test-threads=1
@@ -807,27 +778,34 @@ jobs:
       # Issue #4746: Windows uses the in-process verification runner, and
       # reclaiming an exited workload's stalled driver needs native taskkill.
       - name: Run Windows verification completion and reclaim regressions
-        if: ${{ matrix.shard == 'contracts' }}
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_record::tests::verification_records_exit_while_grandchild_holds_output -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_lease:: -- --test-threads=1
         timeout-minutes: 15
       - name: Run Windows verification driver relink regression
-        if: ${{ startsWith(matrix.shard, 'driver-') }}
-        env:
-          REGRESSION_SHARD: ${{ matrix.shard }}
-        # Issue #5466 AC-4: retain the real-artifact assertions on every run.
-        # Five independent runners each keep two passes: all ten original passes.
+        # Issue #5466 AC-4: all ten passes retain their real-artifact assertions.
+        # Each process has private fixture HOME/project/target directories.
         run: |
-          if ($env:REGRESSION_SHARD -eq 'driver-1') {
-            node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_record::driver:: -- --test-threads=1
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_record::driver:: -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $jobs = 1..5 | ForEach-Object {
+            Start-Job -ArgumentList (Get-Location).Path,$_ -ScriptBlock {
+              param($repo, $worker)
+              Set-Location $repo
+              for ($attempt = 1; $attempt -le 2; $attempt++) {
+                Write-Host "Windows verification driver worker $worker attempt $attempt of 2"
+                node scripts/ci-windows-tests.mjs run gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1
+                if ($LASTEXITCODE -ne 0) { throw "driver worker $worker failed ($LASTEXITCODE)" }
+              }
+            }
           }
-          for ($attempt = 1; $attempt -le 2; $attempt++) {
-            Write-Host "Windows verification driver relink regression $env:REGRESSION_SHARD $attempt/2"
-            node scripts/ci-windows-tests.mjs run gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          try {
+            $results = $jobs | Wait-Job
+            $results | Receive-Job -ErrorAction Continue
+            if (@($results | Where-Object State -ne Completed).Count -ne 0) { exit 1 }
+          } finally {
+            $jobs | Remove-Job -Force
           }
         timeout-minutes: 20
       # Issue #4078 AC-4: the wait declaration is the only way a Windows agent
@@ -836,7 +814,6 @@ jobs:
       # host-state contracts, so they are pinned on the Windows job rather than
       # inferred from the Linux run.
       - name: Run Issue Monitor wait declaration contracts
-        if: ${{ matrix.shard == 'contracts' }}
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run gwt lib gwt cli::issue::tests::monitor_wait_ -- --test-threads=1
@@ -844,19 +821,16 @@ jobs:
           node scripts/ci-windows-tests.mjs run gwt lib gwt issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1
         timeout-minutes: 15
       - name: Run release asset contract tests
-        if: ${{ matrix.shard == 'contracts' }}
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15
       # Issue #4821: keep the readiness contract within 60 seconds.
       # Native timing measurements run on the nightly path.
       - name: Check Windows startup tray readiness contract
-        if: ${{ matrix.shard == 'contracts' }}
         run: node scripts/ci-windows-tests.mjs run gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture
         timeout-minutes: 1
       # Issue #4803 AC-4: Linux runs this in the workspace suite; pin it here
       # too so exceeding the deterministic 1500-session Git budget fails CI.
       - name: Check startup update Git-spawn budget
-        if: ${{ matrix.shard == 'contracts' }}
         run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1
         timeout-minutes: 15
 
@@ -897,7 +871,7 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-required
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: [test-windows-core-stability, test-windows-rust, test-windows-warm, source-sync]
+    needs: [test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-warm, source-sync]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -905,11 +879,12 @@ jobs:
         shell: bash
         env:
           CORE_STABILITY_RESULT: ${{ needs.test-windows-core-stability.result }}
+          INDEX_STABILITY_RESULT: ${{ needs.test-windows-index-stability.result }}
           WINDOWS_RESULT: ${{ needs.test-windows-rust.result }}
           WARM_RESULT: ${{ needs.test-windows-warm.result }}
         run: |
           echo "Windows core stability: $CORE_STABILITY_RESULT; regressions: $WINDOWS_RESULT"
-          test "$CORE_STABILITY_RESULT" = success && test "$WINDOWS_RESULT" = success && test "$WARM_RESULT" = success
+          test "$CORE_STABILITY_RESULT" = success && test "$INDEX_STABILITY_RESULT" = success && test "$WINDOWS_RESULT" = success && test "$WARM_RESULT" = success
 
   # The default-parallel determinism proof lives in nightly.yml (Issue #4134
   # AC-1). It re-ran on Windows a suite Linux had already run, cost 2806s, and
@@ -1022,7 +997,7 @@ jobs:
         timeout-minutes: 15
 
   report-post-merge-failure:
-    needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-verify-timings, test-windows-core-build, test-windows-core-stability, test-windows-regression-build, test-windows-rust, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
+    needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-verify-timings, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
     if: ${{ github.event_name == 'push' && failure() }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-report-post-merge-failure

@@ -417,9 +417,32 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
         .collect();
     assert_eq!(commands, ["node scripts/ci-windows-tests.mjs run-core"]);
     assert!(!run.contains("--test-threads"));
-    let index = core["steps"]
-        .as_sequence()
-        .unwrap()
+    assert!(steps
+        .iter()
+        .all(|(_, run)| !run.contains("ci-windows-tests.mjs run-core-index")));
+    let index_job = job(&doc, "test-windows-index-stability");
+    assert_eq!(index_job["runs-on"].as_str(), Some("windows-latest"));
+    assert_eq!(
+        index_job["needs"],
+        serde_yaml::from_str::<Value>("[source-sync, test-windows-core-build]").unwrap()
+    );
+    assert_eq!(
+        index_job["if"].as_str(),
+        Some("${{ !cancelled() && needs.test-windows-core-build.result == 'success' }}")
+    );
+    assert!(
+        index_job["strategy"].is_null(),
+        "keep all twenty runs on one host"
+    );
+    assert!(index_job["continue-on-error"].is_null());
+    let index_steps = index_job["steps"].as_sequence().unwrap();
+    assert!(index_steps.iter().any(|step| {
+        step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+            && step["with"]["name"].as_str() == Some("windows-core-tests")
+    }));
+    let index = index_steps
         .iter()
         .find(|step| {
             step["run"]
@@ -427,13 +450,20 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
                 .is_some_and(|run| run.contains("ci-windows-tests.mjs run-core-index"))
         })
         .expect("retain twenty additional complete index coordinator runs");
-    assert_eq!(index["if"].as_str(), Some("${{ matrix.run == 1 }}"));
+    assert!(index["if"].is_null());
+    assert!(index["continue-on-error"].is_null());
     let index_run = index["run"].as_str().unwrap();
     assert!(index_run.contains("1..20"));
     assert!(index_run.contains("Remove-Item Env:RUST_TEST_THREADS"));
     assert!(index_run.contains("if ($LASTEXITCODE -ne 0) { $failures++ }"));
     assert!(index_run.contains("if ($failures -ne 0) { exit 1 }"));
     assert!(!index_run.contains("--test-threads"));
+    assert!(
+        run_steps(&index_job)
+            .iter()
+            .all(|(_, run)| !run.contains("cargo test")
+                && !run.contains("ci-windows-tests.mjs build"))
+    );
     assert!(core
         .get("steps")
         .and_then(Value::as_sequence)
@@ -453,13 +483,10 @@ fn the_required_windows_check_requires_successful_core_stability() {
         regressions.get("name").and_then(Value::as_str),
         Some("Test (Windows regressions)")
     );
-    assert_eq!(
-        regressions["needs"],
-        serde_yaml::from_str::<Value>("[source-sync, test-windows-regression-build]").unwrap()
-    );
+    assert_eq!(regressions["needs"].as_str(), Some("source-sync"));
     assert_eq!(
         regressions.get("if").and_then(Value::as_str),
-        Some("${{ !cancelled() && needs.test-windows-regression-build.result == 'success' }}")
+        Some("${{ !cancelled() }}")
     );
     let windows = job(&doc, "test-windows-required");
     assert_eq!(
@@ -485,6 +512,7 @@ fn the_required_windows_check_requires_successful_core_stability() {
         needs,
         [
             CORE_STABILITY_JOB,
+            "test-windows-index-stability",
             "test-windows-rust",
             "test-windows-warm",
             "source-sync"
@@ -511,6 +539,10 @@ fn the_required_windows_check_requires_successful_core_stability() {
         Some("${{ needs.test-windows-rust.result }}")
     );
     assert_eq!(
+        guard["env"]["INDEX_STABILITY_RESULT"].as_str(),
+        Some("${{ needs.test-windows-index-stability.result }}")
+    );
+    assert_eq!(
         guard["env"]["WARM_RESULT"].as_str(),
         Some("${{ needs.test-windows-warm.result }}")
     );
@@ -520,6 +552,7 @@ fn the_required_windows_check_requires_successful_core_stability() {
         .expect("guard must run");
     assert!(run.contains("echo"), "report the dependency result");
     assert!(run.contains("test \"$CORE_STABILITY_RESULT\" = success"));
+    assert!(run.contains("test \"$INDEX_STABILITY_RESULT\" = success"));
     assert!(run.contains("test \"$WINDOWS_RESULT\" = success"));
     assert!(run.contains("test \"$WARM_RESULT\" = success"));
     assert!(guard.get("continue-on-error").is_none() && guard.get("if").is_none());
