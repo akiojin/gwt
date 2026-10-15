@@ -11770,9 +11770,11 @@ impl AppRuntime {
                     &ClientScope::Project(context.project_key.clone()),
                 )
                 .unwrap_or_default(),
-            FrontendEvent::CreateWindow { preset, bounds } => {
-                self.create_window_events(context, preset, bounds)
-            }
+            FrontendEvent::CreateWindow {
+                preset,
+                bounds,
+                surface_owner,
+            } => self.create_window_events(context, preset, bounds, surface_owner),
             FrontendEvent::LoadProcessConsole { id } => {
                 // SPEC-2809 Phase F2 — Console window mount asks for the
                 // current ring buffer. Use the global hub installed by

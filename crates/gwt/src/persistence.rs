@@ -127,6 +127,13 @@ pub enum WindowWorktreeForm {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowSurfaceOwner {
+    Pm,
+    Agents,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedWindowState {
     pub id: String,
@@ -138,6 +145,10 @@ pub struct PersistedWindowState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_title_detail: Option<String>,
     pub preset: WindowPreset,
+    /// Origin of an auxiliary surface; this never grants the PM role.
+    /// Missing values retain the legacy preset-based classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_owner: Option<WindowSurfaceOwner>,
     pub geometry: WindowGeometry,
     #[serde(default)]
     pub geometry_revision: u64,
@@ -373,6 +384,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 session_id: None,
                 linked_issue_number: None,
                 runtime_started_at_ms: None,
+                surface_owner: None,
                 is_pm: false,
             },
             PersistedWindowState {
@@ -402,6 +414,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 session_id: None,
                 linked_issue_number: None,
                 runtime_started_at_ms: None,
+                surface_owner: None,
                 is_pm: false,
             },
         ],
@@ -699,6 +712,29 @@ mod tests {
     }
 
     #[test]
+    fn surface_owner_survives_workspace_save_and_restore() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let mut value = serde_json::to_value(default_workspace_state()).expect("workspace");
+        value["windows"][0]["surface_owner"] = serde_json::json!("pm");
+        value["windows"][0]["is_pm"] = serde_json::json!(true);
+        value["windows"][1]["surface_owner"] = serde_json::json!("agents");
+        let state: PersistedWindowCanvasState = serde_json::from_value(value).expect("owners");
+        save_workspace_state(&path, &state).expect("save");
+        let mut loaded = load_workspace_state(&path).expect("restore");
+        pause_process_windows_for_restore(&mut loaded);
+        let restored = serde_json::to_value(&loaded).expect("readback");
+        assert_eq!(restored["windows"][0]["surface_owner"], "pm");
+        assert_eq!(restored["windows"][1]["surface_owner"], "agents");
+        assert!(
+            !loaded.windows[0].is_pm,
+            "ownership must not confer the PM role"
+        );
+        let legacy = serde_json::to_value(default_workspace_state()).expect("legacy");
+        assert!(legacy["windows"][0].get("surface_owner").is_none());
+    }
+
+    #[test]
     fn default_workspace_contains_claude_and_codex_windows() {
         let state = default_workspace_state();
         assert_eq!(state.viewport, default_canvas_viewport());
@@ -939,6 +975,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -968,6 +1005,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
             ],
@@ -1548,6 +1586,7 @@ mod tests {
                 session_id: Some("sess-1".into()),
                 linked_issue_number: None,
                 runtime_started_at_ms: None,
+                surface_owner: None,
                 is_pm: false,
             }],
             next_z_index: 2,
@@ -1651,6 +1690,7 @@ mod tests {
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
@@ -1728,6 +1768,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -1757,6 +1798,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
             ],
@@ -1976,6 +2018,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
                 PersistedWindowState {
@@ -2005,6 +2048,7 @@ mod tests {
                     session_id: None,
                     linked_issue_number: None,
                     runtime_started_at_ms: None,
+                    surface_owner: None,
                     is_pm: false,
                 },
             ],

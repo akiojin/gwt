@@ -1,7 +1,8 @@
 use crate::{
     persistence::{
         AgentKanbanLane, CanvasViewport, PersistedWindowCanvasState, PersistedWindowState,
-        WindowGeometry, WindowPlacement, WindowProcessStatus, WindowWorktreeForm,
+        WindowGeometry, WindowPlacement, WindowProcessStatus, WindowSurfaceOwner,
+        WindowWorktreeForm,
     },
     preset::WindowPreset,
     protocol::{ArrangeMode, FocusCycleDirection},
@@ -37,6 +38,18 @@ impl WindowCanvasState {
 
     pub fn window(&self, id: &str) -> Option<&PersistedWindowState> {
         self.persisted.windows.iter().find(|window| window.id == id)
+    }
+
+    pub fn set_surface_owner(&mut self, id: &str, owner: Option<WindowSurfaceOwner>) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        let window = &mut self.persisted.windows[index];
+        if window.surface_owner == owner {
+            return false;
+        }
+        window.surface_owner = owner;
+        true
     }
 
     /// Changes snapshot eligibility without replacing the in-memory window.
@@ -459,6 +472,7 @@ impl WindowCanvasState {
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         };
         self.persisted.next_z_index += 1;
@@ -1223,6 +1237,17 @@ mod tests {
     }
 
     #[test]
+    fn surface_owner_is_retained_by_registry_snapshot() {
+        let mut value = serde_json::to_value(default_workspace_state()).expect("workspace");
+        value["windows"][0]["surface_owner"] = serde_json::json!("pm");
+        let state = serde_json::from_value(value).expect("owned window");
+        let canvas = WindowCanvasState::from_persisted(state);
+        let snapshot = serde_json::to_value(canvas.persistable_state()).expect("snapshot");
+        assert_eq!(snapshot["windows"][0]["surface_owner"], "pm");
+        assert!(!canvas.persisted().windows[0].is_pm);
+    }
+
+    #[test]
     fn adding_file_tree_window_marks_it_running_without_process() {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let window = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
@@ -1768,6 +1793,7 @@ mod tests {
                 session_id: None,
                 linked_issue_number: None,
                 runtime_started_at_ms: None,
+                surface_owner: None,
                 is_pm: false,
             }],
             next_z_index: 2,

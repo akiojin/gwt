@@ -1,3 +1,5 @@
+import { surfaceForWindow } from "./surface-rail.js";
+
 const SURFACES = { issues: "Issues", agents: "Agents", board: "Board", settings: "Settings" };
 const PRESETS = { issues: "settings", board: "board", settings: "settings" };
 
@@ -15,6 +17,7 @@ export function createSplitSurfaces({
   let split = false;
   let active = 0;
   let selections = ["issues", "board"];
+  let fixedWindowId = null;
   const requested = new Map();
   const mounted = new Map();
   const panes = ["Left", "Right"].map((label, index) => {
@@ -56,11 +59,15 @@ export function createSplitSurfaces({
     const windows = getWindows(catalog);
     host.dataset.catalogVersion = String(catalog.version);
     for (const [surface, existingIds] of requested) {
-      if (windows.some(data => data.preset === PRESETS[surface] && !existingIds.has(data.id))) {
+      if (windows.some(data => matchesSurface(data, surface) && !existingIds.has(data.id))) {
         requested.delete(surface);
       }
     }
     if (!opened) return;
+    const pm = selections[active] === "pm";
+    if (pm && !windows.some(data => data.id === fixedWindowId && surfaceForWindow(data) === "pm")) {
+      fixedWindowId = windows.find(data => data.is_pm)?.id || null;
+    }
     const visiblePanes = panes.map((pane, index) => ({ pane, index }))
       .filter(({ index }) => split || index === active);
     host.hidden = false;
@@ -68,8 +75,9 @@ export function createSplitSurfaces({
     area.classList.add("has-surface-layout");
     area.classList.toggle("is-split", split);
     button.setAttribute("aria-pressed", String(split));
+    button.disabled = pm;
     button.textContent = split ? "Close split" : "Split view";
-    button.title = split ? "Keep the active surface in a single pane" : "Show two surfaces side by side";
+    button.title = pm ? "PM is shown in a single pane" : split ? "Keep the active surface in a single pane" : "Show two surfaces side by side";
     for (const [index, pane] of panes.entries()) {
       pane.hidden = !split && index !== active;
       pane.setAttribute("aria-label", split ? `${index === 0 ? "Left" : "Right"} pane` : "Main pane");
@@ -78,7 +86,7 @@ export function createSplitSurfaces({
     const assigned = new Map();
     // Reserve each existing pane's live view before allocating a second view.
     for (const { index, pane } of visiblePanes) {
-      const data = windows.find(data => data.preset === PRESETS[selections[index]] &&
+      const data = windows.find(data => matchesSurface(data, selections[index]) &&
         getElement(data.id)?.parentElement === pane.querySelector(".split-pane__body"));
       if (data) { assigned.set(index, data); desired.set(data.id, { element: getElement(data.id), index }); }
     }
@@ -95,12 +103,12 @@ export function createSplitSurfaces({
         pane.querySelector(".split-pane__empty").hidden = true;
         continue;
       }
-      const data = assigned.get(index) || windows.find(data => data.preset === PRESETS[surface] && !desired.has(data.id));
+      const data = assigned.get(index) || windows.find(data => matchesSurface(data, surface) && !desired.has(data.id));
       const empty = pane.querySelector(".split-pane__empty");
       empty.hidden = Boolean(data);
-      empty.textContent = `Opening ${SURFACES[surface]}…`;
-      if (!data && !requested.has(surface)) {
-        requested.set(surface, new Set(windows.filter(data => data.preset === PRESETS[surface]).map(data => data.id)));
+      empty.textContent = surface === "pm" ? "PM is not running. Open PM from the rail." : `Opening ${SURFACES[surface]}…`;
+      if (!data && surface !== "pm" && !requested.has(surface)) {
+        requested.set(surface, new Set(windows.filter(data => matchesSurface(data, surface)).map(data => data.id)));
         openSurface(surface);
       }
       if (data) {
@@ -144,8 +152,14 @@ export function createSplitSurfaces({
     if (changed.length) onLayout(changed);
   }
 
+  function matchesSurface(data, surface) {
+    if (surface === "pm") return data.id === fixedWindowId && surfaceForWindow(data) === "pm";
+    return data.preset === PRESETS[surface] && surfaceForWindow(data) !== "pm";
+  }
+
   function choose(surface, index = active) {
     if (!opened || !SURFACES[surface] || (!split && index !== active)) return false;
+    fixedWindowId = null;
     selections[index] = surface;
     active = index;
     sync();
@@ -156,6 +170,7 @@ export function createSplitSurfaces({
   }
 
   function open(surface = "issues") {
+    if (opened && selections[active] === "pm") return;
     if (opened && split) return;
     if (!opened) {
       selections = [SURFACES[surface] ? surface : "issues", surface === "board" ? "issues" : "board"];
@@ -171,6 +186,17 @@ export function createSplitSurfaces({
     if (opened) return choose(surface);
     selections = [surface, surface === "board" ? "issues" : "board"];
     active = 0;
+    opened = true;
+    split = false;
+    sync();
+    return true;
+  }
+
+  function showWindow(id) {
+    const windows = getWindows(windowCatalogModel.read().catalog);
+    if (!windows.some(data => data.id === id && surfaceForWindow(data) === "pm")) return false;
+    fixedWindowId = id;
+    selections[active] = "pm";
     opened = true;
     split = false;
     sync();
@@ -196,10 +222,12 @@ export function createSplitSurfaces({
     mounted.clear();
     opened = false;
     split = false;
+    fixedWindowId = null;
     onAgentsHost(null, null);
     host.hidden = true;
     area.classList.remove("is-split", "has-surface-layout");
     button.setAttribute("aria-pressed", "false");
+    button.disabled = false;
     button.textContent = "Split view";
     button.title = "Show two surfaces side by side";
     onLayout(ids);
@@ -209,7 +237,7 @@ export function createSplitSurfaces({
   const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
   return {
     dispose: unsubscribe,
-    open, show, close, collapse, sync, select: choose,
+    open, show, showWindow, close, collapse, sync, select: choose,
     isOpen: () => opened && split,
     get hasLayout() { return opened; },
     activeSurface: () => opened ? selections[active] : null,

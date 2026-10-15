@@ -3837,6 +3837,7 @@ mod tests {
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         }
     }
@@ -5777,7 +5778,8 @@ mod tests {
                 .create_window_events(
                     &runtime.test_context(),
                     WindowPreset::Branches,
-                    bounds.clone()
+                    bounds.clone(),
+                    None
                 )
                 .len(),
             3
@@ -5787,7 +5789,8 @@ mod tests {
                 .create_window_events(
                     &runtime.test_context(),
                     WindowPreset::FileTree,
-                    bounds.clone()
+                    bounds.clone(),
+                    None
                 )
                 .len(),
             3
@@ -5966,7 +5969,7 @@ mod tests {
         ] {
             assert_eq!(
                 runtime
-                    .create_window_events(&runtime.test_context(), preset, bounds.clone())
+                    .create_window_events(&runtime.test_context(), preset, bounds.clone(), None)
                     .len(),
                 3,
                 "{preset:?} should create through the normal window path",
@@ -6004,7 +6007,12 @@ mod tests {
             .z_index;
         assert_eq!(
             runtime
-                .create_window_events(&runtime.test_context(), WindowPreset::Work, bounds.clone())
+                .create_window_events(
+                    &runtime.test_context(),
+                    WindowPreset::Work,
+                    bounds.clone(),
+                    None
+                )
                 .len(),
             1,
             "Work must focus the existing Settings surface",
@@ -6942,6 +6950,7 @@ mod tests {
                     gwt::FrontendEvent::CreateWindow {
                         preset: WindowPreset::Settings,
                         bounds: bounds.clone(),
+                        surface_owner: None,
                     },
                 )
                 .len(),

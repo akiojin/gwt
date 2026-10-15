@@ -2259,7 +2259,7 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
     }
 
     runtime.restart_window_events(&codex_id);
-    runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds);
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds, None);
 
     let inventory = gwt::session_inventory::observe_sessions(&repo, &runtime.sessions_dir);
     let live_windows = runtime.runtimes.keys().cloned().collect::<Vec<_>>();
