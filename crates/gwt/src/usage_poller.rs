@@ -42,10 +42,6 @@ const TICK_SECS: u64 = 30;
 /// this often (or immediately on a forced refresh).
 const CONSUMPTION_CACHE_SECS: i64 = 300;
 
-#[cfg(test)]
-#[path = "usage_poller_performance_tests.rs"]
-mod performance_tests;
-
 /// Called with each tick's account rows, in addition to the client broadcast.
 ///
 /// Issue #3616: the quota classifier lives in `AppRuntime`, which only the tao
@@ -461,6 +457,10 @@ fn collect_sessions(config: &UsageConfig, cache: &mut UsageCache) -> Vec<Session
     }
     out
 }
+
+#[cfg(test)]
+#[path = "usage_poller_performance_tests.rs"]
+mod performance_tests;
 
 #[cfg(test)]
 mod tests {
