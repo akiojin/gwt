@@ -10,16 +10,21 @@ const read = (name) => readFileSync(new URL(name, import.meta.url), 'utf8').repl
 const rows = (name) => read(name).trim().split(/\r?\n/).map(JSON.parse);
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 const median = (values) => values.toSorted((a, b) => a - b)[Math.floor(values.length / 2)];
-const gitSource = (name) => execFileSync('git', ['show', `${historicalRef}:crates/gwt/src/${name}`], { cwd: repo });
-const currentSource = (name) => readFileSync(new URL(`../../../crates/gwt/src/${name}`, import.meta.url));
+const gitSource = (name, ref) => execFileSync('git', ['show', `${ref}:crates/gwt/src/${name}`], { cwd: repo, maxBuffer: 4 * 1024 * 1024 });
+function verifySource(hash, name, ref) {
+  const source = gitSource(name, ref);
+  // The recorded Windows checkout used CRLF for some files; preserve those raw digests.
+  const crlf = source.toString('utf8').replace(/\r?\n/g, '\r\n');
+  assert.ok(hash === digest(source) || hash === digest(crlf), `${name}: measured source must match ${ref}`);
+}
 
-function verify(prefix, sourceHash, monitorHash) {
+function verify(prefix, sourceRef) {
   const comparison = rows(`${prefix}comparison.jsonl`);
   const breakdown = rows(`${prefix}breakdown.jsonl`);
   const evidenceContexts = [];
   for (const file of ['comparison.jsonl', 'breakdown.jsonl']) {
     const context = JSON.parse(read(`${prefix}${file}.context.json`));
-    assert.equal(context.current_sha256, sourceHash, `${prefix}${file}: measured source must match`);
+    verifySource(context.current_sha256, 'session_inventory.rs', sourceRef);
     assert.equal(context.roots.length, 5);
     assert.equal(context.instrumented, file === 'breakdown.jsonl');
     evidenceContexts.push(context);
@@ -48,8 +53,8 @@ function verify(prefix, sourceHash, monitorHash) {
 
   const worker = rows(`${prefix}worker-comparison.jsonl`);
   const workerContext = JSON.parse(read(`${prefix}worker-comparison.jsonl.context.json`));
-  assert.equal(workerContext.current_sha256, sourceHash);
-  assert.equal(workerContext.monitor_current_sha256, monitorHash);
+  verifySource(workerContext.current_sha256, 'session_inventory.rs', sourceRef);
+  verifySource(workerContext.monitor_current_sha256, 'monitor_duplicate_runtime.rs', sourceRef);
   evidenceContexts.push(workerContext);
   const manifestName = workerContext.prefs_manifest ?? `${prefix}worker-prefs-manifest.json`;
   assert.equal(manifestName, `${prefix}worker-prefs-manifest.json`);
@@ -85,10 +90,9 @@ function verify(prefix, sourceHash, monitorHash) {
     const libraryHashes = evidenceContexts.map((context) => context.gwt_library_sha256);
     assert.ok(libraryHashes.every((hash) => /^[a-f0-9]{64}$/.test(hash)), 'library digest provenance');
     assert.equal(new Set(libraryHashes).size, 1, 'all integrated probes use the same library');
-    const sharedHash = digest(currentSource('issue_monitor.rs'));
     for (const context of evidenceContexts) {
-      assert.equal(context.shared_issue_monitor_sha256, sharedHash);
-      assert.ok(/^[a-f0-9]{40}$/.test(context.source_commit));
+      assert.equal(context.source_commit, sourceRef, 'all integrated probes use the measured commit');
+      verifySource(context.shared_issue_monitor_sha256, 'issue_monitor.rs', sourceRef);
       assert.ok(context.dependency_base_commit.startsWith('4cb8fe4a0'));
       assert.deepEqual(context.dependencies, ['Issue #5498 / PR #5511', 'Issue #5499 / PR #5508']);
       execFileSync('git', ['merge-base', '--is-ancestor', context.dependency_base_commit, context.source_commit], { cwd: repo });
@@ -96,9 +100,11 @@ function verify(prefix, sourceHash, monitorHash) {
   }
 }
 
-verify('', digest(gitSource('session_inventory.rs')), digest(gitSource('monitor_duplicate_runtime.rs')));
+verify('', historicalRef);
 if (!process.argv.includes('--historical-only')) {
-  verify('integrated-', digest(currentSource('session_inventory.rs')), digest(currentSource('monitor_duplicate_runtime.rs')));
+  const measuredRef = JSON.parse(read('integrated-comparison.jsonl.context.json')).source_commit;
+  assert.match(measuredRef, /^[a-f0-9]{40}$/, 'measured source commit is required');
+  verify('integrated-', measuredRef);
   const before = JSON.parse(read('deployed-v9.123.1-baseline.json'));
   const after = process.argv.includes('--deployed-after') ? JSON.parse(read('deployed-gui-after.json')) : null;
   const fix = '2b6ca0eca084db53ed381a09a85c7d8eb4e2acf0';

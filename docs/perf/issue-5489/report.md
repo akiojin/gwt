@@ -137,7 +137,7 @@ warm 時の decode CPU のゼロは OS CPU counter の分解能による値で�
 
 統合後 worker の CPU 中央値は `89.83%` 減、平均使用コアは `67.14%` 減で、**この実 fleet を読む隔離 worker の前後比較では半減を確認した**。最初の after tick の warm-up コスト `1.640625 CPU 秒` も 3 点に含む。これは Issue #5498 / Issue #5499 を含む統合条件での結果であり、Issue #5489 単独の成果へ帰属させない。配布版 GUI 自体の差替え・修正後 60 分観測は行っていない。
 
-`node docs/perf/issue-5489/verify.mjs` は旧証跡を `git show a96ce624e` の source hash と照合し、新証跡を現在の source hash と照合する。統合後には同一 library digest、依存 commit の祖先関係、前後の 5 prefs hash、census / worker CPU 中央値と worker 平均コアの半減も検査する。
+`node docs/perf/issue-5489/verify.mjs` は旧証跡を `git show a96ce624e` の source hash と照合し、統合後の証跡を context に記録された測定 commit `598b8f0ff5c1222d2c26f684269ce828f5218c2d` と照合する。測定時のファイルには LF と Windows checkout の CRLF が混在するため、Git blob またはその CRLF checkout 表現の SHA-256 が保存済み digest と一致することを要求する。統合後には同一 library digest、依存 commit の祖先関係、前後の 5 prefs hash、census / worker CPU 中央値と worker 平均コアの半減も検査する。
 
 ## 配信済み source と実 GUI の版
 
@@ -172,6 +172,8 @@ PM による通常更新後、Velden が既存 collector を読み取り専用�
 実 5 root は前後で完全一致し、保持した同一 thread handle で測った `gwt-monitor-runtime` の平均使用コアは **57.71% 減**だった。`node docs/perf/issue-5489/verify.mjs --deployed-after` はこれを含む全 assertion に PASS した。AC-3 の実 fleet の半減を直接観測した証拠であるが、窓数、ファイル数、経過時刻と他の配布済み修正が異なるため、Issue #5489 単独の因果効果とは主張しない。同条件での因果比較は上記の交互 census / 隔離 worker 証拠で補完する。
 
 独立レビューで、verifier が観測時刻を検査せず、after を GUI 起動前の時刻へ変えても PASS することを再現した（RED）。日時の parse 可能性、GUI 起動後の観測、baseline より後の after という assertion を追加し、不正な時系列の拒否と元の raw の PASS を確認した（GREEN）。raw は検査前後で同一 bytes に復元した。
+
+配送中に `origin/develop` の `issue_monitor.rs` が別件の settlement 修正で更新された。既存 verifier は測定時の保存 hash を現在の全ファイルと比較していたため、過去の正しい証跡を誤拒否した。最新 base のファイルを置いた隔離コピーで RED を再現し、照合先を記録済みの測定 commit に固定して GREEN を確認した。保存 digest の改変は引き続き拒否する。実稼働版への fix 包含、日時、実 5 root と CPU 半減の検査も維持する。新しい runtime の性能を測ったという主張は加えない。
 
 今回の最小 Plan は、Goal: 未配信の collector / baseline と実 GUI after を検証・配信すること、Acceptance criteria: 修正版の包含・実 5 root の一致・named Monitor CPU 半減を専用 verifier で再検査し、fresh `verify.run` と必須 CI 後に develop へマージすること。Non-goals / What stays untouched: runtime の追加最適化、GUI の設定・再起動、別 owner の修正、Issue #5385 の 60 分計測。新しい probe や runtime 修正を加える案と比較し、既存 collector と verifier の再利用を採用した。source の根本修正は既に配信済みで、残る受け入れ要件は実 GUI の観測だからである。
 
