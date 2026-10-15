@@ -413,46 +413,76 @@ fn describe_holder(
     probe: &mut HolderProbe,
     worktree: &Path,
 ) -> HolderNotice {
-    match coordinator.heavy_lease_status() {
-        Ok(status) => {
-            // Issue #4561: a `daemon` holder runs its commands outside its
-            // own tree, so that tree alone reports it stalled however hard
-            // the verification is working.
-            let workload = crate::cli::verification_lease::holder_activity::workload_for(
-                status.holder_spawn_host.as_deref(),
-                || crate::cli::daemon::verification_host::live_daemon_pids(worktree),
-            );
-            let activity = status
-                .owner
-                .as_ref()
-                .filter(|_| status.held)
-                .and_then(|owner| probe.observe(owner.pid, &workload, status.acquired_at_ms));
+    describe_holder_with_activity(coordinator, |status| {
+        let workload = crate::cli::verification_lease::holder_activity::workload_for(
+            status.holder_spawn_host.as_deref(),
+            || crate::cli::daemon::verification_host::live_daemon_pids(worktree),
+        );
+        status
+            .owner
+            .as_ref()
+            .filter(|_| status.held)
+            .and_then(|owner| probe.observe(owner.pid, &workload, status.acquired_at_ms))
+    })
+}
+
+fn describe_holder_with_activity(
+    coordinator: &IndexCoordinator,
+    observe: impl FnOnce(&HeavyLeaseStatus) -> Option<HolderActivity>,
+) -> HolderNotice {
+    let snapshot = coordinator.heavy_lease_status().and_then(|sampled| {
+        let activity = observe(&sampled);
+        coordinator
+            .heavy_pool_status()
+            .map(|pool| (sampled, activity, pool))
+    });
+    match snapshot {
+        Ok((sampled, activity, pool)) => {
+            // Sampling can outlive the holder. Use one current pool snapshot
+            // for the holder, queue, and slots instead of the pre-sample ticket.
+            let mut status = pool
+                .slots
+                .iter()
+                .find(|slot| slot.status.held)
+                .or_else(|| pool.slots.iter().find(|slot| slot.status.holder_stale))
+                .map(|slot| slot.status.clone())
+                .unwrap_or_default();
+            status.pending = pool.queue.len();
+            status.queue = pool.queue;
+            let activity = activity.filter(|_| {
+                status.held
+                    && status.lease_id == sampled.lease_id
+                    && status.owner == sampled.owner
+                    && status.target == sampled.target
+                    && status.acquired_at_ms == sampled.acquired_at_ms
+            });
             let mut notice = holder_notice(&status, activity.as_ref());
-            if let Ok(pool) = coordinator.heavy_pool_status() {
+            notice.detail.push_str(&format!(
+                "; pool capacity={} running={} available={}",
+                pool.capacity, pool.used, pool.available
+            ));
+            for slot in pool.slots.iter().filter(|slot| slot.status.held) {
                 notice.detail.push_str(&format!(
-                    "; pool capacity={} running={} available={}",
-                    pool.capacity, pool.used, pool.available
+                    "; slot {}: {}",
+                    slot.slot
+                        .map_or_else(|| "exclusive".to_string(), |slot| slot.to_string()),
+                    holder_identity_notice(&slot.status).detail
                 ));
-                for slot in pool.slots.iter().filter(|slot| slot.status.held) {
-                    notice.detail.push_str(&format!(
-                        "; slot {}: {}",
-                        slot.slot
-                            .map_or_else(|| "exclusive".to_string(), |slot| slot.to_string()),
-                        holder_identity_notice(&slot.status).detail
-                    ));
-                }
-                notice.retry_after = pool
-                    .slots
-                    .iter()
-                    .filter(|slot| slot.status.held)
-                    .filter_map(|slot| {
-                        slot.status
-                            .estimated_remaining_ms
-                            .or(slot.status.remaining_ms)
-                    })
-                    .min()
-                    .map(Duration::from_millis)
-                    .or(notice.retry_after);
+            }
+            notice.retry_after = pool
+                .slots
+                .iter()
+                .filter(|slot| slot.status.held)
+                .filter_map(|slot| {
+                    slot.status
+                        .estimated_remaining_ms
+                        .or(slot.status.remaining_ms)
+                })
+                .min()
+                .map(Duration::from_millis)
+                .or(notice.retry_after);
+            if !status.held && status.queue.is_empty() && pool.available > 0 {
+                notice.retry_after = Some(Duration::ZERO);
             }
             notice
         }
@@ -1230,6 +1260,124 @@ mod tests {
             refusal.contains("rerun `verify.run` now"),
             "a lease with no live holder must be retried immediately: {refusal}"
         );
+    }
+
+    fn sampled_activity() -> HolderActivity {
+        HolderActivity {
+            held_ms: 600_000,
+            cpu_percent: 0.0,
+            cpu_gained_ms: 0,
+            turnover: false,
+            processes: 3,
+            window_ms: 1_200,
+            host_cpu_percent: Some(15.0),
+            delegated: false,
+            parent_gone: false,
+            workload_processes: 2,
+        }
+    }
+
+    #[test]
+    fn lease_observation_refreshes_a_holder_released_during_wait_diagnostics() {
+        let root = IsolatedLeaseRoot::new();
+        let key = TargetKey::verification("fixture", "holder");
+        let JobAdmission::Owner(guard) = root
+            .coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("unique holder")
+        };
+        let lease = guard
+            .acquire_heavy_with_ttl(Duration::from_secs(1), Duration::from_secs(60))
+            .unwrap();
+        let notice = describe_holder_with_activity(&root.coordinator, |status| {
+            assert!(status.held);
+            drop(lease);
+            Some(sampled_activity())
+        });
+        assert!(
+            notice.detail.contains("no current holder"),
+            "{}",
+            notice.detail
+        );
+        assert!(!notice.detail.contains("stalled"), "{}", notice.detail);
+        assert!(!notice.detail.contains("CPU"), "{}", notice.detail);
+        assert_eq!(notice.retry_after, Some(Duration::ZERO));
+        // Zero budget still attempts acquisition: no old ticket TTL is waited out.
+        guard
+            .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+            .expect("the released lease must be immediately available");
+    }
+
+    #[test]
+    fn lease_observation_refreshes_status_after_the_holder_releases() {
+        let root = IsolatedLeaseRoot::new();
+        let key = TargetKey::verification("fixture", "holder");
+        let JobAdmission::Owner(guard) = root
+            .coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("unique holder")
+        };
+        let lease = guard
+            .acquire_heavy_with_ttl(Duration::from_secs(1), Duration::from_secs(60))
+            .unwrap();
+        let mut snapshot = verification_lease::status().unwrap();
+        verification_lease::observe_holder_activity_with(&mut snapshot, |_| {
+            Some(sampled_activity())
+        })
+        .unwrap();
+        assert_eq!(snapshot.holder_cpu_percent, Some(0.0));
+        verification_lease::observe_holder_activity_with(&mut snapshot, |status| {
+            assert!(status.held);
+            drop(lease);
+            Some(sampled_activity())
+        })
+        .unwrap();
+        assert!(!snapshot.held);
+        assert!(snapshot.holder_state.is_none());
+        assert!(snapshot.holder_cpu_percent.is_none());
+    }
+
+    #[test]
+    fn lease_observation_discards_the_previous_lease_activity_after_reacquisition() {
+        let root = IsolatedLeaseRoot::new();
+        let key = TargetKey::verification("fixture", "holder");
+        let JobAdmission::Owner(guard) = root
+            .coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("unique holder")
+        };
+        let lease = guard
+            .acquire_heavy_with_ttl(Duration::from_secs(1), Duration::from_secs(60))
+            .unwrap();
+        let mut snapshot = verification_lease::status().unwrap();
+        let mut replacement = None;
+        let notice = describe_holder_with_activity(&root.coordinator, |status| {
+            assert_eq!(status.lease_id.as_deref(), Some(lease.id()));
+            drop(lease);
+            replacement = Some(
+                guard
+                    .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
+                    .unwrap(),
+            );
+            Some(sampled_activity())
+        });
+        assert!(notice.detail.contains("held by"), "{}", notice.detail);
+        assert!(!notice.detail.contains("stalled"), "{}", notice.detail);
+        assert!(!notice.detail.contains("CPU"), "{}", notice.detail);
+        verification_lease::observe_holder_activity_with(&mut snapshot, |_| {
+            Some(sampled_activity())
+        })
+        .unwrap();
+        assert!(snapshot.held);
+        assert!(snapshot.holder_cpu_percent.is_none());
+        let live = describe_holder_with_activity(&root.coordinator, |_| Some(sampled_activity()));
+        assert!(live.detail.contains("CPU"), "{}", live.detail);
     }
 
     /// Issue #4140 AC-3: every refusal carries a concrete next step, so an

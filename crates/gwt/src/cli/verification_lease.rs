@@ -444,7 +444,7 @@ pub(super) fn run<E: CliEnv>(
         VerificationLeaseCommand::Status => {
             let mut status = status()?;
             let worktree = resolve_current_worktree_root(env.repo_path());
-            observe_holder_activity(&mut status, &worktree);
+            observe_holder_activity(&mut status, &worktree)?;
             render(
                 out,
                 "held",
@@ -935,23 +935,43 @@ struct LeaseStatusSnapshot {
 
 /// Fill in the holder's activity; only the status report pays for the
 /// process-table read.
-fn observe_holder_activity(status: &mut LeaseStatusSnapshot, worktree: &Path) {
-    let Some(pid) = status.owner_pid.filter(|_| status.held) else {
-        return;
-    };
-    // Issue #4561: a `daemon` holder's work is not under `owner_pid`, so the
-    // working set has to reach into the daemons that launched it.
-    let workload = holder_workload(
-        status.holder_spawn_host.as_deref(),
-        status.target.as_deref(),
-        worktree,
-    );
-    if let Some(activity) = holder_activity::observe(pid, &workload, status.acquired_at_ms) {
-        status.holder_held_ms = Some(activity.held_ms);
-        status.holder_cpu_percent = Some(activity.cpu_percent);
-        status.holder_state = Some(activity.state().to_string());
-        status.holder_state_detail = Some(activity.describe());
+fn observe_holder_activity(
+    status: &mut LeaseStatusSnapshot,
+    worktree: &Path,
+) -> Result<(), SpecOpsError> {
+    observe_holder_activity_with(status, |status| {
+        let pid = status.owner_pid.filter(|_| status.held)?;
+        // Daemon-hosted commands run outside the holder's own process tree.
+        let workload = holder_workload(
+            status.holder_spawn_host.as_deref(),
+            status.target.as_deref(),
+            worktree,
+        );
+        holder_activity::observe(pid, &workload, status.acquired_at_ms)
+    })
+}
+
+fn observe_holder_activity_with(
+    status: &mut LeaseStatusSnapshot,
+    observe: impl FnOnce(&LeaseStatusSnapshot) -> Option<holder_activity::HolderActivity>,
+) -> Result<(), SpecOpsError> {
+    let activity = observe(status);
+    // A process sample is historical evidence, not proof it still owns a lease.
+    let mut current = self::status()?;
+    if let Some(activity) = activity.filter(|_| {
+        current.held
+            && current.lease_id == status.lease_id
+            && current.owner_pid == status.owner_pid
+            && current.target == status.target
+            && current.acquired_at_ms == status.acquired_at_ms
+    }) {
+        current.holder_held_ms = Some(activity.held_ms);
+        current.holder_cpu_percent = Some(activity.cpu_percent);
+        current.holder_state = Some(activity.state().to_string());
+        current.holder_state_detail = Some(activity.describe());
     }
+    *status = current;
+    Ok(())
 }
 
 impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
