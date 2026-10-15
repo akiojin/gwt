@@ -894,6 +894,10 @@ import { createUiStateStore } from "/ui-state-store.js";
         makeEl,
         clearChildren,
         focusOrSpawnPreset,
+        openReports: () => {
+          openPmAgent();
+          pmChatViews.get(pmWindowId)?.controller.showReports();
+        },
         knowledgeKindForPreset,
         // SPEC-3064 Phase 3 (E6d): these two live in the knowledge-kanban
         // surface, whose factory runs after this one — close over the

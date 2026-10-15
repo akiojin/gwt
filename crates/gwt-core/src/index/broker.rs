@@ -80,6 +80,7 @@ pub enum RefreshScope {
     Discussions,
     Board,
     Works,
+    Reports,
 }
 
 impl RefreshScope {
@@ -93,6 +94,7 @@ impl RefreshScope {
             RefreshScope::Discussions => "discussions",
             RefreshScope::Board => "board",
             RefreshScope::Works => "works",
+            RefreshScope::Reports => "reports",
         }
     }
 }

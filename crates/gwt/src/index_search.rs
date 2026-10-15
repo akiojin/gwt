@@ -829,6 +829,7 @@ fn rebuild_scope_for_name(name: &str) -> Option<crate::index_worker::IndexRebuil
         "discussions" => IndexRebuildScope::Discussions,
         "board" => IndexRebuildScope::Board,
         "works" => IndexRebuildScope::Works,
+        "reports" => IndexRebuildScope::Reports,
         "files" => IndexRebuildScope::Files,
         "files-docs" => IndexRebuildScope::FilesDocs,
         _ => return None,
@@ -1122,6 +1123,7 @@ fn default_index_search_scopes() -> Vec<IndexSearchScope> {
         IndexSearchScope::Discussions,
         IndexSearchScope::Board,
         IndexSearchScope::Works,
+        IndexSearchScope::Reports,
         IndexSearchScope::Files,
         IndexSearchScope::FilesDocs,
     ]
@@ -1396,6 +1398,7 @@ fn append_scope_results(
         IndexSearchScope::Discussions => "discussionResults",
         IndexSearchScope::Board => "boardResults",
         IndexSearchScope::Works => "workResults",
+        IndexSearchScope::Reports => "reportResults",
         IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
     };
     let Some(items) = payload.get(key).and_then(Value::as_array) else {
@@ -1409,6 +1412,7 @@ fn append_scope_results(
             IndexSearchScope::Discussions => discussion_result(item),
             IndexSearchScope::Board => board_result(item, board_scope),
             IndexSearchScope::Works => work_result(item),
+            IndexSearchScope::Reports => report_result(item),
             IndexSearchScope::Files | IndexSearchScope::FilesDocs => file_result(scope, item),
         };
         if let Some(result) = result {
@@ -1441,6 +1445,7 @@ fn append_scope_suggestions(
             IndexSearchScope::Discussions => discussion_result(item),
             IndexSearchScope::Board => board_result(item, board_scope),
             IndexSearchScope::Works => work_result(item),
+            IndexSearchScope::Reports => report_result(item),
             IndexSearchScope::Files | IndexSearchScope::FilesDocs => file_result(scope, item),
         };
         if let Some(result) = result {
@@ -1512,6 +1517,71 @@ fn memory_result(item: &Value) -> Option<IndexSearchResult> {
             heading,
             date,
             user_instruction,
+        },
+    })
+}
+
+fn report_result(item: &Value) -> Option<IndexSearchResult> {
+    let report_id = value_str(item.get("report_id"))?;
+    let created_at = value_str(item.get("created_at")).unwrap_or_default();
+    let source_kind = value_str(item.get("kind")).unwrap_or_default();
+    let report_type = value_str(item.get("report_type")).unwrap_or_default();
+    let question = value_str(item.get("question")).unwrap_or_default();
+    let body = value_str(item.get("body")).unwrap_or_default();
+    let issue_numbers: Vec<u64> = item
+        .get("issue_numbers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect();
+    let issues = issue_numbers
+        .iter()
+        .map(|number| format!("Issue #{number}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(IndexSearchResult {
+        scope: IndexSearchScope::Reports,
+        title: value_str(item.get("title"))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| {
+                if question.is_empty() {
+                    body.lines().next().unwrap_or("Report").to_string()
+                } else {
+                    question.clone()
+                }
+            }),
+        subtitle: [
+            report_type.clone(),
+            if source_kind == report_type {
+                String::new()
+            } else {
+                source_kind.clone()
+            },
+            created_at.clone(),
+            issues,
+        ]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · "),
+        preview: if question.is_empty() {
+            body.clone()
+        } else {
+            format!("Q: {question}\n\nA:\n{body}")
+        },
+        distance: item.get("distance").and_then(Value::as_f64),
+        match_mode: item_match_mode(item),
+        matched_terms: value_string_array(item.get("matched_terms")),
+        missing_terms: value_string_array(item.get("missing_terms")),
+        target: IndexSearchTarget::Report {
+            report_id,
+            created_at,
+            report_type,
+            source_kind,
+            question,
+            body,
+            issue_numbers,
         },
     })
 }
@@ -1942,6 +2012,7 @@ mod tests {
                 IndexSearchScope::Discussions,
                 IndexSearchScope::Board,
                 IndexSearchScope::Works,
+                IndexSearchScope::Reports,
                 IndexSearchScope::Files,
                 IndexSearchScope::FilesDocs,
             ]
@@ -2036,6 +2107,31 @@ mod tests {
             results[0].target,
             IndexSearchTarget::Work { ref work_id } if work_id == "work-feature-auth-abc123"
         ));
+    }
+
+    #[test]
+    fn reports_search_preserves_post_metadata() {
+        let scope = serde_json::from_value(json!("reports")).expect("Reports scope");
+        let mut results = Vec::new();
+        append_scope_results(
+            &mut results,
+            scope,
+            &json!({"reportResults": [{
+                "report_id": "qa-1", "kind": "qa", "report_type": "qa",
+                "created_at": "2026-10-16T00:00:00Z", "question": "検索は正常？",
+                "body": "Issue #5429 で検索を修正します。", "issue_numbers": [5429],
+                "distance": 0.07
+            }]}),
+            &BoardAudienceScope::All,
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].subtitle.contains("2026-10-16T00:00:00Z"));
+        assert!(results[0].subtitle.contains("Issue #5429"));
+        let target = serde_json::to_value(&results[0].target).unwrap();
+        assert_eq!(target["kind"], "report");
+        assert_eq!(target["report_id"], "qa-1");
+        assert_eq!(target["issue_numbers"], json!([5429]));
+        assert_eq!(target["body"], "Issue #5429 で検索を修正します。");
     }
 
     #[test]

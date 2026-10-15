@@ -2176,6 +2176,7 @@ fn search(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
             "board" => Ok(IndexSearchScope::Board),
             "discussions" => Ok(IndexSearchScope::Discussions),
             "works" => Ok(IndexSearchScope::Works),
+            "reports" => Ok(IndexSearchScope::Reports),
             _ => Err(CliParseError::InvalidJson(format!(
                 "unknown search scope: {scope}"
             ))),
@@ -2211,6 +2212,7 @@ fn index_scope(value: &str) -> Result<IndexScope, CliParseError> {
         "discussions" => Ok(IndexScope::Discussions),
         "board" => Ok(IndexScope::Board),
         "works" => Ok(IndexScope::Works),
+        "reports" => Ok(IndexScope::Reports),
         "files" => Ok(IndexScope::Files),
         "files_docs" | "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::InvalidJson(format!(
@@ -5920,6 +5922,23 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/reports-post.git",
+            ],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
         let mut env = TestEnv::new(repo.clone());
         let post = || match ok(
             "pm.report.post",
@@ -5939,6 +5958,16 @@ mod tests {
         assert_eq!(saved["report"]["kind"], "qa");
         assert_eq!(saved["report"]["question"], "Can we ship?");
         assert_eq!(saved["report"]["body"], "Checks passed.");
+        let broker = gwt_core::index::broker::RefreshBroker::open_default().unwrap();
+        let scope = serde_json::from_str("\"reports\"").expect("Reports refresh scope");
+        let hash = crate::index_worker::detect_repo_hash(&repo).unwrap();
+        let target = gwt_core::index::broker::RefreshTarget::base(hash.as_str(), [scope]);
+        let posted_epoch = broker
+            .inspect()
+            .unwrap()
+            .target(&target)
+            .expect("post queues Reports")
+            .desired_epoch();
         let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registered-pm");
         output.clear();
         let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
@@ -5982,6 +6011,15 @@ mod tests {
         );
         assert_eq!(saved["instruction"]["id"], saved["report"]["id"]);
         assert_eq!(gwt_core::user_instruction::load(&repo).unwrap().len(), 1);
+        assert!(
+            broker
+                .inspect()
+                .unwrap()
+                .target(&target)
+                .unwrap()
+                .desired_epoch()
+                > posted_epoch
+        );
         assert_eq!(std::fs::read(&peer_path).unwrap(), b"{");
         let CliCommand::Pm(list) = ok("pm.report.list", json!({})) else {
             panic!("expected PM list")
@@ -7986,6 +8024,21 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn reports_search_and_rebuild_routes_parse() {
+        match ok(
+            "search",
+            json!({"query": "過去のPMの回答", "scopes": ["reports"]}),
+        ) {
+            CliCommand::Search(command) => assert_eq!(command.scopes[0].as_str(), "reports"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(matches!(
+            ok("index.rebuild", json!({"scope": "reports"})),
+            CliCommand::Index(IndexCommand::Rebuild { .. })
+        ));
     }
 
     #[test]
