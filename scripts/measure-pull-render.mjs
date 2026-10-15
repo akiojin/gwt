@@ -105,9 +105,9 @@ function browserClockMapping(run) {
   };
 }
 
-export function pairedComparison(before, after) {
-  if (before?.timing?.browser_clock_rule !== after?.timing?.browser_clock_rule) throw new Error('Browser clock rules differ');
-  const runs = [before, after];
+export function pairedComparison(before, after, beforeB) {
+  const runs = beforeB === undefined ? [before, after] : [before, after, beforeB];
+  if (runs.some(run => run?.timing?.browser_clock_rule !== before?.timing?.browser_clock_rule)) throw new Error('Browser clock rules differ');
   for (const run of runs) {
     if (run?.comparison_rule !== 'observed_slot_coverage_host_covariates_v1' || run?.seconds !== 1800 || run.raw?.seconds?.length !== 1800) throw new Error('Shared host metadata missing');
     let previousHostEnd;
@@ -133,7 +133,7 @@ export function pairedComparison(before, after) {
     const summary = { ...counts, missing_fraction: counts.missing / run.seconds, overrun_fraction: counts.overrun / run.seconds };
     if (!run.sample_status || Object.entries(summary).some(([key, value]) => run.sample_status[key] !== value)) throw new Error('Sample status counts inconsistent');
   }
-  const mask = before.raw.seconds.map((row, k) => row.status === 'observed' && after.raw.seconds[k].status === 'observed');
+  const mask = before.raw.seconds.map((_, k) => runs.every(run => run.raw.seconds[k].status === 'observed'));
   const evidence = runs.map(run => {
     const barrier = run.timing.barrier_at;
     const clockBounds = browserClockMapping(run);
@@ -252,34 +252,40 @@ export function validateMeasurementTiming(run) {
   return [...reasons];
 }
 
-export function compareMeasurements(before, after) {
+function measurementFailures(label, run, mode) {
   const failures = [];
-  for (const [label, run, mode] of [['baseline', before, 'before'], ['after', after, 'after']]) {
-    if (run?.evidence_valid !== true || run?.cleanup_success !== true || run?.invalid_reasons?.length !== 0) failures.push(`${label} evidence invalid`);
-    failures.push(...validateMeasurementTiming(run).map(reason => `${label} ${reason}`));
-    if (!run || run.schema_version !== 1 || run.mode !== mode || run.complete !== true || run.seconds !== 1800
-      || !Number.isFinite(run.elapsed_seconds) || run.elapsed_seconds < 1800 || run.agents !== 5
-      || !Number.isInteger(run.samples) || run.samples < 1800 || run.errors !== 0
-      || run.lost_markers !== 0 || run.dropped_pending !== 0) failures.push(`${label} is not a complete 1800-second ${mode} run`);
-    if (run?.workload?.length !== 5 || run.workload.some((entry, index) => entry.index !== index
-      || !Number.isInteger(entry.pid) || entry.pid <= 0 || entry.sequence !== 1800
-      || entry.bytes !== 1800 * 8192 || entry.dom_sequence !== 1800 || entry.render_sequence !== 1800)
-      || new Set(run?.workload?.map(entry => entry.pid)).size !== 5) {
-      failures.push(`${label} workload is incomplete`);
-    }
-    if (!/^[a-f0-9]{40}$/.test(run?.source_sha ?? '') || !/^[a-f0-9]{64}$/.test(run?.source_diff_sha256 ?? '')
-      || !/^[a-f0-9]{64}$/.test(run?.binary_sha256 ?? '')) {
-      failures.push(`${label} source/build identity is missing`);
-    }
-    if (!/^[a-f0-9]{64}$/.test(run?.environment?.workload ?? '') || !/^[a-f0-9]{64}$/.test(run?.environment?.harness ?? '')) {
-      failures.push(`${label} workload/harness identity is missing`);
-    }
-    if (!/^[a-f0-9]{64}$/.test(run?.environment?.fixture ?? '')) failures.push(`${label} fixture identity is missing`);
-    if (!(run?.metrics?.dom_latency_ms?.count >= 9000) || !(run?.metrics?.render_frame_latency_ms?.count >= 9000)) {
-      failures.push(`${label} latency observations are incomplete`);
-    }
-    if (run?.reports_posted !== 360) failures.push(`${label} Reports workload is incomplete`);
+  if (run?.evidence_valid !== true || run?.cleanup_success !== true || run?.invalid_reasons?.length !== 0) failures.push(`${label} evidence invalid`);
+  failures.push(...validateMeasurementTiming(run).map(reason => `${label} ${reason}`));
+  if (!run || run.schema_version !== 1 || run.mode !== mode || run.complete !== true || run.seconds !== 1800
+    || !Number.isFinite(run.elapsed_seconds) || run.elapsed_seconds < 1800 || run.agents !== 5
+    || !Number.isInteger(run.samples) || run.samples < 1800 || run.errors !== 0
+    || run.lost_markers !== 0 || run.dropped_pending !== 0) failures.push(`${label} is not a complete 1800-second ${mode} run`);
+  if (run?.workload?.length !== 5 || run.workload.some((entry, index) => entry.index !== index
+    || !Number.isInteger(entry.pid) || entry.pid <= 0 || entry.sequence !== 1800
+    || entry.bytes !== 1800 * 8192 || entry.dom_sequence !== 1800 || entry.render_sequence !== 1800)
+    || new Set(run?.workload?.map(entry => entry.pid)).size !== 5) {
+    failures.push(`${label} workload is incomplete`);
   }
+  if (!/^[a-f0-9]{40}$/.test(run?.source_sha ?? '') || !/^[a-f0-9]{64}$/.test(run?.source_diff_sha256 ?? '')
+    || !/^[a-f0-9]{64}$/.test(run?.binary_sha256 ?? '')) {
+    failures.push(`${label} source/build identity is missing`);
+  }
+  if (!/^[a-f0-9]{64}$/.test(run?.environment?.workload ?? '') || !/^[a-f0-9]{64}$/.test(run?.environment?.harness ?? '')) {
+    failures.push(`${label} workload/harness identity is missing`);
+  }
+  if (!/^[a-f0-9]{64}$/.test(run?.environment?.fixture ?? '')) failures.push(`${label} fixture identity is missing`);
+  if (!(run?.metrics?.dom_latency_ms?.count >= 9000) || !(run?.metrics?.render_frame_latency_ms?.count >= 9000)) {
+    failures.push(`${label} latency observations are incomplete`);
+  }
+  if (run?.reports_posted !== 360) failures.push(`${label} Reports workload is incomplete`);
+  return failures;
+}
+
+const COMPARISON_METRICS = ['backend_cpu_percent', 'renderer_rss_bytes', 'renderer_heap_bytes',
+  'ws_payload_bytes_per_second', 'dom_latency_ms', 'render_frame_latency_ms'];
+
+export function compareMeasurements(before, after) {
+  const failures = [...measurementFailures('baseline', before, 'before'), ...measurementFailures('after', after, 'after')];
   if (JSON.stringify(before?.environment) !== JSON.stringify(after?.environment)) failures.push('environment/workload mismatch');
   if (before?.reports_posted !== after?.reports_posted) failures.push('Reports workload mismatch');
   let paired;
@@ -287,8 +293,7 @@ export function compareMeasurements(before, after) {
   catch (error) { failures.push(error.message); return failures; }
   const [selectedBefore, selectedAfter] = paired.runs;
   after.filtered_comparison = paired;
-  for (const name of ['backend_cpu_percent', 'renderer_rss_bytes', 'renderer_heap_bytes',
-    'ws_payload_bytes_per_second', 'dom_latency_ms', 'render_frame_latency_ms']) {
+  for (const name of COMPARISON_METRICS) {
     for (const statistic of ['mean', 'p50', 'p95', 'max']) {
       const previous = selectedBefore.metrics[name][statistic];
       const current = selectedAfter.metrics[name][statistic];
@@ -301,6 +306,46 @@ export function compareMeasurements(before, after) {
   for (const key of ['count', 'duration_ms']) if (!Number.isFinite(before?.long_tasks?.[key]) || !Number.isFinite(after?.long_tasks?.[key])
     || selectedAfter.long_tasks[key] > selectedBefore.long_tasks[key]) failures.push(`long_tasks.${key} regressed or missing`);
   return failures;
+}
+
+// Rejudge immutable captures without overwriting their historical strict verdict.
+export function compareMeasurementsWithNoise(beforeA, after, beforeB) {
+  const result = { rule: 'absolute_before_difference_v1', failures: [], checks: [] };
+  const { failures, checks } = result;
+  try {
+    for (const [label, run, mode] of [['baseline', beforeA, 'before'], ['after', after, 'after'], ['noise', beforeB, 'before']]) {
+      failures.push(...measurementFailures(label, run, mode));
+      if (JSON.stringify(run?.environment) !== JSON.stringify(beforeA?.environment)) failures.push('environment/workload mismatch');
+      for (const name of COMPARISON_METRICS) if (!(run?.metrics?.[name]?.count > 0)) failures.push(`${label} ${name} missing`);
+    }
+    for (const key of ['source_sha', 'source_diff_sha256', 'binary_sha256']) {
+      if (beforeB?.[key] !== beforeA?.[key]) failures.push(`noise baseline ${key} mismatch`);
+    }
+    if (failures.length) return result;
+    result.paired = pairedComparison(beforeA, after, beforeB);
+  } catch (error) { failures.push(error.message); return result; }
+  const [selectedA, selectedAfter, selectedB] = result.paired.runs;
+  const check = (metric, statistic, a, current, b) => {
+    const margin = Math.abs(a - b), delta = current - a;
+    if (![a, b, current, margin, delta].every(Number.isFinite)) {
+      failures.push(`${metric}.${statistic} missing`);
+      return;
+    }
+    const pass = delta <= margin;
+    checks.push({ metric, statistic, before_a: a, before_b: b, after: current, margin, delta, pass });
+    if (!pass) failures.push(`${metric}.${statistic} regressed beyond noise`);
+  };
+  for (const name of COMPARISON_METRICS) for (const statistic of ['mean', 'p50', 'p95', 'max']) {
+    check(name, statistic, selectedA.metrics[name][statistic], selectedAfter.metrics[name][statistic], selectedB.metrics[name][statistic]);
+  }
+  for (const key of ['count', 'duration_ms']) check('long_tasks', key, selectedA.long_tasks[key], selectedAfter.long_tasks[key], selectedB.long_tasks[key]);
+  if (checks.length !== 26) { checks.length = 0; return result; }
+  const reduction = beforeA.ws_payload_bytes - after.ws_payload_bytes;
+  result.ws_improvement = { before: beforeA.ws_payload_bytes, after: after.ws_payload_bytes, reduction_bytes: reduction,
+    reduction_percent: beforeA.ws_payload_bytes > 0 ? 100 * reduction / beforeA.ws_payload_bytes : null,
+    pass: Number.isFinite(reduction) && reduction > 0 };
+  if (!result.ws_improvement.pass) failures.push('WS payload bytes did not decrease');
+  return result;
 }
 
 function operation(binary, name, params, env, cwd = ROOT) {

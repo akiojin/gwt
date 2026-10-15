@@ -59,10 +59,18 @@ test.describe('pull-render runner contract', () => {
       assert.equal(incomplete.runs[1].coverage.cpu.retained_ms, 1793999);
       assert.equal(incomplete.runs[0].metrics.dom_latency_ms.count, 8990);
       assert.equal(incomplete.runs[0].long_tasks.count, 1);
+      const thirdRun = pairedComparison(run(), run(), overrun);
+      assert.equal(thirdRun.runs.length, 3);
+      assert.equal(thirdRun.mask[20], false);
+      assert.ok(thirdRun.runs.every(value => value.metrics.dom_latency_ms.count === 8995));
+      const thirdMissing = pairedComparison(run(), run(), missing);
+      assert.equal(thirdMissing.mask[10], false);
+      assert.equal(thirdMissing.runs[0].coverage.ws.retained_ms, 1798000);
       const insufficientBand = run();
       for (let k = 0; k < 31; k++) insufficientBand.raw.seconds[k] = { status: 'missing', deadline: (k + 1) * 1000 };
       insufficientBand.sample_status = { observed: 1769, overrun: 0, missing: 31, missing_fraction: 31 / 1800, overrun_fraction: 0 };
       assert.throws(() => pairedComparison(insufficientBand, run()), /coverage/);
+      assert.throws(() => pairedComparison(run(), run(), insufficientBand), /coverage/);
       const maskedRss = run(); high(maskedRss, 0); maskedRss.raw.seconds[0].renderer_rss_bytes = null;
       assert.throws(() => pairedComparison(maskedRss, b), /metric/);
       const missingLoad = run(); delete missingLoad.raw.seconds[0].host.loadavg;
@@ -104,6 +112,7 @@ test.describe('pull-render runner contract', () => {
       assert.equal(segmentedPair.runs[0].metrics.dom_latency_ms.count, 9000);
       assert.equal(segmentedPair.runs[0].long_tasks.count, 1);
       assert.throws(() => pairedComparison(run(), segmented()), /clock/);
+      assert.throws(() => pairedComparison(run(), run(), segmented()), /clock/);
       for (const corrupt of [
         value => { value.timing.browser_clock_rule = 'unknown'; },
         value => { value.timing.browser_clock.splice(2, 1); },
@@ -355,13 +364,23 @@ test.describe('pull-render runner contract', () => {
   });
 
   test('comparison refuses incomplete, mismatched or regressed evidence', async () => {
-    const compareMeasurements = (before: unknown, after: unknown) => {
+    const compare = (name: string, runs: unknown[]) => {
       const result = spawnSync(process.execPath, ['--input-type=module', '-e',
-        `import(process.argv[1]).then(({compareMeasurements}) => { let input = ''; process.stdin.on('data', value => input += value); process.stdin.on('end', () => console.log(JSON.stringify(compareMeasurements(...JSON.parse(input))))); });`,
-        pathToFileURL(RUNNER).href], { input: JSON.stringify([before, after]), encoding: 'utf8', timeout: 10_000 });
+        `import assert from 'node:assert/strict';
+         const module = await import(process.argv[1]);
+         let input = ''; process.stdin.on('data', value => input += value);
+         process.stdin.on('end', () => {
+           const runs = JSON.parse(input), original = JSON.stringify(runs);
+           const result = module[process.argv[2]](...runs);
+           if (process.argv[2] === 'compareMeasurementsWithNoise') assert.equal(JSON.stringify(runs), original);
+           console.log(JSON.stringify(result));
+         });`,
+        pathToFileURL(RUNNER).href, name], { input: JSON.stringify(runs), encoding: 'utf8', timeout: 10_000 });
       expect(result.status, result.stderr).toBe(0);
       return JSON.parse(result.stdout);
     };
+    const compareMeasurements = (before: unknown, after: unknown) => compare('compareMeasurements', [before, after]);
+    const compareNoise = (before: unknown, after: unknown, noise: unknown) => compare('compareMeasurementsWithNoise', [before, after, noise]);
     const metrics = Object.fromEntries(['backend_cpu_percent', 'renderer_rss_bytes', 'renderer_heap_bytes',
       'ws_payload_bytes_per_second', 'dom_latency_ms', 'render_frame_latency_ms'].map(name =>
       [name, { count: name.includes('latency') ? 9000 : 1800, mean: 10, p50: 10, p95: 10, max: 10 }]));
@@ -418,6 +437,75 @@ test.describe('pull-render runner contract', () => {
     expect(compareMeasurements({ ...baseline, source_diff_sha256: '' }, after)).toContain('baseline source/build identity is missing');
     expect(compareMeasurements({ ...baseline, environment: { ...baseline.environment, fixture: '' } }, after))
       .toContain('baseline fixture identity is missing');
+
+    const rss = (value: number, source = baseline) => {
+      const run = structuredClone(source);
+      (run as any).raw.seconds.forEach((row: any) => { row.renderer_rss_bytes = value; });
+      return run;
+    };
+    const noise = rss(14);
+    const within = compareNoise(baseline, rss(12, after), noise);
+    expect(within.failures).toEqual([]);
+    expect(within.checks).toHaveLength(26);
+    expect(new Set(within.checks.map((row: any) => `${row.metric}.${row.statistic}`))).toEqual(new Set([
+      ...Object.keys(metrics).flatMap(metric => ['mean', 'p50', 'p95', 'max'].map(statistic => `${metric}.${statistic}`)),
+      'long_tasks.count', 'long_tasks.duration_ms',
+    ]));
+    expect(within.checks.find((row: any) => row.metric === 'renderer_rss_bytes' && row.statistic === 'mean'))
+      .toMatchObject({ before_a: 10, before_b: 14, after: 12, margin: 4, delta: 2, pass: true });
+    expect(compareNoise(baseline, rss(14, after), noise).failures).toEqual([]);
+    expect(compareNoise(baseline, rss(14, after), rss(6)).failures).toEqual([]);
+    expect(compareNoise(baseline, rss(15, after), noise).failures).toContain('renderer_rss_bytes.mean regressed beyond noise');
+    expect(compareNoise(baseline, rss(11, after), baseline).failures).toContain('renderer_rss_bytes.mean regressed beyond noise');
+    expect(compareNoise(baseline, rss(8, after), baseline).failures).toEqual([]);
+
+    const tasks = (source: typeof baseline, count: number) => {
+      const run = structuredClone(source) as any;
+      run.raw.long_tasks = Array.from({ length: count }, (_, index) => [1000 + index * 1000, 60]);
+      run.long_tasks = { count, duration_ms: count * 60 };
+      return run;
+    };
+    const taskResult = compareNoise(tasks(baseline, 1), tasks(after, 3), tasks(baseline, 3));
+    expect(taskResult.failures).toEqual([]);
+    expect(taskResult.checks.filter((row: any) => row.metric === 'long_tasks'))
+      .toMatchObject([{ margin: 2, delta: 2, pass: true }, { margin: 120, delta: 120, pass: true }]);
+    expect(compareNoise(tasks(baseline, 1), tasks(after, 4), tasks(baseline, 3)).failures)
+      .toEqual(expect.arrayContaining(['long_tasks.count regressed beyond noise', 'long_tasks.duration_ms regressed beyond noise']));
+
+    for (const key of ['source_sha', 'source_diff_sha256', 'binary_sha256']) {
+      const mismatch = { ...baseline, [key]: 'f'.repeat(key === 'source_sha' ? 40 : 64) };
+      expect(compareNoise(baseline, after, mismatch).failures).toContain(`noise baseline ${key} mismatch`);
+    }
+    for (const corrupt of [
+      (run: any) => { run.complete = false; },
+      (run: any) => { run.evidence_valid = false; },
+      (run: any) => { run.cleanup_success = false; },
+      (run: any) => { run.environment.browser = 'different'; },
+      (run: any) => { run.raw.seconds[0].renderer_rss_bytes = NaN; },
+      (run: any) => {
+        for (let k = 0; k < 31; k++) run.raw.seconds[k].status = 'overrun';
+        run.sample_status = { observed: 1769, overrun: 31, missing: 0, missing_fraction: 0, overrun_fraction: 31 / 1800 };
+      },
+    ]) {
+      const invalid = structuredClone(baseline); corrupt(invalid);
+      const result = compareNoise(baseline, after, invalid);
+      expect(result.failures.length).toBeGreaterThan(0);
+      expect(result.checks).toEqual([]);
+    }
+    const ws = (source: typeof baseline, bytes: number) => {
+      const run = structuredClone(source) as any;
+      run.raw.seconds.forEach((row: any) => { row.ws_counter *= bytes / source.ws_payload_bytes; });
+      run.ws_payload_bytes = bytes; run.timing.ws.counter_end = bytes;
+      run.metrics.ws_payload_bytes_per_second.mean = bytes / 1800;
+      return run;
+    };
+    for (const bytes of [1000, 1100]) {
+      const result = compareNoise(baseline, ws(after, bytes), ws(baseline, 2000));
+      expect(result.checks.every((row: any) => row.pass)).toBe(true);
+      expect(result.failures).toContain('WS payload bytes did not decrease');
+      expect(result.ws_improvement.pass).toBe(false);
+    }
+    expect(within.ws_improvement).toMatchObject({ before: 1000, after: 900, reduction_bytes: 100, pass: true });
   });
 
   test('fixed custom-agent task emits exactly 8192 bytes per sequence', async () => {
