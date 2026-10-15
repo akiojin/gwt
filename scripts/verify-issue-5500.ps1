@@ -11,7 +11,8 @@ $checkoutGwtd = Join-Path $repoRoot 'target/debug/gwtd.exe'
 if (!(Test-Path -LiteralPath $checkoutGwt) -or !(Test-Path -LiteralPath $checkoutGwtd)) {
     throw 'Build this checkout with cargo build -p gwt --bin gwt --bin gwtd first.'
 }
-$checkHome = Join-Path ([IO.Path]::GetTempPath()) ('gwt-fresh-home.5500-' + [guid]::NewGuid())
+# Keep traces outside verify.run's temporary directory so failed runs remain inspectable.
+$checkHome = Join-Path $repoRoot ('target/issue-5500-browser/gwt-fresh-home.5500-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path (Join-Path $checkHome '.gwt') -Force | Out-Null
 $sessionsFixture = $env:GWT_CAPACITY_SESSIONS_FIXTURE
 if ($sessionsFixture) {
@@ -220,7 +221,7 @@ Module._resolveFilename = function(request, parent, ...rest) {
     & node $playwright install chromium
     if ($LASTEXITCODE) { throw 'Chromium installation failed.' }
     & node $playwright test --config (Join-Path $repoRoot 'crates/gwt/playwright/playwright.config.ts') --workers=1 `
-        --output (Join-Path $checkHome 'playwright') --headed `
+        --output (Join-Path $checkHome 'playwright') --headed --trace retain-on-failure `
         'issue-monitor-capacity-live.spec.ts' @PlaywrightArgs
     if ($LASTEXITCODE) { throw 'Issue #5500 headed verification failed.' }
 } finally {
