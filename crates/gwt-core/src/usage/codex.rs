@@ -90,7 +90,7 @@ pub fn parse_rate_limits(rate_limits: &Value, now: DateTime<Utc>) -> Option<Code
     parse_rate_limits_at(rate_limits, Some(now))
 }
 
-fn parse_rate_limits_at(
+pub(super) fn parse_rate_limits_at(
     rate_limits: &Value,
     observed_at: Option<DateTime<Utc>>,
 ) -> Option<CodexAccount> {
@@ -432,6 +432,26 @@ pub fn read_codex_account_since(
     now: DateTime<Utc>,
     authenticated_at: Option<DateTime<Utc>>,
 ) -> ProviderUsage {
+    read_codex_account_with(home, now, authenticated_at, || {
+        recent_rollouts(home, 8)
+            .into_iter()
+            .filter_map(|path| {
+                let text = fs::read_to_string(path).ok()?;
+                let (payload, observed_at) = last_token_count_event(&text)?;
+                let account = parse_rate_limits_at(payload.get("rate_limits")?, observed_at)?;
+                Some((account, observed_at))
+            })
+            .collect()
+    })
+}
+
+/// Share account attribution/freshness rules with the poll-owned offset cache.
+pub(super) fn read_codex_account_with(
+    home: &Path,
+    now: DateTime<Utc>,
+    authenticated_at: Option<DateTime<Utc>>,
+    read: impl FnOnce() -> Vec<(CodexAccount, Option<DateTime<Utc>>)>,
+) -> ProviderUsage {
     let auth = fs::read_to_string(home.join("auth.json")).ok();
     let account_id = auth.as_deref().and_then(parse_auth_account_identity);
     if account_id.is_none() {
@@ -439,24 +459,12 @@ pub fn read_codex_account_since(
     }
     let account_label = auth.as_deref().and_then(parse_auth_account_label);
     let mut newest: Option<(CodexAccount, Option<DateTime<Utc>>)> = None;
-    for path in recent_rollouts(home, 8) {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Some((payload, observed_at)) = last_token_count_event(&text) else {
-            continue;
-        };
+    for (acc, observed_at) in read() {
         if observed_at.is_some_and(|at| at > now)
             || authenticated_at.is_some_and(|boundary| observed_at.is_none_or(|at| at < boundary))
         {
             continue;
         }
-        let Some(acc) = payload
-            .get("rate_limits")
-            .and_then(|limits| parse_rate_limits_at(limits, observed_at))
-        else {
-            continue;
-        };
         if newest
             .as_ref()
             .is_none_or(|(_, previous)| observed_at > *previous)
