@@ -15017,7 +15017,7 @@ impl IssueMonitorState {
         } else {
             self.label_excluded_issues.remove(&issue_number);
         }
-        let existing = self.inbox_item(issue_number).cloned();
+        let mut existing = self.inbox_item(issue_number).cloned();
         let exclusion = issue_monitor_candidate_exclusion(&issue)
             .or_else(|| {
                 (!allowed).then(|| {
@@ -15037,6 +15037,38 @@ impl IssueMonitorState {
                     },
                 )
             });
+        // Issue #4783 AC-R2: execution settlement ends one delivery, not the
+        // Issue's remaining acceptance criteria. Reconsider the fresh payload
+        // on the next scan without charging or resetting its retry budget.
+        if existing.as_ref().is_some_and(|item| {
+            item.state == MonitorInboxState::Launched && item.launched_window_id.is_none()
+        }) && issue.state == IssueMonitorIssueState::Open
+            && allowed
+            && exclusion.is_none()
+            && !self.issue_is_closed(issue_number)
+            && !self.merged_issues.contains(&issue_number)
+            && !self.failed_issues.contains_key(&issue_number)
+            && !self.active_launches.contains(&issue_number)
+            && !self.launched_windows.contains_key(&issue_number)
+            && !self.has_monitor_pane_for_issue(issue_number)
+            && !self.process_held_issues.contains(&issue_number)
+            && !self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+            && !self
+                .pending_launches
+                .iter()
+                .any(|launch| launch.issue_number == issue_number)
+        {
+            let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                issue.body.as_deref().unwrap_or(""),
+            );
+            if criteria.machine_checkable && !criteria.unchecked.is_empty() {
+                self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
+                existing = self.inbox_item(issue_number).cloned();
+            }
+        }
         let error_message = self.failed_issues.get(&issue_number).cloned().or_else(|| {
             existing.as_ref().and_then(|item| {
                 if matches!(
@@ -19072,10 +19104,10 @@ impl IssueMonitorState {
     /// ordinary completion probe (merged PR / closed Issue) can end it without
     /// the vanished-window reconciliation mistaking the runtime's own close for
     /// a failed attempt. When the probe never fires the row has nothing left to
-    /// wait for, and `record_candidate` preserves the label across every scan,
-    /// so it sat out of the queue indefinitely: four rows stranded between five
-    /// and nine hours in the reported snapshot, one of them the owner of the
-    /// blocker two other Issues were waiting on.
+    /// wait for. Rows without fresh unchecked acceptance criteria retain the
+    /// label across scans, so they sat out of the queue indefinitely: four rows
+    /// stranded between five and nine hours in the reported snapshot, one of
+    /// them the owner of the blocker two other Issues were waiting on.
     ///
     /// The grace period is what separates the two readings. Inside it the row
     /// is a settled delivery whose completion evidence has not landed yet;
@@ -20203,9 +20235,10 @@ impl IssueMonitorState {
     /// about to close the window itself. Unlike [`Self::requeue_exact_window`]
     /// — the `window_closed` contract, which says "this attempt failed, try
     /// again" — a settled delivery is a success: the active slot is released
-    /// in this mutation, no retry attempt is spent, and the row stays
-    /// `Launched` out of the queue until the ordinary completion probe (merged
-    /// PR / closed Issue) ends it. The window is unbound so the later
+    /// in this mutation, no retry attempt is spent, and the row initially stays
+    /// `Launched` out of the queue. The next scan reconsiders an Open Issue with
+    /// unchecked acceptance criteria; otherwise the ordinary completion probe
+    /// (merged PR / closed Issue) ends it. The window is unbound so the later
     /// vanished-window reconciliation cannot mistake the runtime's own close
     /// for a failed attempt.
     ///
@@ -37835,6 +37868,53 @@ mod tests {
         assert!(
             reloaded.settle_exact_terminal_delivery(&target).is_err(),
             "a second settlement of the same launch is refused"
+        );
+    }
+
+    #[test]
+    fn issue_4783_next_scan_requeues_settled_delivery_with_unchecked_acceptance() {
+        let mut monitor = launched_monitor_for_issue(checked_issue(42), "tab-1::agent-42");
+        monitor.record_attempt(42);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+        monitor.record_autonomous_heartbeat(42, "2026-06-26T00:00:00Z");
+        let attempts = monitor.attempt_count(42);
+        let target = stop_target(&monitor, 42);
+
+        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+        assert!(monitor.queued_issue_numbers().is_empty());
+        let mut candidate = issue(42);
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: remaining work\n".into());
+        scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
+
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(monitor.attempt_count(42), attempts);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert_eq!(
+            monitor.prefs().queued_launch_session_strategies.get(&42),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+    }
+
+    #[test]
+    fn issue_4783_next_scan_does_not_requeue_checked_settled_delivery() {
+        let candidate = checked_issue(42);
+        let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
+        let target = stop_target(&monitor, 42);
+        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+
+        scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
+
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
         );
     }
 

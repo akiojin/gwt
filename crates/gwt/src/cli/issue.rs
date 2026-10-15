@@ -1052,6 +1052,7 @@ fn attach_monitor_control_identity(
     let published_active = std::mem::take(&mut status.active_launches);
     status.active_launches = authority.active_issue_numbers();
     status.released = authority.agent_status().released;
+    let prefs = authority.prefs();
     let mut lifecycle = authority.clone();
     let mut changed = Vec::new();
     for row in &mut status.inbox {
@@ -1065,17 +1066,35 @@ fn attach_monitor_control_identity(
         let window_id = active
             .then(|| authority.launched_window_id(row.issue_number))
             .flatten();
-        if published_active.contains(&row.issue_number) != active
-            || (status.released.contains(&row.issue_number)
-                && row.state != crate::MonitorInboxState::Released)
-            || (!active
-                && matches!(
-                    row.state,
-                    crate::MonitorInboxState::Launched | crate::MonitorInboxState::Launching
-                ))
-            || row.claim_id != claim_id
-            || row.delivery_id != delivery_id
-            || row.launched_window_id != window_id
+        // Issue #4783 AC-R3: missing launch identity is not a queue decision.
+        // Keep the daemon's lifecycle unless durable state records a change.
+        let durable_decision = active
+            || status.released.contains(&row.issue_number)
+            || prefs
+                .queued_launch_session_strategies
+                .get(&row.issue_number)
+                == Some(&crate::IssueMonitorLaunchSessionStrategy::FreshRequired)
+            || prefs.merged_issues.contains(&row.issue_number)
+            || prefs
+                .failed_issues
+                .iter()
+                .any(|failed| failed.issue_number == row.issue_number)
+            || prefs
+                .released_failures
+                .iter()
+                .any(|release| release.issue_number == row.issue_number);
+        if durable_decision
+            && (published_active.contains(&row.issue_number) != active
+                || (status.released.contains(&row.issue_number)
+                    && row.state != crate::MonitorInboxState::Released)
+                || (!active
+                    && matches!(
+                        row.state,
+                        crate::MonitorInboxState::Launched | crate::MonitorInboxState::Launching
+                    ))
+                || row.claim_id != claim_id
+                || row.delivery_id != delivery_id
+                || row.launched_window_id != window_id)
         {
             lifecycle.record_candidate(crate::IssueMonitorIssue {
                 number: row.issue_number,
@@ -10826,6 +10845,27 @@ mod tests {
         assert_eq!(released["state"], "queued");
         assert!(released["claim_id"].is_null());
         assert!(released["launched_window_id"].is_null());
+    }
+
+    #[test]
+    fn issue_4783_status_keeps_daemon_lifecycle_without_durable_decision() {
+        let authority = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut published = authority.agent_status();
+        published.inbox = vec![
+            mismatch_row(42, crate::MonitorInboxState::Launched, None),
+            mismatch_row(43, crate::MonitorInboxState::Launched, Some("tab-1::old")),
+        ];
+        published.inbox[1].claim_id = Some("old-claim".into());
+
+        attach_monitor_control_identity(&authority, &mut published);
+
+        assert!(published.queue.is_empty());
+        assert!(published.active_launches.is_empty());
+        for row in published.inbox {
+            assert_eq!(row.state, crate::MonitorInboxState::Launched);
+            assert_eq!(row.claim_id, None);
+            assert_eq!(row.launched_window_id, None);
+        }
     }
 
     /// Issue #4231 AC-5: `priority_order` is an ordering, not queue membership.

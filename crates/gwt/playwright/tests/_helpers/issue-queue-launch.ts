@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { chmod, writeFile } from "node:fs/promises";
+import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture } from "./exact-relaunch";
@@ -55,6 +55,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
   let auditEnv: NodeJS.ProcessEnv;
   let checkoutGwtd = "";
   let stableHook = "";
+  let projectLogs = "";
   const hookAudits: unknown[] = [];
   function auditHooks(cwd: string, repair: boolean) {
     const operation = repair ? "hook.doctor" : "hook.health";
@@ -91,7 +92,8 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
         auto_apply_updates: false, terminal_queue_auto_refill: false,
         launch_profile: { agent_id: "codex", version: "installed", runtime_target: "Host", skip_permissions: true },
       },
-      async beforeStart({ project, env }) {
+      async beforeStart({ project, env, preferences }) {
+        projectLogs = join(preferences, "..", "logs");
         daemon = spawn(checkoutGwtd, [], { cwd: project, env, stdio: ["pipe", "ignore", "pipe"] });
         let daemonErrors = "";
         daemon.stderr?.on("data", chunk => { daemonErrors += chunk; });
@@ -151,6 +153,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
         await writeFile(join(bin, "gh"), gh);
         await chmod(join(bin, "gh"), 0o755);
         Object.assign(env, {
+          RUST_LOG: "info",
           GWT_OWNER_GITHUB_TEST_MODE: "loopback-v1",
           GWT_OWNER_GITHUB_REST_BASE: endpoint,
           GWT_OWNER_GITHUB_GRAPHQL_URL: `${endpoint}/graphql`,
@@ -166,8 +169,36 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     throw error;
   }
   const active = fixture;
-  return { ...active, issueNumber: issue.number, requests, comments, hookAudits,
+  function readOperation(operation: "execution.status" | "perf.startup", cwd: string) {
+    const result = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000,
+      input: JSON.stringify({ schema_version: 1, operation,
+        params: operation === "execution.status" ? { issue: issue.number } : {} }),
+    });
+    if (result.status !== 0) throw new Error(`Fixture ${operation} failed`);
+    const envelope = JSON.parse(result.stdout);
+    if (!envelope.ok) throw new Error(`Fixture ${operation} refused`);
+    return typeof envelope.output === "string" ? JSON.parse(envelope.output) : envelope.output;
+  }
+  async function restoreSummary(since: string) {
+    for (const directory of [join(active.home, ".gwt", "logs"), projectLogs]) {
+      for (const file of await readdir(directory).catch(() => [])) {
+        if (!/\.log(?:\.|$)/.test(file)) continue;
+        for (const line of (await readFile(join(directory, file), "utf8")).split("\n")) {
+          let row;
+          try { row = JSON.parse(line); } catch { continue; } // Retry an incomplete final write.
+          if (row.target === "gwt.restore.admission" && row.fields?.scope === "startup restore"
+            && row.fields.message === "session restore admission summary"
+            && Date.parse(row.timestamp) >= Date.parse(since)) return row.fields;
+        }
+      }
+    }
+    return null;
+  }
+  return { ...active, get url() { return active.url; }, get ownedPid() { return active.ownedPid; },
+    issueNumber: issue.number, requests, comments, hookAudits, restoreSummary,
     auditHooks: (cwd: string) => auditHooks(cwd, false),
+    executionStatus: (cwd: string) => readOperation("execution.status", cwd),
+    startupReport: () => readOperation("perf.startup", active.project).startup,
     async stop() {
       try { await active.stop(); }
       finally {

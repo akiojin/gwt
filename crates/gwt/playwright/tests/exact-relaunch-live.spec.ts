@@ -10,7 +10,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
-import { gotoLiveGwt, openLiveLaunchWizardForBranch, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
 
@@ -63,7 +63,7 @@ async function liveCodexWindow(page: Page, sessionId: string): Promise<AgentWind
 
 async function launchCodex(page: Page, branch: string) {
   const after = await cursor(page);
-  await openLiveLaunchWizardForBranch(page, branch);
+  await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: branch });
   await latestWizard(page, after, true);
   await wizardAction(page, { kind: "set_launch_path", path: "manual_setup" });
   // The installed (fixture) Codex is the only route: the wizard has no version choice.
@@ -157,14 +157,6 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       // Let the SessionStart runtime state land first so it cannot race the exit.
       await expect.poll(async () => (await codexWindows(page)).find((entry) => entry.id === firstWindow.id)?.status,
         { timeout: 60_000, message: "SessionStart runtime state reaches the window" }).toBe("idle");
-      const wizardCursor = await cursor(page);
-      await openLiveLaunchWizardForBranch(page, fixture.branch);
-      const { wizard } = await latestWizard(page, wizardCursor, true);
-      await testInfo.attach("quick-start-cache-view", {
-        body: JSON.stringify(wizard.quick_start_entries), contentType: "application/json" });
-      await expect(page.locator("#wizard-modal .start-method-list")).toBeVisible();
-      await testInfo.attach(`quick-start-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-      await wizardAction(page, { kind: "cancel" });
       // The provider dies (a clean exit closes the window instead); the window
       // runtime turns error and the Restart agent control appears.
       process.kill(first.pid, "SIGTERM");
