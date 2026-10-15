@@ -2121,27 +2121,10 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // Issue #4777: fixed surfaces share the rail and optional split host.
       function openSurface(surface) {
-        if (splitSurfaces?.isOpen()) {
-          if (!splitSurfaces.select(surface)) splitSurfaces.focusSurface(surface);
-          return;
-        }
-        if (surface !== "agents") setAgentsHost(null);
-        switch (surface) {
-          case "issues":
-            openWorkspaceOverview();
-            return;
-          case "board":
-            focusOrSpawnPreset("board");
-            return;
-          case "settings":
-            focusOrSpawnPreset("settings");
-            return;
-          case "agents":
-            setAgentsHost(stage.closest(".canvas-area"));
-            syncSurfaceRail();
-            return;
-          default:
-            return;
+        if (splitSurfaces?.show(surface)) {
+          // A rail choice supersedes camera navigation still awaiting a window.
+          pendingFrameWindowId = null;
+          pendingPmFrame = false;
         }
       }
 
@@ -2293,6 +2276,10 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function visibleBounds() {
+        if (splitSurfaces?.hasLayout) {
+          const area = canvas.parentElement;
+          return { x: 0, y: 0, width: area.clientWidth, height: area.clientHeight };
+        }
         return {
           x: -viewport.x / viewport.zoom,
           y: -viewport.y / viewport.zoom,
@@ -2379,7 +2366,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function clampWindowElementToCameraFrame(windowId) {
-        if (splitSurfaces?.isOpen()) return;
+        if (splitSurfaces?.hasLayout) return;
         const element = windowMap.get(windowId);
         if (!element) {
           return;
@@ -2492,7 +2479,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (!windowData) {
           return;
         }
-        if (splitSurfaces?.isOpen()) {
+        if (splitSurfaces?.hasLayout) {
           if (!splitSurfaces.containsWindow(windowId)) {
             splitSurfaces.select(surfaceForWindow(windowData));
           }
@@ -2575,7 +2562,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       let focusedWindowViewportReframeFrame = null;
 
       function frameFocusedWindowAfterViewportResize() {
-        if (splitSurfaces?.isOpen() || !focusedId) {
+        if (splitSurfaces?.hasLayout || !focusedId) {
           return;
         }
         const windowData = workspaceWindowById(focusedId);
@@ -2831,7 +2818,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         const workspaceWindow = workspaceWindowById(windowId);
         if (agentsHost && agentsSurface?.contains(windowId)) return agentsSurface.isVisible(windowId);
         if (agentsHost === stage.closest(".canvas-area")) return false;
-        if (splitSurfaces?.isOpen() && !isOffCanvasPlacement(workspaceWindow)) {
+        if (splitSurfaces?.hasLayout && !isOffCanvasPlacement(workspaceWindow)) {
           return splitSurfaces.containsWindow(windowId);
         }
         if (isOffCanvasPlacement(workspaceWindow)) {
@@ -3979,7 +3966,7 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // The selected pane or Agents host takes precedence over canvas focus.
       function syncSurfaceRail() {
-        if (splitSurfaces?.isOpen()) {
+        if (splitSurfaces?.hasLayout) {
           applySurfaceSelection(document, splitSurfaces.activeSurface());
           return;
         }
@@ -6256,7 +6243,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                 // with agent status events.
                 recompute: recomputeOperatorTelemetry,
                 afterSync: () => {
-                  if (splitSurfaces?.isOpen() || agentsHost) return;
+                  if (splitSurfaces?.hasLayout || agentsHost) return;
                   const topmostId = topmostWindowId(workspace);
                   if (topmostId && activeWindowIdSet?.has(topmostId)) {
                     focusWindowLocally(topmostId);
@@ -7798,11 +7785,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         },
       });
       document.getElementById("split-view-button").addEventListener("click", () => {
-        if (splitSurfaces.isOpen()) splitSurfaces.close();
+        if (splitSurfaces.isOpen()) splitSurfaces.collapse();
         else splitSurfaces.open(agentsHost ? "agents" : surfaceForWindow(windowWithSettingsSection(workspaceWindowById(focusedId))));
       });
       window.addEventListener("resize", () => {
-        if (!splitSurfaces.isOpen() && !agentsHost) return;
+        if (!splitSurfaces.hasLayout && !agentsHost) return;
         for (const id of windowMap.keys()) {
           if (splitSurfaces.containsWindow(id) || (agentsHost && agentsSurface.isVisible(id))) scheduleTerminalFit(id, true);
         }

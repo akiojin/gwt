@@ -935,8 +935,8 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
   assert.match(
     appSource,
-    /case "issues":\s*openWorkspaceOverview\(\);/,
-    "expected the Issues surface to open the overview",
+    /splitSurfaces\?\.show\(surface\)/,
+    "rail surfaces use the fixed surface host",
   );
 });
 
@@ -5755,5 +5755,19 @@ test("window framing activates a hidden group member after the split route", () 
   assert.match(body, /windowData\.tab_group_id && !windowData\.tab_group_active/);
   assert.match(body, /pendingFrameWindowId\s*=\s*windowId/);
   assert.match(body, /kind:\s*"activate_window_tab",\s*id:\s*windowId/);
-  assert.ok(body.indexOf('splitSurfaces?.isOpen()') < body.indexOf('windowData.tab_group_id && !windowData.tab_group_active'));
+  assert.ok(body.indexOf('splitSurfaces?.hasLayout') < body.indexOf('windowData.tab_group_id && !windowData.tab_group_active'));
+  assert.match(body, /splitSurfaces\.close\(\)/);
+});
+
+test("fixed surface bounds use the visible host instead of the hidden canvas or camera", () => {
+  const body = extractFunctionBody(appSource, "visibleBounds");
+  const bounds = new Function("splitSurfaces", "stage", "canvas", "viewport", body);
+  const stage = { closest: () => ({ clientWidth: 1200, clientHeight: 800 }) };
+  const canvas = { clientWidth: 0, clientHeight: 0, parentElement: stage.closest() };
+  const viewport = { x: -400, y: 200, zoom: 0.5 };
+  assert.deepEqual(bounds({ hasLayout: true }, stage, canvas, viewport),
+    { x: 0, y: 0, width: 1200, height: 800 });
+  assert.deepEqual(bounds({ hasLayout: false }, stage,
+    { clientWidth: 600, clientHeight: 400 }, viewport),
+    { x: 800, y: -400, width: 1200, height: 800 });
 });
