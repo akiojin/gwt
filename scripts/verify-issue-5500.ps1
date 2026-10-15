@@ -227,7 +227,7 @@ Module._resolveFilename = function(request, parent, ...rest) {
     if ($LASTEXITCODE) { throw 'Chromium installation failed.' }
     & node $playwright test --config (Join-Path $repoRoot 'crates/gwt/playwright/playwright.config.ts') --workers=1 `
         --output (Join-Path $checkHome 'playwright') --headed --trace retain-on-failure `
-        'issue-monitor-capacity-live.spec.ts' @PlaywrightArgs
+        'issue-monitor-capacity-sampler-live.spec.ts' @PlaywrightArgs
     if ($LASTEXITCODE) { throw 'Issue #5500 headed verification failed.' }
 } finally {
     foreach ($name in $savedVars.Keys) { [Environment]::SetEnvironmentVariable($name, $savedVars[$name], 'Process') }
