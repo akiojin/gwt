@@ -1070,7 +1070,7 @@ mod tests {
         crate::pm_guidance::generate_pm_guidance(tmp.path()).unwrap();
         for provider in [".claude", ".codex"] {
             let coordination = read_contract(
-                &tmp.path()
+                tmp.path()
                     .join(provider)
                     .join("skills/gwt-coordination/SKILL.md"),
             )
@@ -1079,7 +1079,7 @@ mod tests {
             assert!(coordination.contains("`agent:pm`"));
             assert!(coordination.contains("`hook.health`"));
             let pm =
-                read_contract(&tmp.path().join(provider).join("skills/gwt-pm/SKILL.md")).unwrap();
+                read_contract(tmp.path().join(provider).join("skills/gwt-pm/SKILL.md")).unwrap();
             assert!(pm.contains("Explicit Board read receipts"));
             assert!(pm.contains("\"operation\":\"board.show\""));
             assert!(pm.contains("unread `blocked` or `handoff`"));
