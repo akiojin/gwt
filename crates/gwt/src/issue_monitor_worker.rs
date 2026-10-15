@@ -3887,7 +3887,9 @@ mod tests {
     /// ordinary settlement is what made the release treat interrupted work as
     /// finished and leave the Issue `Launched` with no pane and no way back.
     #[test]
-    fn a_generation_the_reaper_blocked_reads_as_interrupted_not_settled() {
+    fn issue_5535_stopped_holder_requeues_and_activates_a_fresh_launch() {
+        use crate::cli::execution_state::{self, ExecutionControlStatus};
+
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3924,6 +3926,7 @@ mod tests {
             crate::cli::execution_state::current_execution_binding(worktree.path(), owner)
                 .unwrap()
                 .unwrap();
+        let old_generation_id = binding.generation_id.clone();
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let mut session =
             gwt_agent::Session::new(worktree.path(), "work/issue-42", gwt_agent::AgentId::Codex);
@@ -3962,7 +3965,13 @@ mod tests {
             Some(IssueMonitorExecutionSettlement::Unknown),
             "an exact live process must not permit recovery even without a pane"
         );
-        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.terminal_queue_push(&[42], "test", "2026-09-07T04:00:00Z");
+        monitor.set_gui_connected(true);
+        monitor.set_autonomous_mode(true);
         monitor.record_candidate(issue(42));
         monitor.complete_active_launch_at(42, "tab-1::live", "2026-09-07T04:00:00Z");
         monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
@@ -3990,11 +3999,19 @@ mod tests {
                 &read_execution_observations(worktree.path(), &[42]),
             )
             .is_empty());
-        std::fs::remove_file(runtime_path).unwrap();
-
-        // What an auto-update restart leaves behind: the holder is gone and
-        // settled nothing.
-        session.update_status(gwt_agent::AgentStatus::Interrupted);
+        // The stop leaves an exact dead child in the surviving GUI Host's
+        // namespace, but its sidecar cannot supply a successor-fencing proof.
+        let mut runtime = gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Stopped,
+            &identity,
+            41,
+            started_at,
+            i32::MAX as u32,
+            1,
+        );
+        runtime.runtime_incarnation = None;
+        runtime.save(&runtime_path).unwrap();
+        session.update_status(gwt_agent::AgentStatus::Stopped);
         session.save(&sessions_dir).unwrap();
 
         // A different, unbound agent in the same worktree also vetoes recovery.
@@ -4026,6 +4043,27 @@ mod tests {
             .is_empty());
         std::fs::remove_file(unbound_path).unwrap();
 
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pause,
+            "work-stopped-requeue",
+            chrono::Utc::now(),
+        );
+        event.agent_session_id = Some(session_id.to_string());
+        let shard_path = gwt_core::paths::gwt_work_event_shard_path(
+            &worktree.path().join(".gwt/work/events"),
+            &event.id,
+        );
+        std::fs::create_dir_all(shard_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &shard_path,
+            format!("{}\n", serde_json::to_string(&event).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            execution_state::classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
+            execution_state::ExactSessionRuntimeDisposition::ChildExited
+        );
+
         assert_eq!(
             read_execution_observations(worktree.path(), &[owner.number])
                 .get(&owner.number)
@@ -4055,6 +4093,10 @@ mod tests {
             .unwrap(),
             crate::cli::execution_state::StartupActiveGenerationReapOutcome::Reaped
         );
+        assert!(
+            !shard_path.exists(),
+            "recovery archives the untracked Work event"
+        );
 
         assert_eq!(
             read_execution_observations(worktree.path(), &[owner.number])
@@ -4073,6 +4115,42 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("agent process absent"));
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+        assert_eq!(
+            monitor
+                .claim_next_launch_requests(&client, "host-a/session-a", "2026-09-07T04:11:00Z")
+                .iter()
+                .map(|request| request.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42]
+        );
+        let fresh_request = execution_state::SuccessorRequest {
+            operation_id: "stopped-holder-fresh-launch".to_string(),
+            principal_id: "gwt-host-launch".to_string(),
+            work_id: None,
+            source: execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
+            session_binding_id: "binding-fresh-launch".to_string(),
+            initial_session_id: "fresh-launch-holder".to_string(),
+            entrypoint: "gwt-execute".to_string(),
+            requested_at: chrono::Utc::now(),
+        };
+        execution_state::prepare_fresh_linked_owner_launch_successor(
+            worktree.path(),
+            owner,
+            &fresh_request,
+        )
+        .unwrap();
+        let activated =
+            execution_state::activate_successor(worktree.path(), owner, &fresh_request).unwrap();
+        assert_ne!(activated.generation_id, old_generation_id);
+        assert_eq!(
+            execution_state::load_generation_ledger(worktree.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Active)
+        );
     }
 
     #[test]
