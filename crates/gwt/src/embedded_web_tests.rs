@@ -338,7 +338,7 @@ fn embedded_web_issue_monitor_allowed_labels_reuses_operator_controls() {
         "Settings must edit allowed labels while Issues retains server exclusion evidence"
     );
     assert!(
-        settings_js.contains(r#"field("Allowed labels", "text""#)
+        settings_js.contains(r#"field(group("Target"), "Allowed labels", "text""#)
             && settings_js.contains("settings-field")
             && settings_js.contains("settings-input")
             && !surface_js
