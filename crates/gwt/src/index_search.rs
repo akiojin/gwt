@@ -46,6 +46,14 @@ pub struct ProjectIndexSearchOutcome {
     pub stale_scopes: Vec<String>,
     /// True when a single-flight refresh was queued for the stale scopes.
     pub refresh_queued: bool,
+    /// Unusable scopes excluded from a partial search, with their health reason.
+    pub unavailable_scopes: Vec<IndexSearchUnavailableScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct IndexSearchUnavailableScope {
+    pub scope: String,
+    pub reason: String,
 }
 
 /// Typed retry information for FR-388 `INDEX_NOT_READY` failures.
@@ -462,6 +470,18 @@ pub(crate) fn search_project_index_attempt(
         search_unavailable_error("project index search completed without a payload")
     })?;
 
+    // Issue #5430: serve usable scopes immediately and repair only the
+    // excluded scopes that are not held by an explicit operator stop.
+    let unavailable_scopes = unavailable_search_scopes(&payload);
+    let repairable: Vec<(String, String)> = unavailable_scopes
+        .iter()
+        .filter(|scope| !OPERATOR_REPAIR_REASONS.contains(&scope.reason.as_str()))
+        .map(|scope| (scope.scope.clone(), scope.reason.clone()))
+        .collect();
+    if !repairable.is_empty() {
+        let _ = queue_scope_rebuilds(project_root, &repairable, worktree_hash_arg.as_deref());
+    }
+
     // FR-387 stale-while-revalidate: verified results return immediately;
     // one refresh is queued per stale scope (the coordinator coalesces
     // concurrent refreshes host-wide into a single flight).
@@ -472,6 +492,7 @@ pub(crate) fn search_project_index_attempt(
             scopes
                 .iter()
                 .filter_map(Value::as_str)
+                .filter(|scope| !unavailable_scopes.iter().any(|entry| entry.scope == *scope))
                 .map(str::to_string)
                 .collect()
         })
@@ -490,6 +511,12 @@ pub(crate) fn search_project_index_attempt(
     let mut results = Vec::new();
     let mut suggestions = Vec::new();
     for scope in &effective_scopes {
+        if unavailable_scopes
+            .iter()
+            .any(|entry| entry.scope == scope.as_str())
+        {
+            continue;
+        }
         let sub_payload = scope_subpayload(&payload, *scope);
         append_scope_results(&mut results, *scope, sub_payload, &board_scope);
         append_scope_suggestions(&mut suggestions, *scope, sub_payload, &board_scope);
@@ -510,6 +537,7 @@ pub(crate) fn search_project_index_attempt(
         suggestions,
         stale_scopes,
         refresh_queued,
+        unavailable_scopes,
     })
 }
 
@@ -580,9 +608,12 @@ fn sleep_with_attempt_deadline(duration: Duration) -> Result<(), IndexSearchAtte
 
 const SEARCH_RETRY_AFTER_MS: u64 = 5_000;
 
-/// Extract `(scope, state)` pairs whose state blocks searching
-/// (missing / corrupt) from the batch payload's `scopes` classification.
+/// Missing / corrupt scopes require a repair wait only when no requested
+/// scope can be served. Otherwise they are reported as partial exclusions.
 fn broken_scopes(payload: &Value) -> Vec<(String, String)> {
+    if has_searchable_scope(payload) {
+        return Vec::new();
+    }
     payload
         .get("scopes")
         .and_then(Value::as_object)
@@ -607,30 +638,66 @@ const OPERATOR_REPAIR_REASONS: &[&str] = &["cancelled", "repair_stopped"];
 const OPERATOR_REPAIR_RECOVERY: &str = "run the `index.repair` JSON operation to clear the \
      stop state and rebuild; `index.status` shows each scope's reason";
 
-/// Extract the scopes in an operator stop state from the batch payload.
-fn operator_repair_required(payload: &Value) -> Option<IndexSearchRepairRequired> {
-    let stopped: Vec<(&String, &str)> = payload
+fn has_searchable_scope(payload: &Value) -> bool {
+    payload
+        .get("scopes")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .any(|(_, status)| {
+            matches!(
+                status.get("state").and_then(Value::as_str),
+                Some("fresh" | "stale")
+            ) && !status
+                .get("reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| OPERATOR_REPAIR_REASONS.contains(&reason))
+        })
+}
+
+fn unavailable_search_scopes(payload: &Value) -> Vec<IndexSearchUnavailableScope> {
+    payload
         .get("scopes")
         .and_then(Value::as_object)
         .into_iter()
         .flatten()
         .filter_map(|(scope, status)| {
-            let reason = status.get("reason").and_then(Value::as_str)?;
-            OPERATOR_REPAIR_REASONS
-                .contains(&reason)
-                .then_some((scope, reason))
+            let state = status.get("state").and_then(Value::as_str)?;
+            let reason = status
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or(state);
+            (matches!(state, "missing" | "corrupt") || OPERATOR_REPAIR_REASONS.contains(&reason))
+                .then(|| IndexSearchUnavailableScope {
+                    scope: scope.clone(),
+                    reason: reason.to_string(),
+                })
         })
-        .collect();
-    if stopped.is_empty() {
+        .collect()
+}
+
+/// Extract the scopes in an operator stop state from the batch payload.
+fn operator_repair_required(payload: &Value) -> Option<IndexSearchRepairRequired> {
+    if has_searchable_scope(payload) {
+        return None;
+    }
+    let unavailable = unavailable_search_scopes(payload);
+    if !unavailable
+        .iter()
+        .any(|scope| OPERATOR_REPAIR_REASONS.contains(&scope.reason.as_str()))
+    {
         return None;
     }
     Some(IndexSearchRepairRequired {
-        reason: stopped
+        reason: unavailable
             .iter()
-            .map(|(scope, reason)| format!("{scope} index is {reason}"))
+            .map(|scope| format!("{} index is {}", scope.scope, scope.reason))
             .collect::<Vec<_>>()
             .join("; "),
-        affected_scopes: stopped.iter().map(|(scope, _)| (*scope).clone()).collect(),
+        affected_scopes: unavailable
+            .iter()
+            .map(|scope| scope.scope.clone())
+            .collect(),
         recovery: OPERATOR_REPAIR_RECOVERY.to_string(),
     })
 }
@@ -2297,7 +2364,7 @@ mod tests {
     }
 
     #[test]
-    fn broken_scopes_extracts_missing_and_corrupt_states() {
+    fn mixed_scope_search_does_not_wait_for_missing_or_corrupt_scopes() {
         let payload = json!({
             "ok": true,
             "scopes": {
@@ -2307,13 +2374,55 @@ mod tests {
                 "files-docs": {"state": "corrupt"},
             },
         });
-        let mut broken = broken_scopes(&payload);
-        broken.sort();
+        assert!(
+            broken_scopes(&payload).is_empty(),
+            "usable scopes must be served without waiting for unrelated repairs"
+        );
+    }
+
+    #[test]
+    fn mixed_scope_search_does_not_fail_for_operator_stop_states() {
+        for reason in ["cancelled", "repair_stopped"] {
+            let payload = json!({
+                "ok": true,
+                "scopes": {
+                    "issues": {"state": "corrupt", "reason": reason},
+                    "specs": {"state": "fresh"},
+                },
+            });
+            assert!(
+                operator_repair_required(&payload).is_none(),
+                "{reason} must only exclude issues while specs remains searchable"
+            );
+            assert!(broken_scopes(&payload).is_empty());
+        }
+    }
+
+    #[test]
+    fn unavailable_scope_metadata_preserves_every_excluded_reason() {
+        let payload = json!({
+            "scopes": {
+                "issues": {"state": "corrupt", "reason": "repair_stopped"},
+                "specs": {"state": "fresh"},
+                "memory": {"state": "missing"},
+                "discussions": {"state": "corrupt", "reason": "bad_manifest"},
+            },
+        });
         assert_eq!(
-            broken,
+            unavailable_search_scopes(&payload),
             vec![
-                ("files".to_string(), "missing".to_string()),
-                ("files-docs".to_string(), "corrupt".to_string()),
+                IndexSearchUnavailableScope {
+                    scope: "discussions".into(),
+                    reason: "bad_manifest".into()
+                },
+                IndexSearchUnavailableScope {
+                    scope: "issues".into(),
+                    reason: "repair_stopped".into()
+                },
+                IndexSearchUnavailableScope {
+                    scope: "memory".into(),
+                    reason: "missing".into()
+                },
             ]
         );
     }
@@ -2437,17 +2546,15 @@ mod tests {
     }
 
     #[test]
-    fn broken_scopes_extracts_missing_issue_and_corrupt_spec_states() {
+    fn all_broken_scopes_extract_missing_issue_and_corrupt_spec_states() {
         // T-IDX-416 (SPEC #1939 Phase 70d, bundled-required by SPEC #3170
-        // FR-097): the Knowledge Bridge consumer scopes classify exactly like
-        // the file scopes — missing / corrupt block searching, stale does not.
+        // FR-097): when no scope is usable, missing / corrupt still block
+        // searching and preserve the typed repair-wait contract.
         let payload = json!({
             "ok": true,
             "scopes": {
                 "issues": {"state": "missing"},
                 "specs": {"state": "corrupt"},
-                "board": {"state": "fresh"},
-                "works": {"state": "stale"},
             },
         });
         let mut broken = broken_scopes(&payload);
@@ -2964,8 +3071,9 @@ mod tests {
             });
             let required = operator_repair_required(&payload)
                 .expect("an operator stop state must not enter the repair wait");
-            assert_eq!(required.affected_scopes, vec!["issues".to_string()]);
+            assert_eq!(required.affected_scopes, ["issues", "specs"]);
             assert!(required.reason.contains(reason), "{required:?}");
+            assert!(required.reason.contains("specs index is empty_collection"));
             assert!(required.recovery.contains("index.repair"), "{required:?}");
 
             let attempt = IndexSearchAttemptError::RepairRequired(required);

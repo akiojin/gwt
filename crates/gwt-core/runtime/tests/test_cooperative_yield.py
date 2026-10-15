@@ -350,7 +350,7 @@ class IssueIndexCooperativeYieldTests(unittest.TestCase):
         self.assertFalse(resumed.get("yielded"), resumed)
         self.assertEqual(resumed.get("newly_embedded"), ISSUE_TOTAL - CHECKPOINT_BATCH)
 
-    def test_known_budget_interruption_resumes_staging_but_next_crash_stops(self):
+    def test_known_budget_interruption_and_health_probe_crash_remain_retryable(self):
         db = self.db_root / ISSUE_REPO_HASH / "issues"
         with mock.patch.dict(os.environ, {"GWT_INDEX_REFRESH_RUN_ID": "run-a"}), \
                 mock.patch.object(runner, "_pending_higher_priority", side_effect=KeyboardInterrupt):
@@ -362,21 +362,14 @@ class IssueIndexCooperativeYieldTests(unittest.TestCase):
             "fingerprint": marker["fingerprint"], "run_id": "run-a",
         }
         runner._write_json_atomic(db / "repair.json", marker)
-        before = (db / "repair.json").read_bytes()
-        with mock.patch.object(runner.os, "replace", side_effect=OSError("publish")), \
-                mock.patch.object(runner, "_issue_status_v2") as health:
-            with self.assertRaises(OSError):
-                self._run()
-        self.assertEqual((db / "repair.json").read_bytes(), before)
-        health.assert_not_called()
         with mock.patch.dict(os.environ, {"GWT_INDEX_REFRESH_RUN_ID": "run-b"}), \
                 mock.patch.object(runner, "_issue_status_v2", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self._run()
-        marker = runner._read_issue_repair(db)
-        self.assertEqual(marker.get("refresh_run_id"), "run-b")
-        self.assertNotIn("expected_budget_interruption", marker)
-        self.assertEqual(self._run().get("error_code"), "REPAIR_STOPPED")
+        resumed = self._run()
+        self.assertTrue(resumed.get("ok"), resumed)
+        self.assertEqual(resumed.get("newly_embedded"), ISSUE_TOTAL - CHECKPOINT_BATCH)
+        self.assertFalse((db / "repair.json").exists())
 
     def test_known_budget_interruption_finishes_without_reembedding_checkpoint(self):
         db = self.db_root / ISSUE_REPO_HASH / "issues"

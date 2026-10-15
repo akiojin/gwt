@@ -176,6 +176,21 @@ fn manifest_entry_count(manifest_path: &Path) -> Option<u64> {
     Some(entries.len() as u64)
 }
 
+fn issue_build_is_active(db_path: &Path) -> bool {
+    // Open only an existing runner lock: status must never create index files.
+    let lock = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(db_path.join("build/.lock"))
+    {
+        Ok(lock) => lock,
+        Err(error) => return error.kind() != std::io::ErrorKind::NotFound,
+    };
+    // Drop releases a successful probe. Contention or an unreadable lock
+    // cannot establish that the builder died, so retain its live state.
+    fs2::FileExt::try_lock_exclusive(&lock).is_err()
+}
+
 fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
     let db_path = repo_dir.join("issues");
     let meta_path = db_path.join("meta.json");
@@ -234,7 +249,18 @@ fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
             .unwrap_or_else(|| canonical_json_sha256(&json!([])));
         let fingerprint_matches =
             repair.get("fingerprint").and_then(Value::as_str) == Some(source_fingerprint.as_str());
-        if fingerprint_matches && repair.get("failures").and_then(Value::as_u64).unwrap_or(0) > 0 {
+        let incomplete =
+            repair.get("last_error").and_then(Value::as_str) == Some("BUILD_INCOMPLETE");
+        if incomplete {
+            if issue_build_is_active(&db_path) {
+                value["reason"] = json!("building");
+                value["building"] = json!(true);
+            }
+            // An orphan does not override published health. The next runner
+            // status/build reclaims it; this projection remains read-only.
+        } else if fingerprint_matches
+            && repair.get("failures").and_then(Value::as_u64).unwrap_or(0) > 0
+        {
             value["mode"] = repair
                 .get("mode")
                 .cloned()
@@ -611,6 +637,39 @@ mod tests {
         assert_eq!(
             issues_status(&repo, &cache)["reason"],
             "source_cache_changed"
+        );
+    }
+
+    #[test]
+    fn issues_build_sentinel_reports_liveness_without_mutating_status_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let issues = tmp.path().join("issues");
+        fs::create_dir_all(issues.join("build")).unwrap();
+        fs::write(issues.join("meta.json"), r#"{"document_count":1}"#).unwrap();
+        let marker = json!({
+            "fingerprint": canonical_json_sha256(&json!([])),
+            "failures": 1, "last_error": "BUILD_INCOMPLETE", "mode": "full"
+        })
+        .to_string();
+        fs::write(issues.join("repair.json"), &marker).unwrap();
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(issues.join("build/.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let active = issues_status(tmp.path(), &tmp.path().join("cache"));
+        assert_eq!(active["reason"], "building");
+        assert_eq!(active["healthy"], true);
+        drop(lock);
+        let orphan = issues_status(tmp.path(), &tmp.path().join("cache"));
+        assert_eq!(orphan["reason"], "ready");
+        assert_eq!(orphan["healthy"], true);
+        assert_eq!(
+            fs::read_to_string(issues.join("repair.json")).unwrap(),
+            marker
         );
     }
 

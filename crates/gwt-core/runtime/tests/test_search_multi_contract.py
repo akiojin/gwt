@@ -61,6 +61,21 @@ class _KnownDistanceEmbeddingModel:
 
 
 class SearchMultiContractTests(unittest.TestCase):
+    def test_missing_v2_files_do_not_block_available_issue_scope(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            base = Path(tmp)
+            self._write_cached_issue(base, 5430, "Available issue")
+            db_root = base / "index"
+            self.assertTrue(runner.action_index_issues_v2(
+                REPO_HASH, str(base), db_root=db_root)["ok"])
+            payload = runner.action_search_multi_v2(
+                REPO_HASH, WORKTREE_HASH, str(base), "Available", 5,
+                ["files", "issues"], db_root=db_root, file_index_protocol="v2")
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual(payload["scopes"]["files"]["state"], "missing")
+            self.assertNotIn("files", payload["scope_results"])
+            self.assertEqual(payload["issueResults"][0]["number"], 5430)
+
     def setUp(self):
         runner._MODEL_CACHE = None
         self._coord_tmp = tempfile.TemporaryDirectory()
