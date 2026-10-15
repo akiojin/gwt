@@ -193,6 +193,15 @@ test.describe("Issue queue real backend launch", () => {
         "authenticated Done survives cold shared-source intake").toBe("done");
       expect(cold.find((work: any) => work.id === seed.successorId)?.related_work_item_ids).toEqual([]);
 
+      // The restored orphan must have a guarded close action even though its
+      // Issue-linked branch is intentionally absent from Other.
+      await restored.locator('[data-surface="issues"]').click();
+      await restored.locator(`.knowledge-row[data-issue-number="${fixture.issueNumber}"]`).click();
+      const orphanCard = restored.locator(`.knowledge-related-work[data-work-id="${seed.successorId}"]`);
+      await expect(orphanCard).toBeVisible();
+      await expect(orphanCard.locator('[data-action="close-work-done"]')).toBeEnabled();
+      await expect(orphanCard.locator('[data-action="close-work-done"]')).toHaveAttribute("data-work-id", seed.successorId);
+
       // Use the normal manual launch coordinator, rather than restarting the
       // terminal generation or installing a binding from the fixture.
       const wizardEvent = async (event: unknown, requireOpen = false) => {

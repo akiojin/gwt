@@ -126,6 +126,27 @@ test("a persisted work preset restores the Issue list with collapsed Other", asy
   await expect(row(page, "other-paused")).toBeVisible();
 });
 
+test("restored Issue work stays visible and permits close only for the exact orphan Work", async ({ page }) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  const cards = page.locator(".knowledge-related-work");
+  await expect(cards).toHaveCount(3);
+  await expect(cards.nth(0)).toContainText("Recovered Issue work");
+  await expect(cards.nth(0).getByRole("button", { name: "Done", exact: true })).toBeEnabled();
+  await expect(cards.nth(0).getByRole("button", { name: "Discard", exact: true })).toBeEnabled();
+  await expect(cards.nth(1).getByRole("button", { name: "Done unavailable: live_agent", exact: true })).toBeDisabled();
+  await expect(cards.nth(1).getByRole("button", { name: "Discard unavailable: live_agent", exact: true })).toBeDisabled();
+  await expect(cards.nth(2).locator(".workspace-detail-work-actions")).toHaveCount(0);
+  await expect.poll(() => messages(page, "close_work")).toEqual([]);
+
+  await cards.nth(0).getByRole("button", { name: "Done", exact: true }).click();
+  await expect.poll(() => messages(page, "close_work")).toEqual([
+    { kind: "close_work", work_id: "child-issue-orphan", close_kind: "done" },
+  ]);
+  await expect(cards.nth(0).locator(".workspace-detail-work-actions")).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath("issue-orphan-work.png") });
+});
+
 async function installBackend(page: Page, preset: string) {
   const projectKey = new URL(liveUrl || APP_URL).pathname.split("/")[2];
   await page.addInitScript(({ preset, projectKey }) => {
@@ -152,7 +173,13 @@ async function installBackend(page: Page, preset: string) {
       unassigned_agents: [], journal_entries: [],
       active_works: [
         { id: "linked-visible", title: "Linked issue", linked_issue_numbers: [4556],
-          branch: "feature/linked", status_category: "active", lifecycle_state: "active", agents: [], works: [] },
+          branch: "feature/linked", status_category: "active", lifecycle_state: "active", agents: [],
+          works: [
+            { id: "child-issue-orphan", title: "Recovered Issue work", lifecycle_state: "paused",
+              status_category: "idle", manual_close_allowed: true, agents: [] },
+            { id: "child-issue-live", title: "Running Issue work", lifecycle_state: "active",
+              status_category: "active", manual_close_allowed: false, close_blocked_reason: "live_agent", agents: [] },
+          ] },
         { id: "linked-uncached", title: "Issue outside cached results", linked_issue_numbers: [9999],
           branch: "feature/uncached", status_category: "idle", lifecycle_state: "paused", agents: [], works: [] },
         { id: "unknown-authority", title: "Unknown owner", branch: "feature/unknown", agents: [], works: [] },
@@ -215,7 +242,19 @@ async function installBackend(page: Page, preset: string) {
         } else if (message.kind === "select_knowledge_bridge_entry") {
           this.emit({ kind: "knowledge_detail", id: message.id, knowledge_kind: message.knowledge_kind,
             request_id: message.request_id, detail: { number: message.number, title: "Integrate Other",
-              state: "open", labels: [], sections: [], related_works: [] } });
+              state: "open", labels: [], sections: [], related_works: [
+                { id: "child-issue-orphan", title: "Recovered Issue work", status_category: "idle" },
+                { id: "child-issue-live", title: "Running Issue work", status_category: "active" },
+                { id: "unmatched-issue-work", title: "Unmatched Issue work", status_category: "idle" },
+              ].map(work => ({ ...work, branch: "feature/linked", agents: [] })) } });
+        } else if (message.kind === "close_work") {
+          const work = projection.active_works.flatMap(workspace => workspace.works)
+            .find(work => work.id === message.work_id);
+          if (work?.manual_close_allowed) {
+            work.lifecycle_state = message.close_kind;
+            work.manual_close_allowed = false;
+            this.emit({ kind: "active_work_projection", projection });
+          }
         }
       }
       close() { this.readyState = 3; this.dispatchEvent(new CloseEvent("close")); }

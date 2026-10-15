@@ -1110,3 +1110,44 @@ test("queue priority displays canonical reasons and observed assignment without 
     assert.equal(body.querySelector(".issue-detail-priority-assignment").textContent, `Priority assigned by: ${actor} · Assigned at: ${time}`);
   }
 });
+
+test("Issue #4783: Related Work closes only an exact backend-approved child Work", async (t) => {
+  const projection = { active_works: [{ id: "workspace-1", branch: "work/one",
+    manual_close_allowed: true,
+    works: [
+      { id: "orphan-work", lifecycle_state: "paused", manual_close_allowed: true },
+      { id: "live-work", lifecycle_state: "active", manual_close_allowed: false,
+        close_blocked_reason: "live_agent" },
+    ],
+  }] };
+  const { body, surface, load, sent } = await makeFixture({
+    getActiveWorkProjection: () => projection,
+  });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, entries: [knowledgeEntry(1, "launched")], refresh_enabled: true });
+  body.querySelector('.knowledge-row-select').click();
+  const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+    request_id: request.request_id, detail: { number: 1, title: "Issue 1", state: "open",
+      labels: [], sections: [], related_works: ["orphan-work", "live-work", "unmatched-work"].map(id => ({
+        id, title: id, branch: "work/one", status_category: "idle", agents: [],
+      })) } });
+
+  const cards = [...body.querySelectorAll(".knowledge-related-work")];
+  assert.equal(cards.length, 3, "restored Work remains visible without an agent");
+  const buttons = card => [...card.querySelectorAll(".workspace-detail-work-actions button")];
+  assert.deepEqual(buttons(cards[0]).map(button => button.textContent), ["Done", "Discard"]);
+  buttons(cards[0])[0].click();
+  buttons(cards[0])[1].click();
+  assert.deepEqual(sent.filter(message => message.kind === "close_work"), [
+    { kind: "close_work", work_id: "orphan-work", close_kind: "done" },
+    { kind: "close_work", work_id: "orphan-work", close_kind: "discarded" },
+  ]);
+  assert.equal(buttons(cards[1]).length, 2);
+  for (const button of buttons(cards[1])) {
+    assert.ok(button.disabled);
+    assert.equal(button.title, "live_agent");
+  }
+  assert.equal(buttons(cards[2]).length, 0, "branch equality must not supply close authority");
+});
