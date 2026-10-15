@@ -1965,6 +1965,13 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            FrontendEvent::CloseWork {
+                work_id,
+                close_kind,
+            } => Some(AgentFrontendRequest::CloseWork {
+                work_id,
+                close_kind,
+            }),
             FrontendEvent::PaneName {
                 candidate,
                 request_id,
@@ -2068,6 +2075,7 @@ impl AgentPaneSessionScope {
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.
             "pane_close_result" => Some(payload),
+            "work_close_result" => Some(payload),
             _ => None,
         }
     }
@@ -3288,6 +3296,25 @@ mod tests {
                 )
                 .is_some(),
             "the close reply must reach the requesting client (Issue #3629 AC-12)"
+        );
+    }
+
+    #[test]
+    fn agent_workspace_close_preserves_authenticated_host_dispatch_and_reply() {
+        let project = tempfile::tempdir().expect("project");
+        let principal = AgentSessionPrincipal::for_test(project.path(), "pm-session").unwrap();
+        let mut scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+            "test-capability".into(),
+            principal,
+        ));
+        assert!(matches!(scope.filter_inbound(FrontendEvent::CloseWork {
+            work_id: "work-1".into(), close_kind: "done".into(),
+        }), Some(super::AgentFrontendRequest::CloseWork { work_id, close_kind })
+            if work_id == "work-1" && close_kind == "done"));
+        let reply = serde_json::json!({"kind":"work_close_result","work_id":"work-1","close_kind":"done","ok":false,"retryable":true});
+        assert_eq!(
+            scope.filter_outbound(reply.to_string()),
+            Some(reply.to_string())
         );
     }
 

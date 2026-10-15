@@ -152,15 +152,15 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
     ),
     (
         "pr.close", r#"{}"#, CapabilityGapReason::Permission,
-        "Use pm.operation.execute for this exact PR with a scoped instruction or native approval; existing PR gates remain in force",
+        "For PM inventory-triage closure, use pm.operation.execute for the exact PR with scoped instruction or native approval; existing ordinary PR authority remains in force",
     ),
     (
         "worktree.gc_build_artifacts", r#"{}"#, CapabilityGapReason::Permission,
-        "Use pm.operation.execute with scoped cleanup parameters; dry-run and live-worktree exclusions remain in force",
+        "For unmerged or protected-workspace cleanup, use pm.operation.execute with scoped parameters; ordinary dry-run and merged-idle cleanup remain available, with live-worktree exclusions",
     ),
     (
         "pm.message.send", r#"{}"#, CapabilityGapReason::Permission,
-        "Use pm.operation.execute for the exact pane id and input text; project and live-target authority remain enforced",
+        "For provider approval-prompt choices, use pm.operation.execute for the exact pane id and text; ordinary PM coordination remains available, with project and live-target authority enforced",
     ),
 ];
 
@@ -799,14 +799,20 @@ mod tests {
             }
         }
 
-        assert!(
-            report
+        for operation in ["issue.monitor.config.set", "workspace.close"] {
+            let rows = report
                 .capabilities
                 .iter()
-                .filter(|entry| entry.operation == "issue.monitor.config.set")
-                .all(|entry| entry.executable),
-            "resident PM ON is already supported"
-        );
+                .filter(|entry| entry.operation == operation)
+                .collect::<Vec<_>>();
+            assert!(!rows.is_empty(), "{operation} is a normal PM operation");
+            assert!(
+                rows.iter().all(|entry| entry.executable
+                    && entry.permission_stage.is_none()
+                    && entry.alternative_operation.is_none()),
+                "{operation} uses PM authority without a scoped approval route"
+            );
+        }
         for operation in gwt_core::pm_authorization::OPERATIONS {
             let row = report
                 .capabilities

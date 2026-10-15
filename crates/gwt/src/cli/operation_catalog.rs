@@ -768,6 +768,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "workspace.close",
+        aliases: &[],
+    },
+    Operation {
         name: "workspace.store_consolidate",
         aliases: &["workspace.store-consolidate"],
     },

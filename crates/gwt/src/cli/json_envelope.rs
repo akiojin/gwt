@@ -489,6 +489,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?))
         }
         "workspace.update" => workspace_update(params)?,
+        "workspace.close" => {
+            reject_unknown_params(params, &["work_id", "close_kind"], "workspace.close")?;
+            let close_kind = required_string(params, "close_kind")?;
+            if !matches!(close_kind.as_str(), "done" | "discarded") {
+                return Err(CliParseError::InvalidValue {
+                    flag: "close_kind",
+                    reason: "expected done or discarded",
+                });
+            }
+            CliCommand::Workspace(WorkspaceCommand::Close {
+                work_id: required_string(params, "work_id")?,
+                close_kind,
+            })
+        }
         "workspace.receipt" => CliCommand::Workspace(WorkspaceCommand::Receipt {
             operation_id: required_string(params, "operation_id")?,
         }),
@@ -4484,6 +4498,24 @@ mod tests {
         match err("workspace.update", json!({"current_focus": "x"})) {
             CliParseError::MissingFlag(flag) => assert_eq!(flag, "GWT_SESSION_ID"),
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_close_requires_an_exact_target_and_close_kind() {
+        assert!(matches!(
+            ok("workspace.close", json!({"work_id":"work-1","close_kind":"done"})),
+            CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
+                if work_id == "work-1" && close_kind == "done"
+        ));
+        for params in [
+            json!({"close_kind":"done"}),
+            json!({"work_id":"work-1"}),
+            json!({"work_id":"work-1","close_kind":"delete"}),
+            json!({"work_id":"work-1","close_kind":"done","manual_close_allowed":true}),
+            json!({"work_id":"work-1","close_kind":"done","project_root":"/other"}),
+        ] {
+            assert!(parse(&envelope("workspace.close", params)).is_err());
         }
     }
 

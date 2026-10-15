@@ -161,6 +161,8 @@ pub enum DaemonCommand {
 /// SPEC-2359 command model for `workspace.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceCommand {
+    /// Ask the authenticated Host to close one eligible Work record.
+    Close { work_id: String, close_kind: String },
     /// Read the outcome of one update without contacting or mutating the Host.
     Receipt { operation_id: String },
     /// `workspace.update` — update Workspace current projection and journal.

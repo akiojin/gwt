@@ -123,6 +123,28 @@ fn before<E: CliEnv>(env: &mut E, intent: &OperationIntent) -> io::Result<Value>
     }
 }
 
+fn operation_exit_code(operation: &str, code: i32, after: &Value) -> i32 {
+    if code != 0 {
+        return code;
+    }
+    if after["ok"] != true {
+        return 1;
+    }
+    if operation == "worktree.gc_build_artifacts" {
+        let report = after["output"]
+            .as_str()
+            .and_then(|output| serde_json::from_str::<Value>(output).ok());
+        if !report
+            .as_ref()
+            .and_then(|report| report["failed"].as_array())
+            .is_some_and(Vec::is_empty)
+        {
+            return 1;
+        }
+    }
+    0
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     repo: &Path,
@@ -147,15 +169,28 @@ pub(super) fn run<E: CliEnv>(
     let after = serde_json::from_slice::<Value>(&captured).unwrap_or_else(|_| json!({
         "ok":false,"exit_code":code,"error":"inner operation response unavailable; inspect its state before retrying",
     }));
-    let code = if code == 0 && after["ok"] != true {
-        1
-    } else {
-        code
-    };
+    let code = operation_exit_code(&intent.operation, code, &after);
     attempt.finish(repo, code == 0, after.clone()).map_err(|error| crate::cli::io_as_api_error(io::Error::other(
         format!("delegated operation exit_code={code}, but final audit failed: {error}; inspect its state before retrying")
     )))?;
     out.push_str(&json!({"attempt_id":attempt.id,"before":before,"after":after,"audit_path":authority::audit_path(repo)}).to_string());
     out.push('\n');
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn approved_gc_requires_a_readable_report_without_failed_deletions() {
+        let code = |report: &str| {
+            super::operation_exit_code(
+                "worktree.gc_build_artifacts",
+                0,
+                &serde_json::json!({"ok":true,"output":report}),
+            )
+        };
+        assert_ne!(code(r#"{"failed":[{"reason":"permission denied"}]}"#), 0);
+        assert_ne!(code("invalid report"), 0);
+        assert_eq!(code(r#"{"failed":[]}"#), 0);
+    }
 }

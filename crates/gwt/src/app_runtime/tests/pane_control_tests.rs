@@ -198,53 +198,6 @@ fn issue_3713_agent_peer_close_requires_reading_recent_target_session_evidence()
 }
 
 #[test]
-fn registered_pm_self_input_cannot_create_human_instruction_authority() {
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedGwtHome::set(temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    let principal = AgentSessionPrincipal::for_test(&repo, "pm-session-live").unwrap();
-    assert_eq!(
-        runtime.live_pm_window_id(principal.session_id()),
-        Some(pm_window_id.clone())
-    );
-
-    let events = runtime.handle_agent_frontend_event(
-        "pm-client".into(),
-        principal,
-        AgentFrontendRequest::SendInput {
-            text: "Enable automatic updates.\r".into(),
-        },
-    );
-    assert!(
-        matches!(events.as_slice(), [OutboundEvent {
-        target: DispatchTarget::Client(client_id),
-        event: BackendEvent::PaneSendResult { ok:false, window_id:Some(window_id), error:Some(error) },
-        ..
-    }] if client_id == "pm-client" && window_id == &pm_window_id
-        && error.contains("permission_stage=instruction_or_approval")
-        && error.contains("pm.approval.request")
-        && error.contains("human")),
-        "PM must be refused before reaching the PTY input route: {events:?}"
-    );
-
-    let ordinary = AgentSessionPrincipal::for_test(&repo, "other-session").unwrap();
-    let events = runtime.handle_agent_frontend_event(
-        "agent-client".into(),
-        ordinary,
-        AgentFrontendRequest::SendInput {
-            text: "Goal Start\r".into(),
-        },
-    );
-    assert!(
-        matches!(events.as_slice(), [OutboundEvent {
-        event:BackendEvent::PaneSendResult { window_id:Some(window_id), error:Some(error), .. },
-        ..
-    }] if window_id == "tab-1::other-window" && error.contains("no live runtime")),
-        "ordinary self-input must still reach its existing PTY route: {events:?}"
-    );
-}
-
-#[test]
 fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

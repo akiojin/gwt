@@ -786,6 +786,23 @@ same profile to try again.
   reset or switch the whole fleet's profile to work around a hold you
   can release by name.
 
+### Closing an inactive Work
+
+Use `workspace.close {work_id, close_kind}` for a specific inactive Work.
+`work_id` is required; `close_kind` is `done` or `discarded`. This uses
+normal registered-PM authority, without a scoped approval. Only the live
+registered PM may call it through the authenticated Host route.
+
+The Host requires that the exact child Work's `manual_close_allowed` is `true`
+and there are zero active agents for that Work, then rechecks the current
+runtime before recording the close. Unavailable, refreshing, stale, unknown,
+or foreign target state refuses the close. Follow a retryable reply's refresh
+and retry guidance for the same explicit target; never treat a refusal as a
+successful close or bypass it by editing Work state or closing its pane.
+
+A successful close records terminal Work history and retains its branch and worktree.
+Git and build-cache cleanup remain separate operations with their own gates.
+
 ### Fallback cleanup of windows the runtime failed to close
 
 Terminal cleanup is the runtime's job (Issue #3927): once an
@@ -2887,6 +2904,7 @@ mod tests {
     /// the PM measured that no operation covers it and that `pm.capabilities`
     /// does not list it as executable; an operation gap becomes an Issue.
     /// FR-002: a landed fix that is not running yet reaches the digest.
+    /// AC-19: inactive Work closure is a normal PM operation with Host gates.
     #[test]
     fn contract_checks_its_own_authority_before_handing_the_owner_an_action() {
         let body = body();
@@ -2900,6 +2918,12 @@ mod tests {
             "read `stall_reason` and `gui_action` from `issue.monitor.status`",
             "When `stale_runtime` is `true`",
             "`null` means unknown",
+            "`workspace.close {work_id, close_kind}`",
+            "`close_kind` is `done` or `discarded`",
+            "the exact child Work's `manual_close_allowed` is `true`",
+            "zero active agents for that Work",
+            "normal registered-PM authority, without a scoped approval",
+            "records terminal Work history and retains its branch and worktree",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }

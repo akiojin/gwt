@@ -12947,6 +12947,27 @@ impl AppRuntime {
                     WorktreeFormProjection::Persisted,
                 )]
             }
+            AgentFrontendRequest::CloseWork {
+                work_id,
+                close_kind,
+            } => {
+                let result = self.close_work_for_agent(&principal, &work_id, &close_kind);
+                let (ok, changed, retryable, error) = match result {
+                    Ok(changed) => (true, Some(changed), false, None),
+                    Err((error, retryable)) => (false, None, retryable, Some(error)),
+                };
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::WorkCloseResult {
+                        work_id,
+                        close_kind,
+                        ok,
+                        changed,
+                        retryable,
+                        error,
+                    },
+                )]
+            }
             AgentFrontendRequest::CloseWindow {
                 id,
                 request_id,
@@ -13176,26 +13197,6 @@ impl AppRuntime {
                         )];
                     }
                 };
-                // Agent-origin self-input must never become the PM's native
-                // human-message authority. Ordinary agent Goal Start and
-                // browser-origin terminal input keep their existing routes.
-                if gwt::pm_registry::session_is_registered_pm(
-                    &gwt::pm_registry::pm_prefs_path_for_repo_path(
-                        principal.canonical_project_root(),
-                    ),
-                    principal.session_id(),
-                ) && self.live_pm_window_id(principal.session_id()).as_deref()
-                    == Some(window_id.as_str())
-                {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::PaneSendResult {
-                            ok: false,
-                            window_id: Some(window_id),
-                            error: Some("permission_stage=instruction_or_approval: pane.send cannot submit prompts into the registered PM's own pane; use an actual human turn or native pm.approval.request for the intended supported operation".into()),
-                        },
-                    )];
-                }
                 self.pane_send_input_to_window_events(client_id, &window_id, &text)
             }
             AgentFrontendRequest::PmSendInput { .. } => {
