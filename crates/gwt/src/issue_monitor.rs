@@ -5515,7 +5515,7 @@ pub fn invalidate_wait_on_record(
 
 /// Whether `wait` still suspends stuck detection at `now`: not invalidated
 /// (Issue #4286) and within the cap. An unparseable anchor fails closed.
-fn wait_declaration_in_force(wait: &AutonomousWaitDeclaration, now: &str) -> bool {
+pub fn wait_declaration_in_force(wait: &AutonomousWaitDeclaration, now: &str) -> bool {
     wait.invalidated.is_none()
         && rfc3339_elapsed_secs(&wait.since, now)
             .is_some_and(|elapsed| elapsed < AUTONOMOUS_WAIT_MAX_SECS as i64)
