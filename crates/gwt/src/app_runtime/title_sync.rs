@@ -222,6 +222,7 @@ impl AppRuntime {
     pub(crate) fn workspace_projection_title_windows(&self) -> WorkspaceWindowTitles {
         self.window_lookup
             .iter()
+            .filter(|(id, _)| !self.issue_monitor_review_dispatch_windows.contains(*id))
             .filter_map(|(id, address)| {
                 let window = self
                     .tab(&address.tab_id)?

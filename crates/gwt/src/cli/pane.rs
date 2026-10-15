@@ -1707,11 +1707,13 @@ fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir
                 .unwrap_or_else(|| preset_label(window.preset)),
             title
         ));
+        let mut review_dispatch = false;
         if let Some(session) = window.session_id.as_deref().and_then(|id| {
             gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml")))
                 .ok()
                 .filter(|session| session.id == id)
         }) {
+            review_dispatch = session.review_dispatch;
             let origin = serde_json::to_value(session.launch_origin)
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_string))
@@ -1733,6 +1735,8 @@ fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir
         }
         out.push_str(if window.is_pm {
             "\trole=pm\n"
+        } else if review_dispatch {
+            "\trole=review_agent\n"
         } else {
             "\trole=implementation_agent\n"
         });
@@ -2510,6 +2514,18 @@ mod tests {
             "{}",
             rows[1]
         );
+    }
+
+    #[test]
+    fn review_pane_list_uses_durable_session_role() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = gwt_agent::Session::new(temp.path(), "review", gwt_agent::AgentId::Codex);
+        session.review_dispatch = true;
+        session.save(temp.path()).unwrap();
+        let mut review = window("tab::review", WindowPreset::Codex, Some("codex"));
+        review.session_id = Some(session.id);
+        let rows = render_pane_list_with_sessions(&[review], temp.path());
+        assert!(rows.trim_end().ends_with("\trole=review_agent"), "{rows}");
     }
 
     #[test]

@@ -794,9 +794,20 @@ impl LaunchWizardLaunchRequest {
     /// leaves the window.
     ///
     /// A no-op for non-agent (shell) launches.
-    pub fn set_review_dispatch_context(&mut self) {
+    pub fn set_review_dispatch_context(&mut self, reviewed_sha: &str) {
         if let LaunchWizardLaunchRequest::Agent(config) = self {
             config.suppress_execution_control = true;
+            config.is_ephemeral = true;
+            config.ephemeral_base_ref = Some(reviewed_sha.to_string());
+            // Hydration selected the implementation worktree. The existing
+            // ephemeral resolver must materialize the review's detached cwd.
+            config.working_dir = None;
+            config.branch = None;
+            config.base_branch = None;
+            config.display_name = format!(
+                "Review · Issue #{}",
+                config.linked_issue_number.unwrap_or_default()
+            );
             config.env_vars.insert(
                 crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV.to_string(),
                 "1".to_string(),
@@ -901,7 +912,13 @@ mod autonomous_launch_tests {
     #[test]
     fn review_dispatch_launch_marks_the_review_contract() {
         let mut request = agent_request(false);
-        request.set_review_dispatch_context();
+        if let LaunchWizardLaunchRequest::Agent(config) = &mut request {
+            config.working_dir = Some(std::path::PathBuf::from("implementation"));
+            config.branch = Some("work/issue-42".to_string());
+            config.base_branch = Some("develop".to_string());
+            config.linked_issue_number = Some(42);
+        }
+        request.set_review_dispatch_context("reviewed-commit");
         match request {
             LaunchWizardLaunchRequest::Agent(config) => {
                 assert!(
@@ -915,6 +932,18 @@ mod autonomous_launch_tests {
                         .map(String::as_str),
                     Some("1")
                 );
+                assert!(config.is_ephemeral, "review must leave the owner worktree");
+                assert_eq!(
+                    config.ephemeral_base_ref.as_deref(),
+                    Some("reviewed-commit")
+                );
+                assert!(config.working_dir.is_none());
+                assert!(config.branch.is_none());
+                assert!(
+                    config.base_branch.is_none(),
+                    "review must not start owner Work"
+                );
+                assert!(config.display_name.contains("Review"));
             }
             LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
         }
