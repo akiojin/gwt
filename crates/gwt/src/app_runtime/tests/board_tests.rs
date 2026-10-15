@@ -1,6 +1,223 @@
 use super::*;
 
 #[test]
+fn board_refresh_sends_only_changed_entries_and_suppresses_duplicate_notifications() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let entry = |body| {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "test",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+    };
+    post_entry(&repo, entry("old")).unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "board-1");
+    runtime.board_all_view_windows.insert(id);
+    let (first, views) = super::super::board::run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        Default::default(),
+    );
+    assert_eq!(first.events.len(), 1);
+    let new = entry("**new**");
+    post_entry(&repo, new.clone()).unwrap();
+    let (next, views) = super::super::board::run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        views,
+    );
+    assert!(
+        matches!(&next.events[..], [OutboundEvent {
+        event: BackendEvent::BoardEntries { entries, .. }, ..
+    }] if entries.len() == 1 && entries[0].id == new.id
+        && entries[0].body_html.as_deref().unwrap().contains("<strong>new</strong>")),
+        "a post must send only its changed entry: {:?}",
+        next.events
+    );
+    let (duplicate, _) = super::super::board::run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        views,
+    );
+    assert!(
+        duplicate.events.is_empty(),
+        "duplicate watcher/daemon events must send nothing"
+    );
+}
+
+#[test]
+fn board_refresh_catches_up_burst_beyond_hot_projection_and_resets_scope() {
+    use super::super::board::run_board_projection_refresh;
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push(workspace_agent_summary_for_test(
+        "scope-test",
+        Some("scope-test"),
+    ));
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection).unwrap();
+    let entry = |body| {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "test",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+    };
+    let initial = entry("initial");
+    post_entry(&repo, initial.clone()).unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "board-1");
+    runtime.board_all_view_windows.insert(id.clone());
+    let (_, views) = run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        Default::default(),
+    );
+    let count = gwt_core::coordination::HOT_PROJECTION_ENTRY_LIMIT + 1;
+    for _ in 0..count {
+        post_entry(
+            &repo,
+            entry("burst").with_audience(vec!["another-workspace"]),
+        )
+        .unwrap();
+    }
+    let (burst, views) =
+        run_board_projection_refresh(runtime.board_projection_refresh_job(&repo), views);
+    assert!(
+        matches!(&burst.events[..], [OutboundEvent {
+        event: BackendEvent::BoardEntries { entries, .. }, ..
+    }] if entries.len() == count && entries.iter().all(|entry| entry.body == "burst")),
+        "all posts since the cursor, including outside the hot window, must arrive"
+    );
+    runtime.board_all_view_windows.remove(&id);
+    let (scoped, _) =
+        run_board_projection_refresh(runtime.board_projection_refresh_job(&repo), views);
+    assert!(
+        matches!(&scoped.events[..], [OutboundEvent {
+        event: BackendEvent::BoardEntries { entries, .. }, ..
+    }] if entries.len() == 1 && entries[0].id == initial.id),
+        "a scope switch must get a fresh scoped projection"
+    );
+}
+
+#[test]
+#[ignore = "Issue #5402 comparative performance probe; run explicitly with --ignored --nocapture"]
+fn board_refresh_measure_single_post() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let event_path = gwt_core::coordination::coordination_events_path(&repo);
+    fs::create_dir_all(event_path.parent().unwrap()).unwrap();
+    let mut file = std::io::BufWriter::new(fs::File::create(&event_path).unwrap());
+    let body = "### Progress\n\n**Checked** `board` processing.\n\n- first item\n- second item\n\n"
+        .repeat(12);
+    for n in 0..12_000 {
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "probe",
+            BoardEntryKind::Status,
+            &body,
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.created_at = Utc::now() - chrono::Duration::hours(1) + chrono::Duration::seconds(n);
+        // Use a deterministic past ordering so live posts come after the fixture.
+        entry.created_at -= chrono::Duration::hours(4);
+        entry.updated_at = entry.created_at;
+        serde_json::to_writer(
+            &mut file,
+            &gwt_core::coordination::CoordinationEvent::MessageAppended { entry },
+        )
+        .unwrap();
+        writeln!(file).unwrap();
+    }
+    file.flush().unwrap();
+    drop(file);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (_, mut views) = super::super::board::run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        Default::default(),
+    );
+    for round in 0..5 {
+        let started = Instant::now();
+        let snapshot = post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "probe",
+                BoardEntryKind::Status,
+                format!("{body}\nLive {round}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            ),
+        )
+        .unwrap();
+        assert_eq!(snapshot.board.total_entries, 12_001 + round);
+        let post_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
+        let (refreshed, retained) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            views,
+        );
+        let refresh_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let bytes: usize = refreshed
+            .events
+            .iter()
+            .map(|event| serde_json::to_vec(&event.event).unwrap().len())
+            .sum();
+        let entries: usize = refreshed
+            .events
+            .iter()
+            .map(|event| match &event.event {
+                BackendEvent::BoardEntries { entries, .. } => entries.len(),
+                _ => 0,
+            })
+            .sum();
+        println!("board_probe total=12000 round={round} post_ms={post_ms:.3} refresh_ms={refresh_ms:.3} total_ms={:.3} entries={entries} broadcast_bytes={bytes}", post_ms + refresh_ms);
+        views = retained;
+    }
+}
+
+#[test]
 fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
     let _env_lock = env_test_lock()
         .lock()
