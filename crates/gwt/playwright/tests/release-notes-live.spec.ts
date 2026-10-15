@@ -24,6 +24,7 @@ const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const RELEASE_NOTES_VISIBLE_TIMEOUT_MS = 15_000;
 const PROJECT_ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd();
 const CURRENT_VERSION = currentGwtVersion();
+const errorsByPage = new WeakMap<Page, string[]>();
 
 // `serial` because every test in this file talks to the same live backend.
 // In parallel mode the chromium-dark and chromium-light projects race against
@@ -33,12 +34,23 @@ const CURRENT_VERSION = currentGwtVersion();
 test.describe.serial("Release Notes window (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
 
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, info) => {
+    const errors: string[] = [];
+    errorsByPage.set(page, errors);
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    const theme = info.project.name.includes('light') ? 'light' : 'dark';
+    await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
     await suppressInitialFrontendReady(page);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
     await injectReleaseNotesWorkspace(page, CURRENT_VERSION);
     await expect(page.locator("#op-briefing")).toBeHidden();
     await expect(page.locator("#project-picker")).toBeHidden();
+  });
+
+  test.afterEach(async ({ page }) => {
+    expect(errorsByPage.get(page)).toEqual([]);
   });
 
   test("clicking #app-version opens the Release Notes window with the label target focused", async ({
