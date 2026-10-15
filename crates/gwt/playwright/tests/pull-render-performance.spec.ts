@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { cpus, loadavg, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { gotoLiveGwt, openLiveLaunchWizardForBranch, sendLiveGwtEvent } from './_helpers/live-gwt';
+import { gotoLiveGwt, sendLiveGwtEvent } from './_helpers/live-gwt';
 
 const ROOT = process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd();
 const RUNNER = resolve(ROOT, 'scripts/measure-pull-render.mjs');
@@ -797,7 +797,7 @@ async function launchWorkload(page: Page, branch: string, index: number): Promis
           : value.kind === 'use_start_method' ? { path: 'manual_setup', phase: 'settings' } : {});
   };
   const after = await cursor();
-  await openLiveLaunchWizardForBranch(page, branch);
+  await sendLiveGwtEvent(page, { kind: 'open_active_work_launch_wizard', branch_name: branch });
   await waitWizard(after, { open: true });
   const wizard = page.locator('#wizard-modal');
   await expect(wizard).toBeVisible({ timeout: 60_000 });
