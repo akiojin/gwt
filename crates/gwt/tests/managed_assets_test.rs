@@ -1006,7 +1006,9 @@ fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
             "Do not await or synchronously poll it",
             "outer wall-clock deadline of 5 seconds",
             "Never run `pane.send`",
-            "Do not call `pm.message.send`, `pane.send`, or any other input operation to select an option; only the human may resolve it in that pane",
+            "Provider approval prompts may be forwarded or answered only with explicit applicable instruction or approval scoped to the actual target and action",
+            "Without applicable authority, do not call `pm.message.send` or any other input operation to select an option; only the human may resolve that prompt in the pane",
+            "For an authorized response, use `pm.operation.execute` with `operation:\"pm.message.send\"` and the exact target `id` and response `text` in `params`. `pane.send` remains forbidden",
         ] {
             assert!(
                 normalized.contains(phrase),
