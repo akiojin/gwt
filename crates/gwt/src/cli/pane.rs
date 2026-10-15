@@ -1,7 +1,7 @@
 //! `pane.*` JSON operations for live agent-pane inspection.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::Path,
     time::Duration,
 };
@@ -220,19 +220,6 @@ pub(super) fn run<E: CliEnv>(
         .map_err(config_error)?;
     out.push_str(&output);
     Ok(0)
-}
-
-/// Issue #3883 AC-6: the ids of the agent windows this project currently has on
-/// the canvas, read from the same live source `pane.list` reads.
-///
-/// `issue.monitor.reconcile` needs the canvas, not the durable snapshot: the
-/// whole failure it recovers from is a durable snapshot that disagrees with the
-/// windows that are actually running.
-pub(super) fn live_window_ids(default_project_root: &Path) -> Result<BTreeSet<String>, String> {
-    Ok(live_windows(default_project_root)?
-        .into_iter()
-        .map(|window| window.id)
-        .collect())
 }
 
 pub(super) fn live_windows(

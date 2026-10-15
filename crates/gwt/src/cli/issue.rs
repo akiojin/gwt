@@ -1969,11 +1969,9 @@ fn run_monitor_quota_hold_list<E: CliEnv>(
 ///
 /// The recovery the incident needed was six live panes against three slots,
 /// where the fix could not be "close something": all six were working. So this
-/// re-adopts the launches whose windows the canvas still shows, and never
-/// revokes or closes a live launch. Closed-Issue bindings are removed on load.
-/// Binding recovery is safe without the daemon control lane: additive bindings and
-/// launches are union-merged by every cross-process rebase, so a daemon that
-/// owns the state absorbs this commit instead of racing it.
+/// re-adopts launches only after proving their live Session and execution
+/// binding. Positive evidence of a different owner retires stale accounting;
+/// the live pane is never changed. Closed-Issue bindings are removed on load.
 ///
 /// Judgement comes from the live canvas, exactly as `pane.list` reads it,
 /// because the durable snapshot disagreeing with the running windows is the
@@ -1985,16 +1983,39 @@ fn run_monitor_reconcile<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
-    let live_window_ids = crate::cli::pane::live_window_ids(&project_root)
+    let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let live_windows = crate::cli::pane::live_windows(&project_root)
         .map_err(|error| SpecOpsError::from(ApiError::Network(error)))?;
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let snapshot = crate::IssueMonitorWindowSnapshot {
+        project_tab_id: String::new(),
+        observed_at: observed_at.clone(),
+        windows: live_windows
+            .iter()
+            .filter(|window| window.preset.requires_process() && !window.is_pm)
+            .map(|window| crate::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: window.id.clone(),
+                issue_number: window.linked_issue_number,
+                status: window.status,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: window.session_id.clone(),
+            })
+            .collect(),
+    };
+    let live_launch_owners =
+        crate::issue_monitor_worker::verified_live_launch_owners(&project_root, &snapshot, &now);
     let (prefs, readopted) = crate::mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        let readopted = monitor.readopt_live_launch_bindings(&live_window_ids);
-        if !readopted.is_empty() || monitor.prefs().launch_bindings != prefs.launch_bindings {
-            *prefs = monitor.prefs();
+        let readopted = monitor.readopt_live_launch_bindings(&live_launch_owners, &observed_at);
+        let reconciled = monitor.prefs();
+        if reconciled != *prefs {
+            *prefs = reconciled;
         }
         readopted
     })
@@ -2010,7 +2031,7 @@ fn run_monitor_reconcile<E: CliEnv>(
             "readopted": readopted,
             "active_launches": monitor.active_issue_numbers(),
             "max_active": prefs.max_active_agents,
-            "live_windows": live_window_ids.len(),
+            "live_windows": live_windows.len(),
             "source": "live_canvas",
             "scan_requested": delivery.scan_requested,
             "scan_delivery": delivery.scan_delivery,
