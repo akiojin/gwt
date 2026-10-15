@@ -184,10 +184,19 @@ fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
 
 #[test]
 fn issue_5404_unchanged_projection_inputs_skip_rebuild_and_changed_work_refreshes() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
+    // Hook discovery is fingerprinted from HOME as well as GWT HOME.
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo dir");
+    // Keep the first audit independent of the user's installed plugin inventory.
+    fs::create_dir_all(repo.join(".gwt")).expect("fixture settings");
+    fs::write(repo.join(".gwt/external-skill-roots.json"), "[]").expect("isolated skill roots");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
