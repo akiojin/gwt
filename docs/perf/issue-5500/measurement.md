@@ -24,12 +24,23 @@ thread, rather than all GUI worker threads or wall-clock response time.
 | --- | ---: | ---: | ---: |
 | Fixed fixture, before | 60.152982 | 1.140625 | 0.018962 |
 | Fixed fixture, after | 60.524044 | 0.984375 | 0.016264 |
+| Fixed fixture, after develop integration | 60.336575 | 0.703125 | 0.011653 |
 
 Sampler thread CPU decreased by 0.156250 seconds (13.70%); elapsed-normalized
 average cores decreased by 14.23%. This is one before/after observation with
 continuing OS/compiler activity, rather than a statistical throughput estimate.
 Whole-process CPU was 63.562500 and 80.015625 seconds respectively; this change
 does not establish a reduction for the other GUI worker threads.
+
+The original `after.json` predates the Issue #5489 census integration. A fresh
+observation at `38770ebcb` is preserved in `integrated-after.json`, including
+the binary hash and hashes of all four production source files. It uses the
+same 3,435-file, 1,612,683-byte fixture, disabled PM/Monitor, and fresh HOME
+on the original profile volume. Sampler CPU was 0.703125 seconds over
+60.336575 seconds: 38.36% less CPU time and 38.54% fewer average cores than
+the original baseline. Whole-process CPU was 40.828125 seconds. These runs
+occurred amid other compiler/OS activity; this additional single observation
+does not isolate the effects of this Issue from the integrated census change.
 
 An independent production observation (PID 32708, TID 29756,
 2026-10-15T07:52:46.5812700Z to 07:53:46.7665736Z) consumed 7.921875 CPU seconds
