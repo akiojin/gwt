@@ -1233,6 +1233,16 @@ fn parse_pane_close_acceptance(
     expected_request_id: &str,
     expected_window_id: &str,
 ) -> Result<bool, String> {
+    if value.get("kind").and_then(Value::as_str) == Some("pane_close_result")
+        && value.get("window_id").and_then(Value::as_str) == Some(expected_window_id)
+        && value.get("ok").and_then(Value::as_bool) == Some(false)
+    {
+        return Err(value
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("backend refused the correlated self-close")
+            .to_string());
+    }
     if value.get("kind").and_then(Value::as_str) != Some("pane_close_accepted") {
         return Ok(false);
     }
@@ -3846,6 +3856,55 @@ mod tests {
                 received_kinds,
                 vec!["list_windows", "frontend_ready", "close_window"],
                 "self-close must not send a second frontend_ready after revocation"
+            );
+        });
+    }
+
+    #[test]
+    fn issue_3713_self_close_rejection_reports_board_read_recovery() {
+        let refusal = json!({"kind": "pane_close_result", "window_id": "tab::own", "ok": false,
+            "reason": "unread owner evidence; run board.show with all:true"});
+        let error = parse_pane_close_acceptance(&refusal, "request", "tab::own")
+            .expect_err("a direct self-close refusal must preserve its recovery reason");
+        assert!(error.contains("board.show"), "{error}");
+        assert_eq!(
+            parse_pane_close_acceptance(&refusal, "request", "tab::other"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn issue_3713_correlated_self_close_relays_the_direct_socket_refusal() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "self-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut own = window("tab::own", WindowPreset::Codex, Some("codex"));
+            own.session_id = Some("session-self".into());
+            let (url, server) = spawn_close_pane_result_mock(
+                "/repo/self",
+                own,
+                false,
+                Some("unread owner evidence; run board.show all:true"),
+            )
+            .await;
+            let error = close_pane(&url, "/repo/self", "own")
+                .await
+                .expect_err("read gate must refuse self-close");
+            assert!(error.contains("board.show"), "{error}");
+            let received = server.await.unwrap();
+            assert_eq!(
+                received,
+                vec!["list_windows", "frontend_ready", "close_window"]
             );
         });
     }

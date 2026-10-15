@@ -971,6 +971,23 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   fresh `issue.monitor.status` snapshot directly, complete the same
   reconcile contract, and note in your digest that push subscription is
   degraded (FR-109). Subscribe failures are never a reason to park.
+- Explicit Board read receipts are separate from automatic reminder injection.
+  Every cycle, read the Board bodies with this operation before making a
+  lifecycle decision:
+
+      {"schema_version":1,"operation":"board.show","params":{"all":true}}
+
+  Only entries returned by the operation are acknowledged for your Session;
+  a limited or filtered read cannot acknowledge omitted entries. Stop refuses
+  unread `blocked` or `handoff` entries. Read the named entries, then continue.
+  Before `pane.close` or `issue.monitor.stop`, read recent target-owner Board
+  evidence. A new owner post requires another read before retrying the stop.
+  Unavailable Board/receipt diagnostics mean unknown reading state, never zero.
+- Before judging branch divergence or stagnation, run `git fetch origin` in
+  the target repository during this cycle, then inspect the branch again.
+  A previous cycle's fetch is not current evidence. The advisory is warning-only;
+  a failed fetch or provider payload without an explicit successful exit status
+  leaves freshness unknown.
 - Every cycle, also check the agents that are running. Read the Board
   for what they reported themselves, and use `pane.read` on any launch
   whose inbox row looks wrong (stuck in the same state, an

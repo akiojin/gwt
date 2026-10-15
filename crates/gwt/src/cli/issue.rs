@@ -2409,6 +2409,65 @@ fn run_monitor_stop<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    // No active target means this is an idempotent stop or stranded-generation recovery.
+    let observed_prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let observed_identity =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), observed_prefs)
+            .launch_identity(number);
+    let caller_session =
+        crate::board_read_receipts::caller_session_from_env().filter(|_| observed_identity.active);
+    let (target_session, mut board_warning) = if caller_session.is_some() {
+        match monitor_target_session(
+            &project_root,
+            number,
+            observed_identity.window_id.as_deref(),
+        ) {
+            Ok(session) => (session, None),
+            Err(error) => (
+                None,
+                Some(crate::board_read_receipts::warning(format!(
+                    "Monitor target Session lookup in workspace failed: {error}"
+                ))),
+            ),
+        }
+    } else {
+        (None, None)
+    };
+    let read_warning = match caller_session {
+        Some(session) => match crate::board_read_receipts::recent_owner_unread(
+            &project_root,
+            &session,
+            target_session.as_deref(),
+            Some(number),
+            chrono::Utc::now(),
+        ) {
+            Ok(entries) if !entries.is_empty() => {
+                out.push_str(&serde_json::json!({"number": number, "status": "refused",
+                    "reason": "unread_owner_board_evidence",
+                    "board_warning": board_warning,
+                    "detail": crate::board_read_receipts::read_required_message("issue.monitor.stop", &entries),
+                    "recovery": {"schema_version": 1, "operation": "board.show", "params": {"all": true}}
+                }).to_string());
+                out.push('\n');
+                return Ok(1);
+            }
+            Ok(_) => None,
+            Err(error) => Some(crate::board_read_receipts::warning(error)),
+        },
+        None => None,
+    };
+    if let Some(warning) = read_warning {
+        match board_warning.as_mut() {
+            Some(previous) => {
+                previous.push('\n');
+                previous.push_str(&warning);
+            }
+            None => board_warning = Some(warning),
+        }
+    }
+    if let Some(warning) = &board_warning {
+        tracing::warn!(%warning, "Monitor stop Board observation failed open");
+    }
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let (_, (outcome, identity)) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -2469,6 +2528,7 @@ fn run_monitor_stop<E: CliEnv>(
             "number": number,
             "status": status,
             "reason": reason,
+            "board_warning": board_warning,
             "stopped_window_id": stopped_window_id,
             // Say what is left to do rather than implying the pane is gone.
             "pane_teardown": if stopped_window_id.is_some() {
@@ -2481,6 +2541,58 @@ fn run_monitor_stop<E: CliEnv>(
     out.push_str(&payload.to_string());
     out.push('\n');
     Ok(0)
+}
+
+fn monitor_target_session(
+    project_root: &Path,
+    number: u64,
+    window_id: Option<&str>,
+) -> io::Result<Option<String>> {
+    let Some(window_id) = window_id else {
+        return Ok(None);
+    };
+    let workspace = crate::persistence::load_workspace_state(
+        &crate::persistence::workspace_state_path(project_root),
+    )?;
+    let raw_id = window_id
+        .split_once("::")
+        .filter(|(tab, raw)| !tab.is_empty() && !raw.is_empty())
+        .map(|(_, raw)| raw);
+    // Legacy raw IDs can appear on either side. Two qualified IDs must keep
+    // their project-tab identity rather than matching only their raw suffix.
+    let mut candidates = workspace.windows.iter().filter(|window| {
+        window.id == window_id
+            || match raw_id {
+                Some(raw) => window.id == raw,
+                None => window
+                    .id
+                    .split_once("::")
+                    .filter(|(tab, raw)| !tab.is_empty() && !raw.is_empty())
+                    .is_some_and(|(_, raw)| raw == window_id),
+            }
+    });
+    let window = candidates.next().ok_or_else(|| {
+        io::Error::other("the Monitor target window is absent from the persisted workspace")
+    })?;
+    if candidates.next().is_some() {
+        return Err(io::Error::other(
+            "the Monitor target window identity is ambiguous in the workspace",
+        ));
+    }
+    if window
+        .linked_issue_number
+        .is_some_and(|owner| owner != number)
+    {
+        return Err(io::Error::other(
+            "the persisted target window belongs to another Issue",
+        ));
+    }
+    window
+        .session_id
+        .clone()
+        .filter(|session| !session.is_empty())
+        .map(Some)
+        .ok_or_else(|| io::Error::other("the persisted target window has no Session binding"))
 }
 
 fn monitor_execution_settlement(
@@ -11843,6 +11955,318 @@ mod tests {
         .expect("stop runs");
         assert_eq!(code, 0);
         assert!(out.contains("\"status\":\"already_stopped\""), "{out}");
+    }
+
+    #[test]
+    fn issue_3713_monitor_stop_optional_workspace_failure_warns_without_blocking() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "reader-session");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab::owner".into(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let path = crate::persistence::workspace_state_path(&repo);
+        std::fs::write(&path, "{broken workspace").unwrap();
+        let entry = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Owner",
+            gwt_core::coordination::BoardEntryKind::Handoff,
+            "Optional lookup unavailable",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("owner-session");
+        crate::board_provider::post_entry(&repo, entry).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorStop {
+                    project_root: Some(repo),
+                    number: 42,
+                    reason: "recover broken workspace".into(),
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0,
+            "optional lookup failure must not block recovery: {out}"
+        );
+        let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let warning = result["board_warning"].as_str().unwrap_or_default();
+        assert!(
+            warning.contains("unknown") && warning.contains("workspace"),
+            "{out}"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{broken workspace");
+    }
+
+    #[test]
+    fn issue_3713_monitor_stop_requires_reading_origin_session_only_posts() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (stored_id, launched_id, kind) in [
+            (
+                "owner",
+                "tab::owner",
+                gwt_core::coordination::BoardEntryKind::Status,
+            ),
+            (
+                "tab::owner",
+                "tab::owner",
+                gwt_core::coordination::BoardEntryKind::Handoff,
+            ),
+            (
+                "owner",
+                "owner",
+                gwt_core::coordination::BoardEntryKind::Handoff,
+            ),
+            (
+                "tab::owner",
+                "owner",
+                gwt_core::coordination::BoardEntryKind::Handoff,
+            ),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let _home = ScopedGwtHome::set(tmp.path().join("home"));
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "reader-session");
+            let repo = tmp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+            crate::save_issue_monitor_prefs(
+                &prefs_path,
+                &crate::IssueMonitorPrefs {
+                    enabled: true,
+                    launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                        issue_number: 42,
+                        window_id: launched_id.into(),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut workspace = crate::persistence::empty_workspace_state();
+            let mut window = crate::persistence::default_workspace_state()
+                .windows
+                .remove(0);
+            window.id = stored_id.into();
+            window.preset = crate::WindowPreset::Agent;
+            window.session_id = Some("owner-session".into());
+            window.linked_issue_number = Some(42);
+            workspace.windows.push(window);
+            crate::persistence::save_workspace_state(
+                &crate::persistence::workspace_state_path(&repo),
+                &workspace,
+            )
+            .unwrap();
+            let entry = gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::Agent,
+                "Owner",
+                kind,
+                "My body must be read before this window is stopped",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_origin_session_id("owner-session");
+            crate::board_provider::post_entry(&repo, entry).unwrap();
+            let before = std::fs::read(&prefs_path).unwrap();
+            let mut env = crate::cli::TestEnv::new(repo.clone());
+            let stop = || IssueCommand::MonitorStop {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "cleanup".into(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: None,
+            };
+            let mut out = String::new();
+            assert_eq!(
+                run(&mut env, stop(), &mut out).unwrap(),
+                1,
+                "origin-session-only post must refuse stop for {stored_id}/{launched_id}: {out}"
+            );
+            assert!(out.contains("board.show"), "{out}");
+            assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+            crate::cli::board::run(
+                &mut env,
+                crate::cli::board::BoardCommand::Show {
+                    json: true,
+                    workspace: None,
+                    all: true,
+                    limit: None,
+                    unresolved: false,
+                },
+                &mut String::new(),
+            )
+            .unwrap();
+            out.clear();
+            assert_eq!(
+                run(&mut env, stop(), &mut out).unwrap(),
+                0,
+                "explicit body read must enable the same stop: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_3713_monitor_stop_requires_reading_recent_owner_evidence() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "reader-session");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut reader = gwt_agent::Session::new(&repo, "work/reader", gwt_agent::AgentId::Codex);
+        reader.id = "reader-session".into();
+        reader.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab::owner".into(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let entry = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Owner",
+            gwt_core::coordination::BoardEntryKind::Handoff,
+            "Need a ruling before closing",
+            None,
+            None,
+            vec![],
+            vec!["42".into()],
+        );
+        crate::board_provider::post_entry(&repo, entry).unwrap();
+        let before = std::fs::read(&prefs_path).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "cleanup".into(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 1, "unread owner evidence must refuse stop: {out}");
+        assert!(out.contains("board.show"), "{out}");
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+        let mut read_out = String::new();
+        crate::cli::board::run(
+            &mut env,
+            crate::cli::board::BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: true,
+                limit: None,
+                unresolved: false,
+            },
+            &mut read_out,
+        )
+        .unwrap();
+        crate::board_provider::post_entry(
+            &repo,
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::Agent,
+                "Owner",
+                gwt_core::coordination::BoardEntryKind::Handoff,
+                "A new ruling arrived after the first read",
+                None,
+                None,
+                vec![],
+                vec!["42".into()],
+            ),
+        )
+        .unwrap();
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorStop {
+                    project_root: Some(repo.clone()),
+                    number: 42,
+                    reason: "stale read".into(),
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                &mut out
+            )
+            .unwrap(),
+            1,
+            "new owner evidence must invalidate the prior read: {out}"
+        );
+        read_out.clear();
+        crate::cli::board::run(
+            &mut env,
+            crate::cli::board::BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: true,
+                limit: None,
+                unresolved: false,
+            },
+            &mut read_out,
+        )
+        .unwrap();
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorStop {
+                    project_root: Some(repo),
+                    number: 42,
+                    reason: "read and decided".into(),
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0,
+            "explicit read must enable retry: {out}"
+        );
     }
 
     /// Issue #4200 AC-1 / AC-3 / AC-5: revoking a launch releases its execution
