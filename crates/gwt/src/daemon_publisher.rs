@@ -23,7 +23,11 @@
 //! authority, connection/send/receipt uncertainty never authorizes a local
 //! fallback writer.
 
-use std::{path::Path, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use gwt_core::{
     daemon::{
@@ -49,6 +53,110 @@ use crate::runtime_daemon_events::{
 /// simplicity. Callers needing a different budget should use
 /// [`publish_event_with_timeout`].
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
+
+const ENDPOINT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_CACHED_PROJECT_ROOTS: usize = 32;
+
+struct CachedEndpointError {
+    retry_at: Instant,
+    message: String,
+}
+
+/// Worker-owned publisher for repeated best-effort event notifications.
+///
+/// One runtime serves all project roots, with at most 32 cached connections.
+/// Failed exchanges and cache eviction drop the affected session. The daemon
+/// holds its authority lease while serving connections, so reconnecting through
+/// the existing resolver picks up the current owner and token after a daemon
+/// restart. Commands with fallback semantics must continue to use
+/// [`publish_issue_monitor_control`].
+pub struct PersistentEventPublisher {
+    connections: HashMap<PathBuf, DaemonClient>,
+    unavailable: HashMap<PathBuf, CachedEndpointError>,
+    runtime: tokio::runtime::Runtime,
+    timeout: Duration,
+}
+
+impl PersistentEventPublisher {
+    pub fn new() -> Result<Self, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("tokio runtime build failed: {error}"))?;
+        Ok(Self {
+            connections: HashMap::new(),
+            unavailable: HashMap::new(),
+            runtime,
+            timeout: DEFAULT_TIMEOUT,
+        })
+    }
+
+    pub fn publish(
+        &mut self,
+        project_root: &Path,
+        channel: &str,
+        payload: Value,
+    ) -> Result<(), String> {
+        if !self.connections.contains_key(project_root) {
+            if let Some(cached) = self.unavailable.get(project_root) {
+                if Instant::now() < cached.retry_at {
+                    return Err(cached.message.clone());
+                }
+            }
+            self.unavailable.remove(project_root);
+            let endpoint = match resolve_project_daemon_endpoint(project_root)
+                .and_then(|endpoint| endpoint.ok_or_else(|| "daemon not running".to_string()))
+            {
+                Ok(endpoint) => endpoint,
+                Err(message) => {
+                    // Missing or uncertain authority remains an error. Bound
+                    // repeated filesystem resolution while a daemon is absent.
+                    evict_cached_project_if_full(&mut self.unavailable);
+                    self.unavailable.insert(
+                        project_root.to_path_buf(),
+                        CachedEndpointError {
+                            retry_at: Instant::now() + ENDPOINT_RETRY_INTERVAL,
+                            message: message.clone(),
+                        },
+                    );
+                    return Err(message);
+                }
+            };
+            let timeout = self.timeout;
+            let client = self.runtime.block_on(async {
+                tokio::time::timeout(timeout, DaemonClient::connect(&endpoint))
+                    .await
+                    .map_err(|_| format!("connect timeout after {}ms", timeout.as_millis()))?
+            })?;
+            evict_cached_project_if_full(&mut self.connections);
+            self.connections.insert(project_root.to_path_buf(), client);
+        }
+
+        let client = self
+            .connections
+            .get_mut(project_root)
+            .expect("connected event publisher");
+        let result = self
+            .runtime
+            .block_on(send_event(client, channel, payload, self.timeout));
+        if result.is_err() {
+            // A send or receipt failure may follow delivery. Never retry that
+            // frame; the next event resolves and authenticates a fresh session.
+            self.connections.remove(project_root);
+        }
+        result
+    }
+}
+
+fn evict_cached_project_if_full<T>(cache: &mut HashMap<PathBuf, T>) {
+    if cache.len() >= MAX_CACHED_PROJECT_ROOTS {
+        // Any cached session can be dropped safely: its next event resolves
+        // the current authority again. No access-order bookkeeping is needed.
+        if let Some(root) = cache.keys().next().cloned() {
+            cache.remove(&root);
+        }
+    }
+}
 
 /// Publish `payload` to `channel` on the daemon for `project_root`.
 ///
@@ -630,7 +738,7 @@ async fn wait_for_control_retry(
 /// Same as [`publish_event`] but lets the caller override the
 /// connect / read / ack timeout budget. Each individual stage is
 /// bounded by `timeout` so a stuck daemon cannot pin the calling
-/// thread for longer than `2 * timeout` in the worst case.
+/// thread for longer than `3 * timeout` in the worst case.
 pub fn publish_event_with_timeout(
     project_root: &Path,
     channel: &str,
@@ -648,28 +756,34 @@ pub fn publish_event_with_timeout(
         let mut client = tokio::time::timeout(timeout, DaemonClient::connect(&endpoint))
             .await
             .map_err(|_| format!("connect timeout after {}ms", timeout.as_millis()))??;
-        // Bound the send half too: a daemon that has accepted the
-        // connection but stopped reading (or a payload large enough
-        // to fill the socket buffer) can otherwise block the writer
-        // forever, freezing the synchronous caller despite the
-        // documented per-stage `timeout`.
-        let publish_frame = ClientFrame::Publish {
-            channel: channel.to_string(),
-            payload,
-        };
-        tokio::time::timeout(timeout, client.send_frame(&publish_frame))
-            .await
-            .map_err(|_| format!("publish send timeout after {}ms", timeout.as_millis()))?
-            .map_err(|err| format!("publish send failed: {err}"))?;
-        let ack: DaemonFrame = tokio::time::timeout(timeout, client.read_frame())
-            .await
-            .map_err(|_| format!("publish ack timeout after {}ms", timeout.as_millis()))??;
-        match ack {
-            DaemonFrame::Ack => Ok(()),
-            DaemonFrame::Error { message } => Err(format!("daemon rejected publish: {message}")),
-            other => Err(format!("expected Ack, got: {other:?}")),
-        }
+        send_event(&mut client, channel, payload, timeout).await
     })
+}
+
+async fn send_event(
+    client: &mut DaemonClient,
+    channel: &str,
+    payload: Value,
+    timeout: Duration,
+) -> Result<(), String> {
+    // Bound the write as well as the receipt, including when the daemon
+    // accepts a connection but stops reading a full socket buffer.
+    let publish_frame = ClientFrame::Publish {
+        channel: channel.to_string(),
+        payload,
+    };
+    tokio::time::timeout(timeout, client.send_frame(&publish_frame))
+        .await
+        .map_err(|_| format!("publish send timeout after {}ms", timeout.as_millis()))?
+        .map_err(|error| format!("publish send failed: {error}"))?;
+    let ack: DaemonFrame = tokio::time::timeout(timeout, client.read_frame())
+        .await
+        .map_err(|_| format!("publish ack timeout after {}ms", timeout.as_millis()))??;
+    match ack {
+        DaemonFrame::Ack => Ok(()),
+        DaemonFrame::Error { message } => Err(format!("daemon rejected publish: {message}")),
+        other => Err(format!("expected Ack, got: {other:?}")),
+    }
 }
 
 // Liveness probe shared with `cli::daemon` and `main`; see
@@ -729,6 +843,208 @@ mod window_snapshot_publish_tests {
             ),
             "the publish must be attempted, not skipped: {error:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod persistent_event_publish_tests {
+    use std::{path::Path, thread::JoinHandle, time::Duration};
+
+    use gwt_core::{
+        daemon::{
+            persist_endpoint, ClientFrame, DaemonEndpoint, DaemonFrame, IpcHandshakeRequest,
+            IpcHandshakeResponse, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+        },
+        test_support::ScopedEnvVar,
+    };
+    use serde_json::{json, Value};
+    use tempfile::TempDir;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    use super::{CachedEndpointError, PersistentEventPublisher, MAX_CACHED_PROJECT_ROOTS};
+    use crate::cli::daemon::transport::IpcListener;
+
+    #[test]
+    fn persistent_event_publisher_reuses_connection_without_resolving_each_frame() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
+        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        let (endpoint, server) = start_test_daemon(scope, &home.path().join("reuse.sock"), 2);
+        persist_endpoint(&endpoint_path, &endpoint).unwrap();
+        let mut publisher = PersistentEventPublisher::new().unwrap();
+        publisher.timeout = Duration::from_secs(5);
+
+        publisher
+            .publish(project.path(), "runtime", json!(1))
+            .unwrap();
+        // A live connection owns its resolved endpoint until disconnect. The
+        // descriptor disappearing must not force another resolution/handshake.
+        std::fs::remove_file(&endpoint_path).unwrap();
+        let second = publisher.publish(project.path(), "runtime", json!(2));
+        let received = server.join().expect("event daemon joins");
+
+        second.expect("second frame reuses the existing connection");
+        assert_eq!(received, vec![json!(1), json!(2)]);
+        assert_eq!(publisher.connections.len(), 1);
+    }
+
+    #[test]
+    fn persistent_event_publisher_resolves_after_disconnect_without_retrying_failed_frame() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
+        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        let (endpoint, first_server) =
+            start_test_daemon(scope.clone(), &home.path().join("first.sock"), 1);
+        persist_endpoint(&endpoint_path, &endpoint).unwrap();
+        let mut publisher = PersistentEventPublisher::new().unwrap();
+        publisher.timeout = Duration::from_secs(5);
+
+        publisher
+            .publish(project.path(), "runtime", json!(1))
+            .unwrap();
+        assert_eq!(first_server.join().unwrap(), vec![json!(1)]);
+        let (replacement, next_server) =
+            start_test_daemon(scope, &home.path().join("replacement.sock"), 1);
+        persist_endpoint(&endpoint_path, &replacement).unwrap();
+
+        let disconnected = publisher.publish(project.path(), "runtime", json!(2));
+        let recovered = publisher.publish(project.path(), "runtime", json!(3));
+        let received = next_server.join().expect("replacement daemon joins");
+
+        assert!(
+            disconnected.is_err(),
+            "the uncertain frame is never retried"
+        );
+        recovered.expect("the next frame resolves the replacement endpoint");
+        assert_eq!(received, vec![json!(3)]);
+    }
+
+    #[test]
+    fn persistent_event_publisher_bounds_missing_endpoint_cache_until_retry() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut publisher = PersistentEventPublisher::new().unwrap();
+        publisher.timeout = Duration::from_secs(5);
+        for index in 0..MAX_CACHED_PROJECT_ROOTS {
+            publisher.unavailable.insert(
+                home.path().join(format!("unused-root-{index}")),
+                CachedEndpointError {
+                    retry_at: std::time::Instant::now() + Duration::from_secs(3600),
+                    message: "daemon not running".to_string(),
+                },
+            );
+        }
+        assert!(publisher
+            .publish(project.path(), "runtime", json!(1))
+            .unwrap_err()
+            .contains("daemon not running"));
+        assert_eq!(publisher.unavailable.len(), MAX_CACHED_PROJECT_ROOTS);
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
+        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        let (endpoint, server) = start_test_daemon(scope, &home.path().join("retry.sock"), 1);
+        persist_endpoint(&endpoint_path, &endpoint).unwrap();
+
+        publisher
+            .unavailable
+            .get_mut(project.path())
+            .unwrap()
+            .retry_at = std::time::Instant::now() + Duration::from_secs(3600);
+        let cached = publisher.publish(project.path(), "runtime", json!(2));
+        // Advance only the stored deadline; expiry must not rely on scheduling
+        // the test thread within the real one-second cache interval.
+        publisher
+            .unavailable
+            .get_mut(project.path())
+            .unwrap()
+            .retry_at = std::time::Instant::now();
+        let recovered = publisher.publish(project.path(), "runtime", json!(3));
+        let received = server.join().expect("retry daemon joins");
+
+        assert!(cached.is_err(), "missing endpoint resolution is throttled");
+        recovered.expect("expired negative cache picks up the live daemon");
+        assert_eq!(received, vec![json!(3)]);
+    }
+
+    fn start_test_daemon(
+        scope: RuntimeScope,
+        bind: &Path,
+        frame_count: usize,
+    ) -> (DaemonEndpoint, JoinHandle<Vec<Value>>) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut listener = {
+            let _entered = runtime.enter();
+            IpcListener::bind(bind).unwrap()
+        };
+        let endpoint = DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            bind.to_string_lossy().to_string(),
+            "persistent-publisher-token".to_string(),
+            "test-daemon".to_string(),
+        );
+        let expected_scope = endpoint.scope.clone();
+        let server = std::thread::spawn(move || {
+            runtime.block_on(async move {
+                // A hang guard, not a timing assertion: all ordering comes
+                // from completed ACKs and joining the closed first server.
+                tokio::time::timeout(Duration::from_secs(10), async move {
+                    let stream = listener.accept().await.unwrap();
+                    let (reader, mut writer) = stream.into_split();
+                    let mut reader = BufReader::new(reader);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let handshake: IpcHandshakeRequest = serde_json::from_str(line.trim()).unwrap();
+                    assert_eq!(handshake.scope, expected_scope);
+                    let response = IpcHandshakeResponse {
+                        protocol_version: DAEMON_PROTOCOL_VERSION,
+                        daemon_version: "test-daemon".to_string(),
+                        accepted: true,
+                        rejection_reason: None,
+                    };
+                    let mut response = serde_json::to_vec(&response).unwrap();
+                    response.push(b'\n');
+                    writer.write_all(&response).await.unwrap();
+                    let mut received = Vec::new();
+                    for _ in 0..frame_count {
+                        line.clear();
+                        assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                        let ClientFrame::Publish { payload, .. } =
+                            serde_json::from_str(line.trim()).unwrap()
+                        else {
+                            panic!("expected event publish");
+                        };
+                        received.push(payload);
+                        let mut ack = serde_json::to_vec(&DaemonFrame::Ack).unwrap();
+                        ack.push(b'\n');
+                        writer.write_all(&ack).await.unwrap();
+                    }
+                    received
+                })
+                .await
+                .expect("event daemon hang guard")
+            })
+        });
+        (endpoint, server)
     }
 }
 
