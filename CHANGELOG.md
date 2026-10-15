@@ -1,6 +1,62 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.122.0] - 2026-10-15
+
+### Bug Fixes
+
+- **knowledge:** Issue preview を選択時だけ取得する
+- **verify:** Backfill idle slots behind exclusive requests
+- **hook:** Recover runtime state after live delivery failures
+- **index:** Expose model readiness and verify search handover
+- **verify:** Retry transient windows driver artifact locks
+- **verify:** Show unknown commands and clarify backfill bounds
+- **index:** Refresh every scope and verify source counts
+- **index:** Keep shared source polling stable across worktrees
+- **index:** Simplify source snapshot refresh condition
+- **index:** Trust exact document counts over manifest size
+- **gui:** Retain focused issue controls across column moves
+- **hooks:** Resolve nested cwd for PM branch freshness
+- **skills:** PM の Board 読了案内から未対応パラメータを除く
+- **pm:** Reports の生成待機文言を英語へ統一する
+- **pm:** Peer 障害から通常 Reports の更新を分離する
+
+### Documentation
+
+- **pm:** PM 間の相談と Reports の導線を説明する
+
+### Features
+
+- **hooks:** Board の明示確認とエージェント停止保護を強制
+- **pm:** Add direct peer project messages
+
+### Miscellaneous Tasks
+
+- **work:** Issue 5396 の配送 PR を記録する
+- **work:** Record issue 5469 pull request
+- **work:** Preserve issue 5469 successor record
+- **work:** Record PR #5481 delivery metadata
+- **work:** Preserve issue 5431 delivery records
+- **work:** Preserve duplicate launch resume record
+- **work:** Record issue 5469 follow-up pull request
+- **work:** Record PR #5486 delivery metadata
+- **work:** Issue #3713 の引継ぎ履歴を保全
+- **work:** PM 間相談の配信再開を記録する
+- **work:** PM 間相談の PR を記録する
+
+### Performance
+
+- **board:** Send incremental updates and memoize markdown
+- **gui:** Reuse and virtualize issue and kanban rows
+
+### Testing
+
+- **hook:** Isolate fail-open forwarding fixtures
+- **gui:** Adapt selection scenarios to virtual issue rows
+- **skills:** 生成 guidance テストの不要な参照を除く
+- **hooks:** Fetch 警告の fixture を共通 process helper に統一
+- **hooks:** Isolate advisory health fixture from session runtime
+
 ## [9.121.1] - 2026-10-15
 
 ### Bug Fixes
