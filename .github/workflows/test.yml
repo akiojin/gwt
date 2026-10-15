@@ -688,6 +688,9 @@ jobs:
       - name: Check Windows test runner
         run: node --test scripts/ci-windows-tests.test.mjs
       - name: Build Windows regression targets once
+        # Test inherits dev; keep assertions/features while omitting CI line tables.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build default
         timeout-minutes: 30
       - name: Run targeted issue cache refresh regression
@@ -912,29 +915,46 @@ jobs:
       # Build once, then exercise both installed provider commands through
       # the same direct probe, Session persistence, and ConPTY launch routes.
       - name: Build the deterministic Windows agent launch E2E
+        # Test inherits dev; keep assertions/features while omitting CI line tables.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo test -p gwt --test windows_agent_launch_e2e --no-run
         timeout-minutes: 30
       # Issue #4644 AC-5: the non-ignored contract tests in this cfg(windows)
       # target (e.g. the Hub bootstrap reply classifier) are compiled nowhere
       # else, so run them once before the provider combinations.
       - name: Run Windows agent launch E2E contract tests
+        # Test inherits dev; keep assertions/features while omitting CI line tables.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo test -p gwt --test windows_agent_launch_e2e
       # Run both providers even when one fails, retaining native diagnostics.
       - name: Run credential-free deterministic Windows agent launch E2E
         shell: bash
         env:
           GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE: "1"
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           status=0
+          providers=(codex claude)
+          pids=()
+          # Fixtures isolate HOME, npm state, registry/server ports, and sessions.
           for provider in codex claude; do
+            GWT_WINDOWS_AGENT_PROVIDER="$provider" \
+              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture > "$RUNNER_TEMP/windows-agent-${provider}.log" 2>&1 &
+            pids+=("$!")
+          done
+          # Keep both outcomes and the existing provider-specific diagnostics.
+          for index in "${!pids[@]}"; do
+            provider="${providers[$index]}"
             echo "::group::windows installed agent launch E2E ${provider}"
-            if GWT_WINDOWS_AGENT_PROVIDER="$provider" \
-              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture; then
+            if wait "${pids[$index]}"; then
               echo "ok ${provider}/installed"
             else
               echo "::error::windows agent launch E2E failed for ${provider}/installed"
               status=1
             fi
+            cat "$RUNNER_TEMP/windows-agent-${provider}.log"
             echo "::endgroup::"
           done
           exit "$status"

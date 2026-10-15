@@ -460,6 +460,18 @@ fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
         "one regression runner shares its build"
     );
     let steps = regressions["steps"].as_sequence().unwrap();
+    let build = steps
+        .iter()
+        .find(|step| {
+            step["run"].as_str() == Some("node scripts/ci-windows-tests.mjs build default")
+        })
+        .expect("build the default feature set once");
+    assert_eq!(build["env"]["CARGO_PROFILE_DEV_DEBUG"].as_str(), Some("0"));
+    assert!(regressions["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+    assert!(steps.iter().all(|step| {
+        step["uses"].as_str() != Some("Swatinem/rust-cache@v2")
+            || step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null()
+    }));
     let driver = steps
         .iter()
         .find(|step| {
@@ -584,6 +596,8 @@ fn nightly_determinism_failures_have_an_explicit_notification_target() {
 /// providers, and attributes a failure to its provider.
 #[test]
 fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
+    use serde_yaml::Value;
+
     let workflow = read(TEST_WORKFLOW);
     let job = job_body(&workflow, AGENT_LAUNCH_JOB);
     assert!(
@@ -615,4 +629,40 @@ fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
         "the loop must keep the matrix's fail-fast: false semantics and run \
          every provider before failing"
     );
+    let doc: Value = serde_yaml::from_str(&workflow).expect("Test workflow");
+    let agent_job = &doc["jobs"]["test-windows-agent-launch-e2e"];
+    assert!(agent_job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+    let steps = agent_job["steps"].as_sequence().unwrap();
+    let cargo_steps: Vec<_> = steps
+        .iter()
+        .filter(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("cargo test"))
+        })
+        .collect();
+    assert_eq!(cargo_steps.len(), 3);
+    assert!(cargo_steps
+        .iter()
+        .all(|step| step["env"]["CARGO_PROFILE_DEV_DEBUG"].as_str() == Some("0")));
+    assert!(steps.iter().all(|step| {
+        step["uses"].as_str() != Some("Swatinem/rust-cache@v2")
+            || step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null()
+    }));
+    let providers = cargo_steps
+        .iter()
+        .find_map(|step| {
+            let run = step["run"].as_str()?;
+            run.contains("--ignored").then_some(run)
+        })
+        .unwrap();
+    assert!(providers.contains("providers=(codex claude)"));
+    assert!(providers.contains("pids=()"));
+    assert!(providers.contains("2>&1 &"));
+    assert!(providers.contains("pids+=(\"$!\")"));
+    assert!(providers.contains("for index in \"${!pids[@]}\"; do"));
+    assert!(providers.contains("provider=\"${providers[$index]}\""));
+    assert!(providers.contains("if wait \"${pids[$index]}\"; then"));
+    assert!(providers.contains("cat \"$RUNNER_TEMP/windows-agent-${provider}.log\""));
+    assert!(providers.contains("exit \"$status\""));
 }
