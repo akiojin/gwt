@@ -2,7 +2,7 @@
 import { expect, test } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
@@ -14,6 +14,41 @@ test.describe('PM reports', () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL || !HOME, 'requires isolated checkout fixture');
   test.use({ viewport: { width: 1440, height: 1000 } });
   test.setTimeout(90_000);
+
+  test('unchanged polls are silent, changed reports arrive and reconnect hydrates', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      const reports = pane.getByRole('log', { name: 'PM reports' });
+      await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      const id = await pane.getAttribute('data-id');
+      expect(id).toBeTruthy();
+      const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+      for (let index = 0; index < 3; index++) await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      // Observe an entire real frontend polling interval: silence is the contract.
+      await page.waitForTimeout(6_000);
+      const unchanged = await page.evaluate(({ id, cursor }) => (window as any).__gwtPlaywrightMessages.filter((entry: any) =>
+        entry.sequence > cursor && entry.payload.kind === 'pm_reports' && entry.payload.id === id), { id, cursor });
+      expect(unchanged).toHaveLength(0);
+
+      const marker = `Changed report ${info.project.name}`;
+      const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
+      appendFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-reports.jsonl`, `${JSON.stringify({
+        id: randomUUID(), kind: 'progress', body: `# ${marker}`, created_at: new Date().toISOString(),
+      })}\n`);
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
+      await page.reload();
+      await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
+      expect(errors).toEqual([]);
+    });
+  });
 
   test('peer PM sent and received reports persist without duplicates', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
@@ -219,7 +254,8 @@ test.describe('PM reports', () => {
       });
       expect(attachments).toEqual([]);
       await report.getByRole('button', { name: 'Copy report' }).click();
-      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(body);
+      // Windows' native text clipboard round-trips line endings as CRLF.
+      await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, '\n'))).toBe(body);
 
       const question = 'Why did PM recommend waiting?\nWhat should I do next?';
       const answerMarker = `PM answer ${info.project.name}`;
@@ -242,7 +278,7 @@ test.describe('PM reports', () => {
       await expect(qaReport.getByRole('heading', { name: 'A', exact: true })).toBeVisible();
       await expect(qaReport.getByRole('region', { name: 'Answer', exact: true }).locator('strong')).toHaveText('Confirmed');
       await qaReport.getByRole('button', { name: 'Copy report' }).click();
-      await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(`Q: ${question}\n\nA:\n${answerBody}`);
+      await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, '\n'))).toBe(`Q: ${question}\n\nA:\n${answerBody}`);
       const kindFilter = pane.getByRole('combobox', { name: 'Report kind', exact: true });
       await kindFilter.selectOption('qa');
       await expect(qaReport).toBeVisible();

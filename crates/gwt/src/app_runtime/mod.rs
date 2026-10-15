@@ -1432,6 +1432,7 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) pm_sessions: HashMap<PathBuf, String>,
     /// One bounded append reader per Project; native file reads stay off tao.
     pub(crate) pm_conversation_reader: Arc<Mutex<gwt::pm_conversation::PmConversationReader>>,
+    pub(crate) pm_reports_reader: Arc<Mutex<gwt::pm_current::PmReportsReader>>,
     /// SPEC-3431 T-093 (FR-012): per project, the monitor signal set the wake
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
@@ -1483,6 +1484,7 @@ pub(crate) fn initial_project_states(
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
+                    pm_reports_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
@@ -4246,6 +4248,7 @@ impl AppRuntime {
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
+                    pm_reports_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
