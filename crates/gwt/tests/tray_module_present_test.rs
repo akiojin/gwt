@@ -104,7 +104,9 @@ fn tray_menu_pins_action_ids() {
     assert!(TRAY_MENU.contains(r#"pub const OPEN: &str = "gwt.tray.open";"#));
     assert!(TRAY_MENU.contains(r#"pub const COPY_URL: &str = "gwt.tray.copy_url";"#));
     assert!(TRAY_MENU.contains(r#"pub const QUIT: &str = "gwt.tray.quit";"#));
-    assert!(TRAY_MENU.contains(r#"pub const ABOUT: &str = "gwt.tray.about";"#));
+    assert!(!TRAY_MENU.contains("pub const ABOUT:"));
+    assert!(TRAY_MENU.contains(r#"pub const OPEN_PROJECT: &str = "gwt.tray.open_project";"#));
+    assert!(TRAY_MENU.contains(r#"pub const CLONE: &str = "gwt.tray.clone";"#));
     assert!(
         !TRAY_MENU.contains("AUTOSTART_TOGGLE"),
         "autostart must live in Settings > System, not in the tray menu"
@@ -116,7 +118,7 @@ fn tray_menu_pins_action_ids() {
 }
 
 #[test]
-fn tray_menu_contract_is_open_copy_url_about_quit() {
+fn tray_menu_contract_opens_hub_intake_without_about() {
     assert!(
         MAIN_RS.contains(r#""Open in browser""#),
         "tray menu must expose Open in browser"
@@ -134,8 +136,8 @@ fn tray_menu_contract_is_open_copy_url_about_quit() {
         "tray menu must build Copy URL label from the root browser URL"
     );
     assert!(
-        MAIN_RS.contains(r#""About GWT""#),
-        "tray menu must expose About GWT"
+        !MAIN_RS.contains(r#""About GWT""#),
+        "tray menu must not expose About GWT"
     );
     assert!(MAIN_RS.contains(r#""Quit""#), "tray menu must expose Quit");
     assert!(
@@ -144,11 +146,11 @@ fn tray_menu_contract_is_open_copy_url_about_quit() {
     );
     assert!(
         !MAIN_RS.contains("PredefinedMenuItem::about"),
-        "About GWT must open browser About, not the OS native About dialog"
+        "tray must not expose an OS native About dialog"
     );
     assert!(
-        MAIN_RS.contains("about_url_for_browser_url(&browser_url)"),
-        "About GWT handler must derive browser_url#about"
+        MAIN_RS.contains(r#""Open Project…""#) && MAIN_RS.contains(r#""Clone from GitHub…""#),
+        "tray menu must expose both direct Hub intake actions"
     );
     assert!(
         MAIN_RS.contains("Some(MenuAction::CopyUrl)"),

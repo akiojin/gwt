@@ -22,6 +22,7 @@ test("live isolated Hub opens a manual path and acknowledges an already-open Pro
     }));
     await page.goto(new URL("/", base!).href);
     await expect(page.locator("[data-hub]")).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
     await page.getByText("Enter folder path…", { exact: true }).click();
     await page.locator("[data-open-project-path]").fill(projectRoot!);
     const notice = page.locator(".gwt-hub__notice");
@@ -41,6 +42,18 @@ test("live isolated Hub opens a manual path and acknowledges an already-open Pro
     await expect(projects).toHaveCount(openCount);
     await expect(page.locator(".gwt-hub__error")).toBeHidden();
     await page.screenshot({ path: testInfo.outputPath("live-hub-reopened.png") });
+    await page.goto(new URL(projectUrl!, base!).href);
+    await expect(page.locator("#close-project-button")).toBeVisible();
+    await expect(page.locator("#project-home-link")).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Open the gwt Hub in a new tab" })).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("live-project-header.png") });
+    await page.goto(new URL("/?action=clone", base!).href);
+    const cloneDialog = page.getByRole("dialog", { name: "Clone Project" });
+    await expect(cloneDialog).toBeVisible();
+    await expect(cloneDialog).toHaveAttribute("aria-modal", "true");
+    await page.screenshot({ path: testInfo.outputPath("live-tray-clone.png") });
+    await cloneDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(cloneDialog).toBeHidden();
     expect(errors).toEqual([]);
   });
 });
@@ -105,6 +118,39 @@ async function installRouteBackend(page: Page) {
 }
 
 test.describe("Project Hub and routes", () => {
+  test("tray Open Project URL opens the folder picker without another click", async ({ page }, testInfo) => {
+    const errors = collectBrowserErrors(page);
+    await installEmbeddedRoutes(page);
+    await installRouteBackend(page);
+    await page.goto(`${HUB_URL}?action=open-folder`);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+    await expect(page.locator('[data-hub-action="open-folder"]')).toHaveText("Choosing folder…");
+    await expect.poll(() => page.evaluate(() => (window as any).__gwtSent
+      .filter((entry: any) => entry.message.kind === "open_project_dialog").length)).toBe(1);
+    await page.evaluate(() => (window as any).__gwtHubReply({ kind: "picker_started", purpose: "open", request_id: 1 }));
+    await page.evaluate(() => (window as any).__gwtHubReply({ kind: "picker_cancelled", purpose: "open", request_id: 1 }));
+    await expect(page.locator('[data-hub-action="open-folder"]')).toHaveText("Open Folder…");
+    await page.screenshot({ path: testInfo.outputPath("tray-open-project.png") });
+    expect(errors).toEqual([]);
+  });
+
+  test("tray Clone URL opens the shared clone dialog without another click", async ({ page }, testInfo) => {
+    const errors = collectBrowserErrors(page);
+    await installEmbeddedRoutes(page);
+    await installRouteBackend(page);
+    await page.goto(`${HUB_URL}?action=clone`);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+    const dialog = page.getByRole("dialog", { name: "Clone Project" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveClass(/modal-shell/);
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await expect(dialog).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath("tray-clone.png") });
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    expect(errors).toEqual([]);
+  });
+
   test("folder picker is pending once, cancels neutrally, and supports manual paths", async ({ page }) => {
     const errors = collectBrowserErrors(page);
     await installEmbeddedRoutes(page);
@@ -169,7 +215,7 @@ test.describe("Project Hub and routes", () => {
     expect(errors).toEqual([]);
   });
 
-  test("a Project route binds its own scope and links the Hub in a new tab", async ({ page }) => {
+  test("a Project route binds its own scope without a header Hub link", async ({ page }) => {
     const errors = collectBrowserErrors(page);
     await installEmbeddedRoutes(page);
     await installRouteBackend(page);
@@ -180,11 +226,8 @@ test.describe("Project Hub and routes", () => {
       .filter((entry: any) => entry.message.kind === "frontend_ready").map((entry: any) => entry.scope));
     expect(scopes).toContain(projectA.project_key);
     expect(scopes.filter((scope: string | null) => scope && scope !== projectA.project_key)).toEqual([]);
-    const home = page.locator("#project-home-link");
-    await expect(home).toBeVisible();
-    await expect(home).toHaveAttribute("href", "/");
-    await expect(home).toHaveAttribute("target", "_blank");
-    await expect(home).toHaveAttribute("rel", "noopener");
+    await expect(page.locator("#project-home-link")).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Open the gwt Hub in a new tab" })).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 

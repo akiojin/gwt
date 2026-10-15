@@ -10835,7 +10835,7 @@ fn main() -> std::io::Result<()> {
 
     // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
     // native WebView path is removed; instead we build a tray-icon menu
-    // with `[Open] / About / [Quit]` and rely on the existing
+    // with Hub / project intake / Projects / Copy URL / Quit and rely on the existing
     // `EmbeddedServer` + browser UI for the actual GUI surface. The tao
     // event_loop is still used to keep the OS runloop alive (NSApp on
     // macOS, MS message pump on Windows, GTK main loop on Linux). The
@@ -10855,7 +10855,18 @@ fn main() -> std::io::Result<()> {
         true,
         None,
     );
-    let tray_about = MenuItem::with_id(gwt::cli::tray::menu::ids::ABOUT, "About GWT", true, None);
+    let tray_open_project = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::OPEN_PROJECT,
+        "Open Project…",
+        true,
+        None,
+    );
+    let tray_clone = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::CLONE,
+        "Clone from GitHub…",
+        true,
+        None,
+    );
     let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
     let tray_projects = Submenu::new("Projects", false);
     let mut tray_generation = gwt::cli::tray::menu::TrayMenuGeneration::new(
@@ -10869,7 +10880,8 @@ fn main() -> std::io::Result<()> {
             &tray_copy_url,
             &tray_projects,
             &PredefinedMenuItem::separator(),
-            &tray_about,
+            &tray_open_project,
+            &tray_clone,
             &PredefinedMenuItem::separator(),
             &tray_quit,
         ])
@@ -12299,22 +12311,23 @@ fn main() -> std::io::Result<()> {
                 )]);
             }
             // SPEC #2920 Phase 4: the tray menu event handler is now
-            // cross-platform. The tray icon menu (Open / About / Quit) is the
+            // cross-platform. The tray icon menu is the
             // only producer; the legacy macOS native menubar
             // (NativeMenuCommand) was removed alongside the wry
             // WebView.
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
                 use gwt::cli::tray::menu::MenuAction;
                 match MenuAction::from_id(event.id.as_ref()) {
-                    Some(MenuAction::Open) => {
+                    Some(action @ (MenuAction::Open | MenuAction::OpenProject | MenuAction::Clone)) => {
+                        let target_url = action.browser_url(&browser_url).expect("browser-opening menu action");
                         // Best-effort browser open. Failure is logged
                         // but does not interrupt the tray loop —
                         // `gwt open` from the CLI is a fallback.
-                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&browser_url) {
+                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&target_url) {
                             tracing::warn!(
                                 target: "gwt_tray",
                                 error = %error,
-                                url = browser_url.as_str(),
+                                url = target_url.as_str(),
                                 "tray Open menu failed to launch the default browser"
                             );
                         } else {
@@ -12338,18 +12351,6 @@ fn main() -> std::io::Result<()> {
                         let _ = proxy.send_event(UserEvent::QuitApp {
                             reason: GuiShutdownReason::QuitApp,
                         });
-                    }
-                    Some(MenuAction::About) => {
-                        let about_url =
-                            gwt::cli::tray::menu::about_url_for_browser_url(&browser_url);
-                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&about_url) {
-                            tracing::warn!(
-                                target: "gwt_tray",
-                                error = %error,
-                                url = about_url.as_str(),
-                                "tray About menu failed to launch the default browser"
-                            );
-                        }
                     }
                     None => {
                         if let Some(action) = tray_generation.resolve(event.id.as_ref()) {

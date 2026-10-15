@@ -11,7 +11,7 @@ const indexHtml = readFileSync(new URL("../index.html", import.meta.url), "utf8"
 const projectA = { id: "tab-a", project_key: "0123456789abcdef", title: "Alpha", kind: "git" };
 const projectB = { id: "tab-b", project_key: "fedcba9876543210", title: "Beta", kind: "git" };
 
-function fixture() {
+function fixture(action = "") {
   const { document, window } = parseHTML(indexHtml);
   const sockets = [];
   class FakeSocket {
@@ -30,7 +30,7 @@ function fixture() {
   }
   const timers = [];
   const win = Object.assign(window, {
-    location: { href: "http://127.0.0.1:4545/", pathname: "/" },
+    location: { href: `http://127.0.0.1:4545/${action}`, pathname: "/" },
     WebSocket: FakeSocket,
     setTimeout: (callback) => { timers.push(callback); return timers.length; },
     clearTimeout() {},
@@ -260,4 +260,31 @@ test("Hub retries Close after its preview connection is lost", () => {
   sockets[1].open();
   close.click();
   assert.deepEqual(sockets[1].sent.at(-1), { kind: 'preview_close_project', project_key: projectA.project_key });
+});
+
+
+test("tray Open Project URL starts the existing picker once, after frontend readiness", () => {
+  const { document, sockets, timers } = fixture("?action=open-folder");
+  sockets[0].open();
+  assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }, { kind: "open_project_dialog" }]);
+  assert.equal(document.querySelector('[data-hub-action="open-folder"]').textContent, "Choosing folder…");
+  sockets[0].handlers.close();
+  timers.at(-1)();
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
+});
+
+test("tray Clone URL opens the existing accessible clone dialog without starting a clone", () => {
+  const { document, sockets } = fixture("?action=clone");
+  assert.equal(document.querySelector('#clone-project-modal').classList.contains("open"), true);
+  assert.ok(document.querySelector('#clone-project-modal .modal-shell[role="dialog"][aria-modal="true"]'));
+  sockets[0].open();
+  assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }]);
+});
+
+test("unknown Hub actions retain the ordinary picker", () => {
+  const { document, sockets } = fixture("?action=unknown");
+  sockets[0].open();
+  assert.deepEqual(sockets[0].sent, [{ kind: "frontend_ready" }]);
+  assert.equal(document.querySelector('#clone-project-modal').getAttribute("aria-hidden"), "true");
 });
