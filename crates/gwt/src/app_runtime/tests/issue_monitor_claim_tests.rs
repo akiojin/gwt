@@ -556,6 +556,9 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // This asserts durable claim results, not filesystem speed under load.
+    let operation_now = gwt_core::operation_deadline::now();
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(operation_now);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -648,7 +651,7 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
     let mut bounded_remote_calls = 0;
     let mut attempting_effect_id = None;
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        Instant::now() + Duration::from_secs(5),
+        operation_now + Duration::from_secs(5),
     );
     drive_local_issue_monitor_claim_effects_with(
         &prefs_path,
