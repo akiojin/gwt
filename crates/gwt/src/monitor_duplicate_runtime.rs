@@ -86,6 +86,7 @@ fn reconcile_projects(projects: &BTreeMap<PathBuf, PathBuf>, entries: &[Register
             .entry(crate::issue_monitor_prefs_path_for_repo_path(root))
             .or_insert((root, sessions));
     }
+    let mut censuses = BTreeMap::new();
     for (prefs_path, (project, sessions)) in repositories {
         let entries = entries
             .iter()
@@ -95,7 +96,11 @@ fn reconcile_projects(projects: &BTreeMap<PathBuf, PathBuf>, entries: &[Register
             })
             .cloned()
             .collect::<Vec<_>>();
-        if let Err(error) = reconcile_project(project, sessions, &entries) {
+        let inventory = censuses
+            .entry(sessions)
+            .or_insert_with(|| crate::session_inventory::ProjectSessionCensus::capture(sessions))
+            .observe(project);
+        if let Err(error) = reconcile_project(project, sessions, &entries, &inventory) {
             tracing::warn!(target: "gwt.monitor.runtime", project = %project.display(), %error, "runtime reconciliation failed; retaining unknown authority");
         }
     }
@@ -245,12 +250,12 @@ fn reconcile_project(
     project_root: &Path,
     sessions_dir: &Path,
     entries: &[RegisteredMonitorRuntime],
+    inventory: &crate::session_inventory::SessionInventory,
 ) -> io::Result<()> {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         std::time::Instant::now() + Duration::from_secs(5),
     );
     let complete_counts = publish_counts(project_root, entries)?;
-    let inventory = crate::session_inventory::observe_sessions(project_root, sessions_dir);
     let mut groups = BTreeMap::<u64, Vec<&RegisteredMonitorRuntime>>::new();
     for entry in entries.iter().filter(|entry| {
         !entry.registration.review_dispatch && !matches!(entry.handle.try_wait(), Ok(Some(_)))
@@ -485,6 +490,16 @@ mod prefs_io_tests {
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    fn reconcile_project(
+        project: &Path,
+        sessions: &Path,
+        entries: &[RegisteredMonitorRuntime],
+    ) -> io::Result<()> {
+        let inventory =
+            crate::session_inventory::ProjectSessionCensus::capture(sessions).observe(project);
+        super::reconcile_project(project, sessions, entries, &inventory)
+    }
 
     struct PtyGuard(Arc<PtyHandle>);
     impl Drop for PtyGuard {

@@ -164,6 +164,7 @@ struct MachineProcessResources {
     memory: BTreeMap<u32, u64>,
     reviews: BTreeSet<u32>,
     processes: BTreeMap<u32, u64>,
+    epochs: BTreeMap<u32, u64>,
     legacy_processes: Vec<LegacyProcessObservation>,
     boot_epoch: u64,
     tokens_are_epoch: bool,
@@ -262,6 +263,80 @@ pub fn observe_sessions(project_root: &Path, sessions_dir: &Path) -> SessionInve
     observe_sessions_filtered(project_root, sessions_dir, None)
 }
 
+/// A single tick's read-only census, shared by project roots using the same
+/// Session directory. Deduplication and uncertain evidence stay project-scoped.
+/// Never reuse this across ticks or for stop authorization.
+pub struct ProjectSessionCensus {
+    candidates: Vec<RuntimeCandidate>,
+    uncertainties: Vec<(SessionObservationUncertainty, Option<Session>)>,
+    resources: MachineProcessResources,
+}
+
+impl ProjectSessionCensus {
+    pub fn capture(sessions_dir: &Path) -> Self {
+        let mut inventory = SessionInventory::default();
+        let mut snapshot = None;
+        let candidates = read_candidates_scope_with_snapshot(
+            None,
+            sessions_dir,
+            None,
+            &mut inventory,
+            &mut snapshot,
+        );
+        let resources = capture_process_resources(&candidates, &inventory, false, snapshot);
+        let uncertainties = inventory
+            .uncertainties
+            .into_iter()
+            .map(|uncertainty| {
+                // Only runtime decode errors have a known, scoped Session. Ledger
+                // and directory failures must continue to fence every project.
+                let scope = uncertainty
+                    .reason
+                    .starts_with("runtime_unreadable:")
+                    .then(|| {
+                        uncertainty.session_id.as_ref().and_then(|id| {
+                            Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                        })
+                    })
+                    .flatten();
+                (uncertainty, scope)
+            })
+            .collect();
+        Self {
+            candidates,
+            uncertainties,
+            resources,
+        }
+    }
+
+    pub fn observe(&self, project_root: &Path) -> SessionInventory {
+        let root = normalized(project_root);
+        let hash = gwt_core::repo_hash::detect_repo_identity(&root)
+            .map(|identity| identity.hash.as_str().to_string());
+        let matches = |session: &Session| session_matches_project(session, &root, hash.as_deref());
+        let mut inventory = SessionInventory {
+            sessions: Vec::new(),
+            uncertainties: self
+                .uncertainties
+                .iter()
+                .filter(|(_, scope)| scope.as_ref().is_none_or(matches))
+                .map(|(uncertainty, _)| uncertainty.clone())
+                .collect(),
+        };
+        observe_candidate_resources(
+            self.candidates
+                .iter()
+                .filter(|row| matches(&row.session))
+                .cloned()
+                .collect(),
+            &mut inventory,
+            &self.resources,
+            false,
+        );
+        inventory
+    }
+}
+
 /// Observe one Session before cross-Session process deduplication. Recovery
 /// callers hold its Session lease and must also check every uncertainty.
 /// A live host without recorded identity remains uncertain for recovery.
@@ -293,6 +368,17 @@ fn observe_live_candidates(
     measure_resources: bool,
     require_host_absence: bool,
 ) -> MachineProcessResources {
+    let resources = capture_process_resources(&candidates, inventory, measure_resources, None);
+    observe_candidate_resources(candidates, inventory, &resources, require_host_absence);
+    resources
+}
+
+fn capture_process_resources(
+    candidates: &[RuntimeCandidate],
+    inventory: &SessionInventory,
+    measure_resources: bool,
+    snapshot: Option<sysinfo::System>,
+) -> MachineProcessResources {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     if candidates.is_empty() && inventory.uncertainties.is_empty() {
         return MachineProcessResources::default();
@@ -323,8 +409,7 @@ fn observe_live_candidates(
         .collect::<BTreeSet<_>>();
     // Read process state after the sidecars so a newly published child is not
     // compared with an OS snapshot taken before it was spawned.
-    let mut system = System::new();
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let mut system = snapshot.unwrap_or_else(process_snapshot);
     let legacy_children = system
         .processes()
         .iter()
@@ -446,10 +531,29 @@ fn observe_live_candidates(
         .collect::<BTreeMap<_, _>>();
     let boot_epoch = System::boot_time();
     let tokens_are_epoch = cfg!(not(target_os = "linux"));
+    resources.processes = epochs.clone();
+    resources.processes.extend(processes);
+    resources.epochs = epochs;
+    resources.legacy_processes = legacy_processes;
+    resources.boot_epoch = boot_epoch;
+    resources.tokens_are_epoch = tokens_are_epoch;
+    resources
+}
+
+fn observe_candidate_resources(
+    candidates: Vec<RuntimeCandidate>,
+    inventory: &mut SessionInventory,
+    resources: &MachineProcessResources,
+    require_host_absence: bool,
+) {
     let candidates = candidates
         .into_iter()
         .filter(|candidate| {
-            !runtime_from_previous_boot(&candidate.runtime, boot_epoch, tokens_are_epoch)
+            !runtime_from_previous_boot(
+                &candidate.runtime,
+                resources.boot_epoch,
+                resources.tokens_are_epoch,
+            )
         })
         .collect::<Vec<_>>();
     if require_host_absence {
@@ -466,7 +570,7 @@ fn observe_live_candidates(
                     .zip(candidate.runtime.child_started_at)
                     .filter(|(pid, started)| *pid > 0 && *started > 0)
                     .is_none()
-                && processes.contains_key(&candidate.host_pid)
+                && resources.processes.contains_key(&candidate.host_pid)
             {
                 inventory.uncertain(
                     &candidate.path,
@@ -478,20 +582,19 @@ fn observe_live_candidates(
     }
     observe_candidates(
         candidates,
-        &processes,
-        &epochs,
+        &resources.processes,
+        &resources.epochs,
         crate::process::is_process_group_alive,
         inventory,
-        &legacy_processes,
+        &resources.legacy_processes,
     );
-    if measure_resources {
-        resources.processes = epochs;
-        resources.processes.extend(processes);
-        resources.legacy_processes = legacy_processes;
-        resources.boot_epoch = boot_epoch;
-        resources.tokens_are_epoch = tokens_are_epoch;
-    }
-    resources
+}
+
+fn process_snapshot() -> sysinfo::System {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    system
 }
 
 #[cfg(test)]
@@ -525,6 +628,7 @@ fn observe_with_processes(
     inventory
 }
 
+#[derive(Clone)]
 struct RuntimeCandidate {
     host_pid: u32,
     path: PathBuf,
@@ -543,6 +647,16 @@ struct LegacyProcessObservation {
 
 fn normalized(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn session_matches_project(session: &Session, root: &Path, repo_hash: Option<&str>) -> bool {
+    repo_hash.is_some_and(|hash| session.repo_hash.as_deref() == Some(hash))
+        || normalized(
+            session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path),
+        ) == root
 }
 
 fn exact_host_identity(runtime: &SessionRuntimeState, observed: Option<u64>) -> bool {
@@ -607,6 +721,22 @@ fn read_candidates_scope(
     session_id: Option<&str>,
     inventory: &mut SessionInventory,
 ) -> Vec<RuntimeCandidate> {
+    read_candidates_scope_with_snapshot(
+        project_root,
+        sessions_dir,
+        session_id,
+        inventory,
+        &mut None,
+    )
+}
+
+fn read_candidates_scope_with_snapshot(
+    project_root: Option<&Path>,
+    sessions_dir: &Path,
+    session_id: Option<&str>,
+    inventory: &mut SessionInventory,
+    snapshot: &mut Option<sysinfo::System>,
+) -> Vec<RuntimeCandidate> {
     let mut process_evidence = None;
     read_candidates_with_liveness(
         project_root,
@@ -629,13 +759,7 @@ fn read_candidates_scope(
             // PIDs too: a Host can spawn a child and exit after the snapshot
             // but before its direct probe. Never collect environments.
             let (observed, pids) = process_evidence.get_or_insert_with(|| {
-                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-                let mut system = System::new();
-                system.refresh_processes_specifics(
-                    ProcessesToUpdate::All,
-                    true,
-                    ProcessRefreshKind::nothing(),
-                );
+                let system = snapshot.get_or_insert_with(process_snapshot);
                 (
                     !system.processes().is_empty(),
                     system
@@ -738,17 +862,10 @@ fn read_candidates_with_liveness(
                 continue;
             }
         };
-        let same_repo = repo_hash
+        if project_root
             .as_ref()
-            .is_some_and(|hash| session.repo_hash.as_ref() == Some(hash));
-        let same_root = normalized(
-            session
-                .project_state_root
-                .as_deref()
-                .unwrap_or(&session.worktree_path),
-        );
-        let same_root = project_root.as_ref().is_some_and(|root| same_root == *root);
-        if project_root.is_some() && !same_repo && !same_root {
+            .is_some_and(|root| !session_matches_project(&session, root, repo_hash.as_deref()))
+        {
             continue;
         }
         match runtime {
@@ -983,6 +1100,53 @@ impl SessionInventory {
 mod tests {
     use super::*;
     use gwt_agent::{AgentId, AgentStatus};
+
+    #[test]
+    fn project_census_keeps_scopes_and_uncertainties_without_rereading_the_tick() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let roots = [temp.path().join("first"), temp.path().join("second")];
+        let pid = std::process::id();
+        let started = crate::process::host_process_start_time(pid).unwrap();
+        for (index, root) in roots.iter().enumerate() {
+            std::fs::create_dir(root).unwrap();
+            // The same PTY may have aliases in different project scopes. A
+            // global deduplication must not hide either project's observation.
+            save_runtime(
+                &sessions,
+                root,
+                root,
+                &format!("live-{index}"),
+                Some((pid, started)),
+            );
+            save_runtime(&sessions, root, root, &format!("bad-{index}"), None);
+            let bad =
+                gwt_agent::runtime_state_path_for_pid(&sessions, 100, &format!("bad-{index}"));
+            std::fs::write(bad, b"invalid runtime").unwrap();
+        }
+        std::fs::write(
+            sessions.join("runtime/100/unknown.json"),
+            b"invalid runtime",
+        )
+        .unwrap();
+        let expected = roots
+            .each_ref()
+            .map(|root| observe_sessions(root, &sessions));
+        let census = ProjectSessionCensus::capture(&sessions);
+        // No later sidecar/ledger changes may turn one tick into five censuses.
+        std::fs::remove_dir_all(&sessions).unwrap();
+        for (root, expected) in roots.iter().zip(expected) {
+            let actual = census.observe(root);
+            assert_eq!(actual.sessions, expected.sessions);
+            assert_eq!(actual.sessions.len(), 1, "deduplication is project-scoped");
+            assert_eq!(actual.uncertainties, expected.uncertainties);
+            assert_eq!(
+                actual.uncertainties.len(),
+                2,
+                "scoped and unknown failures survive"
+            );
+        }
+    }
 
     #[test]
     fn runtime_cache_reuses_only_matching_mtime_and_size() {
