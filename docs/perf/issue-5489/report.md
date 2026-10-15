@@ -139,6 +139,22 @@ warm 時の decode CPU のゼロは OS CPU counter の分解能による値で�
 
 `node docs/perf/issue-5489/verify.mjs` は旧証跡を `git show a96ce624e` の source hash と照合し、新証跡を現在の source hash と照合する。統合後には同一 library digest、依存 commit の祖先関係、前後の 5 prefs hash、census / worker CPU 中央値と worker 平均コアの半減も検査する。
 
+## 配信済み source と実 GUI の版
+
+PR #5507 は `2026-10-15T12:45:56Z` に merge され、merge commit は `2b6ca0eca084db53ed381a09a85c7d8eb4e2acf0`、最終 head は `046b38b98d4ed238a9e06abacdca51a619f3b743`。再実行時の `origin/develop` にこの commit と既存の全 producing commit が含まれ、branch に未配信 source は無かった。AC-1 の census 内訳と AC-2 の回帰は配信済み source の証拠として扱う。同 head の [Test (Rust)](https://github.com/akiojin/gwt/actions/runs/38732203668/job/116423867533)、[Test (Rust, Windows)](https://github.com/akiojin/gwt/actions/runs/38732203668/job/116423694434)、[coverage / Rust Coverage](https://github.com/akiojin/gwt/actions/runs/38732203522/job/116423167416) はすべて SUCCESS。これは配送 head の既存 CI 証跡であり、今回の session での fresh 実行とは区別する。
+
+稼働 GUI の `v9.123.1` は tag commit `fcd7823b0f1f99cf057775c1e8966edb62786964`（`12:03:44Z`）で、上記 merge より前である。同 tag の `reconcile_project` には root ごとの `observe_sessions` が残る。`git merge-base --is-ancestor 2b6ca0eca v9.123.1` は exit 1。GUI が更新されたという事実だけでは今回の修正後とは判定できない。
+
+[deployed-v9.123.1-baseline.json](deployed-v9.123.1-baseline.json) は `13:07:54Z` に開始した追加の修正前記録。PID `6372`、TID `7604` の `gwt-monitor-runtime` で、`GetThreadDescription` と保持した同一 thread handle の `GetThreadTimes` を使った。終了した thread は観測失敗とし、TID の再利用を別 thread の CPU として数えない。30.9205409 秒で Monitor CPU は 9.9375 秒、0.321388 コア。GUI 全体は 2.148147 コア、implementation agent は区間前後とも 12 窓、runtime は 375 namespaces / 3,812 files。既存 baseline の 11 窓・699 namespaces との条件差を残し、この時点間の差を修正の改善率には使わない。
+
+collector は今後の観測に release tag / commit と fix commit の祖先関係も保存する。`verify.mjs` の隔離 worker 出力は `isolated worker threshold met` と表記し、実 GUI の AC-3 達成を意味する出力にしない。実 GUI の修正後記録は、fix commit を含む配布版で取得してから判定する。
+
+`v9.123.2` は `13:40:39Z` に公開され、tag は修正を含み、対象 census / Monitor source も checkout と一致する。再実行環境の GUI 自動適用設定は root の `auto_apply_updates = true`（canonical `update.settings.status` でも確認）。別の `[agent].auto_update = false` は外部 CLI maintenance の設定であり、GUI 更新を無効にする値ではない（`app_runtime/agent_maintenance.rs` の `start_agent_auto_update`）。
+
+[deployment-wait.json](deployment-wait.json) は更新 cache と各実 5 root の拒否原記録を保存したもの。`13:55:31Z` に `v9.123.2` を検出したが、`13:55:35Z` に `pending_refused`、`Administrator privileges required; the update stays staged` となった。管理者権限での適用を agent が代行せず、Board escalation `206976b5-a230-4c76-adf7-5674d7108ca5` / Issue #5489 comment `6193825907` で PM に調整を引き継いだ。設定・GUI 停止の操作は行っていない。**実 GUI の修正後 CPU は未測定、AC-3 は未チェックである。**
+
+`node docs/perf/issue-5489/verify.mjs` は配信済みの census / 隔離 worker 証拠と新しい修正前 raw の整合性を検証する。成功しても AC-3 を完了とはせず、`PENDING AC-3` を出力する。更新後は collector で `deployed-gui-after.json` を取得し、`node docs/perf/issue-5489/verify.mjs --deployed-after` を実行する。この専用検査は after 記録なしで失敗し、版への fix 包含・同じ実 5 root・Monitor 平均コア半減をすべて要求する。両時点の窓数・runtime 規模・他の統合修正も併記し、単独修正の因果効果とは区別する。
+
 ## 比較の限界と引継ぎ
 
 - Issue #5385 の元資料は `E:/gwt/work/issue-5385/docs/perf/issue-5385/{context.json,threads.json,census-probe.rs,census-probe.txt,collect.ps1,samples.jsonl,report.md}` にある。他 worktree のファイルは変更していない。
