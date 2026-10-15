@@ -221,6 +221,56 @@ test("Issue #5321: selection opens preview, close restores full width and select
   assert.ok(!fixture.body.querySelector(".issue-preview"));
 });
 
+test("Issue #5396: list reloads and identical details retain the preview DOM", async (t) => {
+  const fixture = await makeFixture();
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  const entry = knowledgeEntry(5396);
+  applyEntries(fixture.surface, fixture.load, [entry], null);
+  assert.equal(fixture.sent.filter(message => message.kind === "select_knowledge_bridge_entry").length, 0);
+  fixture.surface.requestKnowledgeDetail("win-1", "issue", entry.number);
+  const request = fixture.sent.at(-1);
+  const completion = {
+    kind: "knowledge_detail", id: request.id, knowledge_kind: "issue",
+    request_id: request.request_id,
+    detail: { ...entry, sections: [{ title: "Description", body: "Original body" }], related_works: [] },
+  };
+  fixture.surface.applyKnowledgeReceiveEvent(completion);
+  const pane = fixture.body.querySelector(".knowledge-detail-pane");
+  const title = pane.querySelector(".knowledge-detail-title");
+  const section = pane.querySelector(".knowledge-section");
+  section.open = false;
+  let replacements = 0;
+  let previousTitle = title;
+  for (let index = 0; index < 20; index++) {
+    fixture.surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_entries", id: fixture.load.id, knowledge_kind: "issue",
+      request_id: fixture.load.request_id, entries: [entry], selected_number: entry.number,
+      refresh_enabled: true,
+    });
+    if (pane.querySelector(".knowledge-detail-title") !== previousTitle) replacements++;
+    previousTitle = pane.querySelector(".knowledge-detail-title");
+    fixture.surface.applyKnowledgeReceiveEvent(JSON.parse(JSON.stringify(completion)));
+    if (pane.querySelector(".knowledge-detail-title") !== previousTitle) replacements++;
+    previousTitle = pane.querySelector(".knowledge-detail-title");
+  }
+  t.diagnostic(JSON.stringify({ replies: 40, previewReplacements: replacements }));
+  assert.ok(pane.querySelector(".knowledge-detail-title") === title, "unchanged preview retains its DOM");
+  assert.ok(pane.querySelector(".knowledge-section") === section);
+  assert.equal(section.open, false, "native disclosure state survives list/detail replays");
+  fixture.surface.applyKnowledgeReceiveEvent({ ...completion,
+    detail: { ...completion.detail, sections: [{ title: "Description", body: "Changed body" }] },
+  });
+  assert.ok(pane.querySelector(".knowledge-section") !== section, "changed content still renders");
+  const error = { kind: "knowledge_error", id: request.id, knowledge_kind: "issue",
+    request_id: request.request_id, message: "Detail unavailable" };
+  fixture.surface.applyKnowledgeReceiveEvent(error);
+  const noticeCount = pane.querySelectorAll(".knowledge-notification-badge").length;
+  assert.equal(noticeCount, 1);
+  fixture.surface.applyKnowledgeReceiveEvent(error);
+  assert.equal(pane.querySelectorAll(".knowledge-notification-badge").length, noticeCount,
+    "retained panes must not append duplicate detail error notices");
+});
+
 // FR-007 / FR-008.
 test("selecting an Issue mirrors its agent read-only in the right pane", async (t) => {
   const fixture = await makeFixture({ workspaceWindows: [previewWindow("agent-1", 3671)] });

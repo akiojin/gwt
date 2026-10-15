@@ -752,6 +752,7 @@ export function createKnowledgeKanbanSurface({
   // runtime factory is the shared one from app.js; `readOnly` keeps every input
   // path unattached. `windowizeIssuePreviewWindow` performs the Canvas handoff.
   createTerminalRuntime,
+  isAgentsSurfaceMounted = () => false,
   windowDisplayTitle,
   windowRoleBadgeLabel,
   windowizeIssuePreviewWindow,
@@ -1152,6 +1153,7 @@ export function createKnowledgeKanbanSurface({
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
       const knowledgeBoardViewModel = createUiStateStore({ windowId: null });
+      const issueDetailRenderKeys = new WeakMap();
       // Receive publishes invalidation; the view owns projection/layout reads.
       const knowledgeEventRefreshModel = createUiStateStore({ kind: null, revision: 0 });
       const knowledgeAutoRefreshModel = createUiStateStore({ revision: 0 });
@@ -3977,6 +3979,43 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderIssueDetailPane(windowId, state, detailPane, { agentPreview = true } = {}) {
+        // #5396: list/status refreshes and duplicate detail replies must retain
+        // the native disclosure, scroll and focus state of an unchanged preview.
+        const number = state.detail?.number ?? state.selectedNumber;
+        const cachedEntry = issueDetailEntry(state, number);
+        const entry = cachedEntry || state.detail ? queueProjectedEntry(cachedEntry || {
+          number: Number(number), title: state.detail.title,
+          state: state.detail.state, labels: state.detail.labels || [],
+        }) : null;
+        const work = entry ? issueWorkRowForEntry(getActiveWorkProjection?.(), entry) : null;
+        const attention = work ? workAttentionFor?.(work) || null : null;
+        const faces = entry ? issueRowFaces(windowId, entry, work) : {};
+        const queue = canonicalQueuedKnowledgeEntries(state);
+        const relatedWorks = state.detail?.related_works || [];
+        const liveSessions = buildKnowledgeRelatedLiveSessionWindowsByConversation(relatedWorks);
+        const relatedActions = relatedWorks.flatMap(relatedWork =>
+          (relatedWork.agents || []).flatMap(agent =>
+            (agent.sessions || []).map(session => [
+              isKnowledgeRelatedResumePending(agent.session_id),
+              findKnowledgeRelatedLiveWindow(agent, session, liveSessions)?.id || null,
+            ])));
+        const key = JSON.stringify([
+          state.detail, state.detailLoading, state.selectedNumber, state.previewHidden,
+          state.issueDetailView, agentPreview, state.error, entry, work, attention,
+          relatedActions,
+          agentPreview && state.issueDetailView === "output" && Boolean(isAgentsSurfaceMounted()),
+          queue.findIndex(item => item.number === entry?.number), queue.length,
+          [faces.inlineWindow, faces.canvasWindow].map(target => target ? [
+            target.id, target.status, windowDisplayTitle?.(target) || target.title,
+            windowRoleBadgeLabel?.(target) || target.agent_id,
+          ] : null),
+        ]);
+        if (issueDetailRenderKeys.get(detailPane) === key && !state.renderError) return;
+        renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview });
+        issueDetailRenderKeys.set(detailPane, key);
+      }
+
+      function renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview = true } = {}) {
         detailPane.innerHTML = "";
         detailPane.hidden = agentPreview && state.previewHidden === true;
         if (detailPane.hidden) return;
@@ -5368,7 +5407,7 @@ export function createKnowledgeKanbanSurface({
             } else if (isSilentSemanticKind(activeIntent.kind)) {
               invalidateKnowledgeSemanticRetry(state);
             }
-            if (selectionIsCurrent && state.selectedNumber) {
+            if (normalizeKnowledgeKind(state.kind) === "pr" && selectionIsCurrent && state.selectedNumber) {
               dispatchKnowledgeDetailRequest(
                 event.id,
                 activeIntent.kind,
@@ -5641,7 +5680,9 @@ export function createKnowledgeKanbanSurface({
             renderIssueDetailPane(windowId, state, element.querySelector(".knowledge-detail-pane"), { agentPreview: state.viewMode !== "split" });
             if (state.error) {
               const detail = element.querySelector(".knowledge-detail-pane");
-              detail?.prepend(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error));
+              if (!detail?.querySelector(".knowledge-notification-badge")) {
+                detail?.prepend(createIssueNoticeBadge("Issue load failed", issueWindowErrorKey(windowId), state.error));
+              }
             }
             publishIssueControlExplanations(windowId, focus);
             if (focusPreview) focusIssuePreview(windowId, element);

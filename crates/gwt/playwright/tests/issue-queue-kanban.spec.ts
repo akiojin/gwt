@@ -251,6 +251,43 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
   expect(splitList.x + splitList.width, "narrow Split keeps its interactive list beside the detail pane").toBeLessThanOrEqual(splitDetail.x + 1);
 });
 
+test("Issue #5396 lazy preview retains DOM across unchanged list and detail replies", async ({ page }, info) => {
+  const detail = page.locator(".knowledge-detail-pane");
+  expect(await page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
+    message.kind === "select_knowledge_bridge_entry").length)).toBe(0);
+  await row(page, 1).locator(".knowledge-row-select").click();
+  await expect(detail.getByText("Description for #1", { exact: true })).toBeVisible();
+  const metrics = await page.evaluate(async () => {
+    const fixture = window as any;
+    const pane = document.querySelector(".knowledge-detail-pane")!;
+    const title = pane.querySelector(".knowledge-detail-title")!;
+    const disclosure = pane.querySelector("details")!;
+    disclosure.open = false;
+    let replacements = 0;
+    const observer = new MutationObserver(() => { if (!title.isConnected) replacements++; });
+    observer.observe(pane, { childList: true, subtree: true });
+    const before = fixture.__queueMessages.length;
+    const started = performance.now();
+    for (let index = 0; index < 20; index++) {
+      fixture.__queueTitle(1, title.textContent);
+      fixture.__queueReplayDetail();
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+    observer.disconnect();
+    return { replies: 40, replacements, retained: title.isConnected,
+      disclosureOpen: disclosure.open, elapsedMs: performance.now() - started,
+      extraSelections: fixture.__queueMessages.slice(before).filter((message: any) =>
+        message.kind === "select_knowledge_bridge_entry").length };
+  });
+  await info.attach("preview-refresh-metrics", { body: JSON.stringify(metrics), contentType: "application/json" });
+  expect(metrics.retained).toBe(true);
+  expect(metrics.replacements).toBe(0);
+  expect(metrics.disclosureOpen).toBe(false);
+  expect(metrics.extraSelections).toBe(0);
+  await page.evaluate(() => (window as any).__queueRefreshDetail());
+  await expect(detail.locator(".knowledge-detail-title")).toHaveText("Refreshed issue");
+});
+
 test("Issue #5321 Settings integrates Issues at 1280px without duplicate surfaces", async ({ page }, info) => {
   test.skip(process.env.GWT_ISSUE_5321_PHASE === "before", "AC-M covers the approved Settings integration");
   const settings = page.locator('.workspace-window[data-preset="settings"]');
@@ -965,7 +1002,8 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
         this.emit({kind:"workspace_state",workspace});
       }; fixture.__queueInbox=(items:unknown[])=>this.dispatchEvent(new MessageEvent("message",{
         data:JSON.stringify({kind:"issue_monitor_inbox",items})
-      })); fixture.__queueRefreshDetail=()=>this.emit({...fixture.__queueLastDetail,
+      })); fixture.__queueReplayDetail=()=>this.emit(fixture.__queueLastDetail);
+      fixture.__queueRefreshDetail=()=>this.emit({...fixture.__queueLastDetail,
         detail:{...fixture.__queueLastDetail.detail,title:"Refreshed issue"}});
         setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
       emit(payload:unknown) {const data=JSON.stringify(payload);setTimeout(()=>this.dispatchEvent(new MessageEvent("message",{data})),0);}
