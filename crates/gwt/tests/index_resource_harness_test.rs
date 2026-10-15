@@ -283,7 +283,7 @@ fn real_e5_all_scopes_build_and_search() {
             "https://github.com/example/all-scopes-e2e.git",
         ],
     ] {
-        assert!(std::process::Command::new("git")
+        assert!(gwt_core::process::hidden_command("git")
             .args(args)
             .current_dir(&harness.project)
             .status()

@@ -5932,7 +5932,7 @@ mod tests {
                 "https://github.com/example/reports-post.git",
             ],
         ] {
-            assert!(std::process::Command::new("git")
+            assert!(gwt_core::process::hidden_command("git")
                 .args(args)
                 .current_dir(&repo)
                 .status()

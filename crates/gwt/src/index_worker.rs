@@ -4400,7 +4400,7 @@ detached
             std::fs::create_dir_all(&root).unwrap();
             init_git_repo_with_origin(&root);
             // This process-wide registry is shared with other parallel fixtures.
-            run_git(
+            run_git_at(
                 &root,
                 &[
                     "remote",
