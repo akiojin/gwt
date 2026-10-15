@@ -78,6 +78,8 @@ pub(crate) struct RawHookEvent {
     transcript_path: Option<String>,
     prompt: Option<String>,
     cwd: Option<String>,
+    active_skill: Option<String>,
+    active_plugin: Option<String>,
 }
 
 /// Wire shape that accepts each field under its snake_case and camelCase
@@ -101,6 +103,13 @@ struct RawHookEventWire {
     transcript_path_camel: Option<String>,
     prompt: Option<String>,
     cwd: Option<String>,
+    // Advisory metadata is optional even when a provider cannot describe it.
+    active_skill: Option<serde_json::Value>,
+    #[serde(rename = "activeSkill")]
+    active_skill_camel: Option<serde_json::Value>,
+    active_plugin: Option<serde_json::Value>,
+    #[serde(rename = "activePlugin")]
+    active_plugin_camel: Option<serde_json::Value>,
 }
 
 impl From<RawHookEventWire> for RawHookEvent {
@@ -112,8 +121,20 @@ impl From<RawHookEventWire> for RawHookEvent {
             transcript_path: wire.transcript_path.or(wire.transcript_path_camel),
             prompt: wire.prompt,
             cwd: wire.cwd,
+            active_skill: advisory_string(wire.active_skill.or(wire.active_skill_camel)),
+            active_plugin: advisory_string(wire.active_plugin.or(wire.active_plugin_camel)),
         }
     }
+}
+
+fn advisory_string(value: Option<serde_json::Value>) -> Option<String> {
+    value.and_then(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 impl RawHookEvent {
@@ -148,6 +169,8 @@ impl From<RawHookEvent> for HookEvent {
             tool_input: raw.tool_input,
             transcript_path: raw.transcript_path,
             cwd: raw.cwd,
+            active_skill: raw.active_skill,
+            active_plugin: raw.active_plugin,
         }
     }
 }
@@ -239,6 +262,8 @@ mod tests {
             transcript_path: None,
             prompt: None,
             cwd: None,
+            active_skill: None,
+            active_plugin: None,
         }
     }
 

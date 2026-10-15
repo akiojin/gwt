@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? '';
@@ -18,9 +18,7 @@ test('compact PM Reports shares one scroll at 600, 1280 and 400 pixels', async (
     await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
     await page.setViewportSize({ width: 1500, height: 1000 });
     const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
-    // Replace only this disposable fixture's report ledger with concise reports.
-    const ledger = `${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-reports.jsonl`;
-    writeFileSync(ledger, '');
+    expect(fixture.project).toBe(ROOT);
     const env = { ...process.env, HOME, USERPROFILE: HOME };
     for (const key of Object.keys(env)) {
       if (key.startsWith('GWT_SESSION_') || key.startsWith('GWT_HOOK_FORWARD_')) delete env[key];
@@ -30,8 +28,13 @@ test('compact PM Reports shares one scroll at 600, 1280 and 400 pixels', async (
         input: JSON.stringify({ schema_version: 1, operation, params }) });
       expect(result.error, result.error?.message).toBeUndefined();
       expect(result.status, result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout).ok).toBe(true);
+      const envelope = JSON.parse(result.stdout);
+      expect(envelope.ok).toBe(true);
+      return JSON.parse(envelope.output);
     };
+    // Every source must start empty; truncating the native ledger leaves Q&A
+    // and peer reports behind and destroys another suite's restart seed.
+    expect(post('pm.report.list', {}).reports).toHaveLength(0);
     for (let index = 1; index <= 6; index++) {
       post('pm.report.post', { kind: 'progress', body: `Report ${index}: first body line.\n\nA concise update.` });
     }
@@ -42,6 +45,7 @@ test('compact PM Reports shares one scroll at 600, 1280 and 400 pixels', async (
     const card = pane.getByRole('region', { name: 'PM status', exact: true });
     await expect(card).toBeVisible({ timeout: 30_000 });
     const id = await pane.getAttribute('data-id');
+    await expect(pane.locator('.pm-chat__message')).toHaveCount(6);
     const body = pane.locator('.pm-chat__body');
     const details = card.locator('details');
     await expect(details).not.toHaveAttribute('open');

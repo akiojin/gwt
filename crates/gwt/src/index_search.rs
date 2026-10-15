@@ -301,6 +301,7 @@ pub(crate) fn search_project_index_attempt(
     // JSON operation funnel through here, so one guard measures the search
     // route end to end, early returns included.
     let _perf_route = crate::perf::RouteTimer::start(crate::perf::PerfRoute::Search);
+    let mut phases = crate::perf::RoutePhaseClock::start(crate::perf::PerfRoute::Search);
     let route_started = Instant::now();
     // One absolute attempt budget covers runtime ensure/provisioning, its
     // cross-process lock, every health probe, repair polling, and the final
@@ -317,8 +318,10 @@ pub(crate) fn search_project_index_attempt(
     let repo_search_root =
         crate::index_worker::default_project_index_worktree_root_for_search(&git_context)
             .map_err(|_| search_unavailable_error("project index git context unavailable"))?;
+    phases.mark("git_context");
     gwt_core::runtime::ensure_project_index_runtime()
         .map_err(|_| search_unavailable_error("project index runtime unavailable"))?;
+    phases.mark("runtime");
 
     let effective_scopes = if scopes.is_empty() {
         default_index_search_scopes()
@@ -336,6 +339,7 @@ pub(crate) fn search_project_index_attempt(
     } else {
         None
     };
+    phases.mark("scope_context");
 
     // Phase 70 FR-384 / AS-2: every scope — repo-shared and worktree file
     // scopes alike — goes through ONE versioned `search-multi` request: one
@@ -356,6 +360,27 @@ pub(crate) fn search_project_index_attempt(
             per_scope_limit,
             match_mode,
         )?;
+        if let Some(timings) = payload.get("timings_ms") {
+            for phase in [
+                "index_read",
+                "model_load",
+                "query_encode",
+                "query",
+                "assemble",
+            ] {
+                if let Some(elapsed) = timings
+                    .get(phase)
+                    .and_then(Value::as_f64)
+                    .and_then(|ms| Duration::try_from_secs_f64(ms / 1_000.0).ok())
+                {
+                    crate::perf::record_route_phase(
+                        crate::perf::PerfRoute::Search,
+                        &format!("runner.{phase}"),
+                        elapsed,
+                    );
+                }
+            }
+        }
         model_load.set(
             model_load
                 .get()
@@ -469,6 +494,7 @@ pub(crate) fn search_project_index_attempt(
     let payload = payload.ok_or_else(|| {
         search_unavailable_error("project index search completed without a payload")
     })?;
+    phases.mark("search_and_repair");
 
     // Issue #5430: serve usable scopes immediately and repair only the
     // excluded scopes that are not held by an explicit operator stop.
@@ -526,6 +552,7 @@ pub(crate) fn search_project_index_attempt(
     suggestions.sort_by(|left, right| distance_key(left).total_cmp(&distance_key(right)));
     results.truncate(INDEX_SEARCH_LIMIT);
     suggestions.truncate(INDEX_SEARCH_LIMIT);
+    phases.mark("assemble");
     if let Some(model_load) = model_load.get() {
         crate::perf::record_route(
             crate::perf::PerfRoute::SearchWarm,
@@ -829,6 +856,7 @@ fn rebuild_scope_for_name(name: &str) -> Option<crate::index_worker::IndexRebuil
         "discussions" => IndexRebuildScope::Discussions,
         "board" => IndexRebuildScope::Board,
         "works" => IndexRebuildScope::Works,
+        "reports" => IndexRebuildScope::Reports,
         "files" => IndexRebuildScope::Files,
         "files-docs" => IndexRebuildScope::FilesDocs,
         _ => return None,
@@ -1122,6 +1150,7 @@ fn default_index_search_scopes() -> Vec<IndexSearchScope> {
         IndexSearchScope::Discussions,
         IndexSearchScope::Board,
         IndexSearchScope::Works,
+        IndexSearchScope::Reports,
         IndexSearchScope::Files,
         IndexSearchScope::FilesDocs,
     ]
@@ -1249,12 +1278,39 @@ fn run_batch_scope_search(
     // host-wide heavy lease — not an exception to it. Registering as a
     // pending interactive claimant is also what makes a running background
     // build hand the lease back at its next document checkpoint.
-    let _heavy = acquire_search_heavy_lease(project_root, repo_hash, worktree_hash)?;
+    let admission_started = Instant::now();
+    let heavy = acquire_search_heavy_lease(project_root, repo_hash, worktree_hash);
+    crate::perf::record_route_phase(
+        crate::perf::PerfRoute::Search,
+        "admission",
+        admission_started.elapsed(),
+    );
+    let _heavy = heavy?;
+    let worker_dir = search_worker_dir();
+    let deadline = gwt_core::operation_deadline::current()
+        .unwrap_or_else(|| Instant::now() + Duration::from_millis(SEARCH_ATTEMPT_HARD_LIMIT_MS));
+    let request = serde_json::json!({
+        "action": "search-multi", "repo_hash": repo_hash,
+        "project_root": project_root, "worktree_hash": worktree_hash,
+        "query": query, "n_results": limit, "match_mode": match_mode.as_str(),
+        "scopes": scopes.iter().map(|scope| scope.as_str()).collect::<Vec<_>>().join(","),
+        "file_index_protocol": if scopes.iter().any(|scope| is_file_scope(*scope)) { "v2" } else { "legacy" },
+    });
+    let resident_started = Instant::now();
+    if let Some(result) = resident_search_request(&worker_dir, &request, deadline) {
+        crate::perf::record_route_phase(
+            crate::perf::PerfRoute::Search,
+            "runner_transport",
+            resident_started.elapsed(),
+        );
+        return result;
+    }
     // FR-103 (T-IDX-419): the interactive semantic attempt runs through the
     // shared process lifecycle boundary — captured output without terminal
     // forwarding, one hard deadline, and full process-tree termination and
     // reaping on expiry. Spawn failure and deadline expiry are retryable
     // SEARCH_UNAVAILABLE, never a raw error string.
+    let runner_started = Instant::now();
     let output = gwt_core::process_console::spawn_logged_blocking(
         &gwt_core::process_console::ProcessConsoleHub::new(),
         gwt_core::process_console::ProcessKind::IndexRunner,
@@ -1263,8 +1319,14 @@ fn run_batch_scope_search(
         gwt_core::process_console::SpawnOptions::new("project index search-multi")
             .current_dir(project_root)
             .forward_output(false),
-    )
-    .map_err(|_| search_unavailable_error("project index runner unavailable"))?;
+    );
+    crate::perf::record_route_phase(
+        crate::perf::PerfRoute::Search,
+        "runner_transport",
+        runner_started.elapsed(),
+    );
+    let output =
+        output.map_err(|_| search_unavailable_error("project index runner unavailable"))?;
     if !output.success() {
         return Err(classify_failed_runner_output(&output));
     }
@@ -1279,6 +1341,10 @@ fn classify_successful_runner_output(
             "malformed project index search response".to_string(),
         ))
     })?;
+    classify_search_payload(payload)
+}
+
+fn classify_search_payload(payload: Value) -> Result<Value, IndexSearchAttemptError> {
     if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
         return Err(runner_payload_error(&payload));
     }
@@ -1301,6 +1367,84 @@ fn classify_successful_runner_output(
         .into());
     }
     Ok(payload)
+}
+
+/// Keep the existing model worker; avoid launching a Python transport process
+/// for every warm query. The home-specific paths also isolate browser checks
+/// whose runtime directory is a junction to the installed assets.
+fn search_worker_dir() -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let identity = serde_json::json!([
+        gwt_core::runtime::project_index_runner_path(),
+        crate::index_worker::project_index_python_path(),
+        std::env::var("GWT_INDEX_FAKE_EMBEDDING").unwrap_or_default(),
+        "interactive",
+    ]);
+    let digest = hex::encode(Sha256::digest(identity.to_string().as_bytes()));
+    gwt_core::paths::gwt_runtime_dir()
+        .join("search-workers")
+        .join(digest)
+}
+
+/// Missing/dead endpoint: cold startup may use the existing logged runner.
+/// Once connected, never replay a request: dropping the socket on any error
+/// lets the worker's disconnect watchdog cancel in-flight model work.
+fn resident_search_request(
+    worker_dir: &Path,
+    arguments: &Value,
+    deadline: Instant,
+) -> Option<Result<Value, IndexSearchAttemptError>> {
+    use std::io::{Read, Write};
+    let endpoint: Value =
+        serde_json::from_slice(&std::fs::read(worker_dir.join("endpoint.json")).ok()?).ok()?;
+    let port = u16::try_from(endpoint.get("port")?.as_u64()?).ok()?;
+    let token = endpoint.get("token")?.as_str()?;
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let timeout = deadline
+        .checked_duration_since(Instant::now())?
+        .min(Duration::from_secs(1));
+    let mut stream = std::net::TcpStream::connect_timeout(&address, timeout).ok()?;
+    let remaining = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "search deadline expired")
+            })
+    };
+    let response = (|| -> std::io::Result<Vec<u8>> {
+        let mut request =
+            serde_json::to_vec(&serde_json::json!({"token": token, "args": arguments}))?;
+        request.push(b'\n');
+        let mut unsent = request.as_slice();
+        while !unsent.is_empty() {
+            stream.set_write_timeout(Some(remaining()?))?;
+            let size = stream.write(unsent)?;
+            if size == 0 {
+                return Err(std::io::ErrorKind::WriteZero.into());
+            }
+            unsent = &unsent[size..];
+        }
+        let mut frame = Vec::new();
+        let mut chunk = [0u8; 65_536];
+        loop {
+            stream.set_read_timeout(Some(remaining()?))?;
+            let size = stream.read(&mut chunk)?;
+            if size == 0 || frame.len() + size > 16 * 1024 * 1024 {
+                return Err(std::io::Error::other("invalid search worker response"));
+            }
+            frame.extend_from_slice(&chunk[..size]);
+            if chunk[..size].contains(&b'\n') {
+                return Ok(frame);
+            }
+        }
+    })();
+    Some(match response {
+        Ok(frame) => serde_json::from_slice(&frame)
+            .map_err(|_| search_unavailable_error("search worker transport failed"))
+            .and_then(classify_search_payload),
+        Err(_) => Err(search_unavailable_error("search worker transport failed")),
+    })
 }
 
 /// Classify a non-zero runner exit (T-IDX-419): a structured stdout
@@ -1351,6 +1495,8 @@ fn batch_scope_search_command_args(
         gwt_core::runtime::project_index_runner_path().into_os_string(),
         OsString::from("--action"),
         OsString::from("search-multi"),
+        OsString::from("--worker-dir"),
+        search_worker_dir().into_os_string(),
         OsString::from("--repo-hash"),
         OsString::from(repo_hash),
         OsString::from("--project-root"),
@@ -1396,6 +1542,7 @@ fn append_scope_results(
         IndexSearchScope::Discussions => "discussionResults",
         IndexSearchScope::Board => "boardResults",
         IndexSearchScope::Works => "workResults",
+        IndexSearchScope::Reports => "reportResults",
         IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
     };
     let Some(items) = payload.get(key).and_then(Value::as_array) else {
@@ -1409,6 +1556,7 @@ fn append_scope_results(
             IndexSearchScope::Discussions => discussion_result(item),
             IndexSearchScope::Board => board_result(item, board_scope),
             IndexSearchScope::Works => work_result(item),
+            IndexSearchScope::Reports => report_result(item),
             IndexSearchScope::Files | IndexSearchScope::FilesDocs => file_result(scope, item),
         };
         if let Some(result) = result {
@@ -1441,6 +1589,7 @@ fn append_scope_suggestions(
             IndexSearchScope::Discussions => discussion_result(item),
             IndexSearchScope::Board => board_result(item, board_scope),
             IndexSearchScope::Works => work_result(item),
+            IndexSearchScope::Reports => report_result(item),
             IndexSearchScope::Files | IndexSearchScope::FilesDocs => file_result(scope, item),
         };
         if let Some(result) = result {
@@ -1512,6 +1661,71 @@ fn memory_result(item: &Value) -> Option<IndexSearchResult> {
             heading,
             date,
             user_instruction,
+        },
+    })
+}
+
+fn report_result(item: &Value) -> Option<IndexSearchResult> {
+    let report_id = value_str(item.get("report_id"))?;
+    let created_at = value_str(item.get("created_at")).unwrap_or_default();
+    let source_kind = value_str(item.get("kind")).unwrap_or_default();
+    let report_type = value_str(item.get("report_type")).unwrap_or_default();
+    let question = value_str(item.get("question")).unwrap_or_default();
+    let body = value_str(item.get("body")).unwrap_or_default();
+    let issue_numbers: Vec<u64> = item
+        .get("issue_numbers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect();
+    let issues = issue_numbers
+        .iter()
+        .map(|number| format!("Issue #{number}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(IndexSearchResult {
+        scope: IndexSearchScope::Reports,
+        title: value_str(item.get("title"))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| {
+                if question.is_empty() {
+                    body.lines().next().unwrap_or("Report").to_string()
+                } else {
+                    question.clone()
+                }
+            }),
+        subtitle: [
+            report_type.clone(),
+            if source_kind == report_type {
+                String::new()
+            } else {
+                source_kind.clone()
+            },
+            created_at.clone(),
+            issues,
+        ]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · "),
+        preview: if question.is_empty() {
+            body.clone()
+        } else {
+            format!("Q: {question}\n\nA:\n{body}")
+        },
+        distance: item.get("distance").and_then(Value::as_f64),
+        match_mode: item_match_mode(item),
+        matched_terms: value_string_array(item.get("matched_terms")),
+        missing_terms: value_string_array(item.get("missing_terms")),
+        target: IndexSearchTarget::Report {
+            report_id,
+            created_at,
+            report_type,
+            source_kind,
+            question,
+            body,
+            issue_numbers,
         },
     })
 }
@@ -1932,6 +2146,79 @@ mod tests {
     }
 
     #[test]
+    fn resident_transport_preserves_the_request_and_typed_failure_without_replay() {
+        use std::io::{BufRead, BufReader, Write};
+        let directory = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std::fs::write(
+            directory.path().join("endpoint.json"),
+            json!({"port": listener.local_addr().unwrap().port(), "token": "private"}).to_string(),
+        )
+        .unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&mut stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["token"], "private");
+            assert_eq!(request["args"]["query"], "検索");
+            stream.write_all(b"{\"ok\":false,\"error_code\":\"SEARCH_UNAVAILABLE\",\"retryable\":true,\"reason\":\"busy\",\"retry_after_ms\":5000}\n").unwrap();
+        });
+        let result = resident_search_request(
+            directory.path(),
+            &json!({"query": "検索"}),
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert!(matches!(
+            result,
+            Some(Err(IndexSearchAttemptError::Unavailable(_)))
+        ));
+        worker.join().unwrap();
+        assert!(resident_search_request(
+            directory.path(),
+            &json!({}),
+            Instant::now() + Duration::from_secs(10)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn resident_transport_deadline_closes_the_inflight_connection() {
+        use std::io::{BufRead, BufReader, Read};
+        let directory = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std::fs::write(
+            directory.path().join("endpoint.json"),
+            json!({"port": listener.local_addr().unwrap().port(), "token": "private"}).to_string(),
+        )
+        .unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(
+                reader.read(&mut [0u8; 1]).unwrap(),
+                0,
+                "deadline must disconnect the worker so it cancels model work"
+            );
+        });
+        let result = resident_search_request(
+            directory.path(),
+            &json!({}),
+            Instant::now() + Duration::from_millis(500),
+        );
+        assert!(matches!(
+            result,
+            Some(Err(IndexSearchAttemptError::Unavailable(_)))
+        ));
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn default_index_search_scopes_cover_all_user_visible_sources() {
         assert_eq!(
             default_index_search_scopes(),
@@ -1942,6 +2229,7 @@ mod tests {
                 IndexSearchScope::Discussions,
                 IndexSearchScope::Board,
                 IndexSearchScope::Works,
+                IndexSearchScope::Reports,
                 IndexSearchScope::Files,
                 IndexSearchScope::FilesDocs,
             ]
@@ -2036,6 +2324,31 @@ mod tests {
             results[0].target,
             IndexSearchTarget::Work { ref work_id } if work_id == "work-feature-auth-abc123"
         ));
+    }
+
+    #[test]
+    fn reports_search_preserves_post_metadata() {
+        let scope = serde_json::from_value(json!("reports")).expect("Reports scope");
+        let mut results = Vec::new();
+        append_scope_results(
+            &mut results,
+            scope,
+            &json!({"reportResults": [{
+                "report_id": "qa-1", "kind": "qa", "report_type": "qa",
+                "created_at": "2026-10-16T00:00:00Z", "question": "検索は正常？",
+                "body": "Issue #5429 で検索を修正します。", "issue_numbers": [5429],
+                "distance": 0.07
+            }]}),
+            &BoardAudienceScope::All,
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].subtitle.contains("2026-10-16T00:00:00Z"));
+        assert!(results[0].subtitle.contains("Issue #5429"));
+        let target = serde_json::to_value(&results[0].target).unwrap();
+        assert_eq!(target["kind"], "report");
+        assert_eq!(target["report_id"], "qa-1");
+        assert_eq!(target["issue_numbers"], json!([5429]));
+        assert_eq!(target["body"], "Issue #5429 で検索を修正します。");
     }
 
     #[test]

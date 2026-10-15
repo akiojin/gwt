@@ -24,6 +24,10 @@ pub fn initialize_launch_session(
     session.docker_service = config.docker_service.clone();
     session.docker_lifecycle_intent = config.docker_lifecycle_intent;
     session.linked_issue_number = config.linked_issue_number;
+    session.review_dispatch =
+        crate::issue_monitor_review::review_dispatch_session_from_env(|name| {
+            config.env_vars.get(name).cloned()
+        });
     session.launch_route = config.launch_route;
     session.launch_command = config.command.clone();
     session.launch_args = config.args.clone();
@@ -187,6 +191,9 @@ mod tests {
         config.session_mode = gwt_agent::SessionMode::Resume;
         config.resume_session_id = Some("conversation".to_string());
         config.branch = Some("work/example".to_string());
+        config
+            .env_vars
+            .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
         let project = tmp.path().join("project");
         let worktree = tmp.path().join("worktree");
         let mut session = initialize_launch_session(&worktree, &project, &config);
@@ -202,6 +209,10 @@ mod tests {
         assert_eq!(saved.status, gwt_agent::AgentStatus::Running);
         assert_eq!(saved.exact_resume_session_id(), Some("conversation"));
         assert_eq!(saved.tool_version.as_deref(), Some("2.1.156"));
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap()["review_dispatch"],
+            true
+        );
         assert!(saved.tool_version_selector.is_none());
         assert!(saved.tool_runtime_provenance.is_none());
         assert!(runtime.exists());

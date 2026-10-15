@@ -2876,6 +2876,93 @@ fn refresh_broker_queue_depth_is_bounded_by_distinct_normalized_targets() {
 }
 
 #[test]
+fn refresh_broker_status_excludes_killed_owner_and_preserves_latest_request() {
+    let arena = TestArena::new();
+    let root = arena.path("refresh-crash");
+    let broker = RefreshBroker::open(&root, Duration::ZERO).expect("open broker");
+    let target = base_refresh_target("repo-crash");
+    broker
+        .submit(dirty_refresh_intent(target.clone(), 1))
+        .unwrap();
+    let ready = arena.path("ready");
+    let start = arena.path("start");
+    let attempted = arena.path("attempted");
+    let complete = arena.path("complete");
+    let result = arena.path("result");
+    let mut owner = spawn_helper(
+        "refresh-crash-owner",
+        &[
+            ("GWT_COORD_ROLE", "claim-refresh-broker".to_string()),
+            ("GWT_COORD_ROOT", root.to_string_lossy().into_owned()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+            ("GWT_COORD_SIGNAL", start.to_string_lossy().into_owned()),
+            (
+                "GWT_COORD_MARKER2",
+                attempted.to_string_lossy().into_owned(),
+            ),
+            ("GWT_COORD_SIGNAL2", complete.to_string_lossy().into_owned()),
+            ("GWT_COORD_RESULT", result.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(20));
+    fs::write(&start, b"claim").unwrap();
+    wait_for_file(&attempted, Duration::from_secs(20));
+    assert_eq!(
+        read_when_published(&result, Duration::from_secs(20)),
+        "claimed"
+    );
+    let record_path = fs::read_dir(root.join("targets"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .expect("target record");
+    // Windows owner locks prevent reading their locked bytes; compare the
+    // durable JSON while the child still owns its claim.
+    let live_bytes = fs::read(&record_path).unwrap();
+    assert_eq!(broker.scan().unwrap().running_count(), 1);
+    assert_eq!(
+        fs::read(&record_path).unwrap(),
+        live_bytes,
+        "scan preserves a live owner"
+    );
+    broker
+        .submit(dirty_refresh_intent(target.clone(), 2))
+        .unwrap();
+    assert_eq!(broker.inspect().unwrap().running_count(), 1);
+    owner.child.kill().expect("kill refresh owner");
+    owner.child.wait().expect("reap refresh owner");
+    let before = recursive_file_bytes(&root);
+    let snapshot = broker.inspect().expect("status after owner exit");
+    assert_eq!(snapshot.running_count(), 0, "dead owners are not running");
+    assert_eq!(
+        recursive_file_bytes(&root),
+        before,
+        "inspect remains read-only"
+    );
+    let recovered = broker.scan().expect("recover abandoned owner");
+    let recovered_target = recovered.target(&target).unwrap();
+    assert_eq!(recovered_target.state(), RefreshTargetState::Queued);
+    assert_eq!(recovered_target.running_epoch(), None);
+    assert_eq!(recovered_target.follow_up_count(), 0);
+    assert_eq!(
+        broker.inspect().unwrap(),
+        recovered,
+        "scan persists recovery"
+    );
+    // Parallel helper forks can briefly retain the host flock until exec.
+    // Reaping this owner does not make every inherited descriptor disappear.
+    let mut claim = None;
+    poll_until(Duration::from_secs(10), || {
+        claim = broker.claim_next().expect("claim recovered request");
+        claim.is_some()
+    });
+    let claim = claim.expect("recover latest request");
+    assert_eq!(claim.intent().desired_epoch, 2);
+    assert_eq!(claim.intent().desired_snapshot, "snapshot-2");
+    claim.complete().unwrap();
+}
+
+#[test]
 fn refresh_broker_two_processes_cannot_claim_the_same_target_concurrently() {
     let arena = TestArena::new();
     let broker_root = arena.path("refresh-broker-concurrent");
@@ -3058,10 +3145,14 @@ fn refresh_broker_sustained_background_work_occupies_half_the_observation_window
         broker
             .submit(dirty_refresh_intent(target, epoch))
             .expect("submit required work");
-        let claim = broker
-            .claim_next()
-            .expect("claim")
-            .expect("work admitted after rest");
+        // Parallel helper forks can briefly retain a flock descriptor until
+        // exec. Observe admission without advancing the broker's manual clock.
+        let mut claim = None;
+        poll_until(Duration::from_secs(10), || {
+            claim = broker.claim_next().expect("claim");
+            claim.is_some()
+        });
+        let claim = claim.expect("work admitted after rest");
         clock.advance(Duration::from_secs(30));
         active_millis += 30_000;
         claim.complete().expect("complete quantum");

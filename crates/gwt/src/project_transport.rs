@@ -107,8 +107,7 @@ impl OutboundEvent {
         assert!(
             matches!(
                 &event,
-                BackendEvent::ProcessLine { .. }
-                    | BackendEvent::LogEntryAppended { .. }
+                BackendEvent::LogEntryAppended { .. }
                     | BackendEvent::RuntimeHealth { .. }
                     | BackendEvent::ProviderUsage { .. }
                     | BackendEvent::BoardAuthStatus { .. }
@@ -1965,6 +1964,13 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            FrontendEvent::CloseWork {
+                work_id,
+                close_kind,
+            } => Some(AgentFrontendRequest::CloseWork {
+                work_id,
+                close_kind,
+            }),
             FrontendEvent::PaneName {
                 candidate,
                 request_id,
@@ -2068,6 +2074,7 @@ impl AgentPaneSessionScope {
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.
             "pane_close_result" => Some(payload),
+            "work_close_result" => Some(payload),
             _ => None,
         }
     }
@@ -2272,6 +2279,30 @@ async fn send_agent_self_close_acceptance<S>(
     // result. If this future is cancelled while awaiting the sink, Rust drops
     // the owned acceptance and runs the same finalizer.
     drop(acceptance);
+}
+
+async fn send_agent_self_close_response<S>(
+    sender: &mut S,
+    response: crate::agent_capability::AgentSelfCloseResponse,
+    deadline: Duration,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match response {
+        Ok(acceptance) => send_agent_self_close_acceptance(sender, acceptance, deadline).await,
+        Err(refusal) => {
+            send_agent_pm_terminal_result(
+                sender,
+                BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id: refusal.window_id,
+                    reason: Some(refusal.reason),
+                },
+                deadline,
+            )
+            .await
+        }
+    }
 }
 
 async fn send_agent_pm_terminal_result<S>(
@@ -2673,15 +2704,10 @@ async fn client_session_with_scope(
                                                     }
                                                 }
                                             };
-                                            let Some(acceptance) = accepted else {
+                                            let Some(response) = accepted else {
                                                 break;
                                             };
-                                            send_agent_self_close_acceptance(
-                                                &mut sender,
-                                                acceptance,
-                                                Duration::from_secs(2),
-                                            )
-                                            .await;
+                                            send_agent_self_close_response(&mut sender, response, Duration::from_secs(2)).await;
                                             break;
                                         }
                                     }
@@ -2800,6 +2826,51 @@ pub async fn send_agent_self_close_acceptance_for_test<S>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue_3713_direct_self_close_refusal_crosses_the_origin_socket_with_recovery() {
+        use futures_util::{SinkExt, StreamExt};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut sender = socket.with(|message: axum::extract::ws::Message| {
+                    let axum::extract::ws::Message::Text(text) = message else {
+                        panic!("expected text response")
+                    };
+                    futures_util::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(
+                        tokio_tungstenite::tungstenite::Message::Text(text.as_str().into()),
+                    ))
+                });
+                super::send_agent_self_close_response(
+                    &mut sender,
+                    Err(crate::agent_capability::AgentSelfCloseRefusal {
+                        window_id: "tab::own".into(),
+                        reason: "unread evidence; run board.show all:true".into(),
+                    }),
+                    std::time::Duration::from_secs(1),
+                )
+                .await;
+            });
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+                .await
+                .unwrap();
+            let message = client.next().await.unwrap().unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(payload["kind"], "pane_close_result");
+            assert_eq!(payload["ok"], false);
+            assert_eq!(payload["window_id"], "tab::own");
+            assert!(payload["reason"].as_str().unwrap().contains("board.show"));
+            server.await.unwrap();
+        });
+    }
+
     #[test]
     fn supported_agent_notifications_are_host_global_and_project_events_stay_scoped() {
         use super::{DispatchTarget, OutboundEvent};
@@ -3224,6 +3295,25 @@ mod tests {
                 )
                 .is_some(),
             "the close reply must reach the requesting client (Issue #3629 AC-12)"
+        );
+    }
+
+    #[test]
+    fn agent_workspace_close_preserves_authenticated_host_dispatch_and_reply() {
+        let project = tempfile::tempdir().expect("project");
+        let principal = AgentSessionPrincipal::for_test(project.path(), "pm-session").unwrap();
+        let mut scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+            "test-capability".into(),
+            principal,
+        ));
+        assert!(matches!(scope.filter_inbound(FrontendEvent::CloseWork {
+            work_id: "work-1".into(), close_kind: "done".into(),
+        }), Some(super::AgentFrontendRequest::CloseWork { work_id, close_kind })
+            if work_id == "work-1" && close_kind == "done"));
+        let reply = serde_json::json!({"kind":"work_close_result","work_id":"work-1","close_kind":"done","ok":false,"retryable":true});
+        assert_eq!(
+            scope.filter_outbound(reply.to_string()),
+            Some(reply.to_string())
         );
     }
 

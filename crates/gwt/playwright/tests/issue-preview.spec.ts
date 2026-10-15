@@ -115,6 +115,8 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator(".issue-split-pair .terminal-text-preview")).toHaveCount(3);
     await page.locator(".surface-knowledge [data-issue-view='list']").click();
     await openIssueOutput(page);
+    // Unsplit keeps the active surface; select Issues before collapsing.
+    await page.getByRole("combobox", { name: "Left pane surface" }).focus();
     await page.getByRole("button", { name: "Close split", exact: true }).click();
     await expect(page.locator(".issue-preview .xterm")).toBeVisible();
     await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi.metrics("tab-issue::agent-preview").readOnly)).toBe(true);

@@ -172,7 +172,7 @@ test('report kind filter retains its selection on polling and hides with the exe
 });
 
 test('report updates preserve nodes and scroll, append history, and retain history on read failure', () => {
-  const { root, update } = fixture();
+  const { root, model, update } = fixture();
   update([report()]);
   const first = root.querySelector('article');
   const transcript = root.querySelector('.pm-chat__body');
@@ -188,6 +188,13 @@ test('report updates preserve nodes and scroll, append history, and retain histo
   update([], 'Reports could not be loaded');
   assert.equal(root.querySelectorAll('article').length, 2);
   assert.match(root.querySelector('[role="status"]').textContent, /could not be loaded/);
+  update([report(), report('two'), report('pm-peer-a'), report('pm-peer-b')], null,
+    { observed_at: '2026-10-15T00:00:00Z' });
+  update([report(), report('two'), { ...report('qa'), kind: 'qa', question: 'Can we continue?' }], null,
+    { observed_at: '2026-10-15T00:01:00Z' });
+  assert.deepEqual(model.readPmWindowState().windows.pm.reports.map(row => row.id), ['one', 'two', 'qa']);
+  assert.equal(model.readPmWindowState().windows.pm.current.observed_at, '2026-10-15T00:01:00Z');
+  assert.equal(root.querySelectorAll('article').length, 3);
 });
 
 test('Reports and raw terminal share one immutable version without replaying terminal packets', () => {
@@ -208,12 +215,12 @@ test('Reports and raw terminal share one immutable version without replaying ter
 });
 
 test('Execution log toggle retains Reports; stale sessions and native transcript cannot replace reports', () => {
-  const { root, model, update, visibility } = fixture();
+  const { root, model, view, update, visibility } = fixture();
   update([report()]);
   const buttons = root.querySelectorAll('.pm-chat__toolbar button');
   buttons[1].click();
   assert.equal(visibility.at(-1), true);
-  buttons[0].click();
+  view.showReports();
   assert.equal(visibility.at(-1), false);
   assert.equal(root.querySelectorAll('article').length, 1);
   const previous = model.readPmWindowState().windows.pm;

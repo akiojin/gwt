@@ -127,12 +127,22 @@ fn board_entry_for_event_with_paths(
     cache_root: &Path,
     linkage_store_path: Option<&Path>,
 ) -> Result<Option<BoardEntry>, HookError> {
-    let Some(context) = resolve_issue_context_with_paths(session, cache_root, linkage_store_path)
-    else {
-        return Ok(None);
+    let context = resolve_issue_context_with_paths(session, cache_root, linkage_store_path);
+    let owner_label = match context.as_ref() {
+        Some(context) => issue_context_label(context),
+        None if session.review_dispatch => "changes".to_string(),
+        None => return Ok(None),
     };
-
-    let owner_label = issue_context_label(&context);
+    let display_name = if session.review_dispatch {
+        format!("Review: {}", session.display_name)
+    } else {
+        session.display_name.clone()
+    };
+    let activity = if session.review_dispatch {
+        "review"
+    } else {
+        "work"
+    };
     let branch_suffix = if session.branch.trim().is_empty() {
         String::new()
     } else {
@@ -142,15 +152,15 @@ fn board_entry_for_event_with_paths(
         "SessionStart" => (
             Some("started".to_string()),
             format!(
-                "{} started work on {}{}",
-                session.display_name, owner_label, branch_suffix
+                "{} started {} on {}{}",
+                display_name, activity, owner_label, branch_suffix
             ),
         ),
         "Stop" => (
             Some("ready".to_string()),
             format!(
                 "{} is ready for the next instruction on {}{}",
-                session.display_name, owner_label, branch_suffix
+                display_name, owner_label, branch_suffix
             ),
         ),
         _ => return Ok(None),
@@ -164,7 +174,11 @@ fn board_entry_for_event_with_paths(
         state,
         None,
         Vec::new(),
-        vec![context.number.to_string()],
+        context
+            .as_ref()
+            .filter(|_| !session.review_dispatch)
+            .map(|context| vec![context.number.to_string()])
+            .unwrap_or_default(),
     );
     if !session.branch.trim().is_empty() {
         entry = entry.with_origin_branch(session.branch.clone());
@@ -319,6 +333,33 @@ mod tests {
         assert_eq!(entry.origin_branch.as_deref(), Some("feature/spec-1974"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
         assert!(entry.origin_session_id.is_some());
+    }
+
+    #[test]
+    fn review_lifecycle_summary_distinguishes_review_without_claiming_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().join("issue-cache");
+        let mut session = Session::new(dir.path(), "review/issue-5478", AgentId::Codex);
+        session.linked_issue_number = Some(5478);
+        session.review_dispatch = true;
+
+        for event in ["SessionStart", "Stop"] {
+            sync_coordination_for_session_with_paths(&session, event, &cache_root, None).unwrap();
+        }
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 2);
+        for entry in &snapshot.board.entries {
+            assert!(entry.body.starts_with("Review: Codex"), "{}", entry.body);
+            assert!(entry.related_owners.is_empty());
+        }
+        let mut unlinked = session;
+        unlinked.linked_issue_number = None;
+        let entry = board_entry_for_event_with_paths(&unlinked, "SessionStart", &cache_root, None)
+            .unwrap()
+            .expect("an unlinked review still announces its role");
+        assert!(entry.body.starts_with("Review: Codex"), "{}", entry.body);
+        assert!(entry.related_owners.is_empty());
     }
 
     #[test]

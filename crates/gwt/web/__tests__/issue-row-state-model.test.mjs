@@ -32,7 +32,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22row-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 test("pending SessionStart diagnosis uses the existing row reason without changing launch state", async () => {
@@ -108,14 +108,14 @@ function createNode(document, tagName, className, text) {
   return node;
 }
 
-async function makeFixture({ workspaceWindows = [], projection = null } = {}) {
+async function makeFixture({ workspaceWindows = [], projection = null, kind = "issue" } = {}) {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML("<!doctype html><html><head></head><body></body></html>");
   globalThis.document = document;
   globalThis.window = window;
   const body = document.createElement("div");
   document.body.appendChild(body);
-  const issueWindow = { id: "win-1", preset: "issue" };
+  const issueWindow = { id: "win-1", preset: kind };
   const sent = [];
   const calls = {
     continued: [],
@@ -140,7 +140,7 @@ async function makeFixture({ workspaceWindows = [], projection = null } = {}) {
     workspaceWindowById: (id) => windows.find((entry) => entry.id === id) || null,
     getWorkspaceWindows: () => windows,
     pendingIndexOpenTargetsByPreset: new Map(),
-    knowledgeKindForPreset: () => "issue",
+    knowledgeKindForPreset: () => kind,
     focusWindowLocally: (id) => calls.focusedLocally.push(id),
     sendWindowFocus: (id) => calls.focusedRemotely.push(id),
     focusOrSpawnPreset() {},
@@ -201,6 +201,35 @@ function visibleActions(row) {
     .filter((button) => !button.closest(".knowledge-row-menu-list"))
     .map((button) => button.dataset.action);
 }
+
+test("Issue #5401 identical entries retain rows and one changed key replaces only that row", async t => {
+  const fixture = await makeFixture();
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  const entries = [1, 2, 3].map(number => knowledgeEntry(number));
+  const row = number => fixture.body.querySelector(`.knowledge-row[data-issue-number="${number}"]`);
+  applyEntries(fixture.surface, fixture.load, entries);
+  const original = entries.map(entry => row(entry.number));
+  applyEntries(fixture.surface, fixture.load, structuredClone(entries));
+  assert.ok(entries.every((entry, index) => row(entry.number) === original[index]), "identical replay retains every row");
+  applyEntries(fixture.surface, fixture.load, [entries[2], { ...entries[1], title: "Updated" }, entries[0]]);
+  assert.equal(row(1), original[0]);
+  assert.notEqual(row(2), original[1]);
+  assert.equal(row(3), original[2]);
+  assert.deepEqual([...fixture.body.querySelectorAll('[data-queue-column="backlog"] .knowledge-row')]
+    .map(node => Number(node.dataset.issueNumber)), [3, 2, 1]);
+});
+
+test("Issue #5401 mounts all 200 rows but virtualizes larger lists", async t => {
+  const fixture = await makeFixture();
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  const entries = Array.from({ length: 1545 }, (_, index) => knowledgeEntry(index + 1));
+  applyEntries(fixture.surface, fixture.load, entries.slice(0, 200));
+  assert.equal(fixture.body.querySelectorAll(".knowledge-row").length, 200);
+  applyEntries(fixture.surface, fixture.load, entries);
+  assert.ok(fixture.body.querySelectorAll(".knowledge-row").length < 200);
+  assert.match(fixture.body.querySelector('[data-queue-column="backlog"] h3').textContent, /1545/);
+  assert.ok(fixture.body.querySelector(".knowledge-virtual-spacer"));
+});
 
 function overflowActions(row) {
   return [...row.querySelectorAll(".knowledge-row-menu-list button[data-action]")].map(
@@ -880,7 +909,7 @@ test("Issue menu disclosure survives row replacement without retaining removed r
   const original = menu(41);
   original.setAttribute("open", "");
   refresh(entries);
-  assert.notEqual(menu(41), original, "the row really was replaced");
+  assert.equal(menu(41), original, "unchanged rows retain the native disclosure");
   assert.equal(menu(41).hasAttribute("open"), true);
   assert.equal(menu(42).hasAttribute("open"), false);
   fixture.body.querySelector('[data-issue-view="split"]').click();

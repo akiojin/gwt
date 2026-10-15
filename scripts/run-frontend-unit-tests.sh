@@ -98,7 +98,6 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/clone-modal-focus-guard-wiring.test.mjs \
   crates/gwt/web/__tests__/recent-row-style.test.mjs \
   crates/gwt/web/__tests__/release-notes-window.test.mjs \
-  crates/gwt/web/__tests__/console-window.test.mjs \
   crates/gwt/web/__tests__/surface-window-reopen.test.mjs \
   crates/gwt/web/__tests__/preset-modal-surface-deck.test.mjs \
   crates/gwt/web/__tests__/logs-process-facet.test.mjs \

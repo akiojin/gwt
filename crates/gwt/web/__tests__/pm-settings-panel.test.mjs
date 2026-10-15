@@ -161,6 +161,49 @@ test("FR-132: Settings mount は英語の PM controls と shared primitives を�
   );
 });
 
+test("AC-6: PM Settings explains existing controls on focus and hover without acting", () => {
+  const { document, sent, confirmed, panel, views } = fixture({ mounts: 2 });
+  panel.applyStatus(RUNNING_STATUS);
+  const view = views[0];
+  for (const [role, meaning] of [
+    ["pm-autonomy-status", /coordination.*Issue Monitor/i],
+    ["pm-pause-toggle", /keeping the Project Manager available/i],
+    ["pm-agent-select", /after restart/i], ["pm-model-input", /after restart/i],
+    ["pm-effort-select", /after restart/i], ["pm-loop-interval", /Minimum: 10 seconds/i],
+    ["pm-auto-start", /automatically.*opens/i], ["pm-restart", /new conversation/i],
+  ]) {
+    const control = required(view, `[data-role="${role}"]`);
+    const text = control.getAttribute("aria-description") || "";
+    assert.match(text, meaning, role);
+    control.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+    const popup = document.getElementById(control.getAttribute("aria-describedby")?.split(/\s+/).at(-1));
+    assert.ok(popup, "focus associates the explanation with its control");
+    assert.equal(popup.hidden, false);
+    assert.equal(popup.textContent, text);
+    control.dispatchEvent(new document.defaultView.Event("focusout", { bubbles: true }));
+    control.dispatchEvent(new document.defaultView.Event("mouseover", { bubbles: true }));
+    assert.equal(popup.hidden, false);
+    assert.equal(popup.textContent, text);
+    control.dispatchEvent(new document.defaultView.Event("mouseout", { bubbles: true }));
+  }
+  const interval = required(view, '[data-role="pm-loop-interval"]');
+  interval.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+  assert.match(interval.getAttribute("aria-describedby"), /pm-loop-interval-error-\d+ /,
+    "tooltip association preserves the existing validation description");
+  const firstPopupId = interval.getAttribute("aria-describedby").split(/\s+/).at(-1);
+  const second = required(views[1], '[data-role="pm-auto-start"]');
+  second.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+  assert.notEqual(second.getAttribute("aria-describedby"), firstPopupId, "Settings mounts have separate tooltip identities");
+  assert.equal(typeof panel.unmount, "function", "window deletion needs explicit tooltip cleanup");
+  panel.unmount(views[0]);
+  views[0].remove();
+  assert.equal(document.getElementById(firstPopupId), null, "unmount disposes immediately without another status");
+  assert.ok(document.getElementById(second.getAttribute("aria-describedby")), "other Settings mounts remain live");
+  assert.match(appJs, /pmSettingsPanel\.unmount\(element\.querySelector\('\[data-settings-panel="project-manager"\]'\)\)/);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(confirmed, []);
+});
+
 test("FR-132: rail gear remains separate from the PM launcher without a standalone overlay", () => {
   const { document } = parseHTML(html);
   const gear = document.getElementById("op-pm-settings-button");
@@ -194,12 +237,15 @@ test("FR-132: shared controller routes gear and pm-settings command to Settings"
   panel.bindEntryPoints({ document });
 
   const openedTargets = [];
+  const openedOwners = [];
   document.addEventListener("settings:open", (event) => {
     openedTargets.push(event.detail?.target);
+    openedOwners.push(event.detail?.surface_owner);
   });
 
   required(document, "#op-pm-settings-button").click();
   assert.deepEqual(openedTargets, ["project-manager"]);
+  assert.deepEqual(openedOwners, ["pm"], "PM Settings must retain its opening surface");
   assert.deepEqual(sent, [], "opening Settings must not start or mutate the PM");
 
   openedTargets.length = 0;

@@ -465,7 +465,6 @@ body {
   background: var(--color-surface);
 }
 
-.workspace-window.surface-file-tree,
 .workspace-window.surface-agent-kanban,
 .workspace-window.surface-branches,
 .workspace-window.surface-board,
@@ -475,8 +474,7 @@ body {
 .workspace-window.surface-knowledge,
 .workspace-window.surface-settings,
 .workspace-window.surface-index,
-.workspace-window.surface-profile,
-.workspace-window.surface-console {
+.workspace-window.surface-profile {
   background: var(--color-surface);
 }
 
@@ -498,7 +496,6 @@ body {
   border-bottom: 1px solid var(--color-border);
 }
 
-.surface-file-tree .titlebar,
 .surface-agent-kanban .titlebar,
 .surface-branches .titlebar,
 .surface-board .titlebar,
@@ -508,8 +505,7 @@ body {
 .surface-settings .titlebar,
 .surface-index .titlebar,
 .surface-work .titlebar,
-.surface-profile .titlebar,
-.surface-console .titlebar {
+.surface-profile .titlebar {
   background: var(--color-surface-elevated);
   color: var(--color-text);
   border-bottom: 1px solid var(--color-border);
@@ -627,7 +623,6 @@ body {
   color: var(--color-text);
 }
 
-.surface-file-tree .status-chip,
 .surface-agent-kanban .status-chip,
 .surface-branches .status-chip,
 .surface-board .status-chip,
@@ -637,7 +632,6 @@ body {
 .surface-index .status-chip,
 .surface-work .status-chip,
 .surface-profile .status-chip,
-.surface-console .status-chip,
 .surface-mock .status-chip {
   color: var(--color-text);
 }
@@ -694,7 +688,6 @@ body {
   color: var(--color-text);
 }
 
-.surface-file-tree .icon-button,
 .surface-agent-kanban .icon-button,
 .surface-branches .icon-button,
 .surface-board .icon-button,
@@ -704,7 +697,6 @@ body {
 .surface-index .icon-button,
 .surface-work .icon-button,
 .surface-profile .icon-button,
-.surface-console .icon-button,
 .surface-mock .icon-button {
   color: var(--color-text);
 }
@@ -797,7 +789,6 @@ body {
   color: #e8eaed;
 }
 
-.surface-file-tree .window-body,
 .surface-agent-kanban .window-body,
 .surface-branches .window-body,
 .surface-board .window-body,
@@ -806,7 +797,6 @@ body {
 .surface-settings .window-body,
 .surface-index .window-body,
 .surface-work .window-body,
-.surface-console .window-body,
 .surface-mock .window-body,
 .surface-profile .window-body {
   background: var(--color-surface);
@@ -1188,7 +1178,6 @@ body {
   87.5% { content: "⣷"; }
 }
 
-.file-tree-root,
 .branch-list-root,
 .board-root,
 .logs-root,
@@ -2018,7 +2007,6 @@ body {
   cursor: default;
 }
 
-.file-tree-path,
 .branch-heading,
 .knowledge-heading,
 .mock-heading {
@@ -2035,7 +2023,7 @@ body {
   text-overflow: ellipsis;
 }
 
-/* `.file-tree-scroll`, `.branch-scroll`, and `.mock-scroll` are now
+/* `.branch-scroll` and `.mock-scroll` are now
    layered on top of `.workspace-scroll` via additive class names. */
 
 .knowledge-search {
@@ -2103,6 +2091,12 @@ body {
 
 .knowledge-list {
   display: grid;
+}
+
+.knowledge-virtual-spacer {
+  flex: 0 0 auto;
+  pointer-events: none;
+  overflow-anchor: none;
 }
 
 .knowledge-state-filter {
@@ -4621,61 +4615,8 @@ body {
   container-type: inline-size;
 }
 
-.file-tree-list,
 .branch-list {
   padding: 8px 0;
-}
-
-.file-tree-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  padding: 0 12px;
-  font-family: var(--font-mono);
-  font-size: var(--type-sm);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text);
-  cursor: pointer;
-}
-
-.file-tree-row:hover {
-  background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
-}
-
-.file-tree-row.selected {
-  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
-}
-
-.tree-caret {
-  width: 12px;
-  color: var(--color-text-muted);
-  text-align: center;
-}
-
-.tree-icon {
-  width: 16px;
-  color: var(--agent-codex);
-}
-
-.tree-icon.file {
-  color: var(--color-text-muted);
-}
-
-.tree-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-tree-footer {
-  padding: 10px 12px;
-  border-top: 1px solid var(--color-border);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text-muted);
 }
 
 .branch-row {
@@ -6852,35 +6793,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Issue #4538 AC-3: Project header link back to the Hub. It opens a new
-   browser tab so the Project tab keeps its URL. */
-.project-home-link {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex: 0 0 auto;
-  margin-right: var(--space-3);
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  color: var(--color-link);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: 600;
-  letter-spacing: var(--tracking-mono);
-  text-decoration: none;
-}
-
-.project-home-link:hover {
-  color: var(--color-link-hover);
-  border-color: var(--color-border-strong);
-}
-
-.project-home-link:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
 }
 
 /* Issue #4538: Hub (`/`) and route not-found pages. They replace the

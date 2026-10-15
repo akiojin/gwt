@@ -54,6 +54,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "board.config.set",
+        aliases: &[],
+    },
+    Operation {
         name: "board.config.show",
         aliases: &["board.config-show"],
     },
@@ -155,6 +159,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "discuss.resolve",
+        aliases: &[],
+    },
+    Operation {
+        name: "discussion.create",
         aliases: &[],
     },
     Operation {
@@ -504,7 +512,27 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pm.approval.request",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.approval.revoke",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.approval.status",
+        aliases: &[],
+    },
+    Operation {
         name: "pm.capabilities",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.operation.execute",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.peer.send",
         aliases: &[],
     },
     Operation {
@@ -545,6 +573,14 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pr.close",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.reopen",
+        aliases: &[],
+    },
+    Operation {
+        name: "pr.review.submit",
         aliases: &[],
     },
     Operation {
@@ -632,11 +668,27 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "release.metadata.set",
+        aliases: &[],
+    },
+    Operation {
         name: "release.update.defer",
         aliases: &[],
     },
     Operation {
+        name: "repository.required_checks.update",
+        aliases: &[],
+    },
+    Operation {
+        name: "repository.settings.set",
+        aliases: &[],
+    },
+    Operation {
         name: "search",
+        aliases: &[],
+    },
+    Operation {
+        name: "update.settings.set",
         aliases: &[],
     },
     Operation {
@@ -713,6 +765,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "workspace.receipt",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.close",
         aliases: &[],
     },
     Operation {

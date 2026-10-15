@@ -51,6 +51,7 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+mod admission_resume;
 pub mod cancellation;
 pub mod continuation;
 pub mod driver;
@@ -2731,6 +2732,53 @@ fn is_certified_pr_delivery_event(worktree: &Path, relative: &[u8]) -> bool {
     }
 }
 
+/// Preserve uncommitted Work history before releasing a defunct execution.
+pub(crate) fn archive_untracked_work_events_for_recovery(worktree: &Path) -> io::Result<usize> {
+    use gwt_core::workspace_projection::{
+        preserve_workspace_work_event_log_as_shards, workspace_work_event_shard_matches, WorkEvent,
+    };
+
+    let canonical_worktree = dunce::canonicalize(worktree)?;
+    let worktree = canonical_worktree.as_path();
+    let dirty = work_event_dirty_paths(worktree)
+        .map_err(|()| io::Error::other("cannot inspect Work events before execution recovery"))?;
+    let archive_dir = gwt_core::paths::gwt_project_dir_for_repo_path(worktree)
+        .join("recovered-work-events")
+        .join("events");
+    let mut archived = 0;
+    for dirty in dirty {
+        if dirty.state != WorkEventPathState::Untracked
+            || classify_path(dirty.path.as_bytes()) != DeliveryPath::WorkEventShard
+        {
+            continue;
+        }
+        let source = worktree.join(&dirty.path);
+        let original = fs::read(&source)?;
+        let Ok(event) = serde_json::from_slice::<WorkEvent>(&original) else {
+            continue;
+        };
+        if source != gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &event.id)
+            || !workspace_work_event_shard_matches(worktree, &event).map_err(io::Error::other)?
+        {
+            continue;
+        }
+        let copies = preserve_workspace_work_event_log_as_shards(&source, &archive_dir)
+            .map_err(io::Error::other)?;
+        if copies.len() != 1 || fs::read(&copies[0])? != original || fs::read(&source)? != original
+        {
+            return Err(io::Error::other(
+                "Work event changed during execution recovery",
+            ));
+        }
+        fs::remove_file(&source)?;
+        archived += 1;
+    }
+    if archived > 0 {
+        tracing::info!(archived, path = %archive_dir.display(), "preserved Work events before execution recovery");
+    }
+    Ok(archived)
+}
+
 fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
     let mut states = work_event_dirty_paths(worktree)?
         .into_iter()
@@ -3214,6 +3262,10 @@ fn child_environment_contract() -> Vec<(&'static str, Option<&'static str>)> {
         // lease down with it (#4182 AC-7). GitHub's runners set this for
         // every step, which is precisely why CI never sees the hang.
         ("GIT_TERMINAL_PROMPT", Some("0")),
+        // Git's terminal flag does not disable GCM's GUI authentication.
+        // GCM detects required interaction and returns an error with this
+        // setting instead of keeping verification's lease indefinitely (#4425).
+        ("GCM_INTERACTIVE", Some("false")),
     ]
 }
 
@@ -6710,7 +6762,7 @@ pub(super) fn run_with_response<E: CliEnv>(
                 &token,
             )
             .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
-            let _attempt_watchdog = if cfg!(test) {
+            let mut attempt_watchdog = if cfg!(test) {
                 None
             } else {
                 let executable = driver
@@ -6741,7 +6793,10 @@ pub(super) fn run_with_response<E: CliEnv>(
                 {
                     Ok(None)
                 } else {
-                    crate::cli::verification_lease::admission::admit_for_attempt(
+                    attempt
+                        .set_admission_waiting(true)
+                        .map_err(|error| error.to_string())?;
+                    let admission = crate::cli::verification_lease::admission::admit_for_attempt(
                         env,
                         &worktree,
                         Some(command),
@@ -6756,8 +6811,18 @@ pub(super) fn run_with_response<E: CliEnv>(
                             )
                         },
                         &heavy_attempt,
-                    )
-                    .map(Some)
+                    )?;
+                    attempt
+                        .set_admission_waiting(false)
+                        .map_err(|error| error.to_string())?;
+                    if !cfg!(test) && admission.waited() >= std::time::Duration::from_secs(5) {
+                        if let Some(watchdog) = attempt_watchdog.as_mut() {
+                            if let Err(error) = watchdog.resume_when_idle() {
+                                tracing::warn!(%error, "verification admission resume notification failed");
+                            }
+                        }
+                    }
+                    Ok(Some(admission))
                 }
             };
             let run = run_verification_for_caller(
@@ -6792,10 +6857,16 @@ pub(super) fn run_with_response<E: CliEnv>(
                 .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
             let (record, transcript) = match run {
                 Ok(result) => result,
-                Err(VerificationError::Deferred(deferral)) => {
+                Err(VerificationError::Deferred(mut deferral)) => {
                     attempt.ensure_active().map_err(|error| {
                         SpecOpsError::from(ApiError::Unexpected(error.to_string()))
                     })?;
+                    if let Some(watchdog) = attempt_watchdog.as_mut() {
+                        match watchdog.resume_after_deferral() {
+                            Ok(()) => deferral.resume_notification = Some("watchdog armed: capacity + own idle pane; one self-notification".to_string()),
+                            Err(error) => deferral.resume_notification = Some(format!("not armed: {error}; retry or declare issue.monitor.wait explicitly")),
+                        }
+                    }
                     out.push_str(&format!("{deferral}\n"));
                     *response = Some(RunResponse {
                         status: "deferred",
@@ -9094,6 +9165,7 @@ mod tests {
                 std::env::var_os("GWT_ALLOW_REAL_GH").is_none(),
                 "verify.run must not expose its live GitHub opt-in to a test child"
             );
+            assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("false"));
             return;
         }
         let _env_lock = crate::env_test_lock()
@@ -9107,10 +9179,12 @@ mod tests {
         );
         let _probe = ScopedEnvVar::set(CHILD_PROBE, "1");
         let _allow_live = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+        let _interactive = ScopedEnvVar::set("GCM_INTERACTIVE", "true");
 
         let (record, transcript) = run_verification(dir.path(), "sess-env", &[command]).unwrap();
 
         assert!(record.all_passed, "{transcript}");
+        assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("true"));
         assert_eq!(
             transcript.matches("GWT_ALLOW_REAL_GH").count(),
             1,
@@ -9134,6 +9208,7 @@ mod tests {
             vec![
                 ("GWT_ALLOW_REAL_GH", None),
                 ("GIT_TERMINAL_PROMPT", Some("0")),
+                ("GCM_INTERACTIVE", Some("false")),
             ],
             "the verify.run child environment contract changed — update #4182's rationale with it"
         );
@@ -9157,6 +9232,16 @@ mod tests {
             Some(Some(std::ffi::OsStr::new("0"))),
             "verify.run children must never be able to open a credential prompt"
         );
+        assert_eq!(
+            process
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("GCM_INTERACTIVE"))
+                .map(|(_, value)| value),
+            Some(Some(std::ffi::OsStr::new("false"))),
+            "credential manager must fail instead of opening a GUI or TTY prompt"
+        );
+        assert!(resolved_child_environment(false)
+            .contains(&("GCM_INTERACTIVE".to_string(), "false".to_string())));
     }
 
     // record is written even when a command fails.
@@ -13045,6 +13130,59 @@ mod tests {
         let deleted = WorkEventGitFixture::tracked_shards();
         fs::remove_file(deleted.event_shard_path("base")).expect("delete tracked Work event shard");
         assert_path_dirty(&deleted, vec![WorkEventPathState::Deleted]);
+    }
+
+    #[test]
+    fn issue_5535_recovery_archives_only_untracked_canonical_work_shards() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Resume,
+            "recovery-work",
+            Utc::now(),
+        );
+        fixture.append_typed_event_shard(&event);
+        let source = fixture.event_shard_path(&event.id);
+        let original = fs::read(&source).unwrap();
+        fixture.write_event_shard("invalid-event", b"{}\n");
+        let staged = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "staged-work",
+            Utc::now(),
+        );
+        fixture.append_typed_event_shard(&staged);
+        fixture.git_ok(&[
+            "add",
+            "--",
+            fixture.event_shard_path(&staged.id).to_str().unwrap(),
+        ]);
+        fs::write(fixture.repo.join("source.rs"), "uncommitted source").unwrap();
+
+        assert_eq!(
+            archive_untracked_work_events_for_recovery(&fixture.repo).unwrap(),
+            1
+        );
+        let archive = gwt_core::paths::gwt_work_event_shard_path(
+            &gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.repo)
+                .join("recovered-work-events")
+                .join("events"),
+            &event.id,
+        );
+        assert_eq!(fs::read(archive).unwrap(), original);
+        assert!(!source.exists());
+        assert!(fixture.event_shard_path("invalid-event").exists());
+        assert!(fixture.event_shard_path(&staged.id).exists());
+        assert_eq!(
+            fs::read_to_string(fixture.repo.join("source.rs")).unwrap(),
+            "uncommitted source"
+        );
+        assert_eq!(
+            archive_untracked_work_events_for_recovery(&fixture.repo).unwrap(),
+            0
+        );
+        assert_eq!(work_event_dirty_paths(&fixture.repo).unwrap().len(), 2);
     }
 
     #[test]

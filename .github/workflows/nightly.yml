@@ -132,6 +132,62 @@ jobs:
           path: target/startup-tray-performance.json
           if-no-files-found: warn
 
+  # Issue #5437: real E5 coverage for every scope and build/search contention.
+  test-windows-index-e2e:
+    name: Test (real E5 index, Windows)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      HF_HOME: ${{ github.workspace }}/.cache/huggingface
+      GWT_INDEX_FAKE_EMBEDDING: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: develop
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-workspace
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Cache HuggingFace model (Windows E5)
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.HF_HOME }}
+          key: hf-cache-windows-multilingual-e5-base-v1
+      - name: Install index runtime dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install -r crates/gwt-core/runtime/project_index_requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pythonPath = (Get-Command python).Source
+          "PYTHON=$pythonPath" >> $env:GITHUB_ENV
+        timeout-minutes: 10
+      - name: Prepare the real E5 model before offline measurements
+        shell: pwsh
+        run: |
+          @'
+          from sentence_transformers import SentenceTransformer
+          SentenceTransformer("intfloat/multilingual-e5-base")
+          SentenceTransformer("intfloat/multilingual-e5-base", revision="d128750597153bb5987e10b1c3493a34e5a4502a")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "HF_HUB_OFFLINE=1" >> $env:GITHUB_ENV
+          "TRANSFORMERS_OFFLINE=1" >> $env:GITHUB_ENV
+        timeout-minutes: 15
+      - name: Build the real-model runtime harness
+        run: cargo test -p gwt --test runtime_tests --no-run
+        timeout-minutes: 45
+      - name: Build and search every index scope with real E5
+        run: cargo test -p gwt --test runtime_tests index_resource_harness_test::real_e5_all_scopes_build_and_search -- --exact --ignored --test-threads=1 --nocapture
+        timeout-minutes: 20
+      - name: Measure warm search during background index build and resume
+        run: cargo test -p gwt --test runtime_tests index_resource_harness_test::real_warm_search_finishes_during_background_build_and_build_resumes -- --exact --ignored --test-threads=1 --nocapture
+        timeout-minutes: 20
+
   # A scheduled run has no pull request to turn red, so a failure that only
   # lands in the Actions tab is a failure nobody sees. This is the named
   # notification target Issue #4134 AC-1 asks for: one open Issue assigned to
@@ -139,7 +195,7 @@ jobs:
   report-nightly-failure:
     name: Report nightly failure
     runs-on: ubuntu-latest
-    needs: [test-windows-default-parallel, test-windows-startup-tray]
+    needs: [test-windows-default-parallel, test-windows-startup-tray, test-windows-index-e2e]
     if: failure()
     steps:
       - name: File or update the nightly failure Issue
@@ -164,5 +220,5 @@ jobs:
               --body "The nightly Windows verification failed again: $RUN_URL"
           else
             gh issue create --repo "$REPO" --title "$TITLE" --assignee akiojin \
-              --body "$(printf 'A nightly Windows determinism or native tray measurement job failed.\n\nRun: %s\n\nThese jobs run outside pull-request CI (Issues #4134 and #4821); this Issue is their notification target.\n' "$RUN_URL")"
+              --body "$(printf 'A nightly Windows determinism, native tray, or real-model index measurement job failed.\n\nRun: %s\n\nThese jobs run outside pull-request CI (Issues #4134, #4821, and #5437); this Issue is their notification target.\n' "$RUN_URL")"
           fi

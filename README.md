@@ -30,8 +30,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator canvas** — arrange Agent, Board, Issue, SPEC, Logs, Profile,
-  File Tree, Branches, and PR surfaces in one mission-control style workspace.
+- **Operator canvas** — arrange Agent, Board, Logs, Profile, Index, and
+  Settings surfaces in one mission-control style workspace.
 
 ## Install
 
@@ -198,8 +198,8 @@ the tray menu:
 - **Projects** — opens a project URL from the open projects followed by Recent,
   with running and error counts. The tray icon shows an error badge while an
   open project has an agent error.
-- **About GWT** — opens the browser About / Version surface for the
-  running tray process.
+- **Open Project…** — opens the Hub and starts its folder picker directly.
+- **Clone from GitHub…** — opens the Hub with its Clone Project dialog.
 - **Quit** — gracefully shuts the tray icon, embedded server, and
   PTY children down in order.
 
@@ -215,8 +215,8 @@ open in a new browser tab, so one browser tab shows one project. Different
 projects keep their windows and launch dialogs separate; two browser tabs on
 the same project URL share its live workspace. Bookmarking or restoring a
 project URL reopens a recent project automatically; an unknown project URL
-shows "Project not found" with a link back to the Hub. The **Hub** link in a
-project's header opens the Hub in a new tab.
+shows "Project not found" with a link back to the Hub. Open the Hub through
+**Open in browser** in the tray menu or `gwt open` without arguments.
 
 Autostart lives in **Settings > System > Launch GWT at login**. Enabling it
 installs an OS-native per-user entry (macOS LaunchAgent / Windows HKCU Run /
@@ -423,7 +423,6 @@ Common windows include:
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
 - `Profile` — environment/profile management
-- `File Tree` — live read-only repository tree
 - `Branches` — branch inspection, filtering, cleanup, and Git details
 - `Settings` — application and agent configuration. The `System` tab lets
   you choose the narrative output language (Auto / English / 日本語) used
@@ -439,15 +438,18 @@ Common windows include:
   when at least one open project has Autonomous enabled. Legacy project
   values migrate once: any enabled value enables the application setting.
   System shows the saved and effective values and pending-update blockers.
-  Change the preference in the GUI; agents can read it with
-  `update.settings.status`. It is no longer an Issue Monitor setting.
-- `PR` — pull-request workflow surface; detailed list support depends on the
-  cache-backed PR source as it lands
+  Change the preference in the GUI or ask the PM to use `update.settings.set`
+  with `auto_apply_updates`; `update.settings.status` reports its state.
+  It is no longer an Issue Monitor setting.
 
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
 requests. The Work Item Knowledge Bridge uses the local Issue cache and semantic
 index rather than rendering direct GitHub API responses in the frontend.
+
+Board keeps up to 1,000 entries in each window. Scroll to the top or choose
+`Load earlier entries` to retrieve older posts. When browsing older history,
+choose `Back to latest entries` to resume the latest updates.
 
 Each worker Agent chooses a short memorable name when it starts. Its badge,
 window title, Fleet, and Kanban cards use that name; duplicate choices receive
@@ -477,8 +479,10 @@ Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
 a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
 appear red; error details and history stay in the notification center. Use ⚙ to
-expand the settings rows in the same pane for Max active, Auto-refill, its limit,
-Allowed labels and candidate profiles. Auto-apply updates is in **System**. Select **Manual** to edit
+expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
+(Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
+profiles. Autonomous and Start / Stop return to the summary when collapsed.
+Auto-apply updates is in **System**. Select **Manual** to edit
 Max active; **Auto** displays the calculated value without editing. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
@@ -519,7 +523,10 @@ auto-refill, or admitted with an `urgent` label. Queue membership authorizes the
 readiness, claim, and capacity checks still apply. `Launch now` on a row opens the
 launch flow, which creates the `work/issue-N` branch/worktree at launch time and
 starts the agent with `gwt-execute #N`. Failed launches remain visible on their
-Issue rows.
+Issue rows. Operators can stop a failed launch with `issue.monitor.stop`,
+`params.number`, and `params.reason`, even after its live claim/window identity
+was lost. The saved failed window is used only while it still belongs to that
+Issue; stopping records a persistent hold and returns any pane to close.
 
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent
@@ -540,9 +547,9 @@ change membership/order with `issue.monitor.queue.push`,
 queue and requests a scan. Existing `issue.monitor.priority.move` and
 `issue.monitor.priority.set` operations remain available. The
 `issue.monitor.config.set` operation can stop processing, disable autonomous
-mode, or set a positive `max_active` limit. For safety, it rejects
-`enabled=true` and `autonomous_mode=true`; enabling either capability requires
-an explicit action in the GUI. Idle agent windows free their slot on
+mode, or set a positive `max_active` limit. The registered PM for the repository
+can also enable `enabled` or `autonomous_mode`; other agent sessions use the GUI
+to enable them. Idle agent windows free their slot on
 their own: each scan classifies every launched window as
 `review_verdict_published`, `execution_settled`, `binding_dead`, or
 `stuck_unknown` (visible per row and in `idle_windows` in
@@ -687,16 +694,23 @@ monitor armed. The full gate design and threat model live in SPEC
 
 Once a work branch merges into `develop`, the monitor settles the delivered
 Issue itself (`Closes #N` only fires on the default branch). When every
-acceptance criterion is checked — or the PR body / an Issue comment records
-that the remaining criteria were delegated to another Issue
-(`残 AC は別 Issue に委譲`) — it posts a comment carrying the PR number and
+acceptance criterion is checked, it posts a comment carrying the PR number and
 merge SHA and closes the Issue. Unchecked criteria leave the Issue open with a
 `merge 済み・未達 AC あり` comment and a `NeedsHuman` state; a `gwt-spec` Issue
-is closed only after every task phase is complete. Auto-close follows the
+is closed only after every task phase is complete. Delegating remaining criteria
+does not bypass the unchecked checklist. Auto-close follows the
 `Autonomous` toggle by default; `issue.monitor.config.set` with
 `auto_close_merged_issues=true|false` overrides it, and when it is off the
 monitor only records a `merge 済み・close 待ち` comment. An Issue a human
 reopened is never closed again by the same merge.
+
+To find completed Issues that still have unchecked acceptance criteria,
+run `node scripts/audit-closed-acceptance.mjs OWNER/REPOSITORY` from this checkout.
+The read-only audit uses `gh` to fetch all closed-Issue pages and prints a JSON
+list with each Issue's number, URL, and unchecked criteria. It excludes pull
+requests and Issues closed as not planned. For comment-resident SPECs it reads
+the referenced `spec` comments, including split sections, and reports unreadable
+sections as errors rather than silently skipping them.
 
 Unattended lifecycle events (merge completed, retry scheduled, gate passed,
 needs-human escalations) surface as toasts and accumulate in a persistent,
@@ -754,6 +768,38 @@ unchanged.
   `pm.status` lists every registration in the repository, and `pm.stop` retires
   one from the CLI — a registered PM can retire an orphan or stand down itself
   without a GUI click.
+- A live registered PM can close a selected inactive Work with `workspace.close`,
+  specifying `work_id` and `close_kind: "done"` or `"discarded"`. The same GUI
+  checks apply: manual close must be allowed and that Work must have no active
+  agents. Closing records terminal history and retains its branch and worktree.
+
+You can ask the PM to create and bind a GitHub Discussion, adjust required checks
+on `develop` or `main`, or change global Auto-apply updates. These actions use a
+recorded instruction scoped to the requested action or an OS-native approval
+dialog. Choose **Approve once** or remember approval for that repository and
+operation kind; ask the PM to inspect or revoke saved approvals through
+`pm.approval.status` / `pm.approval.revoke`. Required-check changes use
+`repository.required_checks.update` and preserve the branch's strict policy and
+retained checks' app bindings.
+
+The same scoped permission route supports `pr.reopen` for a chosen PR,
+`pr.review.submit` for an authorized GitHub review, `release.metadata.set` for
+existing release name/notes/prerelease, and `repository.settings.set` for
+supported reversible metadata, features, merge preferences and archive status.
+Topic replacements use `topics` alone. Existing review and CI checks remain in
+force; release publishing, assets and latest selection use the gated workflow.
+
+For an explicitly authorized PR close, build-cache cleanup, or provider approval
+response, the PM uses `pm.operation.execute` with the existing `pr.close`,
+`worktree.gc_build_artifacts`, or `pm.message.send` action. This route supports
+only those three operations and retains their existing checks.
+
+Ask your PM to consult another project's PM on the same machine, giving the
+other project's absolute path. Registered PMs use `pm.peer.send` for direct
+requests, replies, and notices; unread messages arrive at the next PM prompt.
+Both projects' **Reports** show the exchange, including unavailable peers and
+requests waiting past their deadline. Each PM decides and acts only within its
+own project; peer messages do not grant control over another project's agents.
 
 The design lives in SPEC
 [#3431](https://github.com/akiojin/gwt/issues/3431).
@@ -765,12 +811,15 @@ gwt keeps project knowledge close to the agent workspace:
 - JSON operation `issue.spec.read` reads GitHub Issue-backed SPECs from the local cache.
 - JSON operations `issue.view` and `issue.comments` provide cache-backed Issue
   access through the gwt CLI surface.
-- `gwt-search` searches SPECs, Issues, source files, and docs through the shared
+- `gwt-search` searches SPECs, Issues, source files, docs, and PM Reports through the shared
   ChromaDB runtime. Missing indexes are built on demand, and the desktop app can
   repair the managed Python search runtime when needed.
   During an Issue index rebuild, searches use the last published generation.
   Multi-scope searches return available results and report excluded scopes with
   their reasons; JSON responses include `partial` and `unavailable_scopes`.
+  Select `reports` to find durable digest and Q&A reports, including questions,
+  answers, and Issue references. The Index window shows the report kind, date,
+  and related Issues, and **Open** returns to the PM's Reports view.
 - The Work Item Knowledge Bridge combines cache-backed list/detail views for
   plain and `gwt-spec` tagged Issues with semantic ranking, exact-match
   priority, and match percentages.
@@ -794,6 +843,21 @@ entrypoints are:
 Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
+
+If an agent stop or pane close reports unread Board evidence, read the bodies
+in that same agent session with JSON operation `board.show` and
+`params:{"all":true}`, then retry. Automatic reminders do not acknowledge a
+read. Implementation agents send decision requests to `agent:pm`; only the
+registered PM may address a `user:<id>` from an agent Board post.
+
+JSON operation `hook.health` lists external skill commands that conflict with
+gwt's GitHub mutation policy, together with the affected files and alternatives.
+By default it inspects enabled Claude plugins. To select explicit skill/command
+roots instead, put a JSON array of directory paths in
+`.gwt/external-skill-roots.json`; this replaces automatic plugin discovery, and
+relative paths resolve from the worktree. Include every root you want checked,
+or remove the file to restore automatic discovery. A partial or unavailable scan
+is reported explicitly. See [SPEC #3393](https://github.com/akiojin/gwt/issues/3393).
 
 ### Hook file ownership
 
@@ -903,8 +967,17 @@ worktree without restarting the app.
 
 ## Share local Board milestones through GitHub Discussions
 
-To share `decision`, `blocked`, and `handoff` posts across machines, keep the
-**Local** Board provider and add a binding to `.gwt/work/board.toml`:
+To share `decision`, `blocked`, and `handoff` posts across machines, ask the PM to
+create a Discussion with `discussion.create` and `sync_board:true`. To connect
+an existing Discussion, use `board.config.set` with its `github_discussion`
+number; this also recovers a failed binding without creating a duplicate.
+If the effective Board provider is not Local, explicitly request
+`board_provider:"local"` on creation or `provider:"local"` on binding. The
+project's provider override and binding are saved together; global and other
+projects' provider settings are preserved. Without this explicit switch,
+synchronized creation is refused before creating a remote Discussion.
+Both operations use the current repository. Alternatively, keep the **Local**
+Board provider and add a binding to `.gwt/work/board.toml`:
 
 ```toml
 provider = "local"
@@ -1173,6 +1246,10 @@ remaining Agents. Agents shown inside Issues are included; PM and Shell
 windows are skipped. Cycling keeps the split view and focuses the selected
 terminal for input. Closing the selected tab returns to All agents without stopping the
 agent; cycling can reopen the same terminal.
+
+Agent card and tab titles stay on one line with the name fixed at the start.
+Scroll the purpose horizontally, or hover or keyboard-focus the title to read it in full.
+Issue and Project Manager settings also explain their controls on hover and keyboard focus.
 
 ## Operator Design Language (SPEC-2356)
 
@@ -1583,6 +1660,15 @@ and stops its owned command tree. Runner death also releases its reservation
 without waiting for the reservation TTL. An interruption is neither PASS nor a
 test failure; rerunning the same matrix creates a fresh attempt. A cancellation
 before the first command starts preserves the previous verification record.
+
+Verification children disable Git terminal prompts and Git Credential Manager
+interaction by default. Authentication that requires a GUI or terminal prompt fails instead
+of waiting for input. Cached credentials remain usable.
+
+For a same-project holder reported as a reclaim candidate, call
+`verify.lease.release` with `params.lease_id` and a nonempty `params.reason`.
+Release confirms that no workload remains before reclaiming the holder. Running
+workloads stay protected; use the caller-owned cancellation above for your own attempt.
 
 Initial `cargo build -p gwt --bin gwtd`, ordinary Cargo builds, TDD tests,
 lint, coverage, direct headed browser checks, and pre-push checks run

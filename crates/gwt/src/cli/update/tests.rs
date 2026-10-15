@@ -29,6 +29,7 @@ struct FakeUpdateCliOps {
     make_helper_copy_result: Result<PathBuf, String>,
     spawn_apply_result: Result<(), String>,
     spawn_installer_result: Result<(), String>,
+    running_gui_result: Result<bool, String>,
     restart_args_file: Option<PathBuf>,
     restart_args: Vec<String>,
     helper_copy_calls: Vec<(PathBuf, String)>,
@@ -59,6 +60,7 @@ impl FakeUpdateCliOps {
             make_helper_copy_result: Ok(PathBuf::from("C:/updates/gwt-helper.exe")),
             spawn_apply_result: Ok(()),
             spawn_installer_result: Ok(()),
+            running_gui_result: Ok(false),
             restart_args_file: None,
             restart_args: Vec::new(),
             helper_copy_calls: Vec::new(),
@@ -118,6 +120,15 @@ impl UpdateCliOps for FakeUpdateCliOps {
         self.prepare_update_result.clone()
     }
 
+    fn apply_in_running_gui(
+        &mut self,
+        _latest: &str,
+        _asset_url: &str,
+        _payload: &PreparedPayload,
+    ) -> Result<bool, String> {
+        self.running_gui_result.clone()
+    }
+
     fn write_restart_args_file(&mut self, path: &Path, args: Vec<String>) -> Result<(), String> {
         self.restart_args_file = Some(path.to_path_buf());
         self.restart_args = args;
@@ -167,6 +178,106 @@ impl UpdateCliOps for FakeUpdateCliOps {
         ));
         self.spawn_installer_result.clone()
     }
+}
+
+#[test]
+fn running_gui_update_is_requested_without_starting_a_cli_helper() {
+    let mut ops = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
+    ops.running_gui_result = Ok(true);
+
+    assert!(matches!(
+        run_with(&mut ops, UpdateRunMode::Apply),
+        RunOutcome::Code(0)
+    ));
+    assert!(ops.stdout.contains("requested in the running GUI"));
+    assert!(!ops.stdout.contains("restarting"));
+    assert!(ops.apply_calls.is_empty() && ops.installer_calls.is_empty());
+    assert!(ops.helper_copy_calls.is_empty() && ops.restart_args_file.is_none());
+}
+
+#[test]
+fn running_gui_update_refusal_never_falls_back_to_a_cli_helper() {
+    let mut ops = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
+    ops.running_gui_result = Err("running GUI refused the update request".to_string());
+
+    assert!(matches!(
+        run_with(&mut ops, UpdateRunMode::Apply),
+        RunOutcome::Code(1)
+    ));
+    assert!(ops.stderr.contains("update button") && ops.stderr.contains("quit"));
+    assert!(ops.apply_calls.is_empty() && ops.installer_calls.is_empty());
+    assert!(ops.helper_copy_calls.is_empty() && ops.restart_args_file.is_none());
+}
+
+#[test]
+fn running_gui_dispatch_stages_the_requested_payload_and_authenticates() {
+    use super::ops::RealUpdateCliOps;
+    use gwt_core::test_support::ScopedGwtHome;
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
+        time::Duration,
+    };
+
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedGwtHome::set(home.path());
+    let _force = gwt_core::test_support::ScopedEnvVar::unset("GWT_FORCE_NEW_INSTANCE");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut holder = crate::cli::tray::lock::acquire(&gwt_core::paths::gwt_home()).unwrap();
+    holder
+        .set_url(&format!("http://{}/", listener.local_addr().unwrap()))
+        .unwrap();
+    let token = holder.control_token().to_string();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(&mut stream);
+        let mut headers = String::new();
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+            headers.push_str(&line);
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        assert!(headers.starts_with("POST /internal/update/apply HTTP/1.1\r\n"));
+        assert!(headers
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {token}")));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"version":"99.0.0"})
+        );
+        stream
+            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+    let payload_path = home.path().join("prepared.exe");
+    std::fs::write(&payload_path, b"fixture").unwrap();
+    let payload = PreparedPayload::PortableBinary { path: payload_path };
+    assert!(RealUpdateCliOps::default()
+        .apply_in_running_gui("99.0.0", "https://example.test/gwt.zip", &payload)
+        .unwrap());
+    server.join().unwrap();
+    let staged = gwt_core::update::load_pending_update_manifest().unwrap();
+    assert_eq!(staged.version, "99.0.0");
+    assert_eq!(staged.payload, payload);
+    assert_eq!(
+        staged.origin,
+        gwt_core::update::PendingUpdateOrigin::ManualLater
+    );
 }
 
 #[test]

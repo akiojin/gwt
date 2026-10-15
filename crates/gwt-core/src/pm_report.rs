@@ -153,6 +153,13 @@ fn sync_report_parent(_path: &Path) -> io::Result<()> {
 }
 
 pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
+    load_reports_with_deadline(repo_path).map(|(reports, _)| reports)
+}
+
+/// Return the next peer timeout with the same read that projects its reports.
+pub fn load_reports_with_deadline(
+    repo_path: &Path,
+) -> Result<(Vec<PmReport>, Option<DateTime<Utc>>)> {
     let path = reports_path(repo_path);
     let mut reports = match File::open(&path) {
         Ok(mut file) => {
@@ -169,8 +176,24 @@ pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
             .iter()
             .map(PmReport::from),
     );
+    let deadline = match crate::pm_peer::reports_with_deadline(
+        &crate::pm_peer::project_dir(repo_path),
+        Utc::now(),
+    ) {
+        Ok((peer, deadline)) => {
+            reports.extend(peer);
+            deadline
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %crate::error_ledger::sanitize_error_message(&error.to_string()),
+                "PM peer store unreadable; peer reports omitted"
+            );
+            Some(Utc::now() + chrono::Duration::seconds(5))
+        }
+    };
     reports.sort_by_key(|report| report.created_at);
-    Ok(reports)
+    Ok((reports, deadline))
 }
 
 fn read_reports(file: &mut File, path: &Path) -> Result<Vec<PmReport>> {
@@ -205,6 +228,216 @@ fn invalid_report_data(message: impl std::fmt::Display) -> io::Error {
 mod tests {
     use super::*;
     use crate::test_support::ScopedGwtHome;
+
+    #[test]
+    fn temporarily_unreadable_peer_reports_keep_native_reports_and_schedule_retry() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let native = post_report(&repo, PmReportKind::Progress, "saved report", None).unwrap();
+        fs::write(
+            crate::paths::gwt_home().join("pm-peer-messages.json"),
+            "invalid peer data",
+        )
+        .unwrap();
+        let (reports, retry_at) = load_reports_with_deadline(&repo).unwrap();
+        assert_eq!(reports, vec![native]);
+        assert!(
+            retry_at.is_some(),
+            "a transient peer failure must not be cached indefinitely"
+        );
+    }
+
+    #[test]
+    fn peer_roundtrip_projects_reports_and_expired_wait_from_one_source() {
+        use crate::pm_peer::{self, PeerKind, PeerProject, PeerSend};
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let a = PeerProject {
+            project: "project-a".into(),
+            project_dir: crate::paths::gwt_project_dir_for_repo_path(&home.path().join("a")),
+        };
+        let b = PeerProject {
+            project: "project-b".into(),
+            project_dir: crate::paths::gwt_project_dir_for_repo_path(&home.path().join("b")),
+        };
+        let now = DateTime::parse_from_rfc3339("2026-10-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let request = pm_peer::send(
+            PeerSend {
+                from: a.clone(),
+                to: b.clone(),
+                kind: PeerKind::Request,
+                text: "Please share capacity token=secret-sentinel".into(),
+                reply_to: None,
+                timeout_seconds: 900,
+                unavailable: None,
+            },
+            now,
+        )
+        .unwrap();
+        let (before_timeout, deadline) =
+            pm_peer::reports_with_deadline(&a.project_dir, now).unwrap();
+        assert_eq!(deadline, Some(now + chrono::Duration::seconds(900)));
+        assert!(!before_timeout[0]
+            .body
+            .contains("Waiting for the peer PM to respond"));
+        assert_eq!(
+            pm_peer::reports_with_deadline(&a.project_dir, deadline.unwrap())
+                .unwrap()
+                .1,
+            None
+        );
+        assert_eq!(pm_peer::pending(&b.project_dir).unwrap().len(), 1);
+        assert_eq!(
+            pm_peer::pending(&b.project_dir).unwrap().len(),
+            1,
+            "context reads must not acknowledge messages"
+        );
+        assert!(pm_peer::pending(&a.project_dir).unwrap().is_empty());
+        let reports =
+            pm_peer::reports(&a.project_dir, now + chrono::Duration::minutes(16)).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0]
+            .body
+            .contains("Waiting for the peer PM to respond"));
+        assert!(!reports[0].body.contains("secret-sentinel"));
+        let foreign = PeerProject {
+            project: "foreign".into(),
+            project_dir: home.path().join("foreign"),
+        };
+        let reply = PeerSend {
+            from: b.clone(),
+            to: a.clone(),
+            kind: PeerKind::Reply,
+            text: "One slot available".into(),
+            reply_to: Some(request.id.clone()),
+            timeout_seconds: 900,
+            unavailable: None,
+        };
+        assert!(pm_peer::send(
+            PeerSend {
+                from: foreign,
+                ..reply.clone()
+            },
+            now
+        )
+        .is_err());
+        let unavailable = pm_peer::send(
+            PeerSend {
+                unavailable: Some("stopped".into()),
+                ..reply.clone()
+            },
+            now,
+        )
+        .unwrap();
+        assert!(unavailable.unavailable.is_some());
+        assert_eq!(
+            pm_peer::pending(&b.project_dir).unwrap().len(),
+            1,
+            "failed reply never acknowledges"
+        );
+        pm_peer::send(reply.clone(), now).unwrap();
+        assert!(pm_peer::pending(&b.project_dir).unwrap().is_empty());
+        assert_eq!(pm_peer::pending(&a.project_dir).unwrap().len(), 1);
+        assert!(
+            pm_peer::send(reply, now).is_err(),
+            "one original cannot be settled twice"
+        );
+        let a_reports = load_reports(&home.path().join("a")).unwrap();
+        let b_reports = load_reports(&home.path().join("b")).unwrap();
+        assert_eq!(a_reports.len(), 2);
+        assert_eq!(b_reports.len(), 3);
+        assert_eq!(load_reports(&home.path().join("a")).unwrap(), a_reports);
+    }
+
+    #[test]
+    fn peer_text_limit_refuses_loss_instead_of_silently_truncating() {
+        let text = "x".repeat(1001);
+        assert!(
+            crate::pm_peer::validate(crate::pm_peer::PeerKind::Request, &text, None, 900).is_err()
+        );
+    }
+
+    #[test]
+    fn peer_redaction_expansion_refuses_message_loss() {
+        use crate::pm_peer::{self, PeerKind, PeerProject, PeerSend};
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let message = pm_peer::send(
+            PeerSend {
+                from: PeerProject {
+                    project: "a".into(),
+                    project_dir: home.path().join("a"),
+                },
+                to: PeerProject {
+                    project: "b".into(),
+                    project_dir: home.path().join("b"),
+                },
+                kind: PeerKind::Request,
+                text: format!("token=x {}TAIL", "a".repeat(987)),
+                reply_to: None,
+                timeout_seconds: 900,
+                unavailable: None,
+            },
+            Utc::now(),
+        );
+        assert!(
+            message.is_err(),
+            "redaction expansion must not discard the message tail"
+        );
+    }
+
+    #[test]
+    fn peer_reports_use_owning_store_from_originless_pm_runtime() {
+        use crate::pm_peer::{self, PeerKind, PeerProject, PeerSend};
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let root = home.path().join("project");
+        let project_dir = crate::paths::gwt_project_dir_for_repo_path(&root);
+        let runtime = project_dir.join("pm/runtime");
+        fs::create_dir_all(runtime.join("nested")).unwrap();
+        fs::create_dir_all(project_dir.join("pm/worktree")).unwrap();
+        pm_peer::send(
+            PeerSend {
+                from: PeerProject {
+                    project: "peer".into(),
+                    project_dir: home.path().join("other"),
+                },
+                to: PeerProject {
+                    project: root.display().to_string(),
+                    project_dir: project_dir.clone(),
+                },
+                kind: PeerKind::Notice,
+                text: "Runtime report sentinel".into(),
+                reply_to: None,
+                timeout_seconds: 900,
+                unavailable: None,
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        for path in [
+            &runtime,
+            &runtime.join("nested"),
+            &project_dir.join("pm/worktree"),
+        ] {
+            assert!(
+                load_reports(path)
+                    .unwrap()
+                    .iter()
+                    .any(|report| report.body.contains("Runtime report sentinel")),
+                "{}",
+                path.display()
+            );
+        }
+        let canonical = dunce::canonicalize(&runtime).unwrap();
+        assert!(load_reports(&canonical)
+            .unwrap()
+            .iter()
+            .any(|report| report.body.contains("Runtime report sentinel")));
+    }
 
     #[test]
     fn reports_survive_reload_in_project_order() {
@@ -251,6 +484,8 @@ mod tests {
             })
             .join("\n");
         fs::write(&path, format!("{legacy}\n")).unwrap();
+        let peer_path = crate::paths::gwt_home().join("pm-peer-messages.json");
+        fs::write(&peer_path, b"{").unwrap();
         let qa = post_report(
             &repo,
             PmReportKind::Qa,
@@ -268,6 +503,7 @@ mod tests {
                 .is_none());
         }
         assert_eq!(reports[3], qa);
+        assert_eq!(fs::read(&peer_path).unwrap(), b"{");
         assert_eq!(
             serde_json::to_value(&reports[3]).unwrap()["question"],
             "Can we ship?"

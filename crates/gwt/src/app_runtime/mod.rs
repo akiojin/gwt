@@ -92,6 +92,10 @@ impl AppEventQueue {
     pub(crate) fn is_empty(&self) -> bool {
         self.foreground.is_empty() && self.layout.is_empty() && self.background.is_empty()
     }
+
+    fn len(&self) -> usize {
+        self.foreground.len() + self.layout.len() + self.background.len()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -118,6 +122,9 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
         | UserEvent::PmConversationLoaded { .. }
         | UserEvent::MenuEvent(_)
         | UserEvent::QuitApp { .. }
+        | UserEvent::ApplyUpdateRestartNow { .. }
+        | UserEvent::ApplyUpdateGraceful { .. }
+        | UserEvent::UpdateApplyResolutionFailed(_)
         | UserEvent::StartupReady
         | UserEvent::StartupStopped => AppEventPriority::Foreground,
         _ => AppEventPriority::Background,
@@ -184,6 +191,17 @@ pub enum AppEventProxy {
 }
 
 impl AppEventProxy {
+    /// Best-effort snapshot after a slow handler, excluding the active event.
+    /// Profiling must not wait for a producer holding the queue mutex.
+    pub(crate) fn pending_count(&self) -> Option<usize> {
+        match self {
+            Self::Real(delivery) => delivery.pending.try_lock().ok().map(|queue| queue.len()),
+            Self::Project { inner, .. } => inner.pending_count(),
+            #[cfg(test)]
+            Self::Stub(events) => events.try_lock().ok().map(|events| events.len()),
+        }
+    }
+
     pub(crate) fn for_project(&self, context: ProjectContext) -> Self {
         Self::Project {
             context: Box::new(context),
@@ -573,12 +591,13 @@ struct RuntimeStopThreads {
 }
 
 mod issue_monitor_delivery_ack;
+mod issue_monitor_list;
 pub(crate) use issue_monitor_delivery_ack::IssueMonitorLaunchDeliveryAcknowledged;
+pub(crate) use issue_monitor_list::PreparedIssueMonitorList;
 pub(crate) mod agent_maintenance;
 mod attachments;
 mod board;
 pub(crate) mod continuation;
-mod file_windows;
 mod frontend_action_log;
 mod knowledge;
 mod launch;
@@ -1388,6 +1407,12 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) issue_monitor_claim_renewals_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Latest published read model; capacity refreshes preserve scan/queue authority.
     pub(crate) issue_monitor_status_cache: std::cell::RefCell<Option<gwt::IssueMonitorStatusView>>,
+    pub(crate) issue_monitor_list_revision: std::cell::Cell<u64>,
+    pub(crate) issue_monitor_status_revision: std::cell::Cell<u64>,
+    pub(crate) issue_monitor_inbox_revision: std::cell::Cell<u64>,
+    pub(crate) issue_monitor_inbox_cache:
+        std::cell::RefCell<Option<Vec<gwt::IssueMonitorInboxItem>>>,
+    pub(crate) issue_monitor_list_requests: HashMap<ClientId, Arc<()>>,
     /// One actionable notice shared by PM preparation and Monitor snapshots.
     pub(crate) project_attention_notice:
         std::cell::RefCell<Option<(String, chrono::DateTime<chrono::Utc>)>>,
@@ -1432,6 +1457,7 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) pm_sessions: HashMap<PathBuf, String>,
     /// One bounded append reader per Project; native file reads stay off tao.
     pub(crate) pm_conversation_reader: Arc<Mutex<gwt::pm_conversation::PmConversationReader>>,
+    pub(crate) pm_reports_reader: Arc<Mutex<gwt::pm_current::PmReportsReader>>,
     /// SPEC-3431 T-093 (FR-012): per project, the monitor signal set the wake
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
@@ -1483,6 +1509,7 @@ pub(crate) fn initial_project_states(
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
+                    pm_reports_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
@@ -1491,6 +1518,11 @@ pub(crate) fn initial_project_states(
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
+                    issue_monitor_list_revision: Default::default(),
+                    issue_monitor_status_revision: Default::default(),
+                    issue_monitor_inbox_revision: Default::default(),
+                    issue_monitor_inbox_cache: Default::default(),
+                    issue_monitor_list_requests: Default::default(),
                     project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
@@ -1958,6 +1990,7 @@ pub struct AppRuntime {
     /// delta — an in-place agent restart reusing the same window is fine.
     /// Runtime-only; never persisted.
     pub(crate) window_output_bytes: HashMap<String, u64>,
+    pub(crate) pending_runtime_outputs: HashMap<String, runtime_events::PendingRuntimeOutput>,
     /// Latest parsed preview received from another runtime owner; never persisted.
     pub(crate) remote_terminal_previews: HashMap<String, String>,
     /// Issue #4608: when each pane last wrote to its terminal. The Monitor's
@@ -2051,7 +2084,6 @@ pub struct AppRuntime {
     /// SPEC-2009 amendment: per-window selected worktree root for File Tree
     /// windows. Reset every time the user reopens the picker, so this is a
     /// transient in-memory map and is not persisted with the session state.
-    pub(crate) file_tree_worktree_roots: HashMap<String, PathBuf>,
     /// SPEC-2785 FR-E: embedded server URL captured after the axum bind so
     /// `open_server_url_events` can reject requests whose origin differs from
     /// the bound URL. `None` before the server is started (e.g. during early
@@ -4245,6 +4277,7 @@ impl AppRuntime {
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
+                    pm_reports_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
@@ -4253,6 +4286,11 @@ impl AppRuntime {
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
+                    issue_monitor_list_revision: Default::default(),
+                    issue_monitor_status_revision: Default::default(),
+                    issue_monitor_inbox_revision: Default::default(),
+                    issue_monitor_inbox_cache: Default::default(),
+                    issue_monitor_list_requests: Default::default(),
                     project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
@@ -4629,6 +4667,7 @@ impl AppRuntime {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            pending_runtime_outputs: HashMap::new(),
             remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -4655,7 +4694,6 @@ impl AppRuntime {
             pty_writers,
             attachment_uploads,
             persist_dispatcher,
-            file_tree_worktree_roots: HashMap::new(),
             server_url: None,
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -5432,6 +5470,7 @@ impl AppRuntime {
         project_root: &Path,
         payload: serde_json::Value,
     ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        self.invalidate_issue_monitor_list(project_root);
         Self::publish_issue_monitor_control_owned(project_root, payload)
     }
 
@@ -8235,6 +8274,28 @@ impl AppRuntime {
         usage_threshold_percent: Option<u8>,
         request_id: Option<u64>,
     ) -> Vec<OutboundEvent> {
+        let report_failure =
+            |runtime: &Self, error: gwt::runtime_daemon_events::IssueMonitorControlPublishError| {
+                let message = error.to_string();
+                let mut events = runtime.issue_monitor_control_error_events(
+                    Some(&context.project_root),
+                    Some(client_id),
+                    error,
+                    "profiles-set",
+                    None,
+                );
+                if let Some(request_id) = request_id {
+                    events.push(OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorProfilesWriteFailed {
+                            project_root: context.project_root.display().to_string(),
+                            request_id,
+                            message,
+                        },
+                    ));
+                }
+                events
+            };
         let resolve = |prefs: &gwt::IssueMonitorPrefs| {
             let pool = prefs.launch_profile_pool();
             let (profiles, _) = gwt::merge_issue_monitor_profiles_set(
@@ -8253,12 +8314,9 @@ impl AppRuntime {
         {
             Ok(profiles) => profiles,
             Err(error) => {
-                return self.issue_monitor_control_error_events(
-                    Some(&context.project_root),
-                    Some(client_id),
+                return report_failure(
+                    self,
                     gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(error),
-                    "profiles-set",
-                    None,
                 );
             }
         };
@@ -8269,38 +8327,43 @@ impl AppRuntime {
                 "usage_threshold_percent": usage_threshold_percent,
             }}),
         );
-        let mut events = self.issue_monitor_authorizing_control_result_events(
-            context,
-            client_id,
-            publication,
-            "profiles-set",
-            |monitor| {
-                // Re-resolve omitted fields against the locked current prefs;
-                // a concurrent settings save must not be replaced by our read.
-                let profiles = resolve(&monitor.prefs())?;
-                monitor
-                    .advance_effect_authority_epoch()
-                    .ok_or_else(|| "authority epoch exhausted".to_string())?;
-                monitor.set_launch_profile_pool(profiles);
-                if let Some(percent) = usage_threshold_percent {
-                    monitor.set_launch_usage_threshold_percent(percent);
-                }
-                Ok(())
-            },
-        );
-        if !events.iter().any(|outbound| {
-            matches!(&outbound.event, BackendEvent::IssueMonitorToast { level, .. } if level == "error")
-        }) {
-            if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
-                events.push(OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::IssueMonitorProfiles {
-                        project_root: context.project_root.display().to_string(),
-                        profiles: prefs.launch_profile_pool(),
-                        request_id,
-                    },
-                ));
-            }
+        let outcome = match publication {
+            Ok(()) => Ok(None),
+            Err(error) if error.allows_local_fallback() => self
+                .commit_local_issue_monitor_authorizing_control(context, |monitor| {
+                    // Re-resolve omitted fields against the locked current prefs;
+                    // a concurrent settings save must not be replaced by our read.
+                    let profiles = resolve(&monitor.prefs())?;
+                    monitor
+                        .advance_effect_authority_epoch()
+                        .ok_or_else(|| "authority epoch exhausted".to_string())?;
+                    monitor.set_launch_profile_pool(profiles);
+                    if let Some(percent) = usage_threshold_percent {
+                        monitor.set_launch_usage_threshold_percent(percent);
+                    }
+                    Ok(())
+                })
+                .map(|(monitor, ())| Some(monitor)),
+            Err(error) => Err(error),
+        };
+        let mut events = match outcome {
+            Ok(None) => Vec::new(),
+            Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
+                Some(client_id),
+                Some(&context.project_root),
+                monitor,
+            ),
+            Err(error) => return report_failure(self, error),
+        };
+        if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorProfiles {
+                    project_root: context.project_root.display().to_string(),
+                    profiles: prefs.launch_profile_pool(),
+                    request_id,
+                },
+            ));
         }
         events
     }
@@ -8699,69 +8762,6 @@ impl AppRuntime {
         self.replace_knowledge_terminal_queue(project_root, &monitor.status_view().terminal_queue);
         self.replace_knowledge_monitor_snapshot(project_root, &monitor.inbox);
         self.issue_monitor_snapshot_events_without_wake(client_id, Some(project_root), monitor)
-    }
-
-    fn list_issue_monitor_events_with_reader(
-        &mut self,
-        context: &ProjectContext,
-        client_id: &str,
-        read_status: impl FnOnce(
-            &Path,
-        ) -> Result<
-            Option<serde_json::Value>,
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError,
-        >,
-    ) -> Vec<OutboundEvent> {
-        if let Some(project_root) = Some(context.project_root.as_path()) {
-            let result = read_status(project_root).and_then(|status| {
-                status
-                    .map(serde_json::from_value::<gwt::IssueMonitorAgentStatus>)
-                    .transpose()
-                    .map_err(|error| {
-                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
-                            format!("invalid daemon Issue Monitor status: {error}"),
-                        )
-                    })
-            });
-            match result {
-                Ok(Some(status)) => {
-                    // A live daemon owns the projection. Older daemons omit
-                    // gui_status; their subscriber frames still supply it.
-                    return status
-                        .gui_status
-                        .map(|mut status| {
-                            self.retain_missing_issue_monitor_capacity(project_root, &mut status);
-                            self.remember_issue_monitor_status(Some(project_root), &status);
-                            vec![OutboundEvent::reply(
-                                client_id,
-                                BackendEvent::IssueMonitorStatus {
-                                    status: Box::new(status),
-                                },
-                            )]
-                        })
-                        .unwrap_or_default();
-                }
-                Err(error) => {
-                    return self.issue_monitor_control_error_events(
-                        Some(&context.project_root),
-                        Some(client_id),
-                        error,
-                        "list",
-                        None,
-                    );
-                }
-                Ok(None) => {}
-            }
-        }
-        self.local_issue_monitor_events_with_policy(
-            context,
-            Some(client_id),
-            // Issue #4963: the GUI list only projects local state. Remote
-            // enumeration belongs to the scheduled worker, even for a cold
-            // or stale cache; a deadline alone would still stall this loop.
-            IssueMonitorScanPolicy::CacheOnly,
-            |_| {},
-        )
     }
 
     fn local_issue_monitor_events_with_policy(
@@ -10026,6 +10026,9 @@ impl AppRuntime {
     ) {
         if let Some(state) = project_root.and_then(|root| self.project_state_for_root(root)) {
             state
+                .issue_monitor_status_revision
+                .set(state.issue_monitor_status_revision.get().wrapping_add(1));
+            state
                 .issue_monitor_status_cache
                 .replace(Some(status.clone()));
         }
@@ -10057,6 +10060,9 @@ impl AppRuntime {
             // Initial List owns the full read model; do not invent queue data.
             return Vec::new();
         };
+        let mut previous_capacity = status.agent_capacity.clone();
+        let previous_fresh = previous_capacity.is_fresh();
+        let previous_limits = (status.max_active_agents, status.max_active_agents_override);
         // An older live daemon can omit override provenance. Durable prefs,
         // not that omission, own the Manual choice, just as in CLI status.
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
@@ -10080,6 +10086,17 @@ impl AppRuntime {
         status.max_active_agents_override = capacity.max_active_agents_override();
         status.max_active_agents = capacity.effective_max_active_agents();
         self.remember_issue_monitor_status(Some(project_root), &status);
+        // Retain renewed sensor timestamps locally without rebroadcasting the
+        // entire queue for an otherwise identical capacity projection.
+        let freshness_changed = previous_fresh != status.agent_capacity.is_fresh();
+        previous_capacity.observed_at = status.agent_capacity.observed_at;
+        previous_capacity.expires_at = status.agent_capacity.expires_at;
+        if !freshness_changed
+            && previous_capacity == status.agent_capacity
+            && previous_limits == (status.max_active_agents, status.max_active_agents_override)
+        {
+            return Vec::new();
+        }
         vec![OutboundEvent::project(
             context.project_key,
             BackendEvent::IssueMonitorStatus {
@@ -11238,18 +11255,12 @@ impl AppRuntime {
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
-            | FrontendEvent::LoadFileTree { id, .. }
-            | FrontendEvent::ListFileTreeWorktrees { id, .. }
-            | FrontendEvent::SelectFileTreeWorktree { id, .. }
-            | FrontendEvent::LoadFileContent { id, .. }
-            | FrontendEvent::SaveFileContent { id, .. }
             | FrontendEvent::LoadBranches { id, .. }
             | FrontendEvent::RequestRemoteStartWorkBranches { id, .. }
             | FrontendEvent::LoadBoard { id, .. }
             | FrontendEvent::LoadBoardHistory { id, .. }
             | FrontendEvent::LoadProfile { id, .. }
             | FrontendEvent::LoadLogs { id, .. }
-            | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
             | FrontendEvent::CheckKnowledgeRevision { id, .. }
             | FrontendEvent::ReportKnowledgeError { id, .. }
@@ -11593,18 +11604,12 @@ impl AppRuntime {
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
-            | FrontendEvent::LoadFileTree { id, .. }
-            | FrontendEvent::ListFileTreeWorktrees { id, .. }
-            | FrontendEvent::SelectFileTreeWorktree { id, .. }
-            | FrontendEvent::LoadFileContent { id, .. }
-            | FrontendEvent::SaveFileContent { id, .. }
             | FrontendEvent::LoadBranches { id, .. }
             | FrontendEvent::RequestRemoteStartWorkBranches { id, .. }
             | FrontendEvent::LoadBoard { id, .. }
             | FrontendEvent::LoadBoardHistory { id, .. }
             | FrontendEvent::LoadProfile { id, .. }
             | FrontendEvent::LoadLogs { id, .. }
-            | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
             | FrontendEvent::CheckKnowledgeRevision { id, .. }
             | FrontendEvent::ReportKnowledgeError { id, .. }
@@ -11659,6 +11664,23 @@ impl AppRuntime {
             tracing::trace_span!(target: "gwt_log_scope", parent: None, "machine_frontend_event").entered()
         });
         log_frontend_user_action(&client_id, &event);
+        if matches!(
+            event,
+            FrontendEvent::SetIssueMonitorEnabled { .. }
+                | FrontendEvent::SetIssueMonitorAutonomousMode { .. }
+                | FrontendEvent::IssueMonitorProfilesSet { .. }
+                | FrontendEvent::SetIssueMonitorMaxActiveAgents { .. }
+                | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
+                | FrontendEvent::ReorderIssueMonitorIssues { .. }
+                | FrontendEvent::IssueMonitorQueuePush { .. }
+                | FrontendEvent::IssueMonitorQueueRemove { .. }
+                | FrontendEvent::IssueMonitorQueueMove { .. }
+                | FrontendEvent::SetIssueMonitorAutoRefill { .. }
+                | FrontendEvent::IssueMonitorLaunchNow { .. }
+                | FrontendEvent::IssueMonitorRequeue { .. }
+        ) {
+            self.invalidate_issue_monitor_list(&context.project_root);
+        }
         match event {
             FrontendEvent::ProjectAggregateAck {
                 revision,
@@ -11765,23 +11787,11 @@ impl AppRuntime {
                     &ClientScope::Project(context.project_key.clone()),
                 )
                 .unwrap_or_default(),
-            FrontendEvent::CreateWindow { preset, bounds } => {
-                self.create_window_events(context, preset, bounds)
-            }
-            FrontendEvent::LoadProcessConsole { id } => {
-                // SPEC-2809 Phase F2 — Console window mount asks for the
-                // current ring buffer. Use the global hub installed by
-                // `gwt_core::logging::init`. Reply to the requesting
-                // client only so other Consoles do not see duplicates.
-                let hub = gwt_core::process_console::global();
-                vec![OutboundEvent::reply(
-                    client_id.clone(),
-                    BackendEvent::ProcessConsoleSnapshot {
-                        id,
-                        lines: hub.snapshot_all(),
-                    },
-                )]
-            }
+            FrontendEvent::CreateWindow {
+                preset,
+                bounds,
+                surface_owner,
+            } => self.create_window_events(context, preset, bounds, surface_owner),
             FrontendEvent::FocusWindow { id, bounds } => self.focus_window_events(&id, bounds),
             FrontendEvent::CycleFocus { direction, bounds } => {
                 self.cycle_focus_events(context, direction, bounds)
@@ -11935,61 +11945,6 @@ impl AppRuntime {
                     self.attach_files_events(&id, files)
                 }
             }
-            FrontendEvent::LoadFileTree { id, path } => {
-                let path = path.unwrap_or_default();
-                vec![OutboundEvent::reply(
-                    client_id,
-                    self.load_file_tree_event(&id, &path),
-                )]
-            }
-            FrontendEvent::ListFileTreeWorktrees { id } => vec![OutboundEvent::reply(
-                client_id,
-                self.list_file_tree_worktrees_event(&id),
-            )],
-            FrontendEvent::SelectFileTreeWorktree { id, worktree_id } => {
-                vec![OutboundEvent::reply(
-                    client_id,
-                    self.select_file_tree_worktree_event(&id, &worktree_id),
-                )]
-            }
-            FrontendEvent::LoadFileContent {
-                id,
-                path,
-                mode,
-                hex_offset,
-                hex_length,
-            } => vec![OutboundEvent::reply(
-                client_id,
-                self.load_file_content_event(&id, &path, mode, hex_offset, hex_length),
-            )],
-            FrontendEvent::SaveFileContent {
-                id,
-                path,
-                mode,
-                expected_mtime,
-                expected_size,
-                text,
-                encoding,
-                newline,
-                has_bom,
-                hex_offset,
-                hex_byte,
-            } => vec![OutboundEvent::reply(
-                client_id,
-                self.save_file_content_event(
-                    &id,
-                    &path,
-                    mode,
-                    expected_mtime,
-                    expected_size,
-                    text,
-                    encoding,
-                    newline,
-                    has_bom,
-                    hex_offset,
-                    hex_byte,
-                ),
-            )],
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::RequestRemoteStartWorkBranches { id } => {
                 self.request_remote_start_work_branches_events(&client_id, &id)
@@ -12078,28 +12033,13 @@ impl AppRuntime {
                 knowledge_kind,
                 request_id,
                 number,
-            } => match knowledge_kind {
-                KnowledgeKind::Issue | KnowledgeKind::Spec => self
-                    .select_knowledge_bridge_entry_events(
-                        &client_id,
-                        &id,
-                        knowledge_kind,
-                        request_id,
-                        number,
-                    ),
-                // FR-102 intentionally covers only Issue/SPEC. Keep the PR
-                // surface on its pre-existing full-load selection path.
-                KnowledgeKind::Pr => self.load_knowledge_bridge_events(
-                    &client_id,
-                    KnowledgeLoadRequest {
-                        id: &id,
-                        kind: knowledge_kind,
-                        request_id,
-                        selected_number: Some(number),
-                        refresh: false,
-                    },
-                ),
-            },
+            } => self.select_knowledge_bridge_entry_events(
+                &client_id,
+                &id,
+                knowledge_kind,
+                request_id,
+                number,
+            ),
             FrontendEvent::UpdateKnowledgeBridgePhase {
                 id,
                 request_id,
@@ -12940,6 +12880,27 @@ impl AppRuntime {
                     WorktreeFormProjection::Persisted,
                 )]
             }
+            AgentFrontendRequest::CloseWork {
+                work_id,
+                close_kind,
+            } => {
+                let result = self.close_work_for_agent(&principal, &work_id, &close_kind);
+                let (ok, changed, retryable, error) = match result {
+                    Ok(changed) => (true, Some(changed), false, None),
+                    Err((error, retryable)) => (false, None, retryable, Some(error)),
+                };
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::WorkCloseResult {
+                        work_id,
+                        close_kind,
+                        ok,
+                        changed,
+                        retryable,
+                        error,
+                    },
+                )]
+            }
             AgentFrontendRequest::CloseWindow {
                 id,
                 request_id,
@@ -12989,6 +12950,9 @@ impl AppRuntime {
                     return refusal(
                         "closing the calling session requires a correlated acceptance (request_id)",
                     );
+                }
+                if let Some(reason) = self.agent_close_board_check(&principal, &id) {
+                    return refusal(&reason);
                 }
                 let outcome = self.close_window_outcome(&id);
                 let reason = (!outcome.closed)
@@ -13234,6 +13198,10 @@ impl AppRuntime {
                 target: "gwt_security",
                 "agent self-close Session changed before acceptance"
             );
+            return Vec::new();
+        }
+        if let Some(reason) = self.agent_close_board_check(grant.principal(), &own_window_id) {
+            responder.refuse(own_window_id, reason);
             return Vec::new();
         }
         let Some(window_lifecycle_generation) = self
@@ -14301,6 +14269,7 @@ impl AppRuntime {
     pub(crate) fn seed_window_pty_statuses(&mut self) {
         self.window_pty_statuses.clear();
         self.window_output_bytes.clear();
+        self.pending_runtime_outputs.clear();
         for tab in &self.tabs {
             for window in &tab.workspace.persisted().windows {
                 if window.preset.requires_process() {
@@ -14382,6 +14351,7 @@ impl AppRuntime {
         self.pending_launch_completions.remove(window_id);
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);
+        self.pending_runtime_outputs.remove(window_id);
         self.remote_terminal_previews.remove(window_id);
         self.window_last_output_at.remove(window_id);
         self.window_hook_states.remove(window_id);

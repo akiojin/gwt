@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const source = readFileSync(new URL("../board-logs-surface.js", import.meta.url), "utf8")
-  .replace('from "/board-surface.js"', `from "${new URL("../board-surface.js", import.meta.url).href}"`);
+  .replace('from "/board-surface.js"', `from "${new URL("../board-surface.js", import.meta.url).href}"`)
+  .replace('from "/ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`);
 const { createBoardLogsSurface } = await import(
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`,
 );
@@ -14,7 +15,8 @@ function fixture() {
     send: event => sent.push(event),
     windowMap: new Map(),
     pushAlertToast: notice => notifications.push(notice),
-    activeWorkspace: () => ({ windows: [] }),
+    activeWorkspace: () => ({ windows: [{ id: "board", preset: "board" }] }),
+    focusOrSpawnPreset: () => {},
     activeProjectTab: () => null,
     getActiveWorkProjection: () => null,
   });
@@ -63,4 +65,78 @@ test("Board scope changes request a fresh projection through the existing all fl
     { kind: "load_board", id: "board", all: true },
     { kind: "load_board", id: "board", all: false },
   ]);
+});
+
+function longRunEntry(index) {
+  return { id: `post-${index}`, body: `Update ${index}`,
+    created_at: new Date(Date.UTC(2026, 9, 15) + index * 1000).toISOString() };
+}
+
+test("Board bounds 10,000 pushes and retrieves evicted entries through the history cursor", () => {
+  const { surface, state, receive, sent } = fixture();
+  for (let index = 0; index < 10_000; index++) {
+    receive([longRunEntry(index)]);
+    assert.ok(state.entries.length <= 1000, `retention exceeded at push ${index}`);
+  }
+  assert.equal(state.entries.length, 1000);
+  assert.equal(state.entries[0].id, "post-9000");
+  assert.equal(state.entries.at(-1).id, "post-9999");
+  assert.equal(state.hasMoreBefore, true);
+  surface.requestOlderBoardEntries("board");
+  assert.equal(sent.at(-1).before_entry_id, "post-9000");
+  surface.applyBoardLogsReceiveEvent({ kind: "board_history_page", id: "board",
+    entries: Array.from({ length: 50 }, (_, i) => longRunEntry(8950 + i)), has_more_before: true });
+  assert.equal(state.entries.length, 1000);
+  assert.equal(state.entries[0].id, "post-8950");
+  assert.equal(state.hasNewerEntries, true);
+  // Live pushes cannot punch a gap into the bounded history window.
+  receive([longRunEntry(10_000)]);
+  assert.equal(state.entries.at(-1).id, "post-9949");
+  surface.requestOlderBoardEntries("board");
+  assert.equal(sent.at(-1).before_entry_id, "post-8950");
+});
+
+test("Board focus reloads the latest window when the target was evicted by history paging", () => {
+  const { surface, state, receive, sent } = fixture();
+  receive(Array.from({ length: 1050 }, (_, i) => longRunEntry(i)));
+  surface.applyBoardLogsReceiveEvent({ kind: "board_history_page", id: "board",
+    entries: Array.from({ length: 50 }, (_, i) => longRunEntry(i)), has_more_before: false });
+  surface.requestBoard("board");
+  surface.focusBoardEntry("post-1049");
+  assert.equal(sent.length, 1, "focus waits for the in-flight refresh");
+  receive([longRunEntry(999)]);
+  assert.equal(sent.length, 2, "refresh completion starts the latest reload");
+  assert.equal(sent.at(-1).kind, "load_board");
+  receive(Array.from({ length: 50 }, (_, i) => longRunEntry(1000 + i)));
+  assert.equal(state.entries.at(-1).id, "post-1049");
+  assert.equal(state.hasNewerEntries, false);
+});
+
+test("Board latest reload waits for pending history instead of merging disjoint windows", () => {
+  const { surface, state, receive, sent } = fixture();
+  receive(Array.from({ length: 1050 }, (_, i) => longRunEntry(1000 + i)), true);
+  surface.applyBoardLogsReceiveEvent({ kind: "board_history_page", id: "board",
+    entries: Array.from({ length: 50 }, (_, i) => longRunEntry(1000 + i)), has_more_before: true });
+  surface.requestOlderBoardEntries("board");
+  surface.requestBoard("board", true);
+  assert.equal(sent.at(-1).kind, "load_board_history");
+  surface.applyBoardLogsReceiveEvent({ kind: "board_history_page", id: "board",
+    entries: Array.from({ length: 50 }, (_, i) => longRunEntry(950 + i)), has_more_before: true });
+  assert.equal(sent.at(-1).kind, "load_board");
+  receive(Array.from({ length: 50 }, (_, i) => longRunEntry(2000 + i)), true);
+  assert.equal(state.entries.length, 50);
+  assert.equal(state.entries[0].id, "post-2000");
+  assert.equal(state.hasNewerEntries, false);
+});
+
+test("Board live pushes preserve an in-flight history cursor without leaving an entry gap", () => {
+  const { surface, state, receive } = fixture();
+  receive(Array.from({ length: 1000 }, (_, i) => longRunEntry(1000 + i)), true);
+  surface.requestOlderBoardEntries("board");
+  receive([longRunEntry(2000)]);
+  surface.applyBoardLogsReceiveEvent({ kind: "board_history_page", id: "board",
+    entries: Array.from({ length: 50 }, (_, i) => longRunEntry(950 + i)), has_more_before: true });
+  assert.deepEqual(state.entries.map((entry) => entry.id),
+    Array.from({ length: 1000 }, (_, i) => `post-${950 + i}`));
+  assert.equal(state.hasNewerEntries, true);
 });

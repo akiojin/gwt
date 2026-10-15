@@ -717,12 +717,14 @@ pub fn compute_plan(
     let load_repo_hash = session.repo_hash.clone();
     let load_scope = audience_scope.clone();
     let load_author = session.display_name.clone();
+    let load_cursor = reminders.board_log_cursor.clone();
     let load = move || {
         load_prompt_reminder_for_repo_hash(
             &load_worktree,
             load_repo_hash.as_deref(),
             PromptBoardReadRequest {
                 diff_since,
+                cursor: load_cursor.as_ref(),
                 scope: &load_scope,
                 status_author: &load_author,
                 status_kind: &BoardEntryKind::Status,
@@ -767,6 +769,9 @@ pub fn compute_plan(
     let board_read_succeeded = outcome.succeeded;
     let retry_board_cursor = outcome.read.retry_from_previous_cursor;
     if board_read_succeeded && !retry_board_cursor {
+        if let Some(cursor) = outcome.read.next_cursor {
+            reminders.board_log_cursor = Some(cursor);
+        }
         reminders.last_own_status_checked_at = Some(now);
         reminders.last_own_status_at = [
             reminders.last_own_status_at,
@@ -814,6 +819,16 @@ pub fn compute_plan(
         plan.output = replace_with_terminal_settlement_reminder(plan.output, intent_event);
     } else if is_resident_pm {
         plan.output = replace_with_pm_reminder(plan.output);
+    }
+    if intent_event != IntentBoundaryEvent::Stop {
+        if let Some(context) =
+            crate::board_read_receipts::pm_prompt_context(&session.worktree_path, &session.id)
+        {
+            if let HookOutput::HookSpecificAdditionalContext { text, .. } = &mut plan.output {
+                text.push_str("\n\n");
+                text.push_str(&context);
+            }
+        }
     }
 
     if emit_work_state_reminders {
@@ -988,6 +1003,61 @@ mod tests {
         let mut session = Session::new(dir, branch, AgentId::Codex);
         session.display_name = display_name.to_string();
         session
+    }
+
+    #[test]
+    fn issue_3713_registered_pm_prompt_reports_unread_kinds_without_acknowledging() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let session = make_session(&repo, "work/pm", "PM");
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: session.id.clone(),
+                    agent_id: "codex".into(),
+                    worktree_path: repo.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for kind in [BoardEntryKind::Blocked, BoardEntryKind::Handoff] {
+            post_entry(
+                &repo,
+                BoardEntry::new(
+                    AuthorKind::Agent,
+                    "Peer",
+                    kind,
+                    "Symptom: pending.\nCause: ruling.\nRequest: decide.\nResume: reply.",
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+            )
+            .unwrap();
+        }
+        let first = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(
+            additional_context(&first.output).contains("Board unread: 2"),
+            "{:?}",
+            first.output
+        );
+        assert!(additional_context(&first.output).contains("blocked=1"));
+        assert!(additional_context(&first.output).contains("handoff=1"));
+        write_reminders_state(&repo, &session.id, &first.next_reminders).unwrap();
+        let second = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(additional_context(&second.output).contains("Board unread: 2"));
     }
 
     #[test]
@@ -1424,10 +1494,90 @@ mod tests {
     }
 
     #[test]
+    fn user_prompt_board_cursor_delivers_backdated_appends_after_an_empty_read() {
+        use gwt_core::coordination::CoordinationEvent;
+        use std::{fs::OpenOptions, io::Write};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let session = make_session(&repo, "work/pm", "PM");
+        save_projection(&repo, vec![]);
+        let segments = gwt_core::coordination::coordination_dir(&repo).join("events");
+        std::fs::create_dir_all(&segments).unwrap();
+        let path = segments.join("0000000000000001.jsonl");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        let created_at = Utc::now();
+        let mut delayed = entry(
+            "Other",
+            BoardEntryKind::Status,
+            "delayed-first-append",
+            "work/other",
+            "other",
+            created_at,
+        );
+
+        // Construct the post before the read, but append after it advances
+        // the sidecar. No scheduling or clock delay is needed to force the race.
+        let empty = compute_plan(
+            "UserPromptSubmit",
+            &session,
+            created_at + chrono::Duration::seconds(1),
+        )
+        .unwrap()
+        .unwrap();
+        write_reminders_state(&repo, &session.id, &empty.next_reminders).unwrap();
+        for (turn, body) in ["delayed-first-append", "same-id-second-append"]
+            .into_iter()
+            .enumerate()
+        {
+            delayed.body = body.to_string();
+            serde_json::to_writer(
+                &mut file,
+                &CoordinationEvent::MessageAppended {
+                    entry: delayed.clone(),
+                },
+            )
+            .unwrap();
+            file.write_all(b"\n").unwrap();
+            let plan = compute_plan(
+                "UserPromptSubmit",
+                &session,
+                created_at + chrono::Duration::seconds(turn as i64 + 2),
+            )
+            .unwrap()
+            .unwrap();
+            let HookOutput::HookSpecificAdditionalContext { text, .. } = &plan.output else {
+                panic!("appended row must be available");
+            };
+            assert!(text.contains(body), "{text}");
+            if turn == 1 {
+                assert!(!text.contains("delayed-first-append"), "{text}");
+            }
+            write_reminders_state(&repo, &session.id, &plan.next_reminders).unwrap();
+        }
+        let unchanged = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(!additional_context(&unchanged.output).contains("same-id-second-append"));
+    }
+
+    #[test]
     fn pm_board_context_succeeds_for_one_hundred_prompts_with_eight_writers() {
         use gwt_core::coordination::CoordinationEvent;
         use std::{fs::OpenOptions, io::Write, sync::mpsc};
 
+        // Exercise the real local tail and concurrent writers independently of
+        // host scheduling. The deadline tests below cover the bounded decoder.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+            std::rc::Rc::new(gwt_core::coordination::LocalProvider),
+        );
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let repo = home.path().join("project");
@@ -1491,6 +1641,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(partial.next_reminders.last_injected_at, Some(previous));
+        assert_eq!(
+            partial.next_reminders.board_log_cursor,
+            state.board_log_cursor
+        );
         assert_eq!(
             partial.next_reminders.last_own_status_checked_at,
             Some(previous)
@@ -3097,6 +3251,10 @@ mod tests {
     fn reminders_state_round_trips_phase_u9_fields() {
         let original = RemindersState {
             last_injected_at: None,
+            board_log_cursor: Some(gwt_core::coordination::PromptBoardCursor {
+                segment: Some("0000000000000001.jsonl".to_string()),
+                offset: 42,
+            }),
             last_own_status_checked_at: None,
             last_own_status_at: None,
             last_reminded_kind: Default::default(),
@@ -3117,6 +3275,7 @@ mod tests {
         // Legacy state without the new fields must round-trip via serde defaults.
         let legacy = r#"{"last_injected_at":null,"last_reminded_kind":{}}"#;
         let restored_legacy: RemindersState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(restored_legacy.board_log_cursor, None);
         assert_eq!(restored_legacy.last_title_summary_seen, None);
         assert_eq!(restored_legacy.unchanged_turn_count, 0);
         assert_eq!(restored_legacy.last_current_focus_seen, None);

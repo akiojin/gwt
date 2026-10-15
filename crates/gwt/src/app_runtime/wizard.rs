@@ -95,13 +95,10 @@ use super::continuation::{
 };
 use crate::{ShellLaunchConfig, UserEvent};
 
-/// `Pr => None` because Launch Agent is not exposed for PR bridges
-/// (`KnowledgeDetailView::launch_issue_number` stays `None` for PR entries).
-fn linked_issue_kind_from_knowledge(kind: KnowledgeKind) -> Option<LinkedIssueKind> {
+fn linked_issue_kind_from_knowledge(kind: KnowledgeKind) -> LinkedIssueKind {
     match kind {
-        KnowledgeKind::Issue => Some(LinkedIssueKind::Issue),
-        KnowledgeKind::Spec => Some(LinkedIssueKind::Spec),
-        KnowledgeKind::Pr => None,
+        KnowledgeKind::Issue => LinkedIssueKind::Issue,
+        KnowledgeKind::Spec => LinkedIssueKind::Spec,
     }
 }
 
@@ -253,6 +250,7 @@ struct SilentIssueMonitorLaunchRequest {
     issue_number: u64,
     linked_issue_kind: gwt::LinkedIssueKind,
     review_prompt: Option<String>,
+    reviewed_sha: Option<String>,
     review_model: Option<String>,
     delivery_id: Option<String>,
     launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
@@ -3252,6 +3250,7 @@ impl AppRuntime {
                 issue_number,
                 linked_issue_kind,
                 review_prompt: None,
+                reviewed_sha: None,
                 review_model: None,
                 delivery_id: delivery_id.clone(),
                 launch_session_strategy,
@@ -3538,8 +3537,8 @@ impl AppRuntime {
             prompt_bytes = prompt.len(),
             "autonomous independent-review dispatch"
         );
-        // Spawn a FRESH-session review agent in the implementation work-branch
-        // worktree (idle by review time); it reviews the diff embedded in its
+        // Spawn a FRESH-session review agent in a separate detached worktree
+        // pinned to the reviewed SHA; it reviews the diff embedded in its
         // prompt and reports the verdict via the gwtd issue.monitor.review_verdict
         // op. skip_permissions is forced on the autonomous path so review runs
         // unattended.
@@ -3556,6 +3555,7 @@ impl AppRuntime {
                 issue_number: dispatch.issue_number,
                 linked_issue_kind: dispatch.linked_issue_kind,
                 review_prompt: Some(prompt),
+                reviewed_sha: Some(dispatch.reviewed_sha.clone()),
                 review_model,
                 delivery_id: None,
                 launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
@@ -3621,6 +3621,7 @@ impl AppRuntime {
             issue_number,
             linked_issue_kind,
             review_prompt,
+            reviewed_sha,
             review_model,
             delivery_id,
             launch_session_strategy,
@@ -4029,7 +4030,12 @@ impl AppRuntime {
         // environment so its hooks apply the review contract instead of the
         // producing-session gates it can never satisfy.
         if review_prompt.is_some() {
-            launch_request.set_review_dispatch_context();
+            let reviewed_sha = reviewed_sha
+                .as_deref()
+                .filter(|sha| !sha.trim().is_empty())
+                .ok_or_else(|| "Independent review requires its reviewed SHA".to_string())?;
+            launch_request.set_review_dispatch_context(reviewed_sha);
+            session.workspace_resume_context = None;
         }
         let launch_index = self
             .tab(&session.tab_id)
@@ -4601,19 +4607,7 @@ impl AppRuntime {
 
         match result {
             Ok(base_branch_name) => {
-                let Some(linked_issue_kind) = linked_issue_kind_from_knowledge(knowledge_kind)
-                else {
-                    return vec![OutboundEvent::reply(
-                        &client_id,
-                        knowledge_error_event(
-                            id,
-                            knowledge_kind,
-                            "Launch Agent is not available for this knowledge bridge",
-                            None,
-                            None,
-                        ),
-                    )];
-                };
+                let linked_issue_kind = linked_issue_kind_from_knowledge(knowledge_kind);
                 match self.open_knowledge_launch_wizard_for_base_branch(
                     &tab_id,
                     &project_root,
@@ -6191,6 +6185,8 @@ impl AppRuntime {
         let window = tab
             .workspace
             .add_window_with_title(WindowPreset::Shell, title, false, bounds);
+        tab.workspace
+            .set_surface_owner(&window.id, Some(gwt::WindowSurfaceOwner::Agents));
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 

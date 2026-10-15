@@ -27,8 +27,8 @@ Agent workspace を materialize するために worktree を使いますが、�
 - **Managed workflow skills** — discussion、Issue routing、planning、
   TDD implementation、PR、architecture review、project search、agent 管理用の
   bundled `gwt-*` skills を使えます。
-- **Operator canvas** — Agent、Board、Issue、SPEC、Logs、Profile、
-  File Tree、Branches、PR surface を mission-control 風 workspace に並べられます。
+- **Operator canvas** — Agent、Board、Logs、Profile、Index、Settings の
+  surface を mission-control 風 workspace に並べられます。
 
 ## インストール
 
@@ -191,8 +191,8 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
 - **Projects**: 開いているプロジェクト、Recent の順に表示し、選んだプロジェクトの
   URL を開きます。実行中・エラー件数を表示し、開いているプロジェクトに
   エージェントのエラーがある間はトレイアイコンにエラーバッジが付きます。
-- **About GWT**: 起動中の tray プロセスのブラウザ版 About / Version 画面を
-  開きます。
+- **Open Project…**: Hub を開き、フォルダ選択を直接開始します。
+- **Clone from GitHub…**: Clone Project ダイアログを開いた状態で Hub を表示します。
 - **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
 
 プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
@@ -208,7 +208,7 @@ GitHub、Recent projects、開いているプロジェクトの一覧を表示�
 プロジェクト URL を開いた複数のブラウザタブではワークスペースが同期します。
 プロジェクト URL をブックマークやタブ復元で開くと、Recent のプロジェクトは自動で
 開き直され、未知のプロジェクト URL は Hub へのリンク付きの「Project not found」を
-表示します。プロジェクトのヘッダーにある **Hub** リンクは Hub を新しいタブで開きます。
+表示します。Hub はトレイの **Open in browser**、または引数なしの `gwt open` で開けます。
 
 Autostart は **Settings > System > Launch GWT at login** で切り替えます。
 有効にすると `auto-launch` crate 経由で macOS LaunchAgent / Windows HKCU
@@ -400,7 +400,6 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
 - `Profile` — environment/profile 管理
-- `File Tree` — 実リポジトリの read-only tree
 - `Branches` — branch 確認、filter、cleanup、Git detail
 - `Settings` — application と agent の設定。`System` タブで Workspace summary
   と Board 投稿本文の出力言語を `Auto / English / 日本語` から選択できます
@@ -414,15 +413,19 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   `System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
-  System には保存値・有効値と、更新の保留理由も表示します。変更は GUI から
-  行い、エージェントは `update.settings.status` で読み取れます。
+  System には保存値・有効値と、更新の保留理由も表示します。GUI で変更するか、
+  PM に `update.settings.set` の `auto_apply_updates` で変更を依頼できます。
+  `update.settings.status` で状態を読み取れます。
   この設定は Issue Monitor の設定から除外されています。
-- `PR` — pull-request workflow surface。詳細な一覧機能は cache-backed PR source の整備に依存します
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
 Agent が status、decision、handoff、request を外部化する coordination surface です。
 Work Item Knowledge Bridge は frontend から GitHub API response を直接描画せず、
 ローカル Issue cache と semantic index を使います。
+
+Board は各ウィンドウで最大1,000件を保持します。先頭までスクロールするか
+`Load earlier entries` を選ぶと、古い投稿を再取得できます。過去の履歴を閲覧中は
+`Back to latest entries` で最新の更新へ戻れます。
 
 作業 Agent は起動時に短く覚えやすい固有名を選び、バッジ・ウィンドウタイトル・
 Fleet・Kanban カードに表示します。候補が重複すると数字の接尾辞が付きます。
@@ -450,7 +453,9 @@ Queued には `auto-refill` などの追加元も表示されます。
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
 エラーの詳細と履歴は通知センターで確認できます。⚙ で同じペインの設定行を展開し、
-Max active、Auto-refill と上限、Allowed labels、候補プロファイルを設定します。Auto-apply updates は **System** で設定します。
+**Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
+**Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
+設定を閉じると Autonomous と Start / Stop は要約帯に戻ります。Auto-apply updates は **System** で設定します。
 Max active は **Manual** に切り替えると数値を編集でき、**Auto** では計算値を表示します。Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
 空のキューから新しい作業は起動せず、実行中の作業は継続します。
@@ -489,6 +494,10 @@ open な GitHub Issue は、明示的な追加、有効な Auto-refill、また�
 準備状態・claim・同時実行数のチェックは引き続き適用されます。行の `Launch now` は
 起動フローを開き、起動時に `work/issue-N` のブランチ/worktree を作成して
 `gwt-execute #N` でエージェントを開始します。起動失敗は Issue 行に残ります。
+live な claim/window の識別情報が失われた場合も、operator は `issue.monitor.stop` に
+`params.number` と `params.reason` を渡して失敗した launch を停止できます。
+保存済みの失敗 window は同じ Issue の所有である場合だけ使用し、永続的な停止状態と
+閉じる対象の pane を返します。
 
 `urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
@@ -506,8 +515,8 @@ Agent や自動化からは `issue.monitor.status` で確認し、`issue.monitor
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
 `issue.monitor.config.set` は処理停止、Autonomous
-モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
-`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
+モード無効化、正の `max_active` 上限設定に対応します。リポジトリの登録済み PM は
+`enabled` / `autonomous_mode` の有効化もできます。他のエージェントは GUI から有効化します。
 idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
 `review_verdict_published` / `execution_settled` / `binding_dead` /
 `stuck_unknown` に分類し（`issue.monitor.status` の行と `idle_windows` で確認可能）、
@@ -633,15 +642,23 @@ SPEC [#3200](https://github.com/akiojin/gwt/issues/3200) を参照してくだ�
 
 work ブランチが `develop` に merge されると、monitor は delivered な Issue を
 自分で決着させます（`Closes #N` は default branch でしか発火しません）。
-受け入れ基準がすべてチェック済みか、PR 本文 / Issue コメントに残りの基準を
-別 Issue に委譲した記録（`残 AC は別 Issue に委譲`）があれば、PR 番号と merge
+受け入れ基準がすべてチェック済みなら、PR 番号と merge
 SHA を含むコメントを投稿して Issue を close します。未達の基準が残る場合は
 `merge 済み・未達 AC あり` コメントを残して `NeedsHuman` にし、`gwt-spec` Issue は
-全 Phase の tasks が完了したときだけ close します。auto-close は既定で
+全 Phase の tasks が完了したときだけ close します。残りの基準を別 Issue に
+委譲しても、未チェックの項目があれば close しません。auto-close は既定で
 `Autonomous` トグルに連動し、`issue.monitor.config.set` の
 `auto_close_merged_issues=true|false` で上書きできます（off のときは
 `merge 済み・close 待ち` コメントの記録のみ）。人間が reopen した Issue を同じ
 merge で再度 close することはありません。
+
+完了として close 済みでも未チェックの受け入れ基準が残る Issue は、
+この checkout で `node scripts/audit-closed-acceptance.mjs OWNER/REPOSITORY` を
+実行すると列挙できます。読み取り専用の監査が `gh` で閉じた Issue の全ページを
+取得し、Issue 番号・URL・未チェック基準の JSON 一覧を出力します。PR と
+「対応しない」として閉じた Issue は除外します。コメント保存の SPEC は参照先の
+`spec` コメント（分割 section を含む）を読み、読めない section は黙って飛ばさず
+エラーとして報告します。
 
 無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
 NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
@@ -692,6 +709,35 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
   `pm.status` はリポジトリ内の全登録を一覧し、`pm.stop` は CLI から PM を
   停止します。登録済み PM は孤児化した PM を停止でき、自分自身も GUI 操作なしで
   停止できます。
+- 稼働中の登録済み PM は `workspace.close` で指定した非稼働 Work を閉じられます。
+  `work_id` と `close_kind: "done"` または `"discarded"` を指定し、GUI と同じく
+  手動 close が許可され、その Work の稼働 agent がいないことを確認します。
+  終了履歴を記録し、branch と worktree は保持します。
+
+PM に GitHub Discussion の作成と Board 接続、`develop` / `main` の必須チェック変更、
+全プロジェクト共通の Auto-apply updates 変更を依頼できます。操作対象を明確にした
+指示の記録、または OS ネイティブの承認ダイアログで許可します。**Approve once** で
+今回だけ許可するか、同じリポジトリ・操作種別の許可を記憶できます。保存した許可の確認・
+取り消しは PM に `pm.approval.status` / `pm.approval.revoke` で依頼できます。
+必須チェックの変更には `repository.required_checks.update` を使い、ブランチの strict
+設定と、残すチェックの app との関連付けを維持します。
+
+同じ範囲付き許可で、`pr.reopen` による指定 PR の再開、`pr.review.submit` による
+GitHub review、`release.metadata.set` による既存 release の名前・説明・prerelease の変更、
+`repository.settings.set` による対応済みの可逆な metadata・機能・merge 設定・archive 状態の
+変更も依頼できます。topics の置換は `topics` だけを指定します。既存の review・CI チェックは
+維持し、release の公開・asset・latest の選択には既存の gated workflow を使います。
+
+明示的に許可した PR の close、ビルドキャッシュ削除、provider 承認への応答には、PM が
+`pm.operation.execute` を使います。対象は既存の `pr.close` / `worktree.gc_build_artifacts` /
+`pm.message.send` の3種類に限られ、それぞれの既存のチェックを維持します。
+
+同じマシンの別プロジェクトの PM と相談したい場合は、相手プロジェクトの絶対パスを
+添えて自分の PM に依頼してください。登録済み PM は `pm.peer.send` で依頼・応答・
+通知を直接送り、未読メッセージは相手の次の PM prompt に届きます。双方の
+**Reports** でやり取りを追え、相手が不在の場合や期限を過ぎた応答待ちも表示されます。
+各 PM は自分のプロジェクト内で判断・操作し、メッセージによって他プロジェクトの
+エージェントを操作する権限は与えられません。
 
 設計は SPEC [#3431](https://github.com/akiojin/gwt/issues/3431) にあります。
 
@@ -703,11 +749,14 @@ gwt は project knowledge を Agent workspace の近くに置きます。
 - JSON operations `issue.view` と `issue.comments` は gwt CLI surface から
   cache-backed Issue access を提供します。
 - `gwt-search` は共有 ChromaDB runtime を通じて SPEC、Issue、source files、
-  docs を検索します。index が無い場合は必要に応じて build され、desktop app は
+  docs、PM Reports を検索します。index が無い場合は必要に応じて build され、desktop app は
   管理対象 Python search runtime を修復できます。
   Issue index の再構築中も直前に公開された世代を検索できます。複数 scope の検索は
   利用可能な結果を返し、除外した scope と理由を通知します。JSON 応答には
   `partial` と `unavailable_scopes` が含まれます。
+  `reports` scope では保存済みの digest と Q&A の質問・回答・Issue 参照を検索できます。
+  Index window は report の kind・日時・関連 Issue を表示し、**Open** で PM の
+  Reports view へ戻れます。
 - Work Item Knowledge Bridge は plain Issue と `gwt-spec` label 付き Issue の
   cache-backed list/detail、semantic ranking、exact match priority、match percentage
   を組み合わせます。
@@ -730,6 +779,19 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 Managed hooks は user hook を保持しながら、Agent state、workflow guardrails、
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
+
+agent の停止や pane close が Board の未読を報告した場合は、同じ agent session で
+JSON operation `board.show` に `params:{"all":true}` を渡して本文を読み、再試行します。
+自動 reminder の注入は読了として扱われません。実装 agent の判断依頼は `agent:pm`
+宛に送ります。agent の Board 投稿から `user:<id>` を指定できるのは登録済み PM だけです。
+
+JSON operation `hook.health` では、gwt の GitHub mutation policy と矛盾する外部 skill の
+コマンド、該当ファイル、代替操作を確認できます。既定では有効な Claude plugin を検査します。
+検査する skill/command directory を明示的に選ぶ場合は、`.gwt/external-skill-roots.json` に
+directory path の JSON 配列を保存します。この設定は plugin の自動検出を置き換え、
+相対 path は worktree 基準です。検査したい root をすべて含めてください。ファイルを削除すると
+自動検出へ戻ります。検査が部分的、または実行できない場合は明示されます。仕様は
+[SPEC #3393](https://github.com/akiojin/gwt/issues/3393) を参照してください。
 
 ### Hook ファイルの所有権
 
@@ -842,7 +904,16 @@ worktree にプロジェクトタブが切り替わります。
 
 ## GitHub Discussions でローカル Board の節目を共有する
 
-別マシンと `decision` / `blocked` / `handoff` を共有するには、Board provider を
+別マシンと `decision` / `blocked` / `handoff` を共有するには、PM に
+`discussion.create` の `sync_board:true` で Discussion 作成と接続を依頼できます。
+既存の Discussion に接続する場合は `board.config.set` の `github_discussion` に番号を
+指定します。接続だけ失敗した場合も、Discussion を重複作成せずに復旧できます。
+現在の Board provider が Local 以外なら、作成時は `board_provider:"local"`、
+既存への接続時は `provider:"local"` を明示して切替を依頼してください。
+対象プロジェクトの provider 上書きと接続先を同時に保存し、全体設定や他プロジェクトの
+provider 設定は維持します。明示的な切替がなければ、同期付き作成は GitHub 上に
+Discussion を作る前に拒否されます。
+どちらも現在のリポジトリが対象です。手動で接続する場合は Board provider を
 **Local** のままにして `.gwt/work/board.toml` に接続先を追加します。
 
 ```toml
@@ -1093,6 +1164,10 @@ Issue 内に表示された Agent も含み、PM と Shell はスキップしま
 分割表示を維持し、選んだターミナルに入力フォーカスを移します。
 選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
 再び開けます。
+
+Agent のカードとタブのタイトルは1行表示で、先頭の名前は固定されます。
+作業内容を横にスクロールするか、タイトルへのホバー・キーボードフォーカスで全文を読めます。
+Issue と Project Manager の設定項目も、ホバーとキーボードフォーカスで説明を表示します。
 
 ## Operator デザイン言語 (SPEC-2356)
 
@@ -1479,6 +1554,14 @@ JSON
 所有する command tree を停止します。runner が終了した場合も予約 TTL を待たずに解放します。
 中断は PASS やテスト失敗とは区別し、同じ行列を再実行すると新しい試行を開始します。
 最初のコマンド開始前に取り消した場合は、以前の検証記録を保持します。
+
+検証の子プロセスでは既定で Git の端末プロンプトと Git Credential Manager の対話を無効にします。
+GUI や端末での認証入力が必要になった場合、入力を待たずにエラーを返します。
+キャッシュ済みの認証情報は引き続き使用できます。
+
+同一プロジェクトの holder が回収候補として報告された場合は、`verify.lease.release` に
+`params.lease_id` と空でない `params.reason` を渡します。作業が残っていないことを
+再確認してから回収します。実行中の workload は保護されるため、自分の試行は上記の取消を使います。
 
 初回の `cargo build -p gwt --bin gwtd`、通常の Cargo build、TDD テスト、
 lint、coverage、直接の headed browser 確認、pre-push 確認は verification

@@ -1365,6 +1365,84 @@ mod tests {
     }
 
     #[test]
+    fn monitor_review_isolated_during_wait_and_merge_idle() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let head_sha = |path: &Path| {
+            let head = gwt_core::process::hidden_command("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(head.status.success());
+            String::from_utf8(head.stdout).unwrap().trim().to_string()
+        };
+        let reviewed_sha = head_sha(&repo);
+        // The owner moves on while the review remains bound to the PR head.
+        run_git(
+            &repo,
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "owner delivery bookkeeping",
+            ],
+        );
+        let owner_event = repo.join(".gwt/work/events/owner.jsonl");
+        fs::create_dir_all(owner_event.parent().unwrap()).unwrap();
+        fs::write(&owner_event, "owner event\n").unwrap();
+        let before = fs::read(&owner_event).unwrap();
+        for phase in [
+            gwt::AutonomousPhase::Delivering,
+            gwt::AutonomousPhase::Merged,
+        ] {
+            let mut record = gwt::AutonomousIssueRecord::new(42);
+            record.phase = phase;
+            let mut monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                gwt::IssueMonitorPrefs {
+                    autonomous_records: vec![record],
+                    launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                        issue_number: 42,
+                        window_id: "owner".to_string(),
+                    }],
+                    ..Default::default()
+                },
+            );
+            if phase == gwt::AutonomousPhase::Delivering {
+                let now = chrono::Utc::now().to_rfc3339();
+                assert!(matches!(
+                    monitor.declare_autonomous_wait(42, "CI", "PR merged", &now),
+                    gwt::AutonomousWaitOutcome::Declared { .. }
+                ));
+            }
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+            gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+            let prefs_before = fs::read(&prefs_path).unwrap();
+            let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .working_dir(&repo)
+                .branch("work/issue-42")
+                .build();
+            let mut request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(config));
+            request.set_review_dispatch_context(&reviewed_sha);
+            let gwt::LaunchWizardLaunchRequest::Agent(mut config) = request else {
+                unreachable!()
+            };
+            resolve_launch_worktree(&repo, &mut config).expect("review never waits on the owner");
+            let review_path = config.working_dir.as_ref().unwrap();
+            assert!(!crate::same_worktree_path(review_path, &repo));
+            let review_repo = gwt_git::Repository::discover(review_path).unwrap();
+            assert_eq!(review_repo.current_branch().unwrap(), None);
+            assert_eq!(head_sha(review_path), reviewed_sha);
+            assert!(git_status(review_path, &["diff", "--quiet"]));
+            assert_eq!(fs::read(&owner_event).unwrap(), before);
+            assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+            assert!(!review_path.join(".gwt/work/events/owner.jsonl").exists());
+        }
+    }
+
+    #[test]
     fn launch_worktree_materialization_waits_for_same_branch_lock() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());

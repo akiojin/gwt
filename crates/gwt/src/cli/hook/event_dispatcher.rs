@@ -49,6 +49,18 @@ pub fn handle_with_input(
         ),
         None => output,
     });
+    let result = result.map(|output| {
+        let advisory = run_value(event, "external-skill-advisory", || {
+            super::external_skill_conflicts::advisory_context(event, input, worktree_root)
+        });
+        append_boundary_advisory(output, event, advisory)
+    });
+    let result = result.map(|output| {
+        let advisory = run_value(event, "branch-freshness-advisory", || {
+            super::branch_freshness::handle_with_input(event, input, worktree_root, current_session)
+        });
+        append_boundary_advisory(output, event, advisory)
+    });
     let additional_context_bytes = result
         .as_ref()
         .ok()
@@ -478,10 +490,14 @@ fn handle_stop(
     })?;
     // Evaluate the stop-checks lazily, one at a time: the first StopBlock
     // wins and the remaining checks must NOT run.
-    let stop_checks: [(&str, StopCheck<'_>); 9] = [
+    let stop_checks: [(&str, StopCheck<'_>); 10] = [
         (
             "pm-reporting-stop-check",
             Box::new(|| super::pm_reporting::handle_stop(worktree_root, current_session)),
+        ),
+        (
+            "board-read-stop-check",
+            Box::new(|| crate::board_read_receipts::pm_stop_check(worktree_root, current_session)),
         ),
         // SPEC-3431 FR-012: after the reporting obligation, the PM loop runs — for the
         // PM every other stop gate is either exempt (FR-029) or fail-open, and
@@ -565,20 +581,42 @@ fn handle_stop(
             }),
         ),
     ];
+    let mut board_read_warning = None;
     for (handler, check) in stop_checks {
         let output = run_value(event, handler, check);
+        if handler == "board-read-stop-check" {
+            if let HookOutput::SystemMessage(warning) = &output {
+                board_read_warning = Some(warning.clone());
+            }
+        }
         if matches!(output, HookOutput::StopBlock { .. }) {
             run_step(event, "blocked-stop-runtime-state", || {
                 crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
             })?;
-            return Ok(output);
+            return Ok(append_stop_warning(output, board_read_warning));
         }
     }
     run_step(event, "completed-stop", || {
         super::runtime_state::record_completed_stop_from_env()
     })?;
 
-    Ok(reminder)
+    Ok(append_stop_warning(reminder, board_read_warning))
+}
+
+fn append_stop_warning(output: HookOutput, warning: Option<String>) -> HookOutput {
+    let Some(warning) = warning else {
+        return output;
+    };
+    match output {
+        HookOutput::SystemMessage(text) => {
+            HookOutput::system_message(format!("{text}\n\n{warning}"))
+        }
+        HookOutput::StopBlock { reason } => {
+            HookOutput::stop_block(format!("{reason}\n\n{warning}"))
+        }
+        HookOutput::Silent => HookOutput::system_message(warning),
+        other => other,
+    }
 }
 
 fn run_step<T>(
@@ -625,11 +663,29 @@ fn load_pending_goal_for_hook_worktree_with_session(
 
 fn additional_context_bytes(output: &HookOutput) -> usize {
     match output {
-        HookOutput::HookSpecificAdditionalContext { text, .. } => text.len(),
+        HookOutput::HookSpecificAdditionalContext { text, .. }
+        | HookOutput::PreToolUseAdditionalContext(text) => text.len(),
         HookOutput::PreToolUsePermission { .. }
         | HookOutput::SystemMessage(_)
         | HookOutput::Silent
         | HookOutput::StopBlock { .. } => 0,
+    }
+}
+
+fn append_boundary_advisory(output: HookOutput, event: &str, text: Option<String>) -> HookOutput {
+    let Some(text) = text else {
+        return output;
+    };
+    if let Some(boundary) = IntentBoundaryEvent::from_name(event) {
+        return append_additional_context(output, boundary, Some(text));
+    }
+    match (event, output) {
+        ("PreToolUse", HookOutput::Silent) => HookOutput::pre_tool_use_context(text),
+        ("PreToolUse", HookOutput::PreToolUseAdditionalContext(existing)) => {
+            HookOutput::pre_tool_use_context(format!("{existing}\n\n{text}"))
+        }
+        ("PostToolUse", HookOutput::Silent) => HookOutput::system_message(text),
+        (_, other) => other,
     }
 }
 
@@ -660,7 +716,11 @@ fn append_pm_standing_context(
          Do not assume there are no standing instructions."
             .into()
     });
-    append_additional_context(output, event, (!text.is_empty()).then_some(text))
+    let output = append_additional_context(output, event, (!text.is_empty()).then_some(text));
+    let peer = crate::cli::pm::peer_context(worktree_root).unwrap_or_else(|_| {
+        "Peer PM messages unavailable: the machine-local store could not be read. Do not assume there are no pending requests.".into()
+    });
+    append_additional_context(output, event, (!peer.is_empty()).then_some(peer))
 }
 
 fn append_additional_context(
@@ -1591,6 +1651,7 @@ mod tests {
                 issue_numbers: vec![5342],
                 kind: gwt_core::user_instruction::UserInstructionKind::Standing,
                 supersedes: vec![],
+                authorizations: vec![],
             },
         )
         .unwrap();
@@ -1621,6 +1682,81 @@ mod tests {
     }
 
     #[test]
+    fn peer_messages_reach_only_registered_pm_prompts_without_consumption() {
+        use gwt_core::{
+            pm_peer::{self, PeerKind, PeerProject, PeerSend},
+            test_support::{ScopedEnvVar, ScopedGwtHome},
+        };
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "peer-recipient");
+        let a = home.path().join("a");
+        let b = home.path().join("b");
+        let pm = crate::pm_registry::pm_worktree_path_for_repo_path(&b);
+        std::fs::create_dir_all(&pm).unwrap();
+        assert!(super::super::is_resident_pm_worktree(&pm));
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&b),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: "peer-recipient".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: b.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let message = pm_peer::send(
+            PeerSend {
+                from: PeerProject {
+                    project: a.display().to_string(),
+                    project_dir: gwt_core::paths::gwt_project_dir_for_repo_path(&a),
+                },
+                to: PeerProject {
+                    project: b.display().to_string(),
+                    project_dir: gwt_core::paths::gwt_project_dir_for_repo_path(&b),
+                },
+                kind: PeerKind::Request,
+                text: "Please checkpoint peer request".into(),
+                reply_to: None,
+                timeout_seconds: 900,
+                unavailable: None,
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let event = IntentBoundaryEvent::UserPromptSubmit;
+        for _ in 0..2 {
+            let output = append_pm_standing_context(HookOutput::Silent, event, &pm, true);
+            let HookOutput::HookSpecificAdditionalContext { text, .. } = output else {
+                panic!("missing peer prompt context")
+            };
+            assert!(text.contains(&message.id) && text.contains("Please checkpoint peer request"));
+            assert!(text.contains("not owner authorization"));
+        }
+        assert_eq!(
+            append_pm_standing_context(HookOutput::Silent, event, &pm, false),
+            HookOutput::Silent
+        );
+        assert_eq!(
+            append_pm_standing_context(HookOutput::Silent, IntentBoundaryEvent::Stop, &pm, true),
+            HookOutput::Silent
+        );
+        let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "foreign");
+        assert_eq!(
+            append_pm_standing_context(HookOutput::Silent, event, &pm, true),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
     fn standing_user_instructions_reload_at_each_pm_prompt() {
         use gwt_core::user_instruction::{record, UserInstructionInput, UserInstructionKind};
 
@@ -1635,6 +1771,7 @@ mod tests {
             issue_numbers: vec![5342],
             kind: UserInstructionKind::Standing,
             supersedes: vec![],
+            authorizations: vec![],
         };
         let first = record(&repo, input.clone()).unwrap();
         let initial = append_pm_standing_context(

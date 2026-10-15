@@ -93,11 +93,25 @@ or command log.
 Choose the audience before posting. If the post needs a reply, include
 an explicit `params.mentions` entry:
 
-- `user:<id>` - ask a human user for a response
+- `user:<id>` - registered PM only: ask a human user for a response
 - `agent:<id>` - hand off to or question a specific agent type
 - `session:<id>` - reply to a running session
 - `branch:<name>` - target a workspace branch audience
 - `params.broadcast:true` - make the post visible repo-wide/cross-workspace
+
+For scoped posts, `branch:<name>` resolves to the workspaces of the latest assigned Sessions on that exact branch (case-sensitive).
+Unresolved branch mentions reject the post before it is saved; choose a current branch name or remove the mention and explicitly broadcast.
+Explicit broadcasts skip audience resolution.
+
+Only the registered PM session may use `user:<id>` in agent Board posts.
+Implementation agents address `agent:pm` or the PM's exact `session:<id>`;
+the PM handles human decisions. The operation enforces this for ordinary and
+recovery posts. Missing or stale PM registration grants no exception.
+
+External skills can contain instructions that conflict with gwt's GitHub
+mutation policy. Read the advisory before following those commands and use
+the named JSON operation instead. `hook.health` lists conflicting files and
+commands; diagnostics never authorize an otherwise forbidden mutation.
 
 Without `params.broadcast:true`, `board.post` keeps the post scoped to
 the current workspace and any audience implied by mentions. Do not
@@ -391,6 +405,14 @@ reserving a lease. Use `verify.lease.status` to inspect contention;
 when admission times out. Inspect the reported holder before retrying;
 there is no manual acquire loop or fixed retry schedule.
 
+`deferred` is a temporary wait, not a verification failure or a terminal outcome.
+While the verification tool process is alive, keep polling that same invocation.
+After `deferred`, retry `verify.run` with the identical full requested matrix,
+or declare an active wait through `issue.monitor.wait` with explicit `params.number`
+for the owner Issue, `params.reason`, and `params.resume_condition`. Keep ownership
+until that condition is met. On a resume notification, retry the same matrix;
+do not leave the owner idle. Never use `execution.blocked` or `build.abort` for ordinary admission contention.
+
 Heavy Cargo commands use a bounded verification slot pool. Independent
 worktrees and effective target directories may run concurrently; the same
 worktree or target remains serialized. Capacity follows host CPU/memory or
@@ -522,11 +544,21 @@ entry にしません。
 投稿前に audience を選びます。返答が必要な投稿は必ず `params.mentions`
 付きで:
 
-- `user:<id>` — 人間 user に返答を求める
+- `user:<id>` — registered PM only
 - `agent:<id>` — 特定 agent type に handoff / question
 - `session:<id>` — 実行中 session への返信
 - `branch:<name>` — workspace branch への audience
 - `params.broadcast:true` — repo-wide / cross-workspace に表示
+
+For scoped posts, `branch:<name>` resolves to the workspaces of the latest assigned Sessions on that exact branch (case-sensitive).
+Unresolved branch mentions reject the post before it is saved; choose a current branch name or remove the mention and explicitly broadcast.
+Explicit broadcasts skip audience resolution.
+
+Only the registered PM session may use `user:<id>` in agent Board posts.
+Implementation agents address `agent:pm` or the PM's exact `session:<id>`;
+the PM handles human decisions. Ordinary and recovery posts share this rule.
+Use `hook.health` to inspect external skill files whose GitHub mutation
+instructions conflict with gwt policy, and follow the named JSON alternatives.
 
 `params.broadcast:true` がない `board.post` は current workspace と
 mentions 由来の audience に scope されます。mention 省略を broadcast
@@ -1047,6 +1079,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_3713_materializes_runtime_coordination_recovery_contracts() {
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        crate::pm_guidance::generate_pm_guidance(tmp.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let coordination = read_contract(
+                tmp.path()
+                    .join(provider)
+                    .join("skills/gwt-coordination/SKILL.md"),
+            )
+            .unwrap();
+            assert!(coordination.contains("Only the registered PM session may use `user:<id>`"));
+            assert!(coordination.contains("`agent:pm`"));
+            assert!(coordination.contains("`hook.health`"));
+            let pm =
+                read_contract(tmp.path().join(provider).join("skills/gwt-pm/SKILL.md")).unwrap();
+            assert!(pm.contains("Explicit Board read receipts"));
+            assert!(pm.contains("\"operation\":\"board.show\""));
+            assert!(pm.contains(
+                r#"{"schema_version":1,"operation":"board.show","params":{"all":true}}"#
+            ));
+            assert!(pm.contains("unread `blocked` or `handoff`"));
+            assert!(pm.contains("git fetch origin"));
+        }
+    }
+
     fn required_phrases() -> &'static [&'static str] {
         &[
             "Do not post tool-level updates",
@@ -1054,6 +1113,8 @@ mod tests {
             "`agent:<id>`",
             "`session:<id>`",
             "`branch:<name>`",
+            "latest assigned Sessions on that exact branch",
+            "Unresolved branch mentions reject the post",
             "params.broadcast:true",
             "Without `params.broadcast:true`",
             "gwtd <<'JSON'",
@@ -1140,6 +1201,12 @@ mod tests {
             "first remaining command's admission",
             "Overall: PASS",
             "required headed Chromium evidence",
+            "`deferred` is a temporary wait, not a verification failure or a terminal outcome",
+            "keep polling that same invocation",
+            "explicit `params.number`",
+            "On a resume notification, retry",
+            "do not leave the owner idle",
+            "Never use `execution.blocked` or `build.abort` for ordinary admission contention",
         ];
         let tmp = TempDir::new().unwrap();
         crate::distribute::distribute_to_worktree(tmp.path()).unwrap();

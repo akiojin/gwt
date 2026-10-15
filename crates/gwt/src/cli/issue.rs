@@ -2409,6 +2409,65 @@ fn run_monitor_stop<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    // No active target means this is an idempotent stop or stranded-generation recovery.
+    let observed_prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    let observed_identity =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), observed_prefs)
+            .launch_identity(number);
+    let caller_session =
+        crate::board_read_receipts::caller_session_from_env().filter(|_| observed_identity.active);
+    let (target_session, mut board_warning) = if caller_session.is_some() {
+        match monitor_target_session(
+            &project_root,
+            number,
+            observed_identity.window_id.as_deref(),
+        ) {
+            Ok(session) => (session, None),
+            Err(error) => (
+                None,
+                Some(crate::board_read_receipts::warning(format!(
+                    "Monitor target Session lookup in workspace failed: {error}"
+                ))),
+            ),
+        }
+    } else {
+        (None, None)
+    };
+    let read_warning = match caller_session {
+        Some(session) => match crate::board_read_receipts::recent_owner_unread(
+            &project_root,
+            &session,
+            target_session.as_deref(),
+            Some(number),
+            chrono::Utc::now(),
+        ) {
+            Ok(entries) if !entries.is_empty() => {
+                out.push_str(&serde_json::json!({"number": number, "status": "refused",
+                    "reason": "unread_owner_board_evidence",
+                    "board_warning": board_warning,
+                    "detail": crate::board_read_receipts::read_required_message("issue.monitor.stop", &entries),
+                    "recovery": {"schema_version": 1, "operation": "board.show", "params": {"all": true}}
+                }).to_string());
+                out.push('\n');
+                return Ok(1);
+            }
+            Ok(_) => None,
+            Err(error) => Some(crate::board_read_receipts::warning(error)),
+        },
+        None => None,
+    };
+    if let Some(warning) = read_warning {
+        match board_warning.as_mut() {
+            Some(previous) => {
+                previous.push('\n');
+                previous.push_str(&warning);
+            }
+            None => board_warning = Some(warning),
+        }
+    }
+    if let Some(warning) = &board_warning {
+        tracing::warn!(%warning, "Monitor stop Board observation failed open");
+    }
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let (_, (outcome, identity)) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -2469,6 +2528,7 @@ fn run_monitor_stop<E: CliEnv>(
             "number": number,
             "status": status,
             "reason": reason,
+            "board_warning": board_warning,
             "stopped_window_id": stopped_window_id,
             // Say what is left to do rather than implying the pane is gone.
             "pane_teardown": if stopped_window_id.is_some() {
@@ -2481,6 +2541,58 @@ fn run_monitor_stop<E: CliEnv>(
     out.push_str(&payload.to_string());
     out.push('\n');
     Ok(0)
+}
+
+fn monitor_target_session(
+    project_root: &Path,
+    number: u64,
+    window_id: Option<&str>,
+) -> io::Result<Option<String>> {
+    let Some(window_id) = window_id else {
+        return Ok(None);
+    };
+    let workspace = crate::persistence::load_workspace_state(
+        &crate::persistence::workspace_state_path(project_root),
+    )?;
+    let raw_id = window_id
+        .split_once("::")
+        .filter(|(tab, raw)| !tab.is_empty() && !raw.is_empty())
+        .map(|(_, raw)| raw);
+    // Legacy raw IDs can appear on either side. Two qualified IDs must keep
+    // their project-tab identity rather than matching only their raw suffix.
+    let mut candidates = workspace.windows.iter().filter(|window| {
+        window.id == window_id
+            || match raw_id {
+                Some(raw) => window.id == raw,
+                None => window
+                    .id
+                    .split_once("::")
+                    .filter(|(tab, raw)| !tab.is_empty() && !raw.is_empty())
+                    .is_some_and(|(_, raw)| raw == window_id),
+            }
+    });
+    let window = candidates.next().ok_or_else(|| {
+        io::Error::other("the Monitor target window is absent from the persisted workspace")
+    })?;
+    if candidates.next().is_some() {
+        return Err(io::Error::other(
+            "the Monitor target window identity is ambiguous in the workspace",
+        ));
+    }
+    if window
+        .linked_issue_number
+        .is_some_and(|owner| owner != number)
+    {
+        return Err(io::Error::other(
+            "the persisted target window belongs to another Issue",
+        ));
+    }
+    window
+        .session_id
+        .clone()
+        .filter(|session| !session.is_empty())
+        .map(Some)
+        .ok_or_else(|| io::Error::other("the persisted target window has no Session binding"))
 }
 
 fn monitor_execution_settlement(
@@ -3871,6 +3983,11 @@ pub fn validate_monitor_profiles_set(
     let mut providers = std::collections::BTreeSet::new();
     for profile in profiles {
         let provider = match gwt_agent::resolve_agent_id(&profile.agent_id) {
+            Some(gwt_agent::AgentId::Custom(id))
+                if crate::issue_monitor::custom_coding_agent_definition(&id).is_some() =>
+            {
+                id.to_ascii_lowercase()
+            }
             Some(gwt_agent::AgentId::Custom(_)) | None => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -3994,6 +4111,11 @@ fn resolve_monitor_wait_issue_number(
     explicit.or_else(|| launch_context?.trim().parse::<u64>().ok())
 }
 
+// Wait declarations are durable CLI commands, outside the GUI's 200ms hot path.
+// Keep a bounded budget for both the preflight and the single publish; never
+// replay an ambiguous ACK timeout or write around the daemon's authority.
+const MONITOR_WAIT_IPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Issue #3844: whether `number` has a live launch in the Issue Monitor that
 /// owns `project_root` — the daemon snapshot when one is running, the
 /// persisted prefs otherwise.
@@ -4001,8 +4123,11 @@ fn monitor_launch_is_live(
     project_root: &std::path::Path,
     number: u64,
 ) -> Result<bool, SpecOpsError> {
-    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
-        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status_with_timeout(
+        project_root,
+        MONITOR_WAIT_IPC_TIMEOUT,
+    )
+    .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
     {
         let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
@@ -4023,7 +4148,11 @@ fn publish_monitor_wait_control(
         serde_json::json!({ "wait": wait }),
         std::process::id(),
     );
-    crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+    crate::daemon_publisher::publish_issue_monitor_control_with_timeout(
+        project_root,
+        payload,
+        MONITOR_WAIT_IPC_TIMEOUT,
+    )
 }
 
 /// Issue #4078 AC-2: commit the wait declaration straight to the durable Issue
@@ -4162,7 +4291,9 @@ fn run_monitor_wait<E: CliEnv>(
                 &serde_json::json!({
                     "number": number,
                     "status": "failed",
+                    "refusal": quota_hold_clear_publish_refusal(&error),
                     "detail": format!("wait declaration publish failed: {error}"),
+                    "recovery": "run issue.monitor.status with this project root to inspect active_launches and last_error (including prefs-lock holder/deadline diagnostics); an unknown outcome may already be committed, so check waiting before retrying and never write prefs around daemon authority",
                 })
                 .to_string(),
             );
@@ -11433,6 +11564,44 @@ mod tests {
             .is_some_and(|summary| summary.starts_with("auto (2): ")));
     }
 
+    #[test]
+    fn issue_monitor_profiles_set_accepts_registered_custom_and_rejects_duplicates() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let config = gwt_config::Settings::global_config_path().expect("config path");
+        fs::create_dir_all(config.parent().unwrap()).expect("config dir");
+        fs::write(
+            &config,
+            r#"[tools.customCodingAgents.my-agent]
+id = "my-agent"
+displayName = "My Agent"
+agentType = "command"
+command = "my-agent-cli"
+"#,
+        )
+        .expect("register custom agent");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let env = crate::cli::TestEnv::new(repo.clone());
+        run_monitor_profiles_set(
+            &env,
+            Some(&repo),
+            vec![pool_patch("codex", &[]), pool_patch("my-agent", &[])],
+            None,
+            &mut String::new(),
+        )
+        .expect("save registered custom candidate");
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .expect("read saved candidates");
+        assert_eq!(prefs.launch_profile_pool()[1].agent_id, "my-agent");
+
+        let duplicate = pool_profile("my-agent", &[]);
+        let error = validate_monitor_profiles_set(&[duplicate.clone(), duplicate], None)
+            .expect_err("duplicate custom candidate must be rejected");
+        assert!(error.to_string().contains("duplicate launch candidate"));
+    }
+
     /// Issue #4079 AC-3/AC-4/AC-5: reordering the pool with `{agent_id}`-only
     /// elements must not reset the settings it reorders, a provider new to the
     /// pool inherits the saved head's shared fields, and the reply names every
@@ -11845,6 +12014,318 @@ mod tests {
         assert!(out.contains("\"status\":\"already_stopped\""), "{out}");
     }
 
+    #[test]
+    fn issue_3713_monitor_stop_optional_workspace_failure_warns_without_blocking() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "reader-session");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab::owner".into(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let path = crate::persistence::workspace_state_path(&repo);
+        std::fs::write(&path, "{broken workspace").unwrap();
+        let entry = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Owner",
+            gwt_core::coordination::BoardEntryKind::Handoff,
+            "Optional lookup unavailable",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("owner-session");
+        crate::board_provider::post_entry(&repo, entry).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorStop {
+                    project_root: Some(repo),
+                    number: 42,
+                    reason: "recover broken workspace".into(),
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0,
+            "optional lookup failure must not block recovery: {out}"
+        );
+        let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let warning = result["board_warning"].as_str().unwrap_or_default();
+        assert!(
+            warning.contains("unknown") && warning.contains("workspace"),
+            "{out}"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{broken workspace");
+    }
+
+    #[test]
+    fn issue_3713_monitor_stop_requires_reading_origin_session_only_posts() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (stored_id, launched_id, kind) in [
+            (
+                "owner",
+                "tab::owner",
+                gwt_core::coordination::BoardEntryKind::Status,
+            ),
+            (
+                "tab::owner",
+                "tab::owner",
+                gwt_core::coordination::BoardEntryKind::Handoff,
+            ),
+            (
+                "owner",
+                "owner",
+                gwt_core::coordination::BoardEntryKind::Handoff,
+            ),
+            (
+                "tab::owner",
+                "owner",
+                gwt_core::coordination::BoardEntryKind::Handoff,
+            ),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let _home = ScopedGwtHome::set(tmp.path().join("home"));
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "reader-session");
+            let repo = tmp.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+            crate::save_issue_monitor_prefs(
+                &prefs_path,
+                &crate::IssueMonitorPrefs {
+                    enabled: true,
+                    launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                        issue_number: 42,
+                        window_id: launched_id.into(),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut workspace = crate::persistence::empty_workspace_state();
+            let mut window = crate::persistence::default_workspace_state()
+                .windows
+                .remove(0);
+            window.id = stored_id.into();
+            window.preset = crate::WindowPreset::Agent;
+            window.session_id = Some("owner-session".into());
+            window.linked_issue_number = Some(42);
+            workspace.windows.push(window);
+            crate::persistence::save_workspace_state(
+                &crate::persistence::workspace_state_path(&repo),
+                &workspace,
+            )
+            .unwrap();
+            let entry = gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::Agent,
+                "Owner",
+                kind,
+                "My body must be read before this window is stopped",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_origin_session_id("owner-session");
+            crate::board_provider::post_entry(&repo, entry).unwrap();
+            let before = std::fs::read(&prefs_path).unwrap();
+            let mut env = crate::cli::TestEnv::new(repo.clone());
+            let stop = || IssueCommand::MonitorStop {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "cleanup".into(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: None,
+            };
+            let mut out = String::new();
+            assert_eq!(
+                run(&mut env, stop(), &mut out).unwrap(),
+                1,
+                "origin-session-only post must refuse stop for {stored_id}/{launched_id}: {out}"
+            );
+            assert!(out.contains("board.show"), "{out}");
+            assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+            crate::cli::board::run(
+                &mut env,
+                crate::cli::board::BoardCommand::Show {
+                    json: true,
+                    workspace: None,
+                    all: true,
+                    limit: None,
+                    unresolved: false,
+                },
+                &mut String::new(),
+            )
+            .unwrap();
+            out.clear();
+            assert_eq!(
+                run(&mut env, stop(), &mut out).unwrap(),
+                0,
+                "explicit body read must enable the same stop: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_3713_monitor_stop_requires_reading_recent_owner_evidence() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "reader-session");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut reader = gwt_agent::Session::new(&repo, "work/reader", gwt_agent::AgentId::Codex);
+        reader.id = "reader-session".into();
+        reader.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab::owner".into(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let entry = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Owner",
+            gwt_core::coordination::BoardEntryKind::Handoff,
+            "Need a ruling before closing",
+            None,
+            None,
+            vec![],
+            vec!["42".into()],
+        );
+        crate::board_provider::post_entry(&repo, entry).unwrap();
+        let before = std::fs::read(&prefs_path).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: Some(repo.clone()),
+                number: 42,
+                reason: "cleanup".into(),
+                claim_id: None,
+                delivery_id: None,
+                window_id: None,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(code, 1, "unread owner evidence must refuse stop: {out}");
+        assert!(out.contains("board.show"), "{out}");
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
+        let mut read_out = String::new();
+        crate::cli::board::run(
+            &mut env,
+            crate::cli::board::BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: true,
+                limit: None,
+                unresolved: false,
+            },
+            &mut read_out,
+        )
+        .unwrap();
+        crate::board_provider::post_entry(
+            &repo,
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::Agent,
+                "Owner",
+                gwt_core::coordination::BoardEntryKind::Handoff,
+                "A new ruling arrived after the first read",
+                None,
+                None,
+                vec![],
+                vec!["42".into()],
+            ),
+        )
+        .unwrap();
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorStop {
+                    project_root: Some(repo.clone()),
+                    number: 42,
+                    reason: "stale read".into(),
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                &mut out
+            )
+            .unwrap(),
+            1,
+            "new owner evidence must invalidate the prior read: {out}"
+        );
+        read_out.clear();
+        crate::cli::board::run(
+            &mut env,
+            crate::cli::board::BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: true,
+                limit: None,
+                unresolved: false,
+            },
+            &mut read_out,
+        )
+        .unwrap();
+        out.clear();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::MonitorStop {
+                    project_root: Some(repo),
+                    number: 42,
+                    reason: "read and decided".into(),
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0,
+            "explicit read must enable retry: {out}"
+        );
+    }
+
     /// Issue #4200 AC-1 / AC-3 / AC-5: revoking a launch releases its execution
     /// generation, so the Issue can be launched again.
     ///
@@ -12208,6 +12689,221 @@ mod tests {
             prefs.queued_launch_session_strategies.get(&3705),
             Some(&crate::IssueMonitorLaunchSessionStrategy::FreshRequired)
         );
+    }
+
+    #[test]
+    fn monitor_wait_eight_concurrent_declarations_survive_slow_ack_under_cpu_load() {
+        use crate::cli::daemon::transport::IpcListener;
+        use gwt_core::daemon::{
+            persist_endpoint, ClientFrame, DaemonEndpoint, DaemonFrame, DaemonStatus,
+            IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, RuntimeTarget,
+            DAEMON_PROTOCOL_VERSION,
+        };
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // Keep the Unix socket below sockaddr_un's limit even with a long TMPDIR.
+        #[cfg(unix)]
+        let tmp = tempfile::Builder::new()
+            .prefix("gwt-wait-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        #[cfg(not(unix))]
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let _home = ScopedGwtHome::set(&home);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let prefs = crate::IssueMonitorPrefs {
+            launched_issues: (1..=8)
+                .map(|issue_number| crate::IssueMonitorLaunchedIssue {
+                    issue_number,
+                    window_id: format!("tab::agent-{issue_number}"),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let status = serde_json::to_value(
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs)
+                .agent_status(),
+        )
+        .unwrap();
+        let scope = RuntimeScope::from_project_root(&repo, RuntimeTarget::Host).unwrap();
+        let bind = tmp.path().join("wait.sock").to_string_lossy().into_owned();
+        #[cfg(windows)]
+        let bind = gwt_core::daemon::windows_pipe_name_for(&bind);
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            bind,
+            "wait-test".into(),
+            "test".into(),
+        );
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn({
+            let home = home.clone();
+            move || {
+                let _home = ScopedGwtHome::set(home);
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async move {
+                        let mut listener = IpcListener::bind(Path::new(&endpoint.bind)).unwrap();
+                        persist_endpoint(
+                            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+                            &endpoint,
+                        )
+                        .unwrap();
+                        ready_tx.send(()).unwrap();
+                        let mut handlers = tokio::task::JoinSet::new();
+                        let requests = tokio::time::timeout(Duration::from_secs(30), async {
+                            for _ in 0..16 {
+                                let stream = listener.accept().await.unwrap();
+                                let status = status.clone();
+                                let repo = repo.clone();
+                                handlers.spawn(async move {
+                                    let (reader, mut writer) = stream.into_split();
+                                    let mut reader = BufReader::new(reader);
+                                    let mut line = String::new();
+                                    reader.read_line(&mut line).await.unwrap();
+                                    let _: IpcHandshakeRequest =
+                                        serde_json::from_str(line.trim()).unwrap();
+                                    let handshake = IpcHandshakeResponse {
+                                        protocol_version: DAEMON_PROTOCOL_VERSION,
+                                        daemon_version: "test".into(),
+                                        accepted: true,
+                                        rejection_reason: None,
+                                    };
+                                    writer
+                                        .write_all(
+                                            format!(
+                                                "{}\n",
+                                                serde_json::to_string(&handshake).unwrap()
+                                            )
+                                            .as_bytes(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                    line.clear();
+                                    reader.read_line(&mut line).await.unwrap();
+                                    let frame: ClientFrame =
+                                        serde_json::from_str(line.trim()).unwrap();
+                                    // Model a loaded worker after receipt, beyond the old GUI budget.
+                                    tokio::time::sleep(Duration::from_millis(300)).await;
+                                    let response = match frame {
+                                        ClientFrame::Status => DaemonFrame::Status(DaemonStatus {
+                                            protocol_version: DAEMON_PROTOCOL_VERSION,
+                                            daemon_version: "test".into(),
+                                            uptime_seconds: 0,
+                                            broadcast_channels: 0,
+                                            connections: 1,
+                                            issue_monitor: Some(status),
+                                        }),
+                                        ClientFrame::Publish { payload, .. } => {
+                                            let wait = &payload["payload"]["wait"];
+                                            record_monitor_wait_in_prefs(
+                                                &repo,
+                                                wait["issue_number"].as_u64().unwrap(),
+                                                wait["reason"].as_str().unwrap(),
+                                                wait["resume_condition"].as_str().unwrap(),
+                                                false,
+                                                wait["at"].as_str().unwrap(),
+                                            )
+                                            .unwrap();
+                                            DaemonFrame::Ack
+                                        }
+                                        other => panic!("unexpected frame: {other:?}"),
+                                    };
+                                    let _ = writer
+                                        .write_all(
+                                            format!(
+                                                "{}\n",
+                                                serde_json::to_string(&response).unwrap()
+                                            )
+                                            .as_bytes(),
+                                        )
+                                        .await;
+                                });
+                            }
+                            while let Some(result) = handlers.join_next().await {
+                                result.unwrap();
+                            }
+                        })
+                        .await;
+                        requests.is_ok()
+                    })
+            }
+        });
+        ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let load_ready = Arc::new(std::sync::Barrier::new(3));
+        let failures = std::thread::scope(|threads| {
+            let loads: Vec<_> = (0..2)
+                .map(|_| {
+                    let stop = Arc::clone(&stop);
+                    let load_ready = Arc::clone(&load_ready);
+                    threads.spawn(move || {
+                        load_ready.wait();
+                        while !stop.load(Ordering::Acquire) {
+                            std::hint::black_box(7_u64.wrapping_mul(13));
+                            std::hint::spin_loop();
+                        }
+                    })
+                })
+                .collect();
+            load_ready.wait();
+            let calls: Vec<_> = (1..=8)
+                .map(|number| {
+                    let repo = tmp.path().join("repo");
+                    let home = home.clone();
+                    threads.spawn(move || {
+                        let _home = ScopedGwtHome::set(home);
+                        let env = crate::cli::TestEnv::new(repo.clone());
+                        let mut out = String::new();
+                        let result = run_monitor_wait(
+                            &env,
+                            Some(&repo),
+                            Some(number),
+                            Some("host busy"),
+                            Some("verification finishes"),
+                            false,
+                            &mut out,
+                        );
+                        (result, out)
+                    })
+                })
+                .collect();
+            let results: Vec<_> = calls.into_iter().map(|call| call.join()).collect();
+            stop.store(true, Ordering::Release);
+            for load in loads {
+                load.join().unwrap();
+            }
+            results
+        });
+        let complete = server.join().unwrap();
+        for result in failures {
+            let (code, out) = result.unwrap();
+            assert_eq!(code.unwrap(), 0, "{out}");
+            let output: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(output["status"], "waiting");
+            assert_eq!(output["transport"], "daemon");
+        }
+        assert!(
+            complete,
+            "all eight status reads and single publishes must arrive"
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(persisted.autonomous_records.len(), 8);
+        assert!(persisted.autonomous_records.iter().all(|record| record
+            .wait
+            .as_ref()
+            .is_some_and(|wait| wait.reason == "host busy")));
     }
 
     /// Issue #4078 AC-1/AC-2: accepting a wait declaration must not depend on

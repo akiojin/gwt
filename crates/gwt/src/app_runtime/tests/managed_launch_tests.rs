@@ -1,6 +1,198 @@
 use super::*;
 
 #[test]
+fn registered_pm_workspace_close_uses_exact_cached_eligibility_and_current_membership() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let work_id = "work-session-stopped";
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        &repo,
+        work_id,
+        Some("Stopped work"),
+        None,
+        None,
+        &[],
+        Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/stopped".into()),
+                worktree_path: Some(repo.join("stopped")),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        ),
+        Some("stopped"),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let principal = AgentSessionPrincipal::for_test(&repo, "pm-session-live").unwrap();
+    let request = || AgentFrontendRequest::CloseWork {
+        work_id: work_id.into(),
+        close_kind: "done".into(),
+    };
+    let unavailable =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &unavailable[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: true,
+            ..
+        }
+    ));
+    // Consume the scheduled preparation and accept its latest generation.
+    wait_for_active_work_projection(&mut runtime);
+    runtime.invalidate_workspace_projection_patch("tab-1");
+    assert!(runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .is_none());
+    let loading =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &loading[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: true,
+            ..
+        }
+    ));
+    let view = wait_for_active_work_projection(&mut runtime);
+    assert!(view
+        .active_works
+        .iter()
+        .flat_map(|row| &row.works)
+        .any(|work| work.id == work_id && work.manual_close_allowed));
+
+    let ordinary = AgentSessionPrincipal::for_test(&repo, "other-session").unwrap();
+    let denied = runtime.handle_agent_frontend_event("other-client".into(), ordinary, request());
+    assert!(matches!(
+        &denied[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: false,
+            ..
+        }
+    ));
+    let unknown = runtime.handle_agent_frontend_event(
+        "pm-client".into(),
+        principal.clone(),
+        AgentFrontendRequest::CloseWork {
+            work_id: "unknown-or-foreign-work".into(),
+            close_kind: "done".into(),
+        },
+    );
+    assert!(matches!(
+        &unknown[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: false,
+            ..
+        }
+    ));
+
+    let state = runtime.project_state_for_tab("tab-1").unwrap();
+    for row in &mut state
+        .active_work_projection_cache
+        .borrow_mut()
+        .get_mut("tab-1")
+        .unwrap()
+        .active_works
+    {
+        for work in &mut row.works {
+            if work.id == work_id {
+                work.manual_close_allowed = false;
+                work.close_blocked_reason = Some("remote_unknown".into());
+            }
+        }
+    }
+    let remote =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &remote[0].event,
+        BackendEvent::WorkCloseResult { ok: false, .. }
+    ));
+    runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow_mut()
+        .insert("tab-1".into(), view);
+
+    // Attach a new current member after the cached view was accepted. It is
+    // absent from cached.agents, so the Host must read canonical membership.
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        &repo,
+        work_id,
+        None,
+        None,
+        None,
+        &[],
+        None,
+        Some("new-member"),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let mut resumed = sample_active_agent_session("tab-1", "tab-1::resumed");
+    resumed.session_id = "new-member".into();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::resumed".into(), resumed);
+    let live =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &live[0].event,
+        BackendEvent::WorkCloseResult { ok: false, error: Some(error), .. } if error.contains("current member agent")
+    ));
+    runtime.active_agent_sessions.remove("tab-1::resumed");
+
+    let stale =
+        runtime.handle_agent_frontend_event("pm-client".into(), principal.clone(), request());
+    assert!(matches!(
+        &stale[0].event,
+        BackendEvent::WorkCloseResult {
+            ok: false,
+            retryable: true,
+            ..
+        }
+    ));
+    wait_for_active_work_projection(&mut runtime);
+
+    let closed = runtime.handle_agent_frontend_event("pm-client".into(), principal, request());
+    assert!(
+        matches!(
+            &closed[0].event,
+            BackendEvent::WorkCloseResult {
+                ok: true,
+                changed: Some(true),
+                ..
+            }
+        ),
+        "{:?}",
+        closed[0].event
+    );
+    let items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .unwrap()
+        .unwrap();
+    let target = items
+        .work_items
+        .iter()
+        .find(|work| work.id == work_id)
+        .unwrap();
+    assert!(target.is_terminal());
+    assert!(!target.discarded);
+    assert!(items
+        .work_items
+        .iter()
+        .filter(|work| work.id != work_id)
+        .all(|work| !work.is_terminal()));
+}
+
+#[test]
 fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work() {
     let _env_lock = env_test_lock()
         .lock()
@@ -2259,7 +2451,7 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
     }
 
     runtime.restart_window_events(&codex_id);
-    runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds);
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds, None);
 
     let inventory = gwt::session_inventory::observe_sessions(&repo, &runtime.sessions_dir);
     let live_windows = runtime.runtimes.keys().cloned().collect::<Vec<_>>();

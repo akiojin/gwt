@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
+import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
 function load(name, bindings = {}) {
+  bindings = { setControlExplanation, ...bindings };
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing ${name}`);
   const open = source.indexOf("{", source.indexOf(")", start));
@@ -17,6 +19,52 @@ function load(name, bindings = {}) {
   return Function(...Object.keys(bindings), `return (${source.slice(start, end)})`)(...Object.values(bindings));
 }
 
+test("Settings entry points reuse only the requested surface owner", () => {
+  const { document, CustomEvent } = parseHTML('<html><body><div id="normal"></div><div id="pm"></div></body></html>');
+  const normal = document.getElementById("normal"), pm = document.getElementById("pm");
+  for (const body of [normal, pm]) body.dataset.settingsProjectRoot = "/A";
+  pm.dataset.surfaceOwner = "pm";
+  const selected = [], focused = [], pending = [];
+  load("installSettingsOpenHandler", { switchSettingsTab: (body, target) => selected.push([body.id, target]) })({
+    document, settingsWindowBodies: new Set([normal, pm]), activeProjectTab: () => ({ project_root: "/A" }),
+    focusOrSpawnPreset: (...args) => focused.push(args), setPendingTarget: (...args) => pending.push(args),
+  });
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
+  assert.deepEqual(selected, [["pm", "project-manager"], ["normal", "issues"]]);
+  assert.deepEqual(focused, [["settings", { surfaceOwner: "pm" }], ["settings", { surfaceOwner: null }]]);
+  pm.remove();
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
+  assert.deepEqual(pending, [["project-manager", "pm"]]);
+});
+
+test("Reopening an existing System Settings window reloads CLI update preferences", () => {
+  const { document, CustomEvent } = parseHTML('<html><body><div id="settings"></div></body></html>');
+  const body = document.getElementById("settings");
+  body.dataset.settingsProjectRoot = "/A";
+  const sent = [];
+  load("installSettingsOpenHandler", { switchSettingsTab: () => {} })({
+    document, settingsWindowBodies: new Set([body]), activeProjectTab: () => ({ project_root: "/A" }),
+    focusOrSpawnPreset: () => {}, setPendingTarget: () => assert.fail("reuse the existing window"),
+    send: message => sent.push(message),
+  });
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "system" } }));
+  assert.deepEqual(sent, [{ kind: "get_update_settings" }]);
+});
+
+test("PM auxiliary Settings scrolls its own content without scrolling app chrome", () => {
+  const { document } = parseHTML('<div id="settings" data-surface-owner="pm"><div class="settings-body"><section class="settings-panel" data-settings-panel="project-manager"></section></div></div>');
+  const body = document.getElementById("settings"), scroller = body.querySelector(".settings-body"), panel = body.querySelector("section");
+  Object.defineProperty(scroller, "offsetTop", { value: 20 });
+  Object.defineProperty(panel, "offsetTop", { value: 120 });
+  panel.scrollIntoView = () => assert.fail("must not scroll the document or outer app chrome");
+  let focused = false;
+  panel.focus = options => { focused = options.preventScroll; };
+  load("switchSettingsTab")(body, "project-manager", true);
+  assert.equal(scroller.scrollTop, 100);
+  assert.equal(focused, true);
+});
+
 test("Issues Settings keeps labels and values together and sends existing project controls", () => {
   const { document, Event } = parseHTML("<html><body><section></section></body></html>");
   const panel = document.querySelector("section"), sent = [];
@@ -28,6 +76,12 @@ test("Issues Settings keeps labels and values together and sends existing projec
     send: message => sent.push(message),
   });
   assert.match(panel.textContent, /Project settings.*Project A/);
+  assert.deepEqual([...panel.querySelectorAll("legend")].map(el => el.textContent), ["Launch control", "Refill", "Target"]);
+  assert.equal(panel.firstElementChild.tagName, "H3", "project identity precedes settings groups");
+  assert.equal(panel.querySelector('[aria-label="Max active"]').closest("fieldset").querySelector("legend").textContent, "Launch control");
+  assert.equal(panel.querySelector('[aria-label="Auto-refill"]').closest("fieldset").querySelector("legend").textContent, "Refill");
+  assert.equal(panel.querySelector('[aria-label="Allowed labels"]').closest("fieldset").querySelector("legend").textContent, "Target");
+  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Autonomous", "Max active", "Monitoring"]);
   const change = (name, value) => {
     const control = panel.querySelector(`[aria-label="${name}"]`);
     assert.ok(control, name);
@@ -53,6 +107,33 @@ test("Issues Settings keeps labels and values together and sends existing projec
   assert.equal(panel.querySelector('[aria-label="Autonomous"]'), null, "the summary owns Autonomous once");
 });
 
+test("Issues disclosure reuses authoritative launch controls and returns them to the compact summary", () => {
+  const { document } = parseHTML('<div class="settings-root"><div class="knowledge-monitor-controls"><button data-action="monitor-autonomous">Autonomous</button><button data-action="monitor-toggle">Start</button><button data-action="monitor-settings">⚙</button></div><details class="settings-issues-options"><section></section></details></div>');
+  const body = document.querySelector(".settings-root");
+  const panel = body.querySelector("section");
+  const disclosure = body.querySelector("details");
+  const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+  let clicked = 0;
+  launchControls[1].addEventListener("click", () => clicked++);
+  const render = load("renderIssuesSettingsPanel");
+  const position = load("positionIssuesLaunchControls");
+  disclosure.setAttribute("open", "");
+  for (let i = 0; i < 2; i++) {
+    render(panel, { project: { name: "A" }, status: {}, send: () => {}, launchControls });
+    position(body);
+    assert.equal(panel.querySelector('[data-settings-launch-action="monitor-toggle"] > :last-child').firstElementChild === launchControls[1], true);
+    assert.equal(panel.querySelector('[data-action="monitor-autonomous"]').closest("fieldset").querySelector("legend").textContent, "Launch control");
+    launchControls[1].click();
+  }
+  disclosure.removeAttribute("open");
+  position(body);
+  assert.equal(body.querySelector(".knowledge-monitor-controls").firstElementChild, launchControls[0]);
+  assert.equal(body.querySelectorAll('[data-action="monitor-toggle"]').length, 1);
+  assert.equal(clicked, 2, "original listeners survive status rerenders");
+  const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
+  assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
+});
+
 test("Auto capacity is read-only until Manual is selected", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
@@ -65,6 +146,47 @@ test("Auto capacity is read-only until Manual is selected", () => {
   mode.querySelector('[value="manual"]').selected = true;
   mode.dispatchEvent(new Event("change"));
   assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 4 }]);
+});
+
+test("AC-6: Issues Settings exposes explanations for capacity, refill and targeting", t => {
+  const { document } = parseHTML("<html><body><section></section></body></html>");
+  const panel = document.querySelector("section"), sent = [];
+  const explanations = bindControlExplanations({ document, root: panel, id: "settings-explanation" });
+  t.after(() => explanations.dispose());
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
+  for (const [name, meaning] of [
+    ["Max active", /maximum.*agents/i], ["Max active mode", /automatic.*manual/i],
+    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*disables/i],
+    ["Allowed labels", /matching issues/i],
+  ]) {
+    const control = panel.querySelector(`[aria-label="${name}"]`);
+    assert.match(control.getAttribute("aria-description") || "", meaning, name);
+    assert.equal(control.dataset.issueExplanation, control.getAttribute("aria-description"));
+    assert.ok(control.dataset.issueExplanationKey, "status redraw can find the replacement control");
+    if (!control.disabled) {
+      control.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+      assert.equal(document.getElementById("settings-explanation").textContent, control.getAttribute("aria-description"));
+      assert.equal(explanations.visible, true);
+      control.dispatchEvent(new document.defaultView.Event("focusout", { bubbles: true }));
+    }
+    control.dispatchEvent(new document.defaultView.Event("mouseover", { bubbles: true }));
+    assert.equal(document.getElementById("settings-explanation").textContent, control.getAttribute("aria-description"));
+    assert.equal(explanations.visible, true);
+    control.dispatchEvent(new document.defaultView.Event("mouseout", { bubbles: true }));
+  }
+  const capacity = panel.querySelector(".settings-issues-capacity");
+  assert.equal(capacity.getAttribute("tabindex"), "0", "Auto's disabled value has a keyboard reachable explanation");
+  assert.match(capacity.getAttribute("aria-description"), /maximum.*agents/i);
+  capacity.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 5, max_active_agents_override: null }, send: message => sent.push(message) });
+  panel.dispatchEvent(new document.defaultView.Event("control-explanations:refresh"));
+  assert.equal(explanations.visible, true, "a Settings redraw keeps a focused explanation readable");
+  const replacement = panel.querySelector(".settings-issues-capacity");
+  assert.equal(replacement.getAttribute("aria-describedby"), "settings-explanation");
+  assert.equal(document.getElementById("settings-explanation").textContent, replacement.getAttribute("aria-description"));
+  assert.deepEqual(sent, [], "registering explanations does not change settings");
 });
 
 test("Manual starts at one when Auto has no available capacity", () => {
@@ -108,6 +230,59 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.match(a.textContent, /Candidates/);
   assert.ok(a.querySelector('[aria-label="Prefer for codex"]'));
   assert.ok(a.querySelector('[data-action="add-candidate"]'));
+});
+
+test("Candidates use the known catalog, including custom agents, and explain empty or invalid choices", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "ClaudeCode" }],
+    availableAgents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }, { id: "team-agent", name: "Team agent" }],
+    send: message => sent.push(message),
+  });
+  const picker = panel.querySelector('[aria-label="Add candidate candidate"]');
+  assert.equal(picker.localName, "select");
+  assert.deepEqual([...picker.options].map(option => option.value), ["", "codex", "team-agent"]);
+  const add = panel.querySelector('[data-action="add-candidate"]');
+  add.click();
+  assert.match(panel.querySelector('[role="alert"]').textContent, /Select an agent/);
+  picker.querySelector('[value="team-agent"]').selected = true;
+  add.click();
+  assert.deepEqual(sent[0].profiles.map(profile => profile.agent_id), ["ClaudeCode", "team-agent"]);
+  panel.querySelector('[aria-label="Agent ClaudeCode"]').value = "Codex";
+  picker.querySelector('[value="codex"]').selected = true;
+  add.click();
+  assert.match(panel.querySelector('[role="alert"]').textContent, /already in the candidate pool/);
+  assert.equal(sent.length, 1, "a legacy alias in the draft is already the same provider");
+  assert.ok(panel.querySelector(".settings-status"), "feedback uses the shared Settings primitive");
+});
+
+test("Candidates disable addition with an accessible reason when the catalog is exhausted", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "Codex" }], availableAgents: [{ id: "codex", name: "Codex" }],
+    send: () => assert.fail("no available candidate"),
+  });
+  assert.equal(panel.querySelector('[data-action="add-candidate"]').disabled, true);
+  assert.match(panel.querySelector('[role="status"]').textContent, /All known agents.*candidate pool/);
+});
+
+test("a rejected candidate save shows its reason inline and preserves the draft", () => {
+  const { document } = parseHTML('<div id="settings"><section data-settings-candidates data-saving="true" data-dirty="true" data-pending-request="1"><input value="draft model"><p data-candidate-status></p></section></div>');
+  const body = document.getElementById("settings");
+  body.dataset.settingsProjectRoot = "/A";
+  const apply = load("renderCandidateSaveError");
+  const panel = body.querySelector("section");
+  apply(panel, { request_id: 2, message: "Unrelated save rejected" });
+  assert.equal(panel.dataset.saving, "true", "a stale failure must not cancel this save");
+  panel.dataset.saving = "false"; // Editing while the save is in flight keeps the pending request.
+  apply(panel, { request_id: 1, message: "Candidate save rejected" });
+  assert.equal(panel.dataset.saving, "false");
+  assert.equal(panel.dataset.dirty, "true");
+  assert.equal(panel.querySelector("input").value, "draft model");
+  assert.equal(panel.querySelector('[role="alert"]').textContent, "Candidate save rejected");
+  assert.match(readFileSync(new URL("../app.js", import.meta.url), "utf8"), /case "issue_monitor_profiles_write_failed":\s*applyIssueMonitorProfilesError\(event\)/);
 });
 
 test("section-addressed Settings selects and focuses the requested project panel", () => {

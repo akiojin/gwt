@@ -1,5 +1,6 @@
+import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { createUiStateStore } from "./ui-state-store.js";
-// SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item / PR Kanban)
+// SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
 // bridge state map (cache-backed entries, semantic search coalescing,
 // detail correlation, auto-refresh timer, kanban hide-done preference),
@@ -19,7 +20,7 @@ import { createUiStateStore } from "./ui-state-store.js";
 //   app.js (the markdown body renderer is shared with the Board surface).
 // - windowMap / workspaceWindowById / getWorkspaceWindows: workspace window lookups.
 // - pendingIndexOpenTargetsByPreset: index-open handoff targets by preset.
-// - knowledgeKindForPreset(preset): issue/pr kind mapping.
+// - knowledgeKindForPreset(preset): Issue/SPEC kind mapping.
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn used by drawer actions.
 // - openIssueLaunchWizard(windowId, issueNumber): launch wizard entry.
@@ -27,6 +28,147 @@ import { createUiStateStore } from "./ui-state-store.js";
 // - launchPending: shared Resume/Launch pending controller.
 import { createFocusTrap } from "/focus-trap.js";
 import { createLaunchOperationId } from "./launch-pending-controller.js";
+
+// Keep only the visible window of large collections. Heights are measured per
+// Issue identity; estimates apply only to rows that have never been mounted.
+const keyedKnowledgeLists = new WeakMap();
+function reconcileKnowledgeList(host, entries, options) {
+  let view = keyedKnowledgeLists.get(host);
+  if (!view) {
+    const doc = host.ownerDocument;
+    const cache = new Map();
+    const heights = new Map();
+    let items = [], settings, offsets = [], forced = -1, measuredWidth = null;
+    const spacer = () => {
+      const node = doc.createElement("div");
+      node.className = "knowledge-virtual-spacer";
+      node.setAttribute("aria-hidden", "true");
+      return node;
+    };
+    function draw(measure = true) {
+      const root = settings.scrollRoot;
+      const virtual = settings.virtualize;
+      if (measuredWidth !== root.clientWidth) heights.clear();
+      measuredWidth = root.clientWidth;
+      const gap = Number.parseFloat(doc.defaultView?.getComputedStyle?.(host).rowGap) || 0;
+      offsets = [0];
+      for (const entry of items) offsets.push(offsets.at(-1) + (heights.get(entry.number) || 160) + gap);
+      const relativeTop = (host.getBoundingClientRect?.().top || 0) - (root.getBoundingClientRect?.().top || 0);
+      const top = Math.max(0, root === host ? root.scrollTop || 0 : -relativeTop);
+      const bottom = top + (root.clientHeight || 800);
+      const active = doc.activeElement;
+      const focusedNumber = Number(active?.closest?.("[data-issue-number]")?.dataset.issueNumber);
+      const wanted = [];
+      for (let index = 0; index < items.length; index++) {
+        if (!virtual || (offsets[index + 1] >= top - 640 && offsets[index] <= bottom + 640) ||
+            items[index].number === focusedNumber || index === forced) wanted.push(index);
+      }
+      const nodes = [];
+      let changed = false;
+      let previous = 0;
+      const addSpace = (start, end) => {
+        if (end <= start) return;
+        // Reuse spacers as well so an identical update makes no DOM mutations.
+        const node = [...host.children].find(child => child.dataset.virtualRange === `${start}:${end}`) || spacer();
+        node.dataset.virtualRange = `${start}:${end}`;
+        const height = `${Math.max(0, offsets[end] - offsets[start] - gap)}px`;
+        if (node.style.height !== height) node.style.height = height;
+        nodes.push(node);
+      };
+      const retained = new Set();
+      for (const index of wanted) {
+        if (virtual) addSpace(previous, index);
+        const entry = items[index];
+        const version = settings.version(entry);
+        let saved = cache.get(entry.number);
+        if (!saved || saved.version !== version) {
+          changed = true;
+          const node = settings.render(entry);
+          if (saved?.node.querySelector(".knowledge-row-menu[open]")) node.querySelector(".knowledge-row-menu")?.setAttribute("open", "");
+          const focusIndex = saved?.node === active ? -2 : saved?.node.contains(active)
+            ? [...saved.node.querySelectorAll("button, input, summary, [tabindex]")].indexOf(active) : -1;
+          saved = { node, version, focusIndex };
+          cache.set(entry.number, saved);
+        }
+        nodes.push(saved.node);
+        settings.update?.(saved.node, entry);
+        retained.add(entry.number);
+        previous = index + 1;
+      }
+      if (virtual) addSpace(previous, items.length);
+      const keep = new Set(nodes);
+      for (const child of [...host.childNodes]) if (!keep.has(child)) { child.remove(); changed = true; }
+      let cursor = host.firstChild;
+      for (const node of nodes) {
+        if (node === cursor) cursor = cursor.nextSibling;
+        else host.insertBefore(node, cursor);
+      }
+      while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
+      let resized = false;
+      for (const [number, saved] of cache) {
+        if (!retained.has(number)) { cache.delete(number); continue; }
+        const height = saved.node.getBoundingClientRect?.().height;
+        if (height > 0) {
+          const margin = Number.parseFloat(doc.defaultView?.getComputedStyle?.(saved.node).marginBottom) || 0;
+          resized ||= heights.get(number) !== height + margin;
+          heights.set(number, height + margin);
+        }
+        if (saved.focusIndex === -2) {
+          saved.node.focus({ preventScroll: true });
+          saved.focusIndex = -1;
+        } else if (saved.focusIndex >= 0) {
+          saved.node.querySelectorAll("button, input, summary, [tabindex]")[saved.focusIndex]?.focus({ preventScroll: true });
+          saved.focusIndex = -1;
+        }
+      }
+      if (active?.isConnected && host.contains(active) && doc.activeElement !== active) active.focus?.({ preventScroll: true });
+      if (changed) settings.mounted?.();
+      if (virtual && resized && measure) draw(false);
+    }
+    const root = options.scrollRoot;
+    const onScroll = () => { if (settings.virtualize && items.length) draw(); };
+    root.addEventListener("scroll", onScroll, { passive: true });
+    // Native Tab crosses virtual boundaries just as it crosses mounted rows.
+    host.addEventListener("keydown", event => {
+      if (!settings.virtualize || event.key !== "Tab" || event.ctrlKey || event.altKey || event.metaKey) return;
+      const row = event.target.closest?.("[data-issue-number]");
+      if (!row) return;
+      const controls = [...(row.matches("button") ? [row] : []), ...row.querySelectorAll("button, input, summary, [tabindex]")]
+        .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
+      const direction = event.shiftKey ? -1 : 1;
+      if (event.target !== controls[direction > 0 ? controls.length - 1 : 0]) return;
+      const index = items.findIndex(entry => String(entry.number) === row.dataset.issueNumber) + direction;
+      if (index < 0 || index >= items.length) return;
+      event.preventDefault();
+      view.reveal(items[index].number);
+      const target = cache.get(items[index].number)?.node;
+      const next = [...(target?.matches("button") ? [target] : []), ...(target?.querySelectorAll("button, input, summary, [tabindex]") || [])]
+        .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
+      next[direction > 0 ? 0 : next.length - 1]?.focus();
+    });
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(onScroll) : null;
+    observer?.observe(root);
+    view = {
+      update(next, config) {
+        items = next; settings = config;
+        const keys = new Set(items.map(entry => entry.number));
+        for (const key of heights.keys()) if (!keys.has(key)) heights.delete(key);
+        draw();
+      },
+      reveal(number) {
+        forced = items.findIndex(entry => entry.number === number);
+        if (forced < 0) return false;
+        draw();
+        cache.get(number)?.node.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+        forced = -1;
+        return true;
+      },
+      dispose() { root.removeEventListener("scroll", onScroll); observer?.disconnect(); keyedKnowledgeLists.delete(host); },
+    };
+    keyedKnowledgeLists.set(host, view);
+  }
+  view.update(entries, options);
+}
 
 const MONITOR_STATE_VIEWS = Object.freeze({
   queued: Object.freeze({ label: "Queued", tone: "idle" }),
@@ -686,115 +828,13 @@ export function createKnowledgeKanbanSurface({
 
       function bindIssueControlExplanations(windowId, root) {
         issueControlExplanations.get(windowId)?.dispose();
-        const popup = createNode("div", "op-runtime-health-detail issue-control-explanation");
-        popup.id = `issue-control-explanation-${windowId}`;
-        popup.setAttribute("role", "tooltip");
-        popup.hidden = true;
-        document.body.appendChild(popup);
-        let anchor = null;
-        let focused = null;
-        let hovered = null;
-        let dragging = false;
-        let pointerActive = false;
-        let restoringFocus = false;
-        let popupHovered = false;
-        const target = event => event.target?.closest?.("[data-issue-explanation]");
-        const hide = () => {
-          if (anchor) {
-            const ids = (anchor.getAttribute("aria-describedby") || "").split(/\s+/)
-              .filter(id => id && id !== popup.id);
-            if (ids.length) anchor.setAttribute("aria-describedby", ids.join(" "));
-            else anchor.removeAttribute("aria-describedby");
-          }
-          anchor = null;
-          popup.hidden = true;
-        };
-        const show = node => {
-          if (!node?.isConnected || !root.contains(node)) { hide(); return; }
-          hide();
-          anchor = node;
-          popup.textContent = node.dataset.issueExplanation;
-          popup.hidden = false;
-          node.setAttribute("aria-describedby", [node.getAttribute("aria-describedby"), popup.id].filter(Boolean).join(" "));
-          // Keep the popup outside a draggable card so its pointer hit area
-          // cannot cover the card itself (including its action buttons).
-          const rect = (node.closest(".knowledge-row") || node).getBoundingClientRect?.();
-          if (!rect) return;
-          const viewport = document.defaultView || {};
-          const width = viewport.innerWidth || 1024;
-          const height = viewport.innerHeight || 768;
-          const size = popup.getBoundingClientRect();
-          popup.style.left = `${Math.max(8, Math.min(rect.left, width - size.width - 8))}px`;
-          const top = rect.bottom + size.height <= height - 8
-            ? rect.bottom - 1 : rect.top - size.height + 1;
-          popup.style.top = `${Math.max(8, Math.min(top, height - size.height - 8))}px`;
-        };
-        const over = event => {
-          if (dragging || event.buttons) return;
-          // Hiding a dismissed tooltip exposes the control underneath it;
-          // that hit-test change is not a new pointer entry by the user.
-          if (popup.hidden && popup.contains(event.relatedTarget)) return;
-          const node = target(event);
-          if (!node || node.contains(event.relatedTarget)) return;
-          hovered = node;
-          show(node);
-        };
-        const out = event => {
-          if (!hovered) return;
-          const boundary = hovered.closest(".knowledge-row") || hovered;
-          if (!boundary.contains(event.target) || boundary.contains(event.relatedTarget)) return;
-          hovered = null;
-          if (popup.contains(event.relatedTarget)) return;
-          if (focused) show(focused); else hide();
-        };
-        const focus = event => { focused = pointerActive ? null : target(event); if (focused && !restoringFocus) show(focused); };
-        const blur = () => { focused = null; if (restoringFocus || popupHovered) return; if (hovered) show(hovered); else hide(); };
-        const escape = event => {
-          if (event.key !== "Escape" || popup.hidden) return;
-          focused = null;
-          hovered = null;
-          hide();
-          event.preventDefault();
-          event.stopPropagation();
-        };
-        const leavePopup = () => { popupHovered = false; if (focused) show(focused); else hide(); };
-        const refresh = () => {
-          if (!anchor) return;
-          const previous = anchor;
-          const key = previous.dataset.issueExplanationKey;
-          const node = previous.isConnected ? previous
-            : key ? root.querySelector(`[data-issue-explanation-key="${key}"]`) : null;
-          if (focused === previous) focused = node;
-          if (hovered === previous) hovered = node;
-          show(node);
-        };
-        const pointerDown = () => { pointerActive = true; focused = null; hovered = null; hide(); };
-        const pointerEnd = () => { pointerActive = false; };
-        const dragStart = () => { dragging = true; pointerDown(); };
-        const dragEnd = () => { dragging = false; pointerEnd(); };
-        const listeners = { mouseover: over, mouseout: out, focusin: focus, focusout: blur,
-          pointerdown: pointerDown, dragstart: dragStart, dragend: dragEnd };
-        for (const [type, listener] of Object.entries(listeners)) root.addEventListener(type, listener);
-        popup.addEventListener("mouseenter", () => { popupHovered = true; });
-        popup.addEventListener("mouseleave", leavePopup);
-        // Dismiss before the app's bubble handler turns Escape into overview.
-        document.addEventListener("keydown", escape, true);
-        document.addEventListener("scroll", refresh, true);
-        document.addEventListener("pointerup", pointerEnd);
-        document.addEventListener("pointercancel", pointerEnd);
-        document.defaultView?.addEventListener("resize", hide);
+        const binding = bindControlExplanations({ document, root, id: `issue-control-explanation-${windowId}` });
         let unsubscribe = () => {};
         issueControlExplanations.set(windowId, {
           root,
-          get visible() { return !popup.hidden; },
-          restoreFocus(node, visible) {
-            // Preserve the explanation being read while rebinding keyboard focus.
-            restoringFocus = true;
-            try { node?.focus(); } finally { restoringFocus = false; }
-            // Cache refresh restores focus, not a dismissed explanation.
-            if (!visible) { focused = null; hovered = null; hide(); }
-          },
-          refresh,
+          get visible() { return binding.visible; },
+          restoreFocus: binding.restoreFocus,
+          refresh: binding.refresh,
           dispose() {
             unsubscribe();
             issueExplanationNodes.delete(windowId);
@@ -803,14 +843,7 @@ export function createKnowledgeKanbanSurface({
               delete next[windowId];
               return next;
             });
-            hide();
-            for (const [type, listener] of Object.entries(listeners)) root.removeEventListener(type, listener);
-            document.removeEventListener("scroll", refresh, true);
-            document.removeEventListener("keydown", escape, true);
-            document.removeEventListener("pointerup", pointerEnd);
-            document.removeEventListener("pointercancel", pointerEnd);
-            document.defaultView?.removeEventListener("resize", hide);
-            popup.remove();
+            binding.dispose();
           },
         });
         unsubscribe = issueExplanationModel.subscribe(model => model[windowId], presentation => {
@@ -818,16 +851,11 @@ export function createKnowledgeKanbanSurface({
           for (const control of presentation.controls) {
             const node = issueExplanationNodes.get(windowId)?.get(control.id);
             if (!node) continue;
-            node.dataset.issueExplanation = control.text;
-            node.setAttribute("aria-description", control.text);
-            if (control.key) node.dataset.issueExplanationKey = control.key;
-            if (control.focusable && !node.matches("button, input, select, textarea, a[href], summary")) {
-              node.setAttribute("tabindex", "0");
-            }
+            setControlExplanation(node, control.text, control.key, control.focusable);
           }
           if (presentation.focusedKey) issueControlExplanations.get(windowId)?.restoreFocus(
             root.querySelector(`[data-issue-explanation-key="${presentation.focusedKey}"]`), presentation.visible);
-          refresh();
+          binding.refresh();
         });
       }
 
@@ -984,17 +1012,15 @@ export function createKnowledgeKanbanSurface({
       let nextKnowledgeSearchRequestId = 1;
       let relatedWorkRefreshTimer = null;
       // Issue #5395: display/activity updates do not invalidate Issue correlation.
-      function workAssociationKey(projection, kind) {
+      function workAssociationKey(projection) {
         return JSON.stringify((projection?.active_works || [])
-          .filter(work => kind === "pr" ? work.pr_number != null : work.linked_issue_numbers?.length)
+          .filter(work => work.linked_issue_numbers?.length)
           .map(work => [
             work.id, normalizeWorkBranch(work.branch),
-            kind === "pr" ? work.pr_number ?? null
-              : [...new Set(work.linked_issue_numbers || [])].sort((a, b) => a - b),
+            [...new Set(work.linked_issue_numbers || [])].sort((a, b) => a - b),
           ]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
       }
-      let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.(), "issue");
-      let prWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.(), "pr");
+      let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.());
       const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, status: {
         enabled: false,
         state: "disabled",
@@ -1013,6 +1039,7 @@ export function createKnowledgeKanbanSurface({
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
+      const knowledgeBoardViewModel = createUiStateStore({ windowId: null });
       const issueDetailRenderKeys = new WeakMap();
       // Receive publishes invalidation; the view owns projection/layout reads.
       const knowledgeEventRefreshModel = createUiStateStore({ kind: null, revision: 0 });
@@ -1253,7 +1280,7 @@ export function createKnowledgeKanbanSurface({
           settings.title = lines.join("\n");
           explainIssueControl(settings, settings.title);
         }
-        const toggle = bar.querySelector('[data-action="monitor-toggle"]');
+        const toggle = element.querySelector('[data-action="monitor-toggle"]');
         if (toggle) {
           const enabled = Boolean(issueMonitorModel.read().status.enabled);
           toggle.textContent = enabled ? "Stop" : "Start";
@@ -1264,7 +1291,7 @@ export function createKnowledgeKanbanSurface({
         // names the setting and whose aria-checked + state word carry the
         // current value. It renders only what the server status says — the
         // click handler never writes a local optimistic value.
-        const autonomous = bar.querySelector('[data-action="monitor-autonomous"]');
+        const autonomous = element.querySelector('[data-action="monitor-autonomous"]');
         if (autonomous) {
           const enabled = Boolean(issueMonitorModel.read().status.autonomous_mode);
           autonomous.setAttribute("aria-checked", enabled ? "true" : "false");
@@ -1795,6 +1822,9 @@ export function createKnowledgeKanbanSurface({
       }
 
       function clearKnowledgeBridgeState(windowId) {
+        for (const host of windowMap.get(windowId)?.querySelectorAll(".issue-queue-items, .kanban-column-body") || []) {
+          keyedKnowledgeLists.get(host)?.dispose();
+        }
         issueControlExplanations.get(windowId)?.dispose();
         issueControlExplanations.delete(windowId);
         terminalPreviewText.delete(windowId);
@@ -1932,12 +1962,6 @@ export function createKnowledgeKanbanSurface({
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
-        if (normalizeKnowledgeKind(state.kind) === "pr") {
-          // PR selection still completes through the legacy full-view path.
-          // A newer PR load supersedes that selection owner just as it did
-          // before Issue/SPEC detail requests gained independent ownership.
-          state.detailRequestId = 0;
-        }
         state.ownedLoadRequestIds.add(requestId);
         while (state.ownedLoadRequestIds.size > 4) {
           state.ownedLoadRequestIds.delete(
@@ -1970,15 +1994,12 @@ export function createKnowledgeKanbanSurface({
 
       function refreshKnowledgeWorkSnapshot(forceReload) {
         const projection = getActiveWorkProjection?.();
-        const issueKey = workAssociationKey(projection, "issue");
-        const prKey = workAssociationKey(projection, "pr");
+        const issueKey = workAssociationKey(projection);
         for (const state of knowledgeBridgeStateMap.values()) {
-          state.eventRefreshDirty ||= forceReload || (normalizeKnowledgeKind(state.kind) === "pr"
-            ? prKey !== prWorkAssociationKey : issueKey !== issueWorkAssociationKey);
+          state.eventRefreshDirty ||= forceReload || issueKey !== issueWorkAssociationKey;
           state.workSnapshotDirty = true;
         }
         issueWorkAssociationKey = issueKey;
-        prWorkAssociationKey = prKey;
         scheduleKnowledgeEventRefresh();
       }
 
@@ -2089,15 +2110,6 @@ export function createKnowledgeKanbanSurface({
       }
 
       function knowledgeDetailRequestMatches(state, event) {
-        if (normalizeKnowledgeKind(state.kind) === "pr") {
-          if (!event.request_id) {
-            return event.detail?.number === state.selectedNumber;
-          }
-          return (
-            event.request_id === state.loadRequestId ||
-            event.request_id === state.detailRequestId
-          );
-        }
         if (!event.request_id) {
           // ID-less compatibility is restricted to generation zero. Once a
           // user has selected anything explicitly, identity cannot be proven
@@ -2135,7 +2147,6 @@ export function createKnowledgeKanbanSurface({
 
       function isSilentSemanticKind(kind) {
         // Both Issue and SPEC presets normalize to the backend `issue` kind.
-        // PR intentionally retains its pre-SPEC-3170 behavior.
         return normalizeKnowledgeKind(kind) === "issue";
       }
 
@@ -2482,36 +2493,33 @@ export function createKnowledgeKanbanSurface({
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         const previousNumber = state.selectedNumber;
         const openingPreview = explicit && state.kind === "issue" && state.previewHidden;
-        const prBaseline = normalizeKnowledgeKind(state.kind) === "pr";
         if (explicit) {
           state.selectedNumber = number;
           if (state.kind === "issue") state.previewHidden = false;
-          if (!prBaseline) {
-            // Issue/SPEC selection is a local transition before any I/O.
-            state.selectionGeneration = (state.selectionGeneration || 0) + 1;
-            state.error = "";
-            const findRow = (rows) =>
-              Array.isArray(rows)
-                ? rows.find((entry) => entry && entry.number === number)
-                : null;
-            const row = findRow(state.entries) || findRow(state.baseEntries) ||
-              (state.kind === "issue" ? issueDetailEntry(state, number) : null);
-            const authoritative = state.detail && state.detail.number === number;
-            if (!authoritative) {
-              state.detail = row
-                ? {
-                    number: row.number,
-                    title: row.title || "",
-                    subtitle: `#${row.number}`,
-                    state: row.state || "",
-                    phase: row.phase ?? null,
-                    labels: Array.isArray(row.labels) ? row.labels.slice() : [],
-                    sections: [],
-                    launch_issue_number: row.number,
-                    related_works: [],
-                  }
-                : null;
-            }
+          // Issue/SPEC selection is a local transition before any I/O.
+          state.selectionGeneration = (state.selectionGeneration || 0) + 1;
+          state.error = "";
+          const findRow = (rows) =>
+            Array.isArray(rows)
+              ? rows.find((entry) => entry && entry.number === number)
+              : null;
+          const row = findRow(state.entries) || findRow(state.baseEntries) ||
+            (state.kind === "issue" ? issueDetailEntry(state, number) : null);
+          const authoritative = state.detail && state.detail.number === number;
+          if (!authoritative) {
+            state.detail = row
+              ? {
+                  number: row.number,
+                  title: row.title || "",
+                  subtitle: `#${row.number}`,
+                  state: row.state || "",
+                  phase: row.phase ?? null,
+                  labels: Array.isArray(row.labels) ? row.labels.slice() : [],
+                  sections: [],
+                  launch_issue_number: row.number,
+                  related_works: [],
+                }
+              : null;
           }
         } else if (number !== state.selectedNumber) {
           return false;
@@ -2519,14 +2527,10 @@ export function createKnowledgeKanbanSurface({
         state.detailLoading = true;
         const requestId = nextKnowledgeLoadRequestId++;
         state.detailRequestId = requestId;
-        if (!prBaseline) {
-          state.detailRequestSelectionGeneration = state.selectionGeneration;
-          state.detailRequestNumber = number;
-        }
+        state.detailRequestSelectionGeneration = state.selectionGeneration;
+        state.detailRequestNumber = number;
         const effectiveKind = knowledgeKind || state.kind;
-        if (prBaseline) {
-          renderKnowledgeBridge(windowId);
-        } else if (explicit) {
+        if (explicit) {
           renderKnowledgeSelection(windowId, state, previousNumber, { focusPreview: openingPreview });
         } else {
           renderKnowledgeDetailOnly(windowId, state);
@@ -2575,8 +2579,6 @@ export function createKnowledgeKanbanSurface({
             return "Cached work items";
           case "spec":
             return "Cached work items";
-          case "pr":
-            return "PR bridge";
           default:
             return "Knowledge Bridge";
         }
@@ -2588,8 +2590,6 @@ export function createKnowledgeKanbanSurface({
             return "Semantic search work items";
           case "spec":
             return "Semantic search work items";
-          case "pr":
-            return "Search unavailable";
           default:
             return "Search";
         }
@@ -3105,12 +3105,17 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderIssueQueueBoard(windowId, state, list, entries) {
-        const feedback = createNode("div", "issue-queue-feedback");
+        const feedback = list.querySelector(".issue-queue-feedback") || createNode("div", "issue-queue-feedback");
         feedback.setAttribute("role", "status");
-        const board = createNode("div", "issue-queue-board");
+        const board = list.querySelector(".issue-queue-board") || createNode("div", "issue-queue-board");
+        if (!board.parentNode) list.prepend(feedback, board);
+        // Drop handlers read this current snapshot, never a previous render's array.
+        state.queueBoardEntries = entries;
         state.queueSelection ??= new Set();
+        const queued = canonicalQueuedKnowledgeEntries(state);
+        const queuePositions = new Map(queued.map((entry, index) => [entry.number, index]));
         for (const phase of ["backlog", "queued", "active", "done"]) {
-          const column = createNode("section", "issue-queue-column");
+          const column = board.querySelector(`[data-queue-column="${phase}"]`) || createNode("section", "issue-queue-column");
           column.dataset.queueColumn = phase;
           const label = phase[0].toUpperCase() + phase.slice(1);
           column.setAttribute("aria-label", `${label} column`);
@@ -3122,74 +3127,112 @@ export function createKnowledgeKanbanSurface({
             active: "Issues with an agent launching or running. Card output is a read-only preview.",
             done: "Closed issues or issues the monitor reports as merged or released.",
           };
-          column.appendChild(createNode("h3", "issue-queue-heading", `${label} · ${items.length}`));
-          explainIssueControl(column.lastElementChild, explanations[phase], `column-${phase}`);
-          if (!items.length) column.appendChild(createNode("div", "knowledge-empty", phase === "queued"
-            ? "Nothing will launch until an issue is queued." : `No ${phase} items`));
-          for (const entry of items) {
-            const row = renderIssueRow(windowId, state, entry);
-            if (phase === "active") {
-              const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
-              const agents = work?.agents || [];
-              const windows = getWorkspaceWindows?.() || [];
-              for (const target of windows) {
-                if (!target.agent_id || target.preset === "pm" ||
-                    !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
-                const linked = Number(target.linked_issue_number ?? target.placement?.issue_number);
-                const belongs = Number.isFinite(linked)
-                  ? linked === entry.number
-                  : agents.some(agent => agent.window_id === target.id ||
-                    (target.session_id && agent.session_id === target.session_id));
-                if (!belongs) continue;
-                if (!row.classList.contains("has-live-output")) {
-                  row.querySelector(".issue-agent-status")?.remove();
-                  row.classList.add("has-live-output");
-                }
-                const output = renderIssueAgentStatusRow(windowId, state, entry,
-                  target.placement?.kind === "issue_preview"
-                    ? { inlineWindow: target } : { canvasWindow: target });
-                output.classList.add("issue-card-output");
-                output.setAttribute("role", "group");
-                const title = windowDisplayTitle?.(target) || target.title || target.id;
-                output.setAttribute("aria-label", `Read-only live output: ${title}`);
-                output.querySelector(".issue-agent-status-output")?.remove();
-                const label = output.querySelector(".issue-agent-status-meta");
-                label.classList.add("issue-card-output-label");
-                label.textContent = `Read-only · ${label.textContent}`;
-                const screen = createNode("div", "issue-card-output-screen");
-                screen.appendChild(createNode("pre", "issue-card-output-text",
-                  terminalPreviewText.get(target.id) ?? "Waiting for output"));
-                output.appendChild(screen);
-                row.appendChild(output);
-              }
-            }
-            if (phase === "backlog" || phase === "queued") {
-              const selection = createNode("label", "issue-queue-select");
-              const checkbox = createNode("input");
-              checkbox.type = "checkbox";
-              checkbox.dataset.action = "queue-select";
-              checkbox.checked = state.queueSelection.has(entry.number);
-              checkbox.setAttribute("aria-label", `Select issue #${entry.number} for queue move`);
-              checkbox.addEventListener("click", event => {
-                event.stopPropagation();
-                if (state.queueSelection.has(entry.number)) state.queueSelection.delete(entry.number);
-                else state.queueSelection.add(entry.number);
-              });
-              selection.addEventListener("click", event => event.stopPropagation());
-              selection.append(checkbox, createNode("span", "", "Select"));
-              row.prepend(selection);
-              row.draggable = true;
-              row.addEventListener("dragstart", event => {
-                event.dataTransfer?.setData("text/plain", String(entry.number));
-              });
-            }
-            column.appendChild(row);
+          let heading = column.querySelector("h3");
+          let body = column.querySelector(".issue-queue-items");
+          if (!heading) {
+            heading = createNode("h3", "issue-queue-heading");
+            body = createNode("div", "issue-queue-items");
+            column.append(heading, body);
           }
+          const headingText = `${label} · ${items.length}`;
+          if (heading.textContent !== headingText) heading.textContent = headingText;
+          explainIssueControl(heading, explanations[phase], `column-${phase}`);
+          reconcileKnowledgeList(body, items, {
+            scrollRoot: list.closest(".knowledge-list-pane") || list,
+            virtualize: entries.length > 200,
+            mounted: () => publishIssueControlExplanations(windowId),
+            version: entry => {
+              const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+              const faces = issueRowFaces(windowId, entry, work);
+              return JSON.stringify([{ ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
+                work ? workAttentionFor?.(work) : null,
+                issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
+                phase === "active" ? (getWorkspaceWindows?.() || []).filter(target =>
+                  target.agent_id && (Number(target.linked_issue_number ?? target.placement?.issue_number) === entry.number ||
+                    work?.agents?.some(agent => agent.window_id === target.id || (target.session_id && agent.session_id === target.session_id)))) : null]);
+            },
+            update: (row, entry) => {
+              row.classList.toggle("selected", state.selectedNumber === entry.number);
+              const select = row.querySelector(".knowledge-row-select");
+              if (state.selectedNumber === entry.number) {
+                if (select.getAttribute("aria-current") !== "true") select.setAttribute("aria-current", "true");
+              } else if (select.hasAttribute("aria-current")) select.removeAttribute("aria-current");
+              const checkbox = row.querySelector('[data-action="queue-select"]');
+              if (checkbox) checkbox.checked = state.queueSelection.has(entry.number);
+            },
+            render: entry => {
+              const row = renderIssueRow(windowId, state, entry);
+              if (phase === "active") {
+                const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+                const agents = work?.agents || [];
+                const windows = getWorkspaceWindows?.() || [];
+                for (const target of windows) {
+                  if (!target.agent_id || target.preset === "pm" ||
+                      !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
+                  const linked = Number(target.linked_issue_number ?? target.placement?.issue_number);
+                  const belongs = Number.isFinite(linked)
+                    ? linked === entry.number
+                    : agents.some(agent => agent.window_id === target.id ||
+                      (target.session_id && agent.session_id === target.session_id));
+                  if (!belongs) continue;
+                  if (!row.classList.contains("has-live-output")) {
+                    row.querySelector(".issue-agent-status")?.remove();
+                    row.classList.add("has-live-output");
+                  }
+                  const output = renderIssueAgentStatusRow(windowId, state, entry,
+                    target.placement?.kind === "issue_preview"
+                      ? { inlineWindow: target } : { canvasWindow: target });
+                  output.classList.add("issue-card-output");
+                  output.setAttribute("role", "group");
+                  const title = windowDisplayTitle?.(target) || target.title || target.id;
+                  output.setAttribute("aria-label", `Read-only live output: ${title}`);
+                  output.querySelector(".issue-agent-status-output")?.remove();
+                  const label = output.querySelector(".issue-agent-status-meta");
+                  label.classList.add("issue-card-output-label");
+                  label.textContent = `Read-only · ${label.textContent}`;
+                  const screen = createNode("div", "issue-card-output-screen");
+                  screen.appendChild(createNode("pre", "issue-card-output-text",
+                    terminalPreviewText.get(target.id) ?? "Waiting for output"));
+                  output.appendChild(screen);
+                  row.appendChild(output);
+                }
+              }
+              if (phase === "backlog" || phase === "queued") {
+                const selection = createNode("label", "issue-queue-select");
+                const checkbox = createNode("input");
+                checkbox.type = "checkbox";
+                checkbox.dataset.action = "queue-select";
+                checkbox.checked = state.queueSelection.has(entry.number);
+                checkbox.setAttribute("aria-label", `Select issue #${entry.number} for queue move`);
+                checkbox.addEventListener("click", event => {
+                  event.stopPropagation();
+                  if (state.queueSelection.has(entry.number)) state.queueSelection.delete(entry.number);
+                  else state.queueSelection.add(entry.number);
+                });
+                selection.addEventListener("click", event => event.stopPropagation());
+                selection.append(checkbox, createNode("span", "", "Select"));
+                row.prepend(selection);
+                row.draggable = true;
+                row.addEventListener("dragstart", event => {
+                  event.dataTransfer?.setData("text/plain", String(entry.number));
+                });
+              }
+              return row;
+            },
+          });
+          let empty = column.querySelector(".knowledge-empty");
+          if (!items.length && !empty) {
+            empty = createNode("div", "knowledge-empty", phase === "queued"
+              ? "Nothing will launch until an issue is queued." : `No ${phase} items`);
+            column.appendChild(empty);
+          } else if (items.length) empty?.remove();
+          if (column.parentNode) continue;
           column.addEventListener("dragover", event => event.preventDefault());
           column.addEventListener("drop", event => {
             event.preventDefault();
             const number = Number.parseInt(event.dataTransfer?.getData("text/plain"), 10);
-            const entry = entries.find(item => item.number === number);
+            const currentEntries = state.queueBoardEntries;
+            const entry = currentEntries.find(item => item.number === number);
             if (!entry) return;
             if (phase === "active" || phase === "done") {
               feedback.textContent = `${label} is controlled by the monitor and work lifecycle; drop into Backlog or Queued.`;
@@ -3207,7 +3250,7 @@ export function createKnowledgeKanbanSurface({
               send({kind:"issue_monitor_queue_move", issue_number:number, position:targetIndex < 0 ? Math.max(0, queued.length - 1) : targetIndex});
             } else if (origin !== phase) {
               const numbers = state.queueSelection.has(number)
-                ? entries.filter(item => state.queueSelection.has(item.number) && issueQueueColumnForEntry(item) === origin).map(item => item.number)
+                ? currentEntries.filter(item => state.queueSelection.has(item.number) && issueQueueColumnForEntry(item) === origin).map(item => item.number)
                 : [number];
               send({kind:phase === "queued" ? "issue_monitor_queue_push" : "issue_monitor_queue_remove", issue_numbers:numbers});
             } else return;
@@ -3215,7 +3258,6 @@ export function createKnowledgeKanbanSurface({
           });
           board.appendChild(column);
         }
-        list.prepend(feedback, board);
       }
 
       function kanbanEmptyMessage(state, phase) {
@@ -3780,6 +3822,9 @@ export function createKnowledgeKanbanSurface({
       function closeIssuePreview(windowId, state) {
         state.previewHidden = true;
         renderKnowledgeBridge(windowId);
+        for (const host of windowMap.get(windowId)?.querySelectorAll(".issue-queue-items") || []) {
+          keyedKnowledgeLists.get(host)?.reveal(state.selectedNumber);
+        }
         windowMap.get(windowId)?.querySelector(`.knowledge-row[data-issue-number="${state.selectedNumber}"] .knowledge-row-select`)?.focus();
       }
 
@@ -4098,6 +4143,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderKnowledgeDetailOnly(windowId, state, { focusPreview = false } = {}) {
+        if (!windowMap.get(windowId)?.querySelector(".knowledge-detail-pane")) return;
         if (state.kind === "issue") {
           issueWindowViewModel.update(() => ({ windowId, detailOnly: true, focusPreview }));
           return;
@@ -4602,6 +4648,12 @@ export function createKnowledgeKanbanSurface({
         if (!list || !detailPane || !refreshButton || !searchInput) {
           return;
         }
+        // A queue transition changes the owning column. Preserve the logical
+        // control across both lists, including a destination outside the viewport.
+        const focused = list.contains(document.activeElement) ? document.activeElement : null;
+        const focusedNumber = Number(focused?.closest("[data-issue-number]")?.dataset.issueNumber);
+        const focusedAction = focused?.dataset.action;
+        const focusedSummary = focused?.matches("summary");
 
         refreshButton.disabled =
           !state.refreshEnabled || (state.loading && !knowledgeEntriesAreEmpty(state));
@@ -4637,7 +4689,9 @@ export function createKnowledgeKanbanSurface({
         // replacing it between pointerdown and pointerup loses the user's click.
         const other = list.querySelector(".issue-other-group");
         for (const child of Array.from(list.childNodes)) {
-          if (child !== other) child.remove();
+          if (child === other || (!splitMode && (child.classList?.contains("issue-queue-board") || child.classList?.contains("issue-queue-feedback")))) continue;
+          for (const host of child.querySelectorAll?.(".issue-queue-items") || []) keyedKnowledgeLists.get(host)?.dispose();
+          child.remove();
         }
         const visibleEntries = filteredIssueEntries(state);
         if (state.error) {
@@ -4670,6 +4724,19 @@ export function createKnowledgeKanbanSurface({
         }
         renderOtherWork(list, windowId, { laneFilter: state.issueLaneFilter || "all" });
         renderIssueDetailPane(windowId, state, detailPane, { agentPreview: !splitMode });
+        if (Number.isFinite(focusedNumber) && !focused.isConnected) {
+          let row = list.querySelector(`.knowledge-row[data-issue-number="${focusedNumber}"]`);
+          if (!row) {
+            for (const host of list.querySelectorAll(".issue-queue-items")) {
+              if (keyedKnowledgeLists.get(host)?.reveal(focusedNumber)) break;
+            }
+            row = list.querySelector(`.knowledge-row[data-issue-number="${focusedNumber}"]`);
+          }
+          const target = focusedAction
+            ? [...(row?.querySelectorAll("[data-action]") || [])].find(node => node.dataset.action === focusedAction)
+            : focusedSummary ? row?.querySelector("summary") : null;
+          (target || row?.querySelector(".knowledge-row-select"))?.focus({ preventScroll: true });
+        }
         publishIssueControlExplanations(windowId, focus);
       }
 
@@ -4684,11 +4751,18 @@ export function createKnowledgeKanbanSurface({
         );
         // An error changes the list presentation outside the data revision.
         // The next successful completion must rebuild it to remove that state.
-        if (state.error) state.entriesRevision = null;
+        if (state.error) {
+          state.entriesRevision = null;
+          state.entriesContent = null;
+        }
         if (state.kind === "issue") {
           issueWindowViewModel.update(() => ({ windowId }));
           return;
         }
+        knowledgeBoardViewModel.update(() => ({ windowId }));
+      }
+
+      function renderKnowledgeBoardView(windowId, element, state) {
         const board = element.querySelector(".kanban-board");
         const detailPane = element.querySelector(".knowledge-detail-pane");
         const status = element.querySelector(".knowledge-status");
@@ -4698,6 +4772,9 @@ export function createKnowledgeKanbanSurface({
         if (!board || !detailPane || !status || !refreshButton || !searchInput) {
           return;
         }
+        const focusedCard = board.contains(document.activeElement)
+          ? document.activeElement.closest(".kanban-card[data-issue-number]") : null;
+        const focusedNumber = Number(focusedCard?.dataset.issueNumber);
 
         refreshButton.disabled =
           !state.refreshEnabled || (state.loading && !knowledgeEntriesAreEmpty(state));
@@ -4722,33 +4799,33 @@ export function createKnowledgeKanbanSurface({
           : filteredKnowledgeEntries(state);
         const columnsByPhase = new Map();
         for (const column of board.querySelectorAll(".kanban-column[data-phase]")) {
-          const body = column.querySelector("[data-role='body']");
-          if (body) {
-            body.innerHTML = "";
-          }
           columnsByPhase.set(column.dataset.phase, column);
           if (column.dataset.kanbanWired !== "true") {
             wireKanbanColumnDropTarget(windowId, column);
             column.dataset.kanbanWired = "true";
           }
         }
-        const counts = new Map();
-        for (const entry of visibleEntries) {
-          const phaseKey = effectiveKnowledgePhase(entry);
-          const column = columnsByPhase.get(phaseKey) || columnsByPhase.get("backlog");
-          if (!column) continue;
-          const body = column.querySelector("[data-role='body']");
-          if (!body) continue;
-          const card = renderKanbanCard(windowId, state, entry);
-          body.appendChild(card);
-          counts.set(phaseKey, (counts.get(phaseKey) || 0) + 1);
-        }
         for (const [phase, column] of columnsByPhase) {
+          const items = visibleEntries.filter(entry => {
+            const key = effectiveKnowledgePhase(entry);
+            return key === phase || (phase === "backlog" && !columnsByPhase.has(key));
+          });
           const countLabel = column.querySelector("[data-role='count']");
-          if (countLabel) {
-            countLabel.textContent = String(counts.get(phase) || 0);
+          if (countLabel && countLabel.textContent !== String(items.length)) {
+            countLabel.textContent = String(items.length);
           }
           const body = column.querySelector("[data-role='body']");
+          if (body) reconcileKnowledgeList(body, items, {
+            scrollRoot: body, virtualize: visibleEntries.length > 200,
+            version: entry => JSON.stringify([entry, state.pendingPhaseUpdates?.has(entry.number)]),
+            update: (card, entry) => {
+              card.classList.toggle("is-selected", state.selectedNumber === entry.number);
+              if (state.selectedNumber === entry.number) {
+                if (card.getAttribute("aria-current") !== "true") card.setAttribute("aria-current", "true");
+              } else if (card.hasAttribute("aria-current")) card.removeAttribute("aria-current");
+            },
+            render: entry => renderKanbanCard(windowId, state, entry),
+          });
           if (body && body.childElementCount === 0) {
             const empty = createNode(
               "div",
@@ -4760,6 +4837,16 @@ export function createKnowledgeKanbanSurface({
         }
 
         renderKnowledgeDetailPane(windowId, state, detailPane);
+        if (focusedCard && !focusedCard.isConnected) {
+          let card = board.querySelector(`.kanban-card[data-issue-number="${focusedNumber}"]`);
+          if (!card) {
+            for (const body of board.querySelectorAll(".kanban-column-body")) {
+              if (keyedKnowledgeLists.get(body)?.reveal(focusedNumber)) break;
+            }
+            card = board.querySelector(`.kanban-card[data-issue-number="${focusedNumber}"]`);
+          }
+          card?.focus({ preventScroll: true });
+        }
       }
 
       function renderAllKnowledgeBridgeWindows() {
@@ -4771,6 +4858,7 @@ export function createKnowledgeKanbanSurface({
       // app.js mountWindowBody (surface === "knowledge" branch).
       function mountKnowledgeWindow(windowData, body) {
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
+          if (knowledgeKind !== "issue" && knowledgeKind !== "spec") return;
           // SPEC-2017 — Knowledge Bridge surface is a 6-column Kanban Board:
           // Backlog / Draft / Planning / Implementation / Review / Done.
           // The columns are hard-coded so the source carries every
@@ -5069,16 +5157,7 @@ export function createKnowledgeKanbanSurface({
             ) {
               break;
             }
-            const prSelectionCompletion = Boolean(
-              normalizeKnowledgeKind(state.kind) === "pr" &&
-              event.request_id &&
-              event.request_id === state.detailRequestId,
-            );
-            if (
-              event.request_id &&
-              !state.ownedLoadRequestIds.has(event.request_id) &&
-              !prSelectionCompletion
-            ) {
+            if (event.request_id && !state.ownedLoadRequestIds.has(event.request_id)) {
               break;
             }
             // Issue #3297: a response that lost the race against the 5s
@@ -5088,20 +5167,20 @@ export function createKnowledgeKanbanSurface({
             if (
               event.request_id &&
               event.request_id !== state.loadRequestId &&
-              !knowledgeEntriesAreEmpty(state) &&
-              !prSelectionCompletion
+              !knowledgeEntriesAreEmpty(state)
             ) {
               break;
             }
             const queuedQuery = state.query.trim();
             const previousNumber = state.selectedNumber;
-            const unchangedEntries =
-              typeof event.revision === "string" && event.revision.length > 0 &&
-              event.revision === state.entriesRevision && !state.error && !state.renderError;
-            // Missing revisions keep the legacy full-render path. The revision
-            // belongs to the base list; search and detail retain their owners.
-            state.entriesRevision = event.revision || null;
             const incomingEntries = event.entries || [];
+            const entriesContent = JSON.stringify(incomingEntries);
+            const unchangedEntries = !state.error && !state.renderError &&
+              ((typeof event.revision === "string" && event.revision.length > 0 &&
+                event.revision === state.entriesRevision) || entriesContent === state.entriesContent);
+            // Legacy senders without revisions also preserve identical rows.
+            state.entriesContent = entriesContent;
+            state.entriesRevision = event.revision || null;
             const keepSelectedNumber =
               state.selectedNumber &&
               incomingEntries.some((entry) => entry.number === state.selectedNumber);
@@ -5208,14 +5287,7 @@ export function createKnowledgeKanbanSurface({
             } else if (isSilentSemanticKind(activeIntent.kind)) {
               invalidateKnowledgeSemanticRetry(state);
             }
-            if (normalizeKnowledgeKind(state.kind) === "pr" && selectionIsCurrent && state.selectedNumber) {
-              dispatchKnowledgeDetailRequest(
-                event.id,
-                activeIntent.kind,
-                state.selectedNumber,
-                { explicit: false },
-              );
-            } else if (selectionIsCurrent && state.selectionGeneration === 0) {
+            if (selectionIsCurrent && state.selectionGeneration === 0) {
               state.detail = null;
             }
             renderKnowledgeBridge(event.id);
@@ -5242,11 +5314,7 @@ export function createKnowledgeKanbanSurface({
               finishKnowledgeLoad(state, event.id, event.knowledge_kind);
             }
             state.detailLoading = false;
-            if (normalizeKnowledgeKind(state.kind) === "pr") {
-              renderKnowledgeBridge(event.id);
-            } else {
-              renderKnowledgeSelection(event.id, state, previousNumber);
-            }
+            renderKnowledgeSelection(event.id, state, previousNumber);
             // SPEC-2017 US-9 — refresh the Drawer body when the detail
             // is for the entry the Drawer is currently showing. This
             // also handles the swap-on-different-card case (T-034):
@@ -5365,14 +5433,10 @@ export function createKnowledgeKanbanSurface({
               break;
             }
             const matchesLoadRequest = event.request_id === state.loadRequestId;
-            const prSelectionError =
-              normalizeKnowledgeKind(state.kind) === "pr" &&
-              event.request_id === state.detailRequestId;
             const matchesDetailRequest =
               event.request_id === state.detailRequestId &&
-              (prSelectionError ||
-                (state.detailRequestSelectionGeneration === state.selectionGeneration &&
-                  state.detailRequestNumber === state.selectedNumber));
+              state.detailRequestSelectionGeneration === state.selectionGeneration &&
+              state.detailRequestNumber === state.selectedNumber;
             const matchesInitialIdless =
               !event.request_id && state.selectionGeneration === 0;
             if (!matchesLoadRequest && !matchesDetailRequest && !matchesInitialIdless) {
@@ -5395,7 +5459,7 @@ export function createKnowledgeKanbanSurface({
             }
             state.searching = false;
             state.detailLoading = false;
-            if (matchesLoadRequest || prSelectionError) {
+            if (matchesLoadRequest) {
               renderKnowledgeBridge(event.id);
             } else {
               renderKnowledgeStatusOnly(event.id, state);
@@ -5443,6 +5507,11 @@ export function createKnowledgeKanbanSurface({
         if (kind === "resume") resumeVisibleKnowledgeEventRefresh();
       });
       knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
+      knowledgeBoardViewModel.subscribe(model => model, ({ windowId }) => {
+        const element = windowMap.get(windowId);
+        const state = knowledgeBridgeStateMap.get(windowId);
+        if (element && state) renderKnowledgeBoardView(windowId, element, state);
+      });
       // List completion publishes data in receive; the synchronous view owns
       // both the full rebuild and revision-preserving selection updates.
       knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber }) => {
@@ -5493,6 +5562,7 @@ export function createKnowledgeKanbanSurface({
           const message = String(error?.message || error);
           const list = element.querySelector(detailOnly ? ".knowledge-detail-pane" : ".knowledge-list");
           if (list) {
+            for (const host of list.querySelectorAll(".issue-queue-items")) keyedKnowledgeLists.get(host)?.dispose();
             list.replaceChildren(createIssueNoticeBadge("Issue rendering failed", `issue-window:${windowId}:render`, message));
           }
           if (state.renderError !== message) {

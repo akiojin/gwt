@@ -22,6 +22,8 @@ type SentMessage = {
   kind?: string;
   id?: string;
   preset?: string;
+  surface_owner?: string;
+  bounds?: { width: number; height: number };
 };
 
 test.describe("Surface rail", () => {
@@ -30,7 +32,80 @@ test.describe("Surface rail", () => {
     viewport: { width: 1440, height: 900 },
   });
 
-  test("splits two independent surfaces, keeps agents live, and restores the canvas", async ({ page }, testInfo) => {
+  test("PM owns only its terminal and auxiliary Settings across reload with nearby agents and Start Work", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(String(error)));
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page, false, true);
+    await page.goto(surfaceAppUrl);
+    const main = page.getByRole("region", { name: "Main pane", exact: true });
+    const openPm = () => page.locator("#op-pm-entry").click();
+    const expectPm = async () => {
+      await expect(main).toHaveAttribute("data-surface", "pm");
+      await expect(main.locator('[data-id="pm-window"]')).toBeVisible();
+      await expect(main.locator('.workspace-window')).toHaveCount(1);
+      for (const id of ["agent-one", "agent-two", "naming-window", "start-work-shell"]) await expect(windowById(page, id)).toBeHidden();
+      await expect(page.locator("#canvas")).toBeHidden();
+      await expect(page.locator("#split-view-button")).toBeDisabled();
+    };
+    await openPm();
+    await expectPm();
+    await page.evaluate(() => (window as any).__updateSurfaceAgent("pm-window", {}));
+    await expectPm();
+    await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "hub_state", hub: {
+      app_version: "playwright", projects: [{ id: "tab-1", title: "Surface Rail Fixture", project_root: "/fixture", kind: "git" }], recent_projects: [],
+    } }));
+    await expectPm();
+    await main.locator('[data-id="pm-window"] .xterm').evaluate(node => { (window as any).__ownedPmTerminal = node; });
+    await page.locator("#op-pm-settings-button").click();
+    const auxiliary = main.locator('.workspace-window[data-preset="settings"]');
+    await expect(auxiliary).toBeVisible();
+    const auxiliaryId = await auxiliary.getAttribute("data-id");
+    expect((await sentMessages(page)).filter(message => message.kind === "create_window" && message.surface_owner === "pm")).toHaveLength(1);
+    await auxiliary.getByRole("tab", { name: "Project Manager", exact: true }).click();
+    await openPm();
+    expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await expect(main.locator(".agent-tile")).toHaveCount(4);
+    await expect(main.locator('[data-agent-id="start-work-shell"]')).toContainText("Interactive");
+    await page.locator('[data-agent-id="start-work-shell"] .xterm-helper-textarea').press("s");
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "start-work-shell", data: "s" });
+    await openPm();
+    await page.locator("#op-pm-settings-button").click();
+    await page.reload();
+    await openPm();
+    await expectPm();
+    await page.locator("#op-pm-settings-button").click();
+    await expect(auxiliary).toHaveAttribute("data-id", auxiliaryId!);
+    await auxiliary.locator('[data-action="close"]').click();
+    const close = page.locator("#window-close-confirm-modal");
+    await close.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(auxiliary).toBeVisible();
+    await auxiliary.locator('[data-action="close"]').click();
+    await close.getByRole("button", { name: "Close window", exact: true }).click();
+    await expectPm();
+    await page.locator("#op-pm-settings-button").click();
+    await expect(auxiliary).toBeVisible();
+    await openPm();
+    await expectPm();
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await expect(main.locator(".agent-tile")).toHaveCount(3);
+    await expect(main.locator('[data-agent-id="start-work-shell"]')).toHaveCount(0);
+    await expect(main.locator('[data-agent-id="pm-window"]')).toHaveCount(0);
+    await expect(page.locator("#split-view-button")).toBeEnabled();
+    await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "launch_wizard_open_error", title: "Start Work", message: "Fixture opening state" }));
+    await expect(page.locator("#wizard-modal")).toBeVisible();
+    await expect(main).toHaveAttribute("data-surface", "agents");
+    await page.locator("#wizard-cancel-button").click();
+    await openPm();
+    await expectPm();
+    await page.screenshot({ path: testInfo.outputPath("pm-surface-ownership.png") });
+    expect((await sentMessages(page)).filter(message => message.kind === "open_pm_agent")).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test("rail surfaces fill one fixed pane and split collapses to the active live view", async ({ page }, testInfo) => {
     const errors: string[] = [];
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
     page.on("pageerror", (error) => errors.push(String(error)));
@@ -45,10 +120,19 @@ test.describe("Surface rail", () => {
       })),
     );
     const original = await geometry();
+    await page.locator('.op-rail__surface[data-surface="board"]').click();
+    const main = page.getByRole("region", { name: "Main pane", exact: true });
+    await expect(main.locator('[data-id="board-window"]')).toBeVisible();
+    await expect(page.locator("#canvas")).toBeHidden();
+    const areaBox = await page.locator(".canvas-area").boundingBox();
+    const mainBox = await main.boundingBox();
+    expect(mainBox!.width).toBeCloseTo(areaBox!.width, 0);
+    await main.locator('[data-id="board-window"]').evaluate(node => { (window as any).__singleBoardView = node; });
     await page.getByRole("button", { name: "Split view", exact: true }).click();
     const left = page.getByRole("region", { name: "Left pane", exact: true });
     const right = page.getByRole("region", { name: "Right pane", exact: true });
     await expect(left).toHaveAttribute("data-surface", "board");
+    expect(await left.locator('[data-id="board-window"]').evaluate(node => node === (window as any).__singleBoardView)).toBe(true);
     await expect(right).toHaveAttribute("data-surface", "issues");
     const leftBox = await left.boundingBox();
     const rightBox = await right.boundingBox();
@@ -76,8 +160,11 @@ test.describe("Surface rail", () => {
     await page.screenshot({ path: testInfo.outputPath("split-surfaces.png") });
     await clearMessages(page);
     await page.getByRole("button", { name: "Close split", exact: true }).click();
-    await expect(page.locator("#split-surfaces")).toBeHidden();
-    await expect(page.locator("#canvas-stage > .workspace-window")).toHaveCount(5);
+    await expect(page.locator("#split-surfaces")).toHaveAttribute("data-split", "false");
+    await expect(main).toHaveAttribute("data-surface", "settings");
+    await expect(main.locator(".workspace-window[data-preset='settings']")).toBeVisible();
+    await expect(page.locator("#canvas")).toBeHidden();
+    await page.screenshot({ path: testInfo.outputPath("single-surface.png") });
     expect((await sentMessages(page)).filter((message) => message.kind === "close_window")).toEqual([]);
     expect(errors).toEqual([]);
   });
@@ -112,9 +199,15 @@ test.describe("Surface rail", () => {
       await expect(pane.getByRole("tab", { name: "Custom Agents", exact: true })).toHaveAttribute("aria-selected", "true");
     }
     expect((await sentMessages(page)).filter(message => message.kind === "create_window").length).toBe(2);
+    for (const message of (await sentMessages(page)).filter(message => message.kind === "create_window")) {
+      expect(message.bounds!.width).toBeGreaterThan(0);
+      expect(message.bounds!.height).toBeGreaterThan(0);
+    }
+    const activeViewId = await right.locator(".workspace-window").getAttribute("data-id");
     await clearMessages(page);
     await page.getByRole("button", { name: "Close split", exact: true }).click();
-    await expect(page.locator("#canvas-stage > .workspace-window")).toHaveCount(7);
+    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator(".workspace-window")).toHaveAttribute("data-id", activeViewId!);
+    await expect(page.locator("#canvas-stage > .workspace-window")).toHaveCount(6);
     expect((await sentMessages(page)).filter(message => message.kind === "close_window")).toEqual([]);
     expect(errors).toEqual([]);
   });
@@ -158,7 +251,7 @@ test.describe("Surface rail", () => {
     };
     await expectCatalogRevision();
     await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "terminal_status", id: "agent-one", status: "stopped" }));
-    await expect(right.locator('.agent-tile[data-agent-id="agent-one"] .agent-tile__header span')).toHaveText("Input unavailable", { timeout: 1000 });
+    await expect(right.locator('.agent-tile[data-agent-id="agent-one"] .agent-tile__mode')).toHaveText("Input unavailable", { timeout: 1000 });
     await expectCatalogRevision();
     await page.evaluate(() => {
       window.requestAnimationFrame = (window as any).__catalogRaf;
@@ -185,11 +278,161 @@ test.describe("Surface rail", () => {
     await page.evaluate(() => (window as any).__removeSurfaceAgent("agent-one", { id: "agent-two", status: "stopped" }));
     await expect(left.locator('.agent-tile[data-agent-id="agent-one"]')).toHaveCount(0);
     expect(await page.evaluate(() => (window as any).__gwtTerminalTestApi.metrics("agent-one").hasRuntime)).toBe(false);
-    await expect(right.locator('.agent-tile[data-agent-id="agent-two"] .agent-tile__header span')).toHaveText("Input unavailable");
+    await expect(right.locator('.agent-tile[data-agent-id="agent-two"] .agent-tile__mode')).toHaveText("Input unavailable");
     await expect(right.getByRole("tab", { name: "All agents", exact: true })).toHaveAttribute("aria-selected", "true");
     await page.getByRole("button", { name: "Close split", exact: true }).click();
     await expect(page.locator(".agents-surface--preview")).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('.agent-tile[data-agent-id="agent-two"]')).toBeVisible();
     expect((await sentMessages(page)).filter(message => ["close_window", "stop_agent"].includes(message.kind || ""))).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test("long agent titles stay on one line with a fixed name and hover or focus explanations", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page);
+    await page.goto(surfaceAppUrl);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await page.getByRole("spinbutton", { name: "Agent columns" }).fill("4");
+    const tile = page.locator('.agent-tile[data-agent-id="agent-one"]');
+    const header = tile.locator(".agent-tile__header");
+    const title = header.locator("h3");
+    const terminal = tile.locator(".agent-tile__terminal");
+    const originalHeader = await header.boundingBox();
+    const originalTerminal = await terminal.boundingBox();
+    const originalTab = await page.getByRole("tab", { name: "Aster", exact: true }).boundingBox();
+    const purpose = "Investigate terminal output, preserve agent identity, and deliver the smallest verified change across the existing application surfaces.\n".repeat(2).trim();
+    const fullTitle = `Aster — ${purpose}`;
+    await page.evaluate(purpose => (window as any).__updateSurfaceAgent("agent-one", { dynamic_title: purpose }), purpose);
+    await expect(title).toHaveText(fullTitle);
+    expect((await header.boundingBox())!.height).toBe(originalHeader!.height);
+    expect((await terminal.boundingBox())!.height).toBe(originalTerminal!.height);
+    const name = title.locator(".agent-title__name");
+    const body = title.locator(".agent-title__purpose");
+    const nameBox = await name.boundingBox();
+    const bodyBox = await body.boundingBox();
+    expect(nameBox!.y).toBe(bodyBox!.y);
+    expect(await title.evaluate(node => getComputedStyle(node).whiteSpace)).toBe("nowrap");
+    expect(await body.evaluate(node => node.scrollWidth > node.clientWidth)).toBe(true);
+    await body.hover();
+    const explanation = page.locator("#agents-control-explanation");
+    await expect(explanation).toBeVisible();
+    await expect(explanation).toHaveText(fullTitle);
+    await page.mouse.wheel(250, 0);
+    await expect.poll(() => body.evaluate(node => node.scrollLeft)).toBeGreaterThan(0);
+    expect((await name.boundingBox())!.x).toBe(nameBox!.x);
+    await page.mouse.move(0, 0);
+    await title.focus();
+    await expect(title).toBeFocused();
+    await expect(explanation).toBeVisible();
+    await expect(title).toHaveAttribute("aria-describedby", "agents-control-explanation");
+    await clearMessages(page);
+    await page.keyboard.press("Escape");
+    await expect(explanation).toBeHidden();
+    expect((await sentMessages(page)).filter(message => message.kind === "update_viewport")).toEqual([]);
+    const tab = page.getByRole("tab", { name: fullTitle, exact: true });
+    expect((await tab.boundingBox())!.height).toBe(originalTab!.height);
+    expect(await tab.evaluate(node => getComputedStyle(node).whiteSpace)).toBe("nowrap");
+    await tab.focus();
+    await expect(explanation).toBeVisible();
+    await expect(explanation).toHaveText(fullTitle);
+    const tabNameBox = await tab.locator(".agent-title__name").boundingBox();
+    await tab.locator(".agent-title__purpose").hover();
+    await page.mouse.wheel(250, 0);
+    await expect.poll(() => tab.locator(".agent-title__purpose").evaluate(node => node.scrollLeft)).toBeGreaterThan(0);
+    await expect(tab.locator(".agent-title__name")).toHaveText("Aster");
+    expect((await tab.locator(".agent-title__name").boundingBox())!.x).toBe(tabNameBox!.x);
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => (window as any).__updateSurfaceAgent("agent-one", { agent_name: "Vireo" }));
+    await expect(title.locator(".agent-title__name")).toHaveText("Vireo");
+    await page.getByRole("spinbutton", { name: "Agent columns" }).fill("2");
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    const right = page.getByRole("region", { name: "Right pane", exact: true });
+    await right.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
+    const preview = page.locator('.agents-surface--preview [data-agent-id="agent-one"] h3');
+    await expect(preview).toHaveText(`Vireo — ${purpose}`);
+    await expect(preview.locator(".agent-title__name")).toHaveText("Vireo");
+    expect(await preview.evaluate(node => getComputedStyle(node).whiteSpace)).toBe("nowrap");
+    await right.getByRole("spinbutton", { name: "Agent columns" }).fill("4");
+    for (const heading of [preview, right.locator('[data-agent-id="agent-one"] h3')]) {
+      const identity = await heading.locator(".agent-title__name").boundingBox();
+      const mode = await heading.locator("..").locator(":scope > span").boundingBox();
+      // Allow subpixel overlap of advance boxes; glyphs retain their side bearings.
+      expect(identity!.x + identity!.width).toBeLessThanOrEqual(mode!.x + 0.5);
+    }
+    await right.getByRole("spinbutton", { name: "Agent columns" }).fill("2");
+    await preview.hover();
+    await expect(page.locator("#agents-preview-control-explanation")).toHaveText(`Vireo — ${purpose}`);
+    await expect(page.locator("#agents-preview-control-explanation")).toBeVisible();
+    await page.mouse.move(0, 0);
+    await preview.focus();
+    await expect(page.locator('.agents-surface:not(.agents-surface--preview) [data-agent-id="agent-one"] h3')).toBeFocused();
+    await expect(page.locator("#agents-control-explanation")).toBeVisible();
+    await expect(page.locator("#agents-control-explanation")).toHaveText(`Vireo — ${purpose}`);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: testInfo.outputPath("agent-title-one-line.png") });
+    expect(errors).toEqual([]);
+  });
+
+  test("Settings launch controls and PM controls share hover and keyboard explanations without changing settings", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page);
+    await page.goto(surfaceAppUrl);
+    await page.evaluate(() => {
+      (window as any).__surfaceRailSocket().emit({ kind: "issue_monitor_status", status: {
+        enabled: true, state: "active", active_count: 1, max_active_agents: 2, max_active_agents_override: 2,
+        max_active_agents_mode: "manual", terminal_queue_auto_refill: true, terminal_queue_auto_refill_limit: 3,
+        allowed_labels: ["bug"], terminal_queue: [], queue_len: 0,
+      } });
+      (window as any).__surfaceRailSocket().emit({ kind: "pm_status", available: true, paused: false,
+        auto_start: true, configured_agent_id: "claude", loop_interval_secs: 60, running_agent_id: "claude", is_running: true,
+        agent_options: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }],
+      });
+    });
+    await page.locator('.op-rail__surface[data-surface="settings"]').click();
+    const settings = page.locator('.workspace-window[data-preset="settings"]');
+    const issues = settings.locator('[data-settings-panel="issues"]');
+    await issues.locator(".settings-issues-options > summary").click();
+    await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toBeEnabled();
+    await clearMessages(page);
+    const explain = async (control: ReturnType<Page["locator"]>, pattern: RegExp) => {
+      await control.hover();
+      let ids = (await control.getAttribute("aria-describedby"))!.split(/\s+/);
+      const popup = page.locator(`#${ids.at(-1)}`);
+      await expect(popup).toBeVisible();
+      await expect(popup).toContainText(pattern);
+      await page.mouse.move(0, 0);
+      await control.focus();
+      await expect(control).toBeFocused();
+      await expect(popup).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(popup).toBeHidden();
+    };
+    for (const [name, pattern] of [
+      ["Max active mode", /Auto.*Manual/], ["Max active", /agent/i],
+      ["Auto-refill", /queue/i], ["Refill limit", /0.*disable/i], ["Allowed labels", /matching issues/i],
+    ] as const) await explain(issues.getByLabel(name, { exact: true }), pattern);
+    await settings.getByRole("tab", { name: "Project Manager", exact: true }).click();
+    const pm = settings.locator('[data-settings-panel="project-manager"]');
+    for (const [role, pattern] of [
+      ["pm-autonomy-status", /autonomous coordination/i], ["pm-pause-toggle", /Issue Monitor stays unchanged/],
+      ["pm-agent-select", /after restart/], ["pm-model-input", /after restart/], ["pm-effort-select", /after restart/],
+      ["pm-loop-interval", /Minimum: 10 seconds/], ["pm-auto-start", /automatically/],
+    ] as const) await explain(pm.locator(`[data-role="${role}"]`), pattern);
+    await page.screenshot({ path: testInfo.outputPath("settings-control-explanations.png") });
+    await pm.locator('[data-role="pm-autonomy-status"]').focus();
+    const popupId = (await pm.locator('[data-role="pm-autonomy-status"]').getAttribute("aria-describedby"))!.split(/\s+/).at(-1);
+    await expect(page.locator(`#${popupId}`)).toBeVisible();
+    await page.evaluate(() => (window as any).__removeSurfaceAgent("issue-window"));
+    await expect(windowById(page, "issue-window")).toHaveCount(0);
+    await expect(page.locator(`#${popupId}`)).toHaveCount(0);
+    expect((await sentMessages(page)).filter(message => /^(set_issue_monitor|set_pm|restart_pm|update_viewport)/.test(message.kind || ""))).toEqual([]);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
     expect(errors).toEqual([]);
   });
 
@@ -444,14 +687,14 @@ test.describe("Surface rail", () => {
     // marker (is_pm), not the claude preset, decides where it belongs.
     await clearMessages(page);
     await entry("pm").click();
-    await expect.poll(() => inCanvasView(page, "pm-window")).toBe(true);
+    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="pm-window"]')).toBeVisible();
     await windowById(page, "pm-window").locator(".titlebar").click();
     await expect.poll(() => pressedSurfaces(page)).toEqual(["pm"]);
 
     // Issues opens its section in the migrated Settings view, keeping its ID.
     await clearMessages(page);
     await entry("issues").click();
-    await expect.poll(() => focusTargets(page)).toContain("issue-window");
+    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="issue-window"]')).toBeVisible();
     await expect.poll(() => pressedSurfaces(page)).toEqual(["issues"]);
     await expect(windowById(page, "issue-window").getByRole("tab", { name: "Issues", exact: true })).toHaveAttribute("aria-selected", "true");
     expect(await createdPresets(page)).toEqual([]);
@@ -459,7 +702,7 @@ test.describe("Surface rail", () => {
     // Settings reuses that same view without creating a second host.
     await clearMessages(page);
     await entry("settings").click();
-    await expect.poll(() => focusTargets(page)).toContain("issue-window");
+    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="issue-window"]')).toBeVisible();
     expect(await createdPresets(page)).toEqual([]);
 
     // Every entry explains itself on hover.
@@ -543,8 +786,8 @@ async function clearMessages(page: Page): Promise<void> {
   });
 }
 
-async function installSurfaceRailBackend(page: Page, groupedSettings = false): Promise<void> {
-  await page.addInitScript((groupedSettings) => {
+async function installSurfaceRailBackend(page: Page, groupedSettings = false, ownership = false): Promise<void> {
+  await page.addInitScript(({ groupedSettings, ownership }) => {
     (window as any).__gwtPlaywrightTestBridge = true;
     const canvasWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
@@ -619,6 +862,13 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
       windows.push(canvasWindow("settings-grouped", { preset: "settings", tab_group_id: "group", tab_group_active: false }));
     }
 
+    if (ownership) {
+      windows.push(canvasWindow("naming-window", { title: "Naming…", status: "running", session_id: "session-naming" }));
+      windows.push(canvasWindow("start-work-shell", { preset: "shell", status: "running", surface_owner: "agents", persist: false }));
+      for (const data of windows) data.geometry = { x: 80, y: 80, width: 560, height: 340 };
+      const saved = sessionStorage.getItem("surface-ownership-windows");
+      if (saved) windows.splice(0, windows.length, ...JSON.parse(saved));
+    }
     let zCounter = 20;
     let socket: FixtureWebSocket | null = null;
 
@@ -684,9 +934,15 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
         if (message.kind === "create_window" && message.preset) {
           zCounter += 1;
           const id = `${message.preset}-new`;
-          windows.push(canvasWindow(windows.some(data => data.id === id) ? `${id}-${zCounter}` : id, { preset: message.preset, z_index: zCounter }));
+          windows.push(canvasWindow(windows.some(data => data.id === id) ? `${id}-${zCounter}` : id, { preset: message.preset, surface_owner: message.surface_owner, z_index: zCounter }));
           this.emit(workspaceState());
         }
+        if (message.kind === "close_window") {
+          const index = windows.findIndex(data => data.id === message.id);
+          if (index >= 0) windows.splice(index, 1);
+          this.emit(workspaceState());
+        }
+        if (ownership) sessionStorage.setItem("surface-ownership-windows", JSON.stringify(windows.filter(windowData => windowData.persist !== false)));
         if (message.kind === "activate_window_tab") {
           const target = windows.find((data) => data.id === message.id);
           if (target?.tab_group_id) {
@@ -727,5 +983,5 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
       if (data) Object.assign(data, updates);
       socket?.emit(workspaceState());
     };
-  }, groupedSettings);
+  }, { groupedSettings, ownership });
 }

@@ -31,3 +31,8 @@ test("works is part of the default selected search scopes", () => {
   );
   assert.match(defaultsBlock, /"works"/);
 });
+
+test("Issue #4174: file results cannot spawn the retired File Tree GUI", () => {
+  assert.doesNotMatch(surfaceSource, /focusOrSpawnPreset\("file_tree"\)/);
+  assert.match(surfaceSource, /if \(selected\.target\?\.kind !== "file"\) \{\s*detail\.appendChild\(makeEl\("button"/);
+});

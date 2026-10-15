@@ -1,0 +1,19 @@
+{
+  "owner": 5532,
+  "baseline_revision": "85b2253c8",
+  "platform": "windows",
+  "comparison": "controlled 200ms delay; synchronous placement versus queued frontend dispatch",
+  "injected_probe_delay_ms": 200,
+  "synchronous_model_ms": 202.929,
+  "worker_dispatch_ms": 0.421,
+  "worker_probe_ms": 202.832,
+  "gui_stall_budget_ms": 30,
+  "gui_event_loop_stall_before": true,
+  "gui_event_loop_stall_after": false,
+  "command": "cargo test -p gwt --bin gwt autostart_ -- --nocapture",
+  "rust_passed": 2,
+  "rust_failed": 0,
+  "original_incident_dark_ms": 8070,
+  "original_incident_light_ms": 11620,
+  "original_incident_reproduced_on_this_host": false
+}

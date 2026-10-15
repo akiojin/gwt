@@ -91,6 +91,10 @@ impl std::fmt::Debug for AgentCapabilityGrant {
 pub enum AgentFrontendRequest {
     Ready,
     ListWindows,
+    CloseWork {
+        work_id: String,
+        close_kind: String,
+    },
     Name {
         candidate: String,
         request_id: String,
@@ -125,6 +129,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
         match self {
             Self::Ready => formatter.write_str("AgentFrontendRequest::Ready"),
             Self::ListWindows => formatter.write_str("AgentFrontendRequest::ListWindows"),
+            Self::CloseWork { .. } => {
+                formatter.write_str("AgentFrontendRequest::CloseWork(<redacted>)")
+            }
             Self::Name { .. } => formatter.write_str("AgentFrontendRequest::Name(<redacted>)"),
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
@@ -150,6 +157,7 @@ impl AgentFrontendRequest {
         matches!(
             self,
             Self::Name { .. }
+                | Self::CloseWork { .. }
                 | Self::CloseWindow { .. }
                 | Self::RecoverRestoredWindow { .. }
                 | Self::SendInput { .. }
@@ -491,7 +499,15 @@ impl std::fmt::Debug for ManualExecutionHandoffReservation {
 /// acceptance can neither be broadcast nor replayed to another connection.
 #[derive(Clone)]
 pub struct AgentSelfCloseResponder {
-    sender: Arc<Mutex<Option<oneshot::Sender<AgentSelfCloseDirectAcceptance>>>>,
+    sender: Arc<Mutex<Option<oneshot::Sender<AgentSelfCloseResponse>>>>,
+}
+
+pub type AgentSelfCloseResponse = Result<AgentSelfCloseDirectAcceptance, AgentSelfCloseRefusal>;
+
+#[derive(Debug)]
+pub struct AgentSelfCloseRefusal {
+    pub window_id: String,
+    pub reason: String,
 }
 
 /// Direct origin-socket response channel for one privileged PM send.
@@ -618,7 +634,7 @@ impl std::fmt::Debug for AgentSelfCloseResponder {
 }
 
 impl AgentSelfCloseResponder {
-    pub fn channel() -> (Self, oneshot::Receiver<AgentSelfCloseDirectAcceptance>) {
+    pub fn channel() -> (Self, oneshot::Receiver<AgentSelfCloseResponse>) {
         let (sender, receiver) = oneshot::channel();
         (
             Self {
@@ -640,7 +656,22 @@ impl AgentSelfCloseResponder {
         let Some(sender) = sender else {
             return Err(acceptance);
         };
-        sender.send(acceptance)
+        sender.send(Ok(acceptance)).map_err(|response| {
+            response.expect("the failed send returns the acceptance payload it was given")
+        })
+    }
+
+    pub fn refuse(&self, window_id: String, reason: String) -> bool {
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        sender.is_some_and(|sender| {
+            sender
+                .send(Err(AgentSelfCloseRefusal { window_id, reason }))
+                .is_ok()
+        })
     }
 }
 

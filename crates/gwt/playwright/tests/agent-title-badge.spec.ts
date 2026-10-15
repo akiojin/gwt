@@ -55,6 +55,18 @@ test.describe("Agent title role and worktree badges", () => {
     });
   });
 
+  test("Issue #5478 review title stays distinct from its waiting owner", async ({ page }, info) => {
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installAgentTitleBadgeBackend(page, undefined, false, true);
+    await page.goto(appUrl);
+    const owner = page.locator(".workspace-window[data-id='agent-1']");
+    const review = page.locator(".workspace-window[data-id='agent-2']");
+    await expect(owner.locator(".title-text")).toHaveText("Naming… — Deliver Issue #42");
+    await expect(review.locator(".title-text")).toHaveText("Naming… — Review · Issue #42");
+    await expect(review.locator(".window-worktree-badge")).toHaveAttribute("data-worktree-form", "ephemeral");
+    await page.screenshot({ path: info.outputPath("independent-review.png") });
+  });
+
   test("late names reach badge, title, Fleet and Kanban in both themes", async ({ page }, info) => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installAgentTitleBadgeBackend(page, undefined, true);
@@ -255,7 +267,10 @@ test.describe("Agent title role and worktree badges", () => {
 
     await expectWorktreeChromeNotToOverflow(page, false);
     await page.setViewportSize({ width: 640, height: 720 });
-    await expectWorktreeChromeNotToOverflow(page, true);
+    // Resize reframes the focused window on the next animation frame.
+    await expect(async () => {
+      await expectWorktreeChromeNotToOverflow(page, true);
+    }).toPass();
   });
 });
 
@@ -432,8 +447,9 @@ async function installAgentTitleBadgeBackend(
   page,
   primaryAgent = { agentId: "codex", color: "cyan", title: "Codex" },
   identityScenario = false,
+  reviewScenario = false,
 ) {
-  await page.addInitScript(({ primaryAgentFixture, identityScenario }) => {
+  await page.addInitScript(({ primaryAgentFixture, identityScenario, reviewScenario }) => {
     const windows = [
       {
         id: "agent-1",
@@ -499,6 +515,11 @@ async function installAgentTitleBadgeBackend(
         tab_group_active: false,
       },
     ];
+    if (reviewScenario) {
+      windows[0].purpose_title = "Deliver Issue #42";
+      windows[1].title = "Review · Issue #42";
+      windows[1].purpose_title = "Review · Issue #42";
+    }
     if (identityScenario) {
       Object.assign(windows[0], { dynamic_title: "Fix cache" });
       Object.assign(windows[2], { agent_name: "Lyra", dynamic_title: "Review cache",
@@ -585,5 +606,5 @@ async function installAgentTitleBadgeBackend(
       configurable: true,
       value: FixtureWebSocket,
     });
-  }, { primaryAgentFixture: primaryAgent, identityScenario });
+  }, { primaryAgentFixture: primaryAgent, identityScenario, reviewScenario });
 }

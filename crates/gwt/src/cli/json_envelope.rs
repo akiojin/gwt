@@ -81,7 +81,27 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             return 1;
         }
     };
-    let parsed = match parse(&input) {
+    dispatch_input(env, prog, &input, None)
+}
+
+pub(super) fn parse_operation(
+    operation: &str,
+    params: &Value,
+) -> Result<CliCommand, CliParseError> {
+    parse(
+        &serde_json::json!({"schema_version":1,"operation":operation,"params":params}).to_string(),
+    )
+    .map(|parsed| parsed.command)
+}
+
+/// The same dispatcher with an explicit input/output sink for bounded delegation.
+pub(super) fn dispatch_input<E: CliEnv>(
+    env: &mut E,
+    prog: &str,
+    input: &str,
+    mut captured: Option<&mut Vec<u8>>,
+) -> i32 {
+    let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
             let _ = writeln!(env.stderr(), "{prog}: {err}");
@@ -186,7 +206,7 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                     serde_json::to_value(&warnings).expect("operation warnings must serialize");
             }
             attach_project_store(&mut payload);
-            if let Err(err) = write_response(env.stdout(), &payload) {
+            if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
             }
             match (code, declared_block) {
@@ -237,7 +257,7 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                     .expect("operation refusal metadata must serialize");
             }
             attach_project_store(&mut payload);
-            if let Err(err) = write_response(env.stdout(), &payload) {
+            if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
             }
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
@@ -255,6 +275,17 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             }
             1
         }
+    }
+}
+
+fn write_dispatch_response<E: CliEnv>(
+    env: &mut E,
+    captured: &mut Option<&mut Vec<u8>>,
+    payload: &Value,
+) -> Result<(), String> {
+    match captured {
+        Some(output) => write_response(*output, payload),
+        None => write_response(env.stdout(), payload),
     }
 }
 
@@ -359,14 +390,16 @@ mod param_audit {
         static CONSULTED: RefCell<Option<BTreeSet<String>>> = const { RefCell::new(None) };
     }
 
-    /// Records consulted keys for as long as it is alive. Parsing is
-    /// synchronous and non-reentrant, so one recording per thread is enough.
-    pub(super) struct Recording;
+    /// Records consulted keys for as long as it is alive, restoring the
+    /// enclosing operation's recording after synchronous nested parsing.
+    pub(super) struct Recording {
+        previous: Option<BTreeSet<String>>,
+    }
 
     impl Recording {
         pub(super) fn start() -> Self {
-            CONSULTED.with(|consulted| *consulted.borrow_mut() = Some(BTreeSet::new()));
-            Recording
+            let previous = CONSULTED.with(|consulted| consulted.replace(Some(BTreeSet::new())));
+            Recording { previous }
         }
 
         pub(super) fn consulted(&self) -> BTreeSet<String> {
@@ -376,7 +409,7 @@ mod param_audit {
 
     impl Drop for Recording {
         fn drop(&mut self) {
-            CONSULTED.with(|consulted| *consulted.borrow_mut() = None);
+            CONSULTED.with(|consulted| *consulted.borrow_mut() = self.previous.take());
         }
     }
 
@@ -456,6 +489,20 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             )?))
         }
         "workspace.update" => workspace_update(params)?,
+        "workspace.close" => {
+            reject_unknown_params(params, &["work_id", "close_kind"], "workspace.close")?;
+            let close_kind = required_string(params, "close_kind")?;
+            if !matches!(close_kind.as_str(), "done" | "discarded") {
+                return Err(CliParseError::InvalidValue {
+                    flag: "close_kind",
+                    reason: "expected done or discarded",
+                });
+            }
+            CliCommand::Workspace(WorkspaceCommand::Close {
+                work_id: required_string(params, "work_id")?,
+                close_kind,
+            })
+        }
         "workspace.receipt" => CliCommand::Workspace(WorkspaceCommand::Receipt {
             operation_id: required_string(params, "operation_id")?,
         }),
@@ -810,10 +857,28 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             project_root: optional_path(params, "project_root")?,
             number: required_u64(params, "number")?,
         }),
+        "discussion.create"
+        | "board.config.set"
+        | "repository.required_checks.update"
+        | "repository.settings.set"
+        | "release.metadata.set"
+        | "pr.reopen"
+        | "pr.review.submit"
+        | "update.settings.set"
+        | "pm.approval.request"
+        | "pm.approval.status"
+        | "pm.approval.revoke"
+        | "pm.operation.execute" => {
+            params.keys().for_each(|key| param_audit::note(key));
+            CliCommand::PmAuthorization(super::pm_authorization::parse(
+                &envelope.operation,
+                &envelope.params,
+            )?)
+        }
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
             if lookup(params, "auto_apply_updates").is_some() {
                 return Err(CliParseError::InvalidJson(
-                    "unknown parameter auto_apply_updates; configure automatic updates in Settings > System"
+                    "unknown parameter auto_apply_updates; use JSON operation update.settings.set with instruction_id or approval_id (also available in Settings > System)"
                         .to_string(),
                 ));
             }
@@ -857,7 +922,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain",
                 ));
             }
-            // The handler owns the GUI-only ON policy so dispatch can return
+            // The handler owns the resident-PM caller policy so dispatch can return
             // the normal structured `ok:false` operation envelope. This layer
             // only rejects malformed config values.
             if max_active == Some(0) {
@@ -1537,6 +1602,32 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             text: required_string(params, "text")?,
         }),
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.peer.send" => {
+            reject_unknown_params(
+                params,
+                &["project", "kind", "text", "reply_to", "timeout_seconds"],
+                "pm.peer.send",
+            )?;
+            let project = required_string(params, "project")?;
+            let kind = serde_json::from_value::<gwt_core::pm_peer::PeerKind>(Value::String(
+                required_string(params, "kind")?,
+            ))
+            .map_err(|_| {
+                CliParseError::InvalidJson("PM peer kind must be request, reply, or notice".into())
+            })?;
+            let text = required_string(params, "text")?;
+            let reply_to = optional_string(params, "reply_to")?;
+            let timeout_seconds = optional_u64(params, "timeout_seconds")?.unwrap_or(900);
+            gwt_core::pm_peer::validate(kind, &text, reply_to.as_deref(), timeout_seconds)
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::PeerSend {
+                project,
+                kind,
+                text,
+                reply_to,
+                timeout_seconds,
+            })
+        }
         "pm.report.post" => {
             let kind: gwt_core::pm_report::PmReportKind = serde_json::from_value(Value::String(
                 required_string(params, "kind")?,
@@ -2150,6 +2241,7 @@ fn search(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
             "board" => Ok(IndexSearchScope::Board),
             "discussions" => Ok(IndexSearchScope::Discussions),
             "works" => Ok(IndexSearchScope::Works),
+            "reports" => Ok(IndexSearchScope::Reports),
             _ => Err(CliParseError::InvalidJson(format!(
                 "unknown search scope: {scope}"
             ))),
@@ -2185,6 +2277,7 @@ fn index_scope(value: &str) -> Result<IndexScope, CliParseError> {
         "discussions" => Ok(IndexScope::Discussions),
         "board" => Ok(IndexScope::Board),
         "works" => Ok(IndexScope::Works),
+        "reports" => Ok(IndexScope::Reports),
         "files" => Ok(IndexScope::Files),
         "files_docs" | "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::InvalidJson(format!(
@@ -2668,6 +2761,129 @@ mod tests {
             "params": params,
         })
         .to_string()
+    }
+
+    #[test]
+    fn pm_delegated_operation_executes_authorized_cleanup_dry_run() {
+        use gwt_core::pm_authorization::{self, OperationIntent};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        std::fs::write(repo.join("target/keep"), "build cache").unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let intent = OperationIntent {
+            operation: "worktree.gc_build_artifacts".into(),
+            params: json!({"dry_run":true,"include_unmerged":true}),
+        };
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Inspect build caches",
+            "No deletion in dry run",
+            false,
+        )
+        .unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "pm.operation.execute",
+            json!({
+                "operation":intent.operation,"params":intent.params,"approval_id":approval.id,
+            }),
+        );
+        assert_eq!(
+            super::dispatch(&mut env, "gwtd"),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let result: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(result["after"]["operation"], "worktree.gc_build_artifacts");
+        assert_eq!(result["after"]["ok"], true);
+        let report: Value =
+            serde_json::from_str(result["after"]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(report["dry_run"], true);
+        assert!(repo.join("target/keep").exists());
+        assert!(pm_authorization::approvals(&repo).unwrap()[0].consumed);
+        assert!(std::fs::read_to_string(pm_authorization::audit_path(&repo))
+            .unwrap()
+            .contains("succeeded"));
+    }
+
+    #[test]
+    fn pm_delegated_operation_propagates_inner_refusal() {
+        use gwt_core::pm_authorization::{self, OperationIntent};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _pane = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let intent = OperationIntent {
+            operation: "pm.message.send".into(),
+            params: json!({"id":"fixture-agent","text":"Approved exact action"}),
+        };
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Forward approved action",
+            "No input if target is unavailable",
+            false,
+        )
+        .unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope(
+            "pm.operation.execute",
+            json!({
+                "operation":intent.operation,"params":intent.params,"approval_id":approval.id,
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["ok"], false);
+        let result: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(result["after"]["ok"], false);
+        assert_eq!(result["after"]["exit_code"], 1);
+        assert!(result["after"]["error"]
+            .as_str()
+            .unwrap()
+            .contains(gwt_agent::GWT_PANE_WS_URL_ENV));
+        assert!(std::fs::read_to_string(pm_authorization::audit_path(&repo))
+            .unwrap()
+            .contains("failed"));
+    }
+
+    #[test]
+    fn pm_delegated_operation_rejects_other_operations_and_foreign_targets() {
+        for params in [
+            json!({"operation":"actions.dispatch","params":{"workflow":"release.yml"}}),
+            json!({"operation":"pm.operation.execute","params":{}}),
+            json!({"operation":"pm.message.send","params":{"id":"agent","text":"yes","project_root":"/other"}}),
+            json!({"operation":"pr.close","params":{"number":7,"repo":"other/repo"}}),
+        ] {
+            assert!(parse(&envelope("pm.operation.execute", params)).is_err());
+        }
+        assert!(parse(&envelope(
+            "pm.operation.execute",
+            json!({
+                "operation":"pr.close","params":{"number":7},"approval_id":"scoped-id"
+            })
+        ))
+        .is_ok());
     }
 
     #[test]
@@ -4288,6 +4504,24 @@ mod tests {
     }
 
     #[test]
+    fn workspace_close_requires_an_exact_target_and_close_kind() {
+        assert!(matches!(
+            ok("workspace.close", json!({"work_id":"work-1","close_kind":"done"})),
+            CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
+                if work_id == "work-1" && close_kind == "done"
+        ));
+        for params in [
+            json!({"close_kind":"done"}),
+            json!({"work_id":"work-1"}),
+            json!({"work_id":"work-1","close_kind":"delete"}),
+            json!({"work_id":"work-1","close_kind":"done","manual_close_allowed":true}),
+            json!({"work_id":"work-1","close_kind":"done","project_root":"/other"}),
+        ] {
+            assert!(parse(&envelope("workspace.close", params)).is_err());
+        }
+    }
+
+    #[test]
     fn workspace_lifecycle_operations_parse() {
         assert!(matches!(
             ok("workspace.candidates", json!({"agent_session": "s"})),
@@ -4691,8 +4925,8 @@ mod tests {
             )
         );
         assert!(matches!(
-            err("update.settings.set", json!({"auto_apply_updates": false})),
-            CliParseError::UnknownSubcommand(_)
+            ok("update.settings.set", json!({"auto_apply_updates": false})),
+            CliCommand::PmAuthorization(_)
         ));
     }
 
@@ -5894,6 +6128,23 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/reports-post.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
         let mut env = TestEnv::new(repo.clone());
         let post = || match ok(
             "pm.report.post",
@@ -5913,6 +6164,16 @@ mod tests {
         assert_eq!(saved["report"]["kind"], "qa");
         assert_eq!(saved["report"]["question"], "Can we ship?");
         assert_eq!(saved["report"]["body"], "Checks passed.");
+        let broker = gwt_core::index::broker::RefreshBroker::open_default().unwrap();
+        let scope = serde_json::from_str("\"reports\"").expect("Reports refresh scope");
+        let hash = crate::index_worker::detect_repo_hash(&repo).unwrap();
+        let target = gwt_core::index::broker::RefreshTarget::base(hash.as_str(), [scope]);
+        let posted_epoch = broker
+            .inspect()
+            .unwrap()
+            .target(&target)
+            .expect("post queues Reports")
+            .desired_epoch();
         let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "registered-pm");
         output.clear();
         let error = crate::cli::pm::run(&mut env, post(), &mut output).unwrap_err();
@@ -5943,6 +6204,8 @@ mod tests {
             CliCommand::Pm(command) => command,
             other => panic!("unexpected report command: {other:?}"),
         };
+        let peer_path = gwt_core::paths::gwt_home().join("pm-peer-messages.json");
+        std::fs::write(&peer_path, b"{").unwrap();
         assert_eq!(
             crate::cli::pm::run(&mut env, capture(), &mut output).unwrap(),
             0
@@ -5954,6 +6217,16 @@ mod tests {
         );
         assert_eq!(saved["instruction"]["id"], saved["report"]["id"]);
         assert_eq!(gwt_core::user_instruction::load(&repo).unwrap().len(), 1);
+        assert!(
+            broker
+                .inspect()
+                .unwrap()
+                .target(&target)
+                .unwrap()
+                .desired_epoch()
+                > posted_epoch
+        );
+        assert_eq!(std::fs::read(&peer_path).unwrap(), b"{");
         let CliCommand::Pm(list) = ok("pm.report.list", json!({})) else {
             panic!("expected PM list")
         };
@@ -6203,6 +6476,164 @@ mod tests {
             3
         );
         assert!(!gwt_core::pm_status::status_path(&pm).exists());
+    }
+
+    #[test]
+    fn pm_peer_send_strict_boundary() {
+        let valid = json!({"project":"/tmp/peer","kind":"request","text":"Please checkpoint"});
+        assert!(matches!(
+            ok("pm.peer.send", valid.clone()),
+            CliCommand::Pm(_)
+        ));
+        for field in ["project", "kind", "text"] {
+            let mut invalid = valid.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(parse(&envelope("pm.peer.send", invalid)).is_err());
+        }
+        for (field, value) in [
+            ("id", json!("foreign-pane")),
+            ("session_id", json!("forged")),
+            ("project_root", json!("/tmp/foreign")),
+            ("kind", json!("stop")),
+            ("text", json!(" ")),
+            ("timeout_seconds", json!(0)),
+            ("timeout_seconds", json!(86401)),
+            ("reply_to", json!("unrelated")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(parse(&envelope("pm.peer.send", invalid)).is_err());
+        }
+        assert!(crate::cli::pm::capabilities_report()
+            .capabilities
+            .iter()
+            .any(|row| row.operation == "pm.peer.send" && row.executable));
+    }
+
+    #[test]
+    fn pm_peer_two_project_runtime_roundtrip_and_unavailable() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let a = home.path().join("a");
+        let b = home.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let register = |repo: &std::path::Path, id: &str| {
+            let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(repo);
+            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::create_dir_all(worktree.parent().unwrap().join("runtime")).unwrap();
+            let mut session = gwt_agent::Session::new(&worktree, "work", gwt_agent::AgentId::Codex);
+            session.id = id.into();
+            session.project_state_root = Some(repo.to_path_buf());
+            session.status = gwt_agent::AgentStatus::Running;
+            session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+            let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+            runtime.child_pid = Some(std::process::id());
+            runtime.child_started_at = crate::process::host_process_start_time(std::process::id());
+            assert!(runtime.child_started_at.is_some());
+            runtime
+                .save(&gwt_agent::runtime_state_path(
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    id,
+                ))
+                .unwrap();
+            crate::pm_registry::save_pm_prefs(
+                &crate::pm_registry::pm_prefs_path_for_repo_path(repo),
+                &crate::pm_registry::PmPrefs {
+                    registration: Some(crate::pm_registry::PmRegistration {
+                        session_id: id.into(),
+                        agent_id: "codex".into(),
+                        worktree_path: worktree.display().to_string(),
+                        created_at: None,
+                        consecutive_crashes: 0,
+                        next_not_before: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        register(&a, "pm-a");
+        register(&b, "pm-b");
+        let send = |repo: &std::path::Path, params: Value| {
+            let mut env = TestEnv::new(
+                crate::pm_registry::pm_worktree_path_for_repo_path(repo)
+                    .parent()
+                    .unwrap()
+                    .join("runtime"),
+            );
+            let CliCommand::Pm(command) = ok("pm.peer.send", params) else {
+                panic!("expected PM command")
+            };
+            let mut output = String::new();
+            crate::cli::pm::run(&mut env, command, &mut output)
+                .map(|_| serde_json::from_str::<Value>(&output).unwrap())
+        };
+        let request = json!({"project":b,"kind":"request","text":"Please checkpoint"});
+        let _direct = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        assert!(send(&a, request.clone()).is_err());
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "implementation-agent");
+        assert!(send(&a, request.clone()).is_err());
+        let _pm_a = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-a");
+        let sent = send(&a, request.clone()).unwrap();
+        assert_eq!(sent["status"], "queued");
+        assert!(crate::cli::pm::peer_context(&a).unwrap().is_empty());
+        {
+            let _pm_b = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-b");
+            let context = crate::cli::pm::peer_context(&b).unwrap();
+            assert!(
+                context.contains("Please checkpoint")
+                    && context.contains(sent["message"]["id"].as_str().unwrap())
+            );
+            assert_eq!(crate::cli::pm::peer_context(&b).unwrap(), context);
+            let reply = json!({"project":a,"kind":"reply","text":"Checkpoint saved","reply_to":sent["message"]["id"]});
+            assert_eq!(send(&b, reply).unwrap()["status"], "queued");
+            assert!(!crate::cli::pm::peer_context(&b)
+                .unwrap()
+                .contains("Please checkpoint"));
+        }
+        assert!(crate::cli::pm::peer_context(&a)
+            .unwrap()
+            .contains("Checkpoint saved"));
+        assert_eq!(gwt_core::pm_report::load_reports(&a).unwrap().len(), 2);
+        assert_eq!(gwt_core::pm_report::load_reports(&b).unwrap().len(), 2);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut stopped = gwt_agent::Session::load(&sessions.join("pm-b.toml")).unwrap();
+        stopped.status = gwt_agent::AgentStatus::Stopped;
+        stopped.save(&sessions).unwrap();
+        assert_eq!(send(&a, request.clone()).unwrap()["status"], "unavailable");
+        stopped.status = gwt_agent::AgentStatus::Running;
+        stopped.save(&sessions).unwrap();
+        std::fs::remove_file(gwt_agent::runtime_state_path(
+            &gwt_core::paths::gwt_sessions_dir(),
+            "pm-b",
+        ))
+        .unwrap();
+        assert_eq!(
+            send(&a, request.clone()).unwrap()["status"],
+            "unavailable",
+            "stale Running registration must not count as live"
+        );
+        let missing =
+            json!({"project":home.path().join("absent"),"kind":"notice","text":"Update pending"});
+        assert_eq!(send(&a, missing).unwrap()["status"], "unavailable");
+        let reports = gwt_core::pm_report::load_reports(&a).unwrap();
+        assert!(reports
+            .iter()
+            .any(|r| r.body.contains("Waiting for the peer project")));
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&a),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(
+            send(&a, request).is_err(),
+            "replaced PM loses send authority"
+        );
     }
 
     #[test]
@@ -7799,6 +8230,21 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn reports_search_and_rebuild_routes_parse() {
+        match ok(
+            "search",
+            json!({"query": "過去のPMの回答", "scopes": ["reports"]}),
+        ) {
+            CliCommand::Search(command) => assert_eq!(command.scopes[0].as_str(), "reports"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(matches!(
+            ok("index.rebuild", json!({"scope": "reports"})),
+            CliCommand::Index(IndexCommand::Rebuild { .. })
+        ));
     }
 
     #[test]

@@ -23,8 +23,8 @@ pub(crate) fn runtime_publication_lock(sessions_dir: &Path) -> io::Result<fs::Fi
         .open(sessions_dir.join(".runtime-publication.lock"))
 }
 
-pub const RUNTIME_NAMESPACE_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-pub const RUNTIME_NAMESPACE_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub const RUNTIME_NAMESPACE_MIN_AGE: Duration = Duration::from_secs(5 * 60);
+pub const RUNTIME_NAMESPACE_GC_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RuntimeGcReport {
