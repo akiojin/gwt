@@ -1459,6 +1459,7 @@ mod tests {
     #[test]
     fn gwt_work_notes_paths_live_under_home_project_dir() {
         let dir = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(dir.path());
         let repo = dir.path().join("repo");
         init_git_repo(&repo);
 

@@ -449,6 +449,10 @@ coordination surface agents use to expose status, decisions, handoffs, and
 requests. The Work Item Knowledge Bridge uses the local Issue cache and semantic
 index rather than rendering direct GitHub API responses in the frontend.
 
+Board keeps up to 1,000 entries in each window. Scroll to the top or choose
+`Load earlier entries` to retrieve older posts. When browsing older history,
+choose `Back to latest entries` to resume the latest updates.
+
 Each worker Agent chooses a short memorable name when it starts. Its badge,
 window title, Fleet, and Kanban cards use that name; duplicate choices receive
 a numeric suffix. The name stays the same through restore and in-place restart.
