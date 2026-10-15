@@ -4864,6 +4864,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
         scheduleKnowledgeRelatedWorkRefresh,
+        resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
@@ -4886,9 +4887,10 @@ import { createUiStateStore } from "/ui-state-store.js";
         createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
-        isKnowledgeWindowVisible: (id) => elementHasLayoutBox(
-          windowMap.get(id)?.querySelector(".surface-knowledge") || windowMap.get(id),
-        ),
+        isKnowledgeWindowVisible: (id) => !document.hidden &&
+          !workspaceWindowById(id)?.minimized &&
+          (!workspaceWindowById(id)?.tab_group_id || workspaceWindowById(id)?.tab_group_active) &&
+          elementHasLayoutBox(windowMap.get(id)?.querySelector(".surface-knowledge") || windowMap.get(id)),
         getWorkspaceWindows: () =>
           allProjectWindowIds()
             .map((windowId) => workspaceWindowById(windowId))
@@ -5125,7 +5127,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           });
         }
         if (isStrongContinueWorkSuccess(exact)) {
-          scheduleKnowledgeRelatedWorkRefresh();
+          scheduleKnowledgeRelatedWorkRefresh(true);
         }
       }
 
@@ -6279,6 +6281,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // Subscribers may mount runtimes: publish only after removal, creation
         // and focus have settled, never with the previous membership.
         publishWindowCatalog();
+        resumeKnowledgeEventRefresh();
         return result;
       }
 
@@ -6814,7 +6817,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                   dismissible: true,
                   timeoutMs: 0,
                 });
-                scheduleKnowledgeRelatedWorkRefresh();
+                scheduleKnowledgeRelatedWorkRefresh(true);
               }
             }
             break;
@@ -6823,7 +6826,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "workspace_resume_agent_started":
             workspaceResumePicker.handleStarted(event);
             launchPending.settleAck(event);
-            scheduleKnowledgeRelatedWorkRefresh();
+            scheduleKnowledgeRelatedWorkRefresh(true);
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
@@ -7909,6 +7912,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         rearmVisibleTerminalViewportRefreshes();
+        resumeKnowledgeEventRefresh();
         refreshVisibleKnowledgeWindows();
       });
       for (const button of modal.querySelectorAll("[data-preset]")) {
