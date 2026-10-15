@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { build, run, targets } from "./ci-windows-tests.mjs";
+import { build, run, runCore, targets } from "./ci-windows-tests.mjs";
 
 test("required Windows CI builds and runs the gate lifecycle regressions", () => {
   assert.ok(targets("default").some(([pkg, kind, name]) =>
@@ -83,4 +83,36 @@ test("failed builds invalidate old manifests and missing artifacts cannot silent
   assert.equal(fs.existsSync(manifest), false);
   assert.throws(() => build("default", root, () => ({ status: 0, stdout: "" })), /missing.*gwt/i);
   assert.throws(() => run("default", ["gwt", "lib", "gwt"], root), /ENOENT/);
+});
+
+test("core artifacts include every Cargo harness and run without rebuilding at default parallelism", (t) => {
+  const root = fixture(t);
+  const messages = artifacts(root, "warm").map((message) => ({
+    ...message, manifest_path: path.join(root, "crates", "gwt-core", "Cargo.toml"),
+    target: { kind: ["lib"], name: "gwt_core" },
+  }));
+  messages.push({ ...messages[0], target: { kind: ["test"], name: "index_coordinator" },
+    executable: path.join(root, "target", "debug", "deps", "index_coordinator.exe") });
+  messages.push({ ...messages[0], target: { kind: ["test"], name: "windows_process_resolver" },
+    executable: path.join(root, "target", "debug", "deps", "windows_process_resolver.exe") });
+  assert.equal(build("core", root, (command, args) => {
+    assert.equal(command, "cargo");
+    assert.deepEqual(args, ["test", "-p", "gwt-core", "--all-features", "--no-run", "--message-format=json"]);
+    return { status: 0, stdout: messages.map(JSON.stringify).join("\n") };
+  }), 0);
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, "target", "ci-windows-tests-core.json")));
+  assert.deepEqual(Object.keys(manifest), ["gwt-core|lib|gwt_core", "gwt-core|test|index_coordinator",
+    "gwt-core|test|windows_process_resolver"]);
+  assert.equal(run("core", ["gwt-core", "test", "index_coordinator"], root, (command, args) => {
+    assert.equal(command, messages[1].executable);
+    assert.deepEqual(args, []);
+    return { status: 0 };
+  }), 0);
+  const executed = [];
+  assert.equal(runCore(root, (command, args) => {
+    executed.push(command);
+    assert.deepEqual(args, []);
+    return { status: executed.length === 2 ? 23 : 0 };
+  }), 23);
+  assert.deepEqual(executed, messages.slice(0, 2).map((message) => message.executable));
 });
