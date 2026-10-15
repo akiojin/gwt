@@ -1583,6 +1583,172 @@ fn issue_5062_deferred_update_releases_drain_on_the_next_observation() {
 }
 
 #[test]
+fn list_issue_monitor_slow_reader_runs_outside_the_dispatch() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let tab = sample_project_tab("active", "Project", root, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("active"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker_reads = reads.clone();
+    let mut watchdog = crate::dispatch_watchdog::DispatchWatchdog::start();
+    let started = std::time::Instant::now();
+    let guard = watchdog.enter("ListIssueMonitor");
+    let events = runtime.list_issue_monitor_events_with_reader(
+        &runtime.test_context(),
+        "client-1",
+        move |_| {
+            worker_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            Ok(None)
+        },
+    );
+    drop(guard);
+    eprintln!(
+        "Issue #5537 slow-reader dispatch_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    assert_eq!(
+        reads.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "dispatch must enqueue without entering the reader"
+    );
+    assert!(events.is_empty());
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    // The worker can remain blocked beyond the watchdog threshold after dispatch returns.
+    let task = tasks.lock().unwrap().pop().unwrap();
+    task();
+    drop(watchdog);
+    let ledger = temp.path().join(".gwt/logs/errors");
+    if ledger.exists() {
+        for entry in fs::read_dir(ledger).unwrap() {
+            let content = fs::read_to_string(entry.unwrap().path()).unwrap();
+            assert!(!content.contains("gui_event_loop_stall"), "{content}");
+        }
+    }
+}
+
+#[test]
+fn list_issue_monitor_discards_old_requests_and_hydrates_parallel_clients() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let tab = sample_project_tab("active", "Project", root, ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("active"));
+    runtime.persist().unwrap();
+    assert!(runtime
+        .persist_dispatcher
+        .wait_idle(std::time::Duration::from_secs(30)));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let context = runtime.test_context();
+    let read = |limit| {
+        move |_: &Path| {
+            let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+            monitor.set_max_active_agents(limit);
+            Ok(Some(serde_json::to_value(monitor.agent_status()).unwrap()))
+        }
+    };
+    runtime.list_issue_monitor_events_with_reader(&context, "client-a", read(1));
+    runtime.list_issue_monitor_events_with_reader(&context, "client-a", read(5));
+    runtime.list_issue_monitor_events_with_reader(&context, "client-b", read(2));
+    let latest = tasks.lock().unwrap().remove(1);
+    latest();
+    let latest_events = finish_list_read(&mut runtime, &events);
+    assert!(matches!(&latest_events[0].event,
+        BackendEvent::IssueMonitorStatus { status } if status.max_active_agents == 5));
+    let old = tasks.lock().unwrap().remove(0);
+    old();
+    assert!(finish_list_read(&mut runtime, &events).is_empty());
+    let parallel = tasks.lock().unwrap().remove(0);
+    parallel();
+    let reply = finish_list_read(&mut runtime, &events);
+    assert!(reply.iter().any(|event| matches!(&event.target,
+        DispatchTarget::Client(id) if id == "client-b")
+        && matches!(&event.event, BackendEvent::IssueMonitorStatus { status } if status.max_active_agents == 5)));
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "display updates must not trigger retry starvation"
+    );
+}
+
+#[test]
+fn list_issue_monitor_does_not_overwrite_a_newer_daemon_projection() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let tab = sample_project_tab("active", "Project", root.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("active"));
+    runtime.persist().unwrap();
+    assert!(runtime
+        .persist_dispatcher
+        .wait_idle(std::time::Duration::from_secs(30)));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    let old_status = serde_json::to_value(monitor.agent_status()).unwrap();
+    runtime.list_issue_monitor_events_with_reader(&runtime.test_context(), "client-1", move |_| {
+        Ok(Some(old_status))
+    });
+    let mut newer = monitor.status_view();
+    newer.max_active_agents = 7;
+    runtime.issue_monitor_daemon_status_events(&root, Box::new(newer));
+    runtime.issue_monitor_daemon_inbox_events(&root, Vec::new());
+    let task = tasks.lock().unwrap().remove(0);
+    task();
+    let reply = finish_list_read(&mut runtime, &events);
+    assert!(
+        matches!(&reply[0].event, BackendEvent::IssueMonitorStatus { status } if status.max_active_agents == 7)
+    );
+    assert_eq!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .issue_monitor_status_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .max_active_agents,
+        7
+    );
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "a newer display must hydrate without another read"
+    );
+    assert!(reply.iter().any(|event| matches!(&event.event, BackendEvent::IssueMonitorInbox { items } if items.is_empty())));
+    // An acknowledged control can change prefs before any new display arrives.
+    runtime
+        .list_issue_monitor_events_with_reader(&runtime.test_context(), "client-1", |_| Ok(None));
+    runtime.invalidate_issue_monitor_list(&root);
+    let task = tasks.lock().unwrap().remove(0);
+    task();
+    assert!(finish_list_read(&mut runtime, &events).is_empty());
+    let retry = tasks.lock().unwrap().remove(0);
+    retry();
+    assert!(finish_list_read(&mut runtime, &events)
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::IssueMonitorStatus { .. })));
+}
+
+fn finish_list_read(
+    runtime: &mut AppRuntime,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Vec<OutboundEvent> {
+    let event = events.lock().unwrap().remove(0);
+    let Some(UserEvent::IssueMonitorListPrepared(prepared)) =
+        runtime.accept_project_completion(event)
+    else {
+        panic!("List completion expected");
+    };
+    runtime.issue_monitor_list_prepared_events(*prepared)
+}
+
+#[test]
 fn list_issue_monitor_uses_the_daemon_gui_projection_without_local_scan() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
@@ -1598,14 +1764,10 @@ fn list_issue_monitor_uses_the_daemon_gui_projection_without_local_scan() {
     let expected = agent["gui_status"].clone();
     reset_local_issue_monitor_remote_scan_count();
 
-    let events = runtime.list_issue_monitor_events_with_reader(
-        &runtime.test_context(),
-        "client-1",
-        |project_root| {
-            assert_eq!(project_root, root);
-            Ok(Some(agent))
-        },
-    );
+    let events = runtime.completed_issue_monitor_list_for_test("client-1", move |project_root| {
+        assert_eq!(project_root, root);
+        Ok(Some(agent))
+    });
 
     assert_eq!(local_issue_monitor_remote_scan_count(), 0);
     assert_eq!(events.len(), 1);
@@ -1646,11 +1808,7 @@ fn list_issue_monitor_uncertain_and_legacy_daemon_reads_preserve_display() {
         (Ok(Some(serde_json::json!({"gui_status": "invalid"}))), true),
         (Ok(Some(legacy)), false),
     ] {
-        let events = runtime.list_issue_monitor_events_with_reader(
-            &runtime.test_context(),
-            "client-1",
-            |_| result,
-        );
+        let events = runtime.completed_issue_monitor_list_for_test("client-1", move |_| result);
         assert!(events
             .iter()
             .all(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. })));
@@ -1700,11 +1858,7 @@ fn list_issue_monitor_without_daemon_never_scans_remote_for_cold_or_stale_cache(
                 .expect("stale cache");
         }
         reset_local_issue_monitor_remote_scan_count();
-        let events = runtime.list_issue_monitor_events_with_reader(
-            &runtime.test_context(),
-            "client-1",
-            |_| Ok(None),
-        );
+        let events = runtime.completed_issue_monitor_list_for_test("client-1", |_| Ok(None));
         assert_eq!(
             local_issue_monitor_remote_scan_count(),
             0,

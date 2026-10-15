@@ -576,7 +576,9 @@ struct RuntimeStopThreads {
 }
 
 mod issue_monitor_delivery_ack;
+mod issue_monitor_list;
 pub(crate) use issue_monitor_delivery_ack::IssueMonitorLaunchDeliveryAcknowledged;
+pub(crate) use issue_monitor_list::PreparedIssueMonitorList;
 pub(crate) mod agent_maintenance;
 mod attachments;
 mod board;
@@ -1390,6 +1392,12 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) issue_monitor_claim_renewals_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Latest published read model; capacity refreshes preserve scan/queue authority.
     pub(crate) issue_monitor_status_cache: std::cell::RefCell<Option<gwt::IssueMonitorStatusView>>,
+    pub(crate) issue_monitor_list_revision: std::cell::Cell<u64>,
+    pub(crate) issue_monitor_status_revision: std::cell::Cell<u64>,
+    pub(crate) issue_monitor_inbox_revision: std::cell::Cell<u64>,
+    pub(crate) issue_monitor_inbox_cache:
+        std::cell::RefCell<Option<Vec<gwt::IssueMonitorInboxItem>>>,
+    pub(crate) issue_monitor_list_requests: HashMap<ClientId, Arc<()>>,
     /// One actionable notice shared by PM preparation and Monitor snapshots.
     pub(crate) project_attention_notice:
         std::cell::RefCell<Option<(String, chrono::DateTime<chrono::Utc>)>>,
@@ -1495,6 +1503,11 @@ pub(crate) fn initial_project_states(
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
+                    issue_monitor_list_revision: Default::default(),
+                    issue_monitor_status_revision: Default::default(),
+                    issue_monitor_inbox_revision: Default::default(),
+                    issue_monitor_inbox_cache: Default::default(),
+                    issue_monitor_list_requests: Default::default(),
                     project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
@@ -4258,6 +4271,11 @@ impl AppRuntime {
                     issue_monitor_scheduled_scans_in_flight: HashSet::new(),
                     issue_monitor_claim_renewals_in_flight: Default::default(),
                     issue_monitor_status_cache: Default::default(),
+                    issue_monitor_list_revision: Default::default(),
+                    issue_monitor_status_revision: Default::default(),
+                    issue_monitor_inbox_revision: Default::default(),
+                    issue_monitor_inbox_cache: Default::default(),
+                    issue_monitor_list_requests: Default::default(),
                     project_attention_notice: Default::default(),
                     work_merged_branches: HashMap::new(),
                     work_items_cache: Arc::new(Mutex::new(
@@ -5437,6 +5455,7 @@ impl AppRuntime {
         project_root: &Path,
         payload: serde_json::Value,
     ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        self.invalidate_issue_monitor_list(project_root);
         Self::publish_issue_monitor_control_owned(project_root, payload)
     }
 
@@ -8730,69 +8749,6 @@ impl AppRuntime {
         self.issue_monitor_snapshot_events_without_wake(client_id, Some(project_root), monitor)
     }
 
-    fn list_issue_monitor_events_with_reader(
-        &mut self,
-        context: &ProjectContext,
-        client_id: &str,
-        read_status: impl FnOnce(
-            &Path,
-        ) -> Result<
-            Option<serde_json::Value>,
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError,
-        >,
-    ) -> Vec<OutboundEvent> {
-        if let Some(project_root) = Some(context.project_root.as_path()) {
-            let result = read_status(project_root).and_then(|status| {
-                status
-                    .map(serde_json::from_value::<gwt::IssueMonitorAgentStatus>)
-                    .transpose()
-                    .map_err(|error| {
-                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
-                            format!("invalid daemon Issue Monitor status: {error}"),
-                        )
-                    })
-            });
-            match result {
-                Ok(Some(status)) => {
-                    // A live daemon owns the projection. Older daemons omit
-                    // gui_status; their subscriber frames still supply it.
-                    return status
-                        .gui_status
-                        .map(|mut status| {
-                            self.retain_missing_issue_monitor_capacity(project_root, &mut status);
-                            self.remember_issue_monitor_status(Some(project_root), &status);
-                            vec![OutboundEvent::reply(
-                                client_id,
-                                BackendEvent::IssueMonitorStatus {
-                                    status: Box::new(status),
-                                },
-                            )]
-                        })
-                        .unwrap_or_default();
-                }
-                Err(error) => {
-                    return self.issue_monitor_control_error_events(
-                        Some(&context.project_root),
-                        Some(client_id),
-                        error,
-                        "list",
-                        None,
-                    );
-                }
-                Ok(None) => {}
-            }
-        }
-        self.local_issue_monitor_events_with_policy(
-            context,
-            Some(client_id),
-            // Issue #4963: the GUI list only projects local state. Remote
-            // enumeration belongs to the scheduled worker, even for a cold
-            // or stale cache; a deadline alone would still stall this loop.
-            IssueMonitorScanPolicy::CacheOnly,
-            |_| {},
-        )
-    }
-
     fn local_issue_monitor_events_with_policy(
         &mut self,
         context: &ProjectContext,
@@ -10054,6 +10010,9 @@ impl AppRuntime {
         status: &gwt::IssueMonitorStatusView,
     ) {
         if let Some(state) = project_root.and_then(|root| self.project_state_for_root(root)) {
+            state
+                .issue_monitor_status_revision
+                .set(state.issue_monitor_status_revision.get().wrapping_add(1));
             state
                 .issue_monitor_status_cache
                 .replace(Some(status.clone()));
@@ -11690,6 +11649,23 @@ impl AppRuntime {
             tracing::trace_span!(target: "gwt_log_scope", parent: None, "machine_frontend_event").entered()
         });
         log_frontend_user_action(&client_id, &event);
+        if matches!(
+            event,
+            FrontendEvent::SetIssueMonitorEnabled { .. }
+                | FrontendEvent::SetIssueMonitorAutonomousMode { .. }
+                | FrontendEvent::IssueMonitorProfilesSet { .. }
+                | FrontendEvent::SetIssueMonitorMaxActiveAgents { .. }
+                | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
+                | FrontendEvent::ReorderIssueMonitorIssues { .. }
+                | FrontendEvent::IssueMonitorQueuePush { .. }
+                | FrontendEvent::IssueMonitorQueueRemove { .. }
+                | FrontendEvent::IssueMonitorQueueMove { .. }
+                | FrontendEvent::SetIssueMonitorAutoRefill { .. }
+                | FrontendEvent::IssueMonitorLaunchNow { .. }
+                | FrontendEvent::IssueMonitorRequeue { .. }
+        ) {
+            self.invalidate_issue_monitor_list(&context.project_root);
+        }
         match event {
             FrontendEvent::ProjectAggregateAck {
                 revision,

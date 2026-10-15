@@ -2169,6 +2169,7 @@ enum UserEvent {
         project_root: PathBuf,
         status: Box<gwt::IssueMonitorStatusView>,
     },
+    IssueMonitorListPrepared(Box<app_runtime::PreparedIssueMonitorList>),
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
     IssueMonitorDaemonInbox {
@@ -11529,6 +11530,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_scheduled_scan_prepared_events(*prepared));
+            }
+            Event::UserEvent(UserEvent::IssueMonitorListPrepared(prepared)) => {
+                clients.dispatch(app.issue_monitor_list_prepared_events(*prepared));
             }
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);
