@@ -199,7 +199,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           const current = status?.agent_capacity;
           const text = document.querySelector('.notification-center__item[data-error-key="issue-monitor:capacity"] .notification-center__message')?.textContent ?? "";
           return !!current && text.includes(`${value - current.recommended_worker_limit} over recommended`);
-        }, { id: windowId, value: manual })).toBe(true);
+        }, { id: windowId, value: manual }), { timeout: 75_000, intervals: [1_000, 2_000] }).toBe(true);
         await expect(notice).toContainText("Lower Max active if slow.");
         await expect(warning).toHaveAttribute("data-tone", "info");
         await expect(budget).toContainText("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
@@ -303,7 +303,12 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         try {
           await fixture.cleanup(async () => {
             if (before) {
-              await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: before.max_active_agents_override });
+              await expect.poll(() => latestStatus(page), { timeout: 75_000 })
+                .toHaveProperty("max_active_agents_override");
+              const current = await latestStatus(page);
+              if (current.max_active_agents_override !== before.max_active_agents_override) {
+                await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: before.max_active_agents_override });
+              }
               await expectOverride(page, before.max_active_agents_override);
             }
           });

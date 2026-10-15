@@ -11,8 +11,10 @@ $checkoutGwtd = Join-Path $repoRoot 'target/debug/gwtd.exe'
 if (!(Test-Path -LiteralPath $checkoutGwt) -or !(Test-Path -LiteralPath $checkoutGwtd)) {
     throw 'Build this checkout with cargo build -p gwt --bin gwt --bin gwtd first.'
 }
-# Keep traces outside verify.run's temporary directory so failed runs remain inspectable.
-$checkHome = Join-Path $repoRoot ('target/issue-5500-browser/gwt-fresh-home.5500-' + [guid]::NewGuid())
+# Retain traces outside verify.run's child TEMP on the original profile volume,
+# separate from Cargo output and the target tree measured by the sampler.
+$browserChecksRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'gwt/browser-check'
+$checkHome = Join-Path $browserChecksRoot ('gwt-fresh-home.5500-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path (Join-Path $checkHome '.gwt') -Force | Out-Null
 $sessionsFixture = $env:GWT_CAPACITY_SESSIONS_FIXTURE
 if ($sessionsFixture) {
@@ -38,7 +40,10 @@ $repoHash = $status.project_store.hash
 $statePath = Join-Path $checkHome ".gwt/projects/$repoHash/project-state"
 New-Item -ItemType Directory -Path $statePath -Force | Out-Null
 '{"settings":{"auto_start":false}}' | Set-Content -LiteralPath (Join-Path $statePath 'pm.json')
-'{"enabled":false,"max_active_agents":1,"priority_order":[]}' | Set-Content -LiteralPath (Join-Path $statePath 'issue-monitor.json')
+$monitorPreferences = @{enabled=$false;max_active_agents=1;priority_order=@()}
+# Exercise the current Auto format in E2E; preserve the CPU comparison fixture.
+if (!$MeasureOnly) { $monitorPreferences['max_active_agents_mode'] = 'auto' }
+$monitorPreferences | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $statePath 'issue-monitor.json')
 @{active_tab_id='issue-5500';tabs=@(@{id='issue-5500';title='Issue 5500';project_root=$repoRoot;kind='git'});recent_projects=@()} |
     ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $checkHome '.gwt/session.json')
 $hookBin = $env:GWT_HOOK_BIN
