@@ -5174,6 +5174,15 @@ export function createKnowledgeKanbanSurface({
             const queuedQuery = state.query.trim();
             const previousNumber = state.selectedNumber;
             const incomingEntries = event.entries || [];
+            const previousSelectedEntry = state.baseEntries.find(entry => entry.number === previousNumber);
+            const incomingSelectedEntry = incomingEntries.find(entry => entry.number === previousNumber);
+            const relatedSnapshot = entry => JSON.stringify([
+              entry.related_work_refs || [], entry.related_work_count || 0,
+              entry.related_session_count || 0,
+            ]);
+            const refreshSelectedDetail = state.selectionGeneration > 0 &&
+              previousSelectedEntry && incomingSelectedEntry &&
+              relatedSnapshot(previousSelectedEntry) !== relatedSnapshot(incomingSelectedEntry);
             const entriesContent = JSON.stringify(incomingEntries);
             const unchangedEntries = !state.error && !state.renderError &&
               ((typeof event.revision === "string" && event.revision.length > 0 &&
@@ -5213,6 +5222,11 @@ export function createKnowledgeKanbanSurface({
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.refreshedAt = Date.now();
             state.error = "";
+            // A cache-first list can precede the related-work snapshot used by
+            // an explicit selection. Refresh its detail without selecting anew.
+            if (refreshSelectedDetail) {
+              dispatchKnowledgeDetailRequest(event.id, event.knowledge_kind, previousNumber, { explicit: false });
+            }
             const renderCompletion = () => {
               knowledgeCompletionViewModel.update(() => ({
                 windowId: event.id, unchangedEntries, previousNumber,

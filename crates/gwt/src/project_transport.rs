@@ -1141,6 +1141,12 @@ impl ClientHub {
 
         let mut dead_clients: Vec<String> = Vec::new();
         for outbound in events {
+            let knowledge_load = match &outbound.event {
+                BackendEvent::KnowledgeEntries { id, request_id, .. } => {
+                    Some((id.clone(), *request_id, std::time::Instant::now()))
+                }
+                _ => None,
+            };
             crate::error_report::queue_backend_event_with_origin(
                 &outbound.event,
                 outbound.error_origin.as_ref(),
@@ -1153,6 +1159,11 @@ impl ClientHub {
                 {
                     dead_clients.push(client_id.clone());
                 }
+            }
+            if let Some((window_id, request_id, started)) = knowledge_load {
+                tracing::info!(target: "gwt::knowledge_load", stage = "send", status = "completed",
+                    %window_id, ?request_id, duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+                    boundary = "serialize_and_socket_queue", "Issue cache response queued");
             }
         }
 
