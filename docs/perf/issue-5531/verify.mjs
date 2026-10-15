@@ -4,31 +4,35 @@ import { readFileSync } from "node:fs";
 
 const read = name => JSON.parse(readFileSync(new URL(name, import.meta.url), "utf8"));
 const checkout = new URL("../../../", import.meta.url);
-// The recorded 30-minute runs preceded the trace-safe CDP harness refinement.
-// Preserve their original test identity; production files must still match HEAD.
-const measuredTestPaths = ["scripts/diagnostics/issue-5531-browser-check.ps1",
-  "crates/gwt/playwright/tests/socket-receive-backpressure-live.spec.ts"];
-const digest = source => createHash("sha256").update(source.replace(/\r\n/g, "\n")).digest("hex");
+const harnessPath = "crates/gwt/playwright/tests/socket-receive-backpressure-live.spec.ts";
+const measuredHarness = new URL("measured-harness.spec.ts.txt", import.meta.url);
+const normalize = source => source.replace(/\r\n/g, "\n");
+const digest = source => createHash("sha256").update(normalize(source)).digest("hex");
+const currentHarness = normalize(readFileSync(new URL(harnessPath, checkout), "utf8"));
+assert.equal(digest(readFileSync(measuredHarness, "utf8")),
+  read("after-dark-multikey-launch.json").test_sha256[harnessPath]);
+assert.equal(normalize(readFileSync(measuredHarness, "utf8"))
+  .replace('const input = "GWT_INPUT_5531";', 'const input = "X";')
+  .replace("26 controller", "per-event controller"), currentHarness,
+"the archived multi-key harness may differ only in its input probe and comment");
 for (const label of ["before", "after"]) {
   const launch = read(`${label}-launch.json`);
   assert.equal(launch.label, label);
   assert.equal(launch.acceptance_duration, true);
-  for (const [name, hash] of Object.entries(launch.source_sha256)) {
-    const path = `crates/gwt/web/${name}`;
+  for (const [path, hash] of Object.entries({
+    ...Object.fromEntries(Object.entries(launch.source_sha256).map(([name, hash]) => [`crates/gwt/web/${name}`, hash])),
+    ...launch.test_sha256,
+  })) {
     assert.equal(digest(readFileSync(new URL(path, checkout), "utf8")), hash,
       `${label}: measured source changed: ${path}`);
-  }
-  assert.deepEqual(Object.keys(launch.test_sha256).sort(), [...measuredTestPaths].sort());
-  for (const [path, hash] of Object.entries(launch.test_sha256)) {
-    const measured = path === "crates/gwt/playwright/tests/socket-receive-backpressure-live.spec.ts"
-      ? new URL("measured-harness.spec.ts.txt", import.meta.url) : new URL(path, checkout);
-    assert.equal(digest(readFileSync(measured, "utf8")), hash, `${label}: original measurement harness changed: ${path}`);
   }
   for (const theme of ["dark", "light"]) {
     const run = read(`${label}-${theme}.json`);
     assert.equal(run.label, label);
     assert.equal(run.theme, theme);
     assert.equal(run.baseline_sha, launch.baseline_sha);
+    assert.equal(String(run.frontend.owned_pid), String(launch.owned_pid));
+    assert.equal(run.frontend.isolated_home, launch.isolated_home);
     assert.equal(run.acceptance_duration, true);
     assert.ok(run.background_elapsed_ms >= 1800000);
     for (const key of ["controller_restore_started_at_ms", "browser_performance_time_origin_ms", "controller_restore_start_performance_ms"]) {

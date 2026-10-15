@@ -3,7 +3,7 @@
 Owner: [Issue #5531](https://github.com/akiojin/gwt/issues/5531).
 Parent: [SPEC #5390](https://github.com/akiojin/gwt/issues/5390).
 The comparison dispatcher is pinned to `bc175f05a2b730775e1f5302b3af0d588ba4470a`.
-The fetched develop `73eddff7311c0e042ab9ec90702e6745982e8e86` still had the
+The fetched develop `9edfe3788fdeea554c0a7340e0cec92b57096c68` still had the
 identical dispatcher blob `e0f304b0131896cacc824027e2e70ed08ef5d1d1`, including
 the repeated `unshift`, and no receive-queue cap or foreground resynchronization.
 
@@ -22,9 +22,9 @@ traffic and requests authoritative snapshots instead of replaying a stream
 with gaps. A native foreground visibility event also discards the backlog and
 requests fresh state. Old socket generations cannot recover a replacement
 socket. Recovery reloads mounted read surfaces and preserves drafts; it does
-not retry mutations. A lost File Tree save or unconfirmed Board post remains
-explicitly uncertain so the user can decide whether to retry.
-Late File Tree read replies cannot overwrite a new edit made during recovery.
+not retry mutations. An unconfirmed Board post remains explicitly uncertain
+so the user can decide whether to retry. Console and File Tree were retired
+upstream by Issue #4174 during this work and are not restored by this fix.
 Settings recovery preserves explicit-save inputs while synchronizing the
 autostart checkbox's value and pending state independently.
 
@@ -32,10 +32,12 @@ autostart checkbox's value and pending state independently.
 
 - Run `scripts/diagnostics/issue-5531-browser-check.ps1` with `-Label before`
   and `-Label after`, each with `-BackgroundMilliseconds 1800000` and the
-  pinned `-BaselineRef` above. Each invocation runs both Operator themes.
+  pinned `-BaselineRef` above. The initial invocations run both Operator
+  themes; the repeated dark run selects `--project chromium-dark`.
 - Use this checkout's `target/debug/gwt.exe` with a fresh HOME, disabled PM
   and Issue Monitor, stable managed-hook fallback, and recorded owned PID.
-  All ten changed frontend assets are compared with the served assets.
+  All ten measured frontend assets are compared with the served assets,
+  including the Agents renderer and shared control explanations.
 - Use real headed Chromium and a native minimized window. A private copy of
   Playwright 1.49.1 disables its forced focus emulation; Chromium's default
   background timer policy is restored. Every background sample checks the
@@ -55,6 +57,11 @@ autostart checkbox's value and pending state independently.
   of the controller's native foreground request. Map its wall clock to the
   browser's `performance.timeOrigin`; a delayed visibility handler cannot
   reset the deadline. Windows helper compilation happens in setup.
+- Both themes send one trusted native `X` key and wait for its backend echo,
+  measuring input readiness. The archived `GWT_INPUT_5531` multi-key harness
+  belongs to excluded earlier runs. It differs only in that input constant
+  and a comment; the validator checks the exact difference. Background
+  traffic, recovery and all limits are identical.
 - Record the maximum Long Tasks API duration in the initial 0–2s interval
   and in the settled 2–4s interval. AC-4 requires settling within two seconds:
   the latter maximum must be below 200ms. An initial transient is reported,
@@ -78,23 +85,28 @@ so foreground operations do not overlap. Both instances are cleaned up.
 
 ## Evidence and verification
 
-All four real background periods lasted 1,800,013–1,800,117ms, with
-659,531–668,114 WebSocket frames sent during each period.
+Final measurements below use the integrated production frontend at
+`6864fa6f497a03368431b4b35e1a4fa019267091`; source digests bind them to the
+delivered files. Traffic totals include the final foreground-triggering burst.
 
 | Run | Peak queue | Completed task max (ms) | Tasks 0–2s / 2–4s (ms) | Snapshot / input (ms) |
 | --- | ---: | ---: | --- | --- |
-| Before, dark | 630,792 | 14,782 | unobserved / unobserved | timeout at 15,004 / unobserved |
-| Before, light | 657,976 | 41,961 | unobserved / unobserved | timeout at 15,005 / unobserved |
-| After, dark | 2,048 | 979 | 301 / 0 | 546 / 793 |
-| After, light | 2,048 | 627 | 140 / 0 | 361 / 518 |
+| Before, dark | 373,280 | 41,412 | unobserved / unobserved | timeout at 15,018 / unobserved |
+| Before, light | 647,408 | 98,951 | unobserved / unobserved | timeout at 15,008 / unobserved |
+| After, dark | 2,048 | 2,915 | 241 / 0 | 448 / 828 (one key) |
+| After, light | 2,048 | 3,398 | 88 / 0 | 629 / 753 (one key) |
+
+The background periods lasted 1,800,006ms (before dark), 1,800,010ms
+(before light), 1,800,007ms (after dark) and 1,800,015ms (after light).
+They sent 673,702, 686,642, 676,435 and 689,213 frames respectively.
 
 Both baseline timeouts occurred while waiting for native visibility. The
 completed-task maximum is the last observable value, not the duration of the
 unfinished foreground task. No foreground duration is inferred from timeout.
-The baseline light observation gap reached 68,238ms while its main thread
-blocked; after dark/light gaps stayed within 57,726/30,249ms. Both after runs
-passed, with zero console/page/fixture errors. Their initial tasks ended
-before the two-second deadline; both settled windows had no reported tasks.
+Baseline dark/light observation gaps reached 55,033/100,924ms; adopted after
+dark/light gaps stayed within 30,489/30,467ms. Both after runs passed,
+with zero console/page/fixture errors. Both settled windows had no reported
+tasks of at least 50ms.
 
 ![Dark theme after recovery](after-dark-recovered.png)
 
@@ -103,18 +115,14 @@ before the two-second deadline; both settled windows had no reported tasks.
 The raw `before-dark.json`, `before-light.json`, `after-dark.json` and
 `after-light.json` include real elapsed duration, traffic samples, native
 visibility events, long tasks, snapshot/input latency and console/page errors.
-The two launch manifests record the owned process, isolated HOME and
+The launch manifests record the owned process, isolated HOME and
 LF-normalized SHA-256 digests of the ten frontend files and both test inputs.
 They are preserved outside Playwright's output directory during startup.
 These measurements preceded the final source commit: `head_sha` records the
 parent commit, while the file digests identify the measured working tree and
-are checked against the delivered production files. The original measurement
-harness from commit `859a5219facc82866232ec3472f977e967218fda` is archived
-verbatim in `measured-harness.spec.ts.txt`. The validator checks its digest
-against the original manifests, so verification also works after a squash
-merge in a fresh clone. The unchanged launch wrapper is checked directly.
+are checked against the delivered production files and measurement harness.
 
-Two subsequent canonical short runs failed the input deadline with tracing
+Two initial canonical short runs failed the input deadline with tracing
 enabled (dark: 2,811ms and 2,025ms; light passed). In the first trace,
 Playwright DOM snapshot collection took 7,557.9ms and 3,514ms, matching the
 recorded 7,558ms and 3,514ms long tasks. The current harness therefore uses
@@ -124,8 +132,30 @@ triggering before/after DOM snapshots. The physical foreground origin,
 eight-snapshot check, backend input echo, independent long-task collection,
 two-second deadline and 200ms settled limit are unchanged. Ordinary
 Playwright assertions and the recovered screenshot remain outside that
-interval. Production files and the four original long-run records are
-unchanged; the final canonical smoke verifies the refined harness separately.
+interval. All adopted long runs use the integrated frontend. The archived
+multi-key harness and final single-key harness use the same background and
+recovery code; the final canonical smoke verifies the latter separately.
+
+An earlier integrated dark run completed recovery in 297/511ms but had a 72,528ms
+background observation gap. It is excluded from acceptance evidence and
+preserved in [the interrupted record](after-dark-interrupted.json) and
+[its launch manifest](after-dark-interrupted-launch.json). The
+before/after observers resumed only 19ms apart around that interruption;
+its underlying cause was not attributed to a product defect. Dark was
+repeated alone in a separate owned instance. That first repeat had continuous
+observations (maximum gap 30,120ms), a 176ms snapshot and zero settled long
+tasks, but its 14-character echo took 2,158ms and failed. It is preserved in
+[the multi-key record](after-dark-multikey.json) and
+[its launch manifest](after-dark-multikey-launch.json). It is excluded from
+acceptance evidence. These excluded records used frontend `a0465e2b9`.
+Input readiness was then measured with one native key, with no background
+workload or threshold changes. When Issue #4174 retired two surfaces and
+changed the active Agents renderer upstream, the in-progress dark repeat
+was stopped deliberately at 16.8 minutes. It supplies no acceptance evidence.
+The final integrated frontend was rebuilt and all four full periods below
+were measured again. The validator checks the delivered production/test
+hashes and each adopted run's owned PID and isolated HOME. All adopted
+after observations must remain within the same one-minute bound.
 
 `node docs/perf/issue-5531/verify.mjs` checks all four 30-minute runs, their
 source identity and the acceptance thresholds. It also requires increasing
