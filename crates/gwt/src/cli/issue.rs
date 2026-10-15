@@ -3226,6 +3226,7 @@ fn run_monitor_release_stranded_launch(
                             review_dispatch: false,
                             hold_reason: None,
                             last_output_at: None,
+                            session_id: window.session_id.clone(),
                         })
                         .collect(),
                 });
@@ -5990,6 +5991,7 @@ mod tests {
             pane_state: None,
             pane_hold_reason: None,
             runtime_consistency: None,
+            hook_live_delivery: None,
         }
     }
 
@@ -9679,6 +9681,7 @@ mod tests {
                 pane_state: None,
                 pane_hold_reason: None,
                 runtime_consistency: None,
+                hook_live_delivery: None,
             }],
             inbox_coverage: None,
             closure_held: Vec::new(),
@@ -9824,6 +9827,7 @@ mod tests {
                     pane_hold_reason: None,
                     pane_state: None,
                     runtime_consistency: None,
+                    hook_live_delivery: None,
                 }],
                 inbox_coverage: None,
                 closure_held: Vec::new(),
@@ -12640,6 +12644,7 @@ mod tests {
                 pane_state: None,
                 pane_hold_reason: None,
                 runtime_consistency: None,
+                hook_live_delivery: None,
             }],
             inbox_coverage: None,
             closure_held: Vec::new(),
