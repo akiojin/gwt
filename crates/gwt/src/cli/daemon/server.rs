@@ -1142,13 +1142,18 @@ fn spawn_issue_monitor_worker_with_lease(
                             }
                             effect_execution_requested = !monitor.pending_effects().is_empty();
                         }
-                        IssueMonitorControlCommit::Rejected => {
+                        rejection @ (IssueMonitorControlCommit::Rejected
+                        | IssueMonitorControlCommit::WaitNotLaunched) => {
                             let (drained, completion, authorizing) = pending_authority_controls
                                 .as_mut()
                                 .expect("authority barrier exists during retry")
                                 .committed_front();
                             if let Some(completion) = completion {
-                                completion.reject(IssueMonitorControlQueueError::Rejected);
+                                completion.reject(if rejection == IssueMonitorControlCommit::WaitNotLaunched {
+                                    IssueMonitorControlQueueError::WaitNotLaunched
+                                } else {
+                                    IssueMonitorControlQueueError::Rejected
+                                });
                             }
                             if drained {
                                 pending_authority_controls = None;
@@ -2154,6 +2159,7 @@ enum IssueMonitorControlCommit {
         authority_changed: bool,
     },
     Rejected,
+    WaitNotLaunched,
     RetryableFailure,
     TerminalFailure,
 }
@@ -2376,9 +2382,14 @@ fn apply_or_queue_issue_monitor_control(
                 commit_issue_monitor_control_completion(hub, monitor, completion);
             }
         }
-        IssueMonitorControlCommit::Rejected => {
+        rejection @ (IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::WaitNotLaunched) => {
             if let Some(completion) = completion {
-                completion.reject(IssueMonitorControlQueueError::Rejected);
+                completion.reject(if rejection == IssueMonitorControlCommit::WaitNotLaunched {
+                    IssueMonitorControlQueueError::WaitNotLaunched
+                } else {
+                    IssueMonitorControlQueueError::Rejected
+                });
             }
         }
         IssueMonitorControlCommit::RetryableFailure => {
@@ -3059,6 +3070,7 @@ fn apply_issue_monitor_control_with_disk_migration(
     match try_apply_issue_monitor_control_with_disk_migration(prefs_path, monitor, control) {
         IssueMonitorControlCommit::Committed { should_scan, .. } => should_scan,
         IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::WaitNotLaunched
         | IssueMonitorControlCommit::RetryableFailure
         | IssueMonitorControlCommit::TerminalFailure => false,
     }
@@ -3137,7 +3149,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         .last_control_receipt()
         .is_some_and(|receipt| receipt.control_id == accepted.control_id);
     let mut receipt_convergence_failed = false;
-    let mut rejected = false;
+    let mut rejected = None;
     let recovery_baseline = monitor.prefs();
     let mut candidate = monitor.clone();
     let transaction = crate::issue_monitor::mutate_issue_monitor_prefs_recovering_observed(
@@ -3205,7 +3217,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     disk.clone(),
                 );
                 if !issue_monitor_agent_failure_source_matches(&accepted.control, &canonical) {
-                    rejected = true;
+                    rejected = Some(IssueMonitorControlCommit::Rejected);
                     return;
                 }
             }
@@ -3226,13 +3238,16 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     .is_some(),
                 _ => false,
             };
-            if ((typed_failure || fenced_agent_failure || refused_launch_binding)
-                && applied == Some(Some(false)))
-                || (wait_declaration && applied == Some(None))
+            if wait_declaration && applied == Some(None) {
+                // An unrecorded wait is refused, not ACKed and not a terminal
+                // failure of the control lane (Issue #5066).
+                rejected = Some(IssueMonitorControlCommit::WaitNotLaunched);
+                return;
+            }
+            if (typed_failure || fenced_agent_failure || refused_launch_binding)
+                && applied == Some(Some(false))
             {
-                // A refused launch or unrecorded wait is not a successful ACK
-                // and not a terminal failure of the control lane.
-                rejected = true;
+                rejected = Some(IssueMonitorControlCommit::Rejected);
                 return;
             }
             if applied.is_some_and(|result| result.is_some()) {
@@ -3247,9 +3262,9 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
     );
     match transaction {
         Ok(_) => {
-            if rejected {
+            if let Some(rejection) = rejected {
                 *monitor = candidate;
-                return IssueMonitorControlCommit::Rejected;
+                return rejection;
             }
             if receipt_convergence_failed {
                 monitor.record_control_commit_error(
@@ -3324,6 +3339,77 @@ fn issue_5062_host_drain_can_requeue_a_review_delivery_through_control() {
     assert!(
         matches!(decode_issue_monitor_control(payload), Some(IssueMonitorControl::ReviewDispatchDeferred(dispatch)) if dispatch.issue_number == 5062 && dispatch.pr_number == 42)
     );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
+    let _prefs_budget = pin_prefs_hang_guard();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    for launched in [false, true] {
+        let prefs_path = temp.path().join(format!("monitor-{launched}.json"));
+        let before = crate::IssueMonitorPrefs {
+            launched_issues: if launched {
+                vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 5524,
+                    window_id: "tab-1::agent-live".to_string(),
+                }]
+            } else {
+                Vec::new()
+            },
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            before.clone(),
+        );
+        let hub = BroadcastHub::new();
+        let mut receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("claim control receiver");
+        let receipt = hub
+            .enqueue_issue_monitor_control(DaemonFrame::Ack)
+            .await
+            .expect("admit control");
+        let (_, completion) = receiver.recv().await.expect("receive control").into_parts();
+        let mut pending = None;
+        assert!(!apply_or_queue_issue_monitor_control(
+            &hub,
+            &prefs_path,
+            &mut monitor,
+            IssueMonitorControl::WaitDeclared {
+                issue_number: 5524,
+                reason: "verification".to_string(),
+                resume_condition: "lease available".to_string(),
+                at: "2026-10-15T00:00:00Z".to_string(),
+            },
+            &mut IssueMonitorEffectPermit::new(),
+            &mut pending,
+            Some(completion),
+        )
+        .should_scan());
+        assert!(pending.is_none(), "a settled wait is not a retry barrier");
+        let completion = receipt.await.expect("completion is settled");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        if launched {
+            assert_eq!(completion, Ok(()), "a durable live launch is accepted");
+            assert!(monitor.autonomous_wait(5524).is_some());
+            assert!(monitor.last_control_receipt().is_some());
+            assert_eq!(persisted, monitor.prefs());
+        } else {
+            let error = completion.expect_err("missing durable launch must reject its receipt");
+            let message = error.message();
+            assert!(message.contains("rejected before commit"), "{message}");
+            assert!(message.contains("reason=not_launched"), "{message}");
+            assert!(message.contains("durable launch"), "{message}");
+            assert!(message.contains("issue.monitor.status"), "{message}");
+            assert!(message.contains("launch context"), "{message}");
+            assert_eq!(monitor.prefs(), before);
+            assert_eq!(persisted, before);
+            assert!(monitor.last_control_receipt().is_none());
+        }
+    }
 }
 
 fn decode_issue_monitor_control_in_repo(
@@ -9708,7 +9794,7 @@ exit 0
                     at: "2026-06-29T01:00:00Z".to_string(),
                 },
             ),
-            super::IssueMonitorControlCommit::Rejected
+            super::IssueMonitorControlCommit::WaitNotLaunched
         );
         assert_eq!(monitor.prefs(), before);
         assert_eq!(

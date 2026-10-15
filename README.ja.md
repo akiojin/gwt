@@ -191,8 +191,8 @@ area、Linux は StatusNotifierItem 対応 DE のシステムトレイ) にア�
 - **Projects**: 開いているプロジェクト、Recent の順に表示し、選んだプロジェクトの
   URL を開きます。実行中・エラー件数を表示し、開いているプロジェクトに
   エージェントのエラーがある間はトレイアイコンにエラーバッジが付きます。
-- **About GWT**: 起動中の tray プロセスのブラウザ版 About / Version 画面を
-  開きます。
+- **Open Project…**: Hub を開き、フォルダ選択を直接開始します。
+- **Clone from GitHub…**: Clone Project ダイアログを開いた状態で Hub を表示します。
 - **Quit**: tray アイコン + 埋込サーバー + PTY 子プロセスを順に停止します。
 
 プロジェクトのブラウザタブにはエージェントの RUN / BLOCK 件数と状態別 favicon を
@@ -208,7 +208,7 @@ GitHub、Recent projects、開いているプロジェクトの一覧を表示�
 プロジェクト URL を開いた複数のブラウザタブではワークスペースが同期します。
 プロジェクト URL をブックマークやタブ復元で開くと、Recent のプロジェクトは自動で
 開き直され、未知のプロジェクト URL は Hub へのリンク付きの「Project not found」を
-表示します。プロジェクトのヘッダーにある **Hub** リンクは Hub を新しいタブで開きます。
+表示します。Hub はトレイの **Open in browser**、または引数なしの `gwt open` で開けます。
 
 Autostart は **Settings > System > Launch GWT at login** で切り替えます。
 有効にすると `auto-launch` crate 経由で macOS LaunchAgent / Windows HKCU
@@ -454,7 +454,9 @@ Queued には `auto-refill` などの追加元も表示されます。
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
 エラーの詳細と履歴は通知センターで確認できます。⚙ で同じペインの設定行を展開し、
-Max active、Auto-refill と上限、Allowed labels、候補プロファイルを設定します。Auto-apply updates は **System** で設定します。
+**Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
+**Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
+設定を閉じると Autonomous と Start / Stop は要約帯に戻ります。Auto-apply updates は **System** で設定します。
 Max active は **Manual** に切り替えると数値を編集でき、**Auto** では計算値を表示します。Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
 空のキューから新しい作業は起動せず、実行中の作業は継続します。

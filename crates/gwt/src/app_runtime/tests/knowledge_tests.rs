@@ -1469,7 +1469,7 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
     );
 
     let context_b = runtime.project_context(&tab_b_id).unwrap();
-    runtime.create_window_events(&context_b, WindowPreset::Logs, canvas_bounds());
+    runtime.create_window_events(&context_b, WindowPreset::Logs, canvas_bounds(), None);
     let logs_b_raw_id = runtime
         .tab(&tab_b_id)
         .expect("opened project tab")

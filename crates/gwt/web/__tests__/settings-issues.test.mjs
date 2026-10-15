@@ -17,6 +17,38 @@ function load(name, bindings = {}) {
   return Function(...Object.keys(bindings), `return (${source.slice(start, end)})`)(...Object.values(bindings));
 }
 
+test("Settings entry points reuse only the requested surface owner", () => {
+  const { document, CustomEvent } = parseHTML('<html><body><div id="normal"></div><div id="pm"></div></body></html>');
+  const normal = document.getElementById("normal"), pm = document.getElementById("pm");
+  for (const body of [normal, pm]) body.dataset.settingsProjectRoot = "/A";
+  pm.dataset.surfaceOwner = "pm";
+  const selected = [], focused = [], pending = [];
+  load("installSettingsOpenHandler", { switchSettingsTab: (body, target) => selected.push([body.id, target]) })({
+    document, settingsWindowBodies: new Set([normal, pm]), activeProjectTab: () => ({ project_root: "/A" }),
+    focusOrSpawnPreset: (...args) => focused.push(args), setPendingTarget: (...args) => pending.push(args),
+  });
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
+  assert.deepEqual(selected, [["pm", "project-manager"], ["normal", "issues"]]);
+  assert.deepEqual(focused, [["settings", { surfaceOwner: "pm" }], ["settings", { surfaceOwner: null }]]);
+  pm.remove();
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
+  assert.deepEqual(pending, [["project-manager", "pm"]]);
+});
+
+test("PM auxiliary Settings scrolls its own content without scrolling app chrome", () => {
+  const { document } = parseHTML('<div id="settings" data-surface-owner="pm"><div class="settings-body"><section class="settings-panel" data-settings-panel="project-manager"></section></div></div>');
+  const body = document.getElementById("settings"), scroller = body.querySelector(".settings-body"), panel = body.querySelector("section");
+  Object.defineProperty(scroller, "offsetTop", { value: 20 });
+  Object.defineProperty(panel, "offsetTop", { value: 120 });
+  panel.scrollIntoView = () => assert.fail("must not scroll the document or outer app chrome");
+  let focused = false;
+  panel.focus = options => { focused = options.preventScroll; };
+  load("switchSettingsTab")(body, "project-manager", true);
+  assert.equal(scroller.scrollTop, 100);
+  assert.equal(focused, true);
+});
+
 test("Issues Settings keeps labels and values together and sends existing project controls", () => {
   const { document, Event } = parseHTML("<html><body><section></section></body></html>");
   const panel = document.querySelector("section"), sent = [];
@@ -28,6 +60,12 @@ test("Issues Settings keeps labels and values together and sends existing projec
     send: message => sent.push(message),
   });
   assert.match(panel.textContent, /Project settings.*Project A/);
+  assert.deepEqual([...panel.querySelectorAll("legend")].map(el => el.textContent), ["Launch control", "Refill", "Target"]);
+  assert.equal(panel.firstElementChild.tagName, "H3", "project identity precedes settings groups");
+  assert.equal(panel.querySelector('[aria-label="Max active"]').closest("fieldset").querySelector("legend").textContent, "Launch control");
+  assert.equal(panel.querySelector('[aria-label="Auto-refill"]').closest("fieldset").querySelector("legend").textContent, "Refill");
+  assert.equal(panel.querySelector('[aria-label="Allowed labels"]').closest("fieldset").querySelector("legend").textContent, "Target");
+  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Autonomous", "Max active", "Monitoring"]);
   const change = (name, value) => {
     const control = panel.querySelector(`[aria-label="${name}"]`);
     assert.ok(control, name);
@@ -51,6 +89,33 @@ test("Issues Settings keeps labels and values together and sends existing projec
     { kind: "set_issue_monitor_allowed_labels", allowed_labels: ["auto-merge", "bug"] },
   ]);
   assert.equal(panel.querySelector('[aria-label="Autonomous"]'), null, "the summary owns Autonomous once");
+});
+
+test("Issues disclosure reuses authoritative launch controls and returns them to the compact summary", () => {
+  const { document } = parseHTML('<div class="settings-root"><div class="knowledge-monitor-controls"><button data-action="monitor-autonomous">Autonomous</button><button data-action="monitor-toggle">Start</button><button data-action="monitor-settings">⚙</button></div><details class="settings-issues-options"><section></section></details></div>');
+  const body = document.querySelector(".settings-root");
+  const panel = body.querySelector("section");
+  const disclosure = body.querySelector("details");
+  const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+  let clicked = 0;
+  launchControls[1].addEventListener("click", () => clicked++);
+  const render = load("renderIssuesSettingsPanel");
+  const position = load("positionIssuesLaunchControls");
+  disclosure.setAttribute("open", "");
+  for (let i = 0; i < 2; i++) {
+    render(panel, { project: { name: "A" }, status: {}, send: () => {}, launchControls });
+    position(body);
+    assert.equal(panel.querySelector('[data-settings-launch-action="monitor-toggle"] > :last-child').firstElementChild === launchControls[1], true);
+    assert.equal(panel.querySelector('[data-action="monitor-autonomous"]').closest("fieldset").querySelector("legend").textContent, "Launch control");
+    launchControls[1].click();
+  }
+  disclosure.removeAttribute("open");
+  position(body);
+  assert.equal(body.querySelector(".knowledge-monitor-controls").firstElementChild, launchControls[0]);
+  assert.equal(body.querySelectorAll('[data-action="monitor-toggle"]').length, 1);
+  assert.equal(clicked, 2, "original listeners survive status rerenders");
+  const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
+  assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
 
 test("Auto capacity is read-only until Manual is selected", () => {
