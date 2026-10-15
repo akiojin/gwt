@@ -511,6 +511,21 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
             self._worktree_head().exists(),
             "a yielded v2 build must not publish a partial worktree view",
         )
+        status = runner._explicit_file_index_v2_status(
+            V2_REPO_HASH, V2_WORKTREE_HASH, self.db_root
+        )
+        for scope in ("files", "files-docs"):
+            progress = status[scope]["build_progress"]
+            self.assertEqual(progress["done"], CHECKPOINT_BATCH)
+            self.assertEqual(progress["total"], TOTAL_DOCS)
+            self.assertEqual(progress["phase"], "overlay")
+            self.assertTrue(progress["resumable"])
+            self.assertNotEqual(status[scope]["reason"], "collection_missing")
+            self.assertFalse(
+                runner.resolve_db_path(
+                    V2_REPO_HASH, V2_WORKTREE_HASH, scope, db_root=self.db_root
+                ).exists()
+            )
 
         # A second yielded run makes real forward progress: the first batch is
         # served entirely from the CAS checkpoint, and only the next batch
@@ -528,6 +543,10 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
             CHECKPOINT_BATCH,
             f"the first batch must be served from the CAS checkpoint: {second}",
         )
+        status = runner._explicit_file_index_v2_status(
+            V2_REPO_HASH, V2_WORKTREE_HASH, self.db_root
+        )
+        self.assertEqual(status["files"]["build_progress"]["done"], 2 * CHECKPOINT_BATCH)
 
         # 3. With the claimant gone the build finishes, embedding only the
         #    documents no earlier run had reached.
@@ -544,6 +563,10 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
             self._worktree_head().exists(),
             "a completed v2 build must publish the worktree view",
         )
+        status = runner._explicit_file_index_v2_status(
+            V2_REPO_HASH, V2_WORKTREE_HASH, self.db_root
+        )
+        self.assertNotIn("build_progress", status["files"])
 
     def test_v2_build_completes_without_pending_claimants(self):
         payload = self._run_v2()
@@ -583,6 +606,11 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
         self.assertTrue(first.get("yielded"), first)
         self.assertEqual(first.get("computed_embeddings"), CHECKPOINT_BATCH, first)
         self.assertFalse(self._worktree_head().exists(), first)
+        progress = runner._explicit_file_index_v2_status(
+            V2_REPO_HASH, V2_WORKTREE_HASH, self.db_root
+        )["files"]["build_progress"]
+        self.assertEqual(progress["phase"], "base")
+        self.assertEqual(progress["done"], CHECKPOINT_BATCH)
 
         second = self._run_v2()
         self.assertTrue(second.get("yielded"), second)
