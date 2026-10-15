@@ -7,6 +7,46 @@
 use gwt::cli::hook::{HookEvent, HookKind, HookOutput};
 
 #[test]
+fn issue_3713_plugin_active_skill_plugin_advisory_identity_survives_both_spellings() {
+    for payload in [
+        r#"{"active_skill":"external:ship","active_plugin":"external@market"}"#,
+        r#"{"activeSkill":"external:ship","activePlugin":"external@market"}"#,
+        r#"{"active_skill":"external:ship","activeSkill":"other","active_plugin":"external@market","activePlugin":"other"}"#,
+    ] {
+        let event: HookEvent = serde_json::from_str(payload).unwrap();
+        let observed = format!("{event:?}");
+        assert!(
+            observed.contains("external:ship"),
+            "lost skill provenance: {observed}"
+        );
+        assert!(
+            observed.contains("external@market"),
+            "lost plugin provenance: {observed}"
+        );
+    }
+    let legacy: HookEvent = serde_json::from_str("{}").unwrap();
+    assert!(legacy.tool_name.is_none());
+}
+
+#[test]
+fn issue_3713_plugin_provider_adapters_preserve_advisory_provenance() {
+    for (provider, event_name) in [
+        ("opencode", "tool.execute.before"),
+        ("openclaw", "before_tool_call"),
+        ("hermes", "pre_tool_call"),
+    ] {
+        let normalized = gwt::cli::hook::provider_event::normalize_provider_payload(provider, event_name,
+            r#"{"toolName":"Skill","activeSkill":"external:ship","activePlugin":"external@market"}"#).unwrap();
+        let event: HookEvent = serde_json::from_value(normalized.payload).unwrap();
+        assert_eq!(event.active_skill.as_deref(), Some("external:ship"));
+        assert_eq!(event.active_plugin.as_deref(), Some("external@market"));
+    }
+    let malformed: HookEvent =
+        serde_json::from_str(r#"{"activeSkill":7,"activePlugin":{}}"#).unwrap();
+    assert!(malformed.active_skill.is_none() && malformed.active_plugin.is_none());
+}
+
+#[test]
 fn hook_kind_from_name_covers_every_documented_hook() {
     assert_eq!(
         HookKind::from_name("runtime-state"),

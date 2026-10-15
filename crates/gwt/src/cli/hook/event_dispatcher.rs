@@ -49,6 +49,18 @@ pub fn handle_with_input(
         ),
         None => output,
     });
+    let result = result.map(|output| {
+        let advisory = run_value(event, "external-skill-advisory", || {
+            super::external_skill_conflicts::advisory_context(event, input, worktree_root)
+        });
+        append_boundary_advisory(output, event, advisory)
+    });
+    let result = result.map(|output| {
+        let advisory = run_value(event, "branch-freshness-advisory", || {
+            super::branch_freshness::handle_with_input(event, input, worktree_root, current_session)
+        });
+        append_boundary_advisory(output, event, advisory)
+    });
     let additional_context_bytes = result
         .as_ref()
         .ok()
@@ -478,10 +490,14 @@ fn handle_stop(
     })?;
     // Evaluate the stop-checks lazily, one at a time: the first StopBlock
     // wins and the remaining checks must NOT run.
-    let stop_checks: [(&str, StopCheck<'_>); 9] = [
+    let stop_checks: [(&str, StopCheck<'_>); 10] = [
         (
             "pm-reporting-stop-check",
             Box::new(|| super::pm_reporting::handle_stop(worktree_root, current_session)),
+        ),
+        (
+            "board-read-stop-check",
+            Box::new(|| crate::board_read_receipts::pm_stop_check(worktree_root, current_session)),
         ),
         // SPEC-3431 FR-012: after the reporting obligation, the PM loop runs — for the
         // PM every other stop gate is either exempt (FR-029) or fail-open, and
@@ -565,20 +581,42 @@ fn handle_stop(
             }),
         ),
     ];
+    let mut board_read_warning = None;
     for (handler, check) in stop_checks {
         let output = run_value(event, handler, check);
+        if handler == "board-read-stop-check" {
+            if let HookOutput::SystemMessage(warning) = &output {
+                board_read_warning = Some(warning.clone());
+            }
+        }
         if matches!(output, HookOutput::StopBlock { .. }) {
             run_step(event, "blocked-stop-runtime-state", || {
                 crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
             })?;
-            return Ok(output);
+            return Ok(append_stop_warning(output, board_read_warning));
         }
     }
     run_step(event, "completed-stop", || {
         super::runtime_state::record_completed_stop_from_env()
     })?;
 
-    Ok(reminder)
+    Ok(append_stop_warning(reminder, board_read_warning))
+}
+
+fn append_stop_warning(output: HookOutput, warning: Option<String>) -> HookOutput {
+    let Some(warning) = warning else {
+        return output;
+    };
+    match output {
+        HookOutput::SystemMessage(text) => {
+            HookOutput::system_message(format!("{text}\n\n{warning}"))
+        }
+        HookOutput::StopBlock { reason } => {
+            HookOutput::stop_block(format!("{reason}\n\n{warning}"))
+        }
+        HookOutput::Silent => HookOutput::system_message(warning),
+        other => other,
+    }
 }
 
 fn run_step<T>(
@@ -625,11 +663,29 @@ fn load_pending_goal_for_hook_worktree_with_session(
 
 fn additional_context_bytes(output: &HookOutput) -> usize {
     match output {
-        HookOutput::HookSpecificAdditionalContext { text, .. } => text.len(),
+        HookOutput::HookSpecificAdditionalContext { text, .. }
+        | HookOutput::PreToolUseAdditionalContext(text) => text.len(),
         HookOutput::PreToolUsePermission { .. }
         | HookOutput::SystemMessage(_)
         | HookOutput::Silent
         | HookOutput::StopBlock { .. } => 0,
+    }
+}
+
+fn append_boundary_advisory(output: HookOutput, event: &str, text: Option<String>) -> HookOutput {
+    let Some(text) = text else {
+        return output;
+    };
+    if let Some(boundary) = IntentBoundaryEvent::from_name(event) {
+        return append_additional_context(output, boundary, Some(text));
+    }
+    match (event, output) {
+        ("PreToolUse", HookOutput::Silent) => HookOutput::pre_tool_use_context(text),
+        ("PreToolUse", HookOutput::PreToolUseAdditionalContext(existing)) => {
+            HookOutput::pre_tool_use_context(format!("{existing}\n\n{text}"))
+        }
+        ("PostToolUse", HookOutput::Silent) => HookOutput::system_message(text),
+        (_, other) => other,
     }
 }
 

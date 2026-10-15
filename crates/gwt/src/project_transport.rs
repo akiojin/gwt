@@ -2274,6 +2274,30 @@ async fn send_agent_self_close_acceptance<S>(
     drop(acceptance);
 }
 
+async fn send_agent_self_close_response<S>(
+    sender: &mut S,
+    response: crate::agent_capability::AgentSelfCloseResponse,
+    deadline: Duration,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match response {
+        Ok(acceptance) => send_agent_self_close_acceptance(sender, acceptance, deadline).await,
+        Err(refusal) => {
+            send_agent_pm_terminal_result(
+                sender,
+                BackendEvent::PaneCloseResult {
+                    ok: false,
+                    window_id: refusal.window_id,
+                    reason: Some(refusal.reason),
+                },
+                deadline,
+            )
+            .await
+        }
+    }
+}
+
 async fn send_agent_pm_terminal_result<S>(
     sender: &mut S,
     event: BackendEvent,
@@ -2673,15 +2697,10 @@ async fn client_session_with_scope(
                                                     }
                                                 }
                                             };
-                                            let Some(acceptance) = accepted else {
+                                            let Some(response) = accepted else {
                                                 break;
                                             };
-                                            send_agent_self_close_acceptance(
-                                                &mut sender,
-                                                acceptance,
-                                                Duration::from_secs(2),
-                                            )
-                                            .await;
+                                            send_agent_self_close_response(&mut sender, response, Duration::from_secs(2)).await;
                                             break;
                                         }
                                     }
@@ -2800,6 +2819,51 @@ pub async fn send_agent_self_close_acceptance_for_test<S>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue_3713_direct_self_close_refusal_crosses_the_origin_socket_with_recovery() {
+        use futures_util::{SinkExt, StreamExt};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut sender = socket.with(|message: axum::extract::ws::Message| {
+                    let axum::extract::ws::Message::Text(text) = message else {
+                        panic!("expected text response")
+                    };
+                    futures_util::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(
+                        tokio_tungstenite::tungstenite::Message::Text(text.as_str().into()),
+                    ))
+                });
+                super::send_agent_self_close_response(
+                    &mut sender,
+                    Err(crate::agent_capability::AgentSelfCloseRefusal {
+                        window_id: "tab::own".into(),
+                        reason: "unread evidence; run board.show all:true".into(),
+                    }),
+                    std::time::Duration::from_secs(1),
+                )
+                .await;
+            });
+            let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+                .await
+                .unwrap();
+            let message = client.next().await.unwrap().unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(payload["kind"], "pane_close_result");
+            assert_eq!(payload["ok"], false);
+            assert_eq!(payload["window_id"], "tab::own");
+            assert!(payload["reason"].as_str().unwrap().contains("board.show"));
+            server.await.unwrap();
+        });
+    }
+
     #[test]
     fn supported_agent_notifications_are_host_global_and_project_events_stay_scoped() {
         use super::{DispatchTarget, OutboundEvent};

@@ -728,6 +728,19 @@ Managed hooks は user hook を保持しながら、Agent state、workflow guard
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
 
+agent の停止や pane close が Board の未読を報告した場合は、同じ agent session で
+JSON operation `board.show` に `params:{"all":true}` を渡して本文を読み、再試行します。
+自動 reminder の注入は読了として扱われません。実装 agent の判断依頼は `agent:pm`
+宛に送ります。agent の Board 投稿から `user:<id>` を指定できるのは登録済み PM だけです。
+
+JSON operation `hook.health` では、gwt の GitHub mutation policy と矛盾する外部 skill の
+コマンド、該当ファイル、代替操作を確認できます。既定では有効な Claude plugin を検査します。
+検査する skill/command directory を明示的に選ぶ場合は、`.gwt/external-skill-roots.json` に
+directory path の JSON 配列を保存します。この設定は plugin の自動検出を置き換え、
+相対 path は worktree 基準です。検査したい root をすべて含めてください。ファイルを削除すると
+自動検出へ戻ります。検査が部分的、または実行できない場合は明示されます。仕様は
+[SPEC #3393](https://github.com/akiojin/gwt/issues/3393) を参照してください。
+
 ### Hook ファイルの所有権
 
 - gwt は `.claude/settings.local.json` をマシンローカルファイルとして再生成し、

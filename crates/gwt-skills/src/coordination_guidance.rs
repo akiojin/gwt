@@ -93,11 +93,21 @@ or command log.
 Choose the audience before posting. If the post needs a reply, include
 an explicit `params.mentions` entry:
 
-- `user:<id>` - ask a human user for a response
+- `user:<id>` - registered PM only: ask a human user for a response
 - `agent:<id>` - hand off to or question a specific agent type
 - `session:<id>` - reply to a running session
 - `branch:<name>` - target a workspace branch audience
 - `params.broadcast:true` - make the post visible repo-wide/cross-workspace
+
+Only the registered PM session may use `user:<id>` in agent Board posts.
+Implementation agents address `agent:pm` or the PM's exact `session:<id>`;
+the PM handles human decisions. The operation enforces this for ordinary and
+recovery posts. Missing or stale PM registration grants no exception.
+
+External skills can contain instructions that conflict with gwt's GitHub
+mutation policy. Read the advisory before following those commands and use
+the named JSON operation instead. `hook.health` lists conflicting files and
+commands; diagnostics never authorize an otherwise forbidden mutation.
 
 Without `params.broadcast:true`, `board.post` keeps the post scoped to
 the current workspace and any audience implied by mentions. Do not
@@ -522,11 +532,17 @@ entry にしません。
 投稿前に audience を選びます。返答が必要な投稿は必ず `params.mentions`
 付きで:
 
-- `user:<id>` — 人間 user に返答を求める
+- `user:<id>` — registered PM only
 - `agent:<id>` — 特定 agent type に handoff / question
 - `session:<id>` — 実行中 session への返信
 - `branch:<name>` — workspace branch への audience
 - `params.broadcast:true` — repo-wide / cross-workspace に表示
+
+Only the registered PM session may use `user:<id>` in agent Board posts.
+Implementation agents address `agent:pm` or the PM's exact `session:<id>`;
+the PM handles human decisions. Ordinary and recovery posts share this rule.
+Use `hook.health` to inspect external skill files whose GitHub mutation
+instructions conflict with gwt policy, and follow the named JSON alternatives.
 
 `params.broadcast:true` がない `board.post` は current workspace と
 mentions 由来の audience に scope されます。mention 省略を broadcast
@@ -1044,6 +1060,30 @@ mod tests {
                     path.display()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn issue_3713_materializes_runtime_coordination_recovery_contracts() {
+        let tmp = TempDir::new().unwrap();
+        generate_coordination_guidance(tmp.path()).unwrap();
+        crate::pm_guidance::generate_pm_guidance(tmp.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let coordination = read_contract(
+                &tmp.path()
+                    .join(provider)
+                    .join("skills/gwt-coordination/SKILL.md"),
+            )
+            .unwrap();
+            assert!(coordination.contains("Only the registered PM session may use `user:<id>`"));
+            assert!(coordination.contains("`agent:pm`"));
+            assert!(coordination.contains("`hook.health`"));
+            let pm =
+                read_contract(&tmp.path().join(provider).join("skills/gwt-pm/SKILL.md")).unwrap();
+            assert!(pm.contains("Explicit Board read receipts"));
+            assert!(pm.contains("\"operation\":\"board.show\""));
+            assert!(pm.contains("unread `blocked` or `handoff`"));
+            assert!(pm.contains("git fetch origin"));
         }
     }
 

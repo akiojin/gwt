@@ -815,6 +815,16 @@ pub fn compute_plan(
     } else if is_resident_pm {
         plan.output = replace_with_pm_reminder(plan.output);
     }
+    if intent_event != IntentBoundaryEvent::Stop {
+        if let Some(context) =
+            crate::board_read_receipts::pm_prompt_context(&session.worktree_path, &session.id)
+        {
+            if let HookOutput::HookSpecificAdditionalContext { text, .. } = &mut plan.output {
+                text.push_str("\n\n");
+                text.push_str(&context);
+            }
+        }
+    }
 
     if emit_work_state_reminders {
         plan.output = append_title_summary_required_context(
@@ -988,6 +998,61 @@ mod tests {
         let mut session = Session::new(dir, branch, AgentId::Codex);
         session.display_name = display_name.to_string();
         session
+    }
+
+    #[test]
+    fn issue_3713_registered_pm_prompt_reports_unread_kinds_without_acknowledging() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let session = make_session(&repo, "work/pm", "PM");
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: session.id.clone(),
+                    agent_id: "codex".into(),
+                    worktree_path: repo.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for kind in [BoardEntryKind::Blocked, BoardEntryKind::Handoff] {
+            post_entry(
+                &repo,
+                BoardEntry::new(
+                    AuthorKind::Agent,
+                    "Peer",
+                    kind,
+                    "Symptom: pending.\nCause: ruling.\nRequest: decide.\nResume: reply.",
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+            )
+            .unwrap();
+        }
+        let first = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(
+            additional_context(&first.output).contains("Board unread: 2"),
+            "{:?}",
+            first.output
+        );
+        assert!(additional_context(&first.output).contains("blocked=1"));
+        assert!(additional_context(&first.output).contains("handoff=1"));
+        write_reminders_state(&repo, &session.id, &first.next_reminders).unwrap();
+        let second = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .unwrap()
+            .unwrap();
+        assert!(additional_context(&second.output).contains("Board unread: 2"));
     }
 
     #[test]
