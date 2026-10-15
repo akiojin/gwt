@@ -40,7 +40,7 @@ pub const VERIFICATION_RESERVATION_TTL: Duration = Duration::from_secs(10 * 60);
 /// Keep retry priority briefly, then let resident verification work use idle
 /// capacity without deleting the absent claimant's remembered FIFO position.
 pub const VERIFICATION_RESERVATION_GRACE: Duration = Duration::from_secs(3 * 60);
-/// Fill idle shared slots briefly, then drain holders for a waiting exclusive.
+/// Bound later shared backfill; older FIFO predecessors retain priority.
 pub const VERIFICATION_EXCLUSIVE_BACKFILL_WINDOW: Duration = Duration::from_secs(60);
 /// Issue #4086: TTL horizon on index-job heavy leases. The kernel lock still
 /// decides exclusion; the TTL makes a runaway runner visible as `expired` in
@@ -722,9 +722,9 @@ impl QueueRecord {
                     if now.saturating_sub(self.queued_at_ms)
                         < VERIFICATION_EXCLUSIVE_BACKFILL_WINDOW.as_millis() as u64
                     {
-                        "shared backfill allowed during the exclusive wait window"
+                        "later shared backfill allowed during the exclusive wait window"
                     } else {
-                        "draining shared holders for exclusive admission"
+                        "draining later shared requests; older FIFO predecessors retain priority"
                     }
                     .to_string()
                 }),
