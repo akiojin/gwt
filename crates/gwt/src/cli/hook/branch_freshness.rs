@@ -32,18 +32,24 @@ pub(crate) fn handle_with_input(
         return None;
     }
     let session = current_session?;
-    let project_store = crate::board_read_receipts::project_store(worktree_root);
+    let repository_root = repository_root_for_cwd(worktree_root);
+    let identity_root = repository_root.as_deref().unwrap_or(worktree_root);
+    let project_store = if crate::pm_registry::is_canonical_pm_worktree(identity_root) {
+        // HOME may retain /var while the resolved cwd uses /private/var.
+        identity_root.parent()?.parent()?.to_path_buf()
+    } else {
+        crate::board_read_receipts::project_store(identity_root)
+    };
     let prefs_path = project_store.join("project-state/pm.json");
-    if !crate::board_read_receipts::registered_pm(worktree_root, session) {
+    if !crate::pm_registry::session_is_registered_pm(&prefs_path, session) {
         if let Err(error) = crate::pm_registry::load_pm_prefs(&prefs_path) {
             return Some(unavailable(worktree_root, error));
         }
         return None;
     }
-    let repository_root = worktree_root
-        .ancestors()
-        .find_map(crate::pm_registry::pm_worktree_for_runtime_dir)
-        .unwrap_or_else(|| worktree_root.to_path_buf());
+    let Some(repository_root) = repository_root else {
+        return Some(unavailable(worktree_root, "repository identity is unknown"));
+    };
     let worktree_root = repository_root.as_path();
     let Some(common_dir) = gwt_core::repo_hash::repository_common_dir(worktree_root) else {
         return Some(unavailable(worktree_root, "repository identity is unknown"));
@@ -75,6 +81,11 @@ pub(crate) fn handle_with_input(
     }
     let command = parsed.command()?;
     let cwd = parsed.command_cwd(worktree_root);
+    let in_repository = |cwd: &Path| {
+        repository_root_for_cwd(cwd)
+            .and_then(|root| gwt_core::repo_hash::repository_common_dir(&root))
+            .is_some_and(|dir| dir == common_dir)
+    };
     if event == "PostToolUse" {
         // A compound command's final status cannot in general prove fetch
         // succeeded (`git fetch || true`). Keep uncertain forms advisory-only.
@@ -105,7 +116,7 @@ pub(crate) fn handle_with_input(
         if invocation.subcommand != "fetch"
             || !invocation.receipt_safe
             || !matches!(fetch_scope.as_slice(), ["origin"] | ["--all"])
-            || !gwt_core::repo_hash::same_repository(&invocation.cwd, worktree_root)
+            || !in_repository(&invocation.cwd)
             || !successful_response(&payload)
         {
             return None;
@@ -119,7 +130,7 @@ pub(crate) fn handle_with_input(
             matches!(
                 invocation.subcommand.as_str(),
                 "status" | "log" | "diff" | "rev-list" | "rev-parse" | "branch" | "show"
-            ) && gwt_core::repo_hash::same_repository(&invocation.cwd, worktree_root)
+            ) && in_repository(&invocation.cwd)
         })
     });
     if !inspection {
@@ -135,6 +146,35 @@ pub(crate) fn handle_with_input(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Some(warning(worktree_root)),
         Err(error) => Some(unavailable(worktree_root, error)),
     }
+}
+
+/// Resolve an existing cwd to its nearest actual Git boundary. Layout roots
+/// containing sibling bare repositories are not themselves command targets.
+fn repository_root_for_cwd(cwd: &Path) -> Option<PathBuf> {
+    let cwd = dunce::canonicalize(cwd).ok()?;
+    if !cwd.is_dir() {
+        return None;
+    }
+    for candidate in cwd.ancestors() {
+        let has_marker = match std::fs::symlink_metadata(candidate.join(".git")) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(_) => return None,
+        };
+        if has_marker
+            || (candidate.join("HEAD").is_file()
+                && candidate.join("objects").is_dir()
+                && candidate.join("refs").is_dir())
+        {
+            // Even a broken marker fences an enclosing repository: resolving
+            // it must not credit a fetch against that outer repository.
+            return Some(candidate.to_path_buf());
+        }
+        if let Some(worktree) = crate::pm_registry::pm_worktree_for_runtime_dir(candidate) {
+            return Some(worktree);
+        }
+    }
+    None
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -662,11 +702,78 @@ mod tests {
             );
             handle_with_input(
                 "PostToolUse",
-                &payload("git fetch origin", &repo, json!({"exit_code":0})),
+                &payload("git fetch origin", &nested, json!({"exit_code":0})),
                 cwd,
                 Some("pm-a"),
             );
             assert!(handle_with_input("PreToolUse", &inspection, cwd, Some("pm-a")).is_none());
         }
+    }
+
+    #[test]
+    fn nested_fetch_respects_the_nearest_repository_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(dir.path().join("home"));
+        let repo = dir.path().join("repo");
+        repository(&repo);
+        register_pm(&repo, "pm-a");
+        let nested = repo.join("src");
+        std::fs::create_dir(&nested).unwrap();
+        let foreign = repo.join("foreign");
+        repository(&foreign);
+        let malformed = repo.join("malformed");
+        std::fs::create_dir(&malformed).unwrap();
+        std::fs::write(malformed.join(".git"), "invalid gitdir").unwrap();
+        let layout = dir.path().join("layout");
+        std::fs::create_dir(&layout).unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(layout.join("sibling.git"))
+            .status()
+            .unwrap()
+            .success());
+        let plain = layout.join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let inspection = payload("git status", &repo, json!(null));
+        for cwd in [foreign, malformed, repo.join("missing"), plain] {
+            handle_with_input("UserPromptSubmit", "{}", &repo, Some("pm-a"));
+            handle_with_input(
+                "PostToolUse",
+                &payload("git fetch origin", &cwd, json!({"exit_code":0})),
+                &repo,
+                Some("pm-a"),
+            );
+            assert!(
+                handle_with_input("PreToolUse", &inspection, &repo, Some("pm-a")).is_some(),
+                "false fetch receipt for {}",
+                cwd.display()
+            );
+        }
+        handle_with_input(
+            "PostToolUse",
+            &payload(
+                &format!("git -C '{}' fetch origin", nested.display()),
+                &repo,
+                json!({"exit_code":0}),
+            ),
+            &repo,
+            Some("pm-a"),
+        );
+        assert!(handle_with_input("PreToolUse", &inspection, &repo, Some("pm-a")).is_none());
+    }
+
+    #[test]
+    fn runtime_mapping_does_not_cross_an_inner_git_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(dir.path().join("home"));
+        let repo = gwt_core::paths::gwt_projects_dir().join("pm-store/pm/worktree");
+        repository(&repo);
+        let runtime = crate::pm_registry::ensure_pm_runtime_dir_for_pm_worktree(&repo).unwrap();
+        let foreign = runtime.join("foreign");
+        repository(&foreign);
+        assert_eq!(
+            repository_root_for_cwd(&foreign),
+            Some(dunce::canonicalize(&foreign).unwrap())
+        );
     }
 }
