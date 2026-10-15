@@ -213,15 +213,25 @@ fn startup_and_frontend_ready_coalesce_one_canonical_base_without_direct_runner_
         .iter()
         .map(|state| state.target())
         .collect::<Vec<_>>();
+    assert!(targets.contains(&&expected_base));
+    for scope in [
+        RefreshScope::Issues,
+        RefreshScope::Specs,
+        RefreshScope::Memory,
+        RefreshScope::Discussions,
+        RefreshScope::Board,
+        RefreshScope::Works,
+    ] {
+        assert!(targets.contains(&&RefreshTarget::base(repo_hash.as_str(), [scope])));
+    }
     assert_eq!(
-        targets,
-        vec![&expected_base],
-        "main plus N linked worktrees must coalesce to one canonical base target and no overlays"
+        snapshot.target_count(),
+        7,
+        "one Files pair and six repo scopes, no overlays"
     );
-    assert_eq!(snapshot.target_count(), 1, "distinct target count");
     assert!(
-        snapshot.queue_depth() <= 1,
-        "startup queue must remain bounded by the one distinct base target"
+        snapshot.queue_depth() <= 7,
+        "startup queue must remain bounded by the distinct scope targets"
     );
     assert_eq!(
         snapshot.running_count(),

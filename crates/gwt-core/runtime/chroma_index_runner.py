@@ -4570,7 +4570,13 @@ def _full_build_store(db_path: Path, mode: str) -> tuple:
     return staging, staging
 
 
-def _finish_full_build(db_path: Path, staging: Optional[Path], scope: str):
+def _finish_full_build(
+    db_path: Path,
+    staging: Optional[Path],
+    scope: str,
+    expected_count: Optional[int] = None,
+    after_publish=None,
+):
     """Publish a staged full build; no-op for incremental builds.
 
     Returns the typed error payload when publishing failed, else None.
@@ -4582,7 +4588,11 @@ def _finish_full_build(db_path: Path, staging: Optional[Path], scope: str):
             staging, _scope_collection_name(scope)
         )
         try:
-            document_count = _safe_collection_count(collection)
+            document_count = int(collection.count())
+            if expected_count is not None and document_count != expected_count:
+                raise ValueError(
+                    f"staged {scope} count {document_count} != source count {expected_count}"
+                )
         finally:
             _close_chroma_client(client)
     except Exception as error:
@@ -4596,7 +4606,11 @@ def _finish_full_build(db_path: Path, staging: Optional[Path], scope: str):
             "retryable": True,
         }
     publish = _publish_generation(
-        db_path, staging, scope=scope, document_count=document_count
+        db_path,
+        staging,
+        scope=scope,
+        document_count=document_count,
+        **({"after_publish": after_publish} if after_publish is not None else {}),
     )
     return None if publish.get("ok") else publish
 
@@ -5429,101 +5443,16 @@ def action_index_specs_v2(
     worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
-    """Index cached `gwt-spec` Issues into ChromaDB under the v2 layout."""
-    db_path = resolve_db_path(repo_hash, worktree_hash, "specs", db_root=db_root)
-    spec_documents, new_entries = _load_cached_spec_documents(repo_hash)
-    new_entries.sort(key=lambda entry: entry["path"])
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "specs",
-            "mode": mode,
-            "done": 0,
-            "total": len(spec_documents),
-        }
+    """Index cached gwt-spec Issues into the repo-scoped specs store."""
+    del worktree_hash
+    documents, entries = _load_cached_spec_documents(repo_hash)
+    entries.sort(key=lambda entry: entry["path"])
+    return _index_repo_records_v2(
+        repo_hash, "specs", _build_spec_records(documents),
+        entries, mode, db_root, project_root, qos,
     )
-
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_SPECS_COLLECTION)
-        try:
-            if mode == "incremental":
-                old_entries = read_manifest(db_path, scope="specs")
-                diff = compute_manifest_diff(old_entries, new_entries)
-                changed_spec_ids = set(diff["added"] + diff["changed"])
-                _delete_spec_records(collection, diff["changed"] + diff["removed"])
-                spec_records = _build_spec_records(
-                    [
-                        spec
-                        for spec in spec_documents
-                        if spec["spec_id"] in changed_spec_ids
-                    ]
-                )
-                emit_progress(
-                    {
-                        "phase": "diff",
-                        "scope": "specs",
-                        "added": len(diff["added"]),
-                        "changed": len(diff["changed"]),
-                        "removed": len(diff["removed"]),
-                    }
-                )
-            else:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                spec_records = _build_spec_records(spec_documents)
-
-            if spec_records:
-                ids = [r["id"] for r in spec_records]
-                documents = [r["document"] for r in spec_records]
-                metadatas = [r["metadata"] for r in spec_records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-
-            write_manifest(db_path, scope="specs", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=worktree_hash,
-                scope="specs",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": len(spec_records),
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="specs")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "specs",
-            "mode": mode,
-            "indexed": len(spec_records),
-            "total": len(spec_records),
-        }
-    )
-    return {"ok": True, "scope": "specs", "indexed": len(spec_records)}
 
 
 # ---------------------------------------------------------------------
@@ -5987,111 +5916,17 @@ def action_index_memory_v2(
     worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
-    """Index work notes and saved user instructions into the memory store.
-
-    `worktree_hash` is accepted for symmetry with the other v2 actions but is
-    ignored — memory is repo-scoped. When either source changes, rebuild the
-    combined records. Instruction changes also compare a content hash so
-    supersession updates cannot hide behind unchanged size/mtime.
-    """
-    del worktree_hash  # repo-scoped scope does not consume the worktree hash
-    db_path = resolve_db_path(repo_hash, None, "memory", db_root=db_root)
-    memories, new_entries = _load_memory_documents(project_root, repo_hash)
-    instruction_records, instruction_entries = _load_user_instruction_records(repo_hash)
-    new_entries.extend(instruction_entries)
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "memory",
-            "mode": mode,
-            "done": 0,
-            "total": len(memories) + len(instruction_records),
-        }
+    """Index work notes and saved instructions by document difference."""
+    del worktree_hash
+    memories, entries = _load_memory_documents(project_root, repo_hash)
+    instructions, instruction_entries = _load_user_instruction_records(repo_hash)
+    entries.extend(instruction_entries)
+    return _index_repo_records_v2(
+        repo_hash, "memory", _build_memory_records(memories) + instructions,
+        entries, mode, db_root, project_root, qos,
     )
-
-    indexed = 0
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_MEMORY_COLLECTION)
-        try:
-            old_entries = read_manifest(db_path, scope="memory")
-            diff = compute_manifest_diff(old_entries, new_entries)
-            old_hashes = {entry["path"]: entry.get("content_hash") for entry in old_entries}
-            for entry in instruction_entries:
-                path = entry["path"]
-                if path in old_hashes and old_hashes[path] != entry["content_hash"] and path not in diff["changed"]:
-                    diff["changed"].append(path)
-            file_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
-
-            if mode != "incremental" or file_changed:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                memory_records = _build_memory_records(memories) + instruction_records
-            else:
-                memory_records = []
-
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": "memory",
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
-            )
-
-            if memory_records:
-                ids = [r["id"] for r in memory_records]
-                documents = [r["document"] for r in memory_records]
-                metadatas = [r["metadata"] for r in memory_records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-                indexed = len(memory_records)
-
-            write_manifest(db_path, scope="memory", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=None,
-                scope="memory",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": indexed,
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="memory")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "memory",
-            "mode": mode,
-            "indexed": indexed,
-            "total": indexed,
-        }
-    )
-    return {"ok": True, "scope": "memory", "indexed": indexed}
 
 
 def _extract_discussion_field(body: str, field: str) -> str:
@@ -6230,104 +6065,137 @@ def _build_discussion_records(
     return records
 
 
+def _index_repo_records_v2(
+    repo_hash: str,
+    scope: str,
+    records: List[Dict[str, Any]],
+    new_entries: List[Dict[str, Any]],
+    mode: str,
+    db_root: Optional[Path],
+    project_root: Optional[str],
+    qos: str,
+) -> dict:
+    """Apply document differences and publish only a verified source count."""
+    db_path = resolve_db_path(repo_hash, None, scope, db_root=db_root)
+    by_id = {record["id"]: record for record in records}
+    expected_count = len(by_id)
+    emit_progress({
+        "phase": "indexing", "scope": scope, "mode": mode,
+        "done": 0, "total": expected_count,
+    })
+
+    def commit_metadata():
+        write_manifest(db_path, scope=scope, entries=new_entries)
+        _write_scope_meta(
+            repo_hash, None, scope, db_root,
+            updates={
+                "last_repair_at": _now_utc().isoformat(),
+                "document_count": expected_count,
+                "source_document_count": expected_count,
+                "source_project_root": project_root,
+            },
+        )
+
+    build_store, staging = _full_build_store(db_path, mode)
+    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
+        make_collection = (
+            _make_chroma_collection if mode == "incremental"
+            else _make_chroma_collection_repairing
+        )
+        client, collection = make_collection(build_store, _scope_collection_name(scope))
+        try:
+            diff = compute_manifest_diff(read_manifest(db_path, scope), new_entries)
+            emit_progress({
+                "phase": "diff", "scope": scope,
+                **{key: len(value) for key, value in diff.items()},
+            })
+            existing_by_id = {}
+            if mode == "incremental":
+                existing = collection.get(include=["documents", "metadatas"])
+                existing_by_id = {
+                    record_id: (document, metadata)
+                    for record_id, document, metadata in zip(
+                        existing["ids"], existing["documents"], existing["metadatas"]
+                    )
+                }
+                removed = sorted(set(existing_by_id) - set(by_id))
+                if removed:
+                    collection.delete(ids=removed)
+            changed = [
+                record for record_id, record in by_id.items()
+                if existing_by_id.get(record_id) != (record["document"], record["metadata"])
+            ]
+            checkpoint_batch = 1 if qos == "background" else 100
+            for offset in range(0, len(changed), checkpoint_batch):
+                batch = changed[offset:offset + checkpoint_batch]
+                batch_started = time.monotonic()
+                collection.upsert(
+                    ids=[record["id"] for record in batch],
+                    documents=[record["document"] for record in batch],
+                    metadatas=[record["metadata"] for record in batch],
+                )
+                embedded = offset + len(batch)
+                done = expected_count - len(changed) + embedded
+                _write_heavy_progress(
+                    _heavy_target_stem(repo_hash, scope), done, expected_count,
+                    len(batch), int((time.monotonic() - batch_started) * 1000),
+                )
+                emit_progress({"phase": "indexing", "scope": scope, "mode": mode,
+                               "done": done, "total": expected_count})
+                if (embedded < len(changed) and qos == "background"
+                        and _pending_higher_priority("background")):
+                    emit_progress({"phase": "yielded", "scope": scope,
+                                   "staged": done, "total": expected_count})
+                    return {"ok": True, "scope": scope, "yielded": True,
+                            "resumable": staging is None,
+                            "indexed": embedded, "total": expected_count}
+            actual_count = int(collection.count())
+            if actual_count != expected_count:
+                raise ValueError(
+                    f"{scope} count {actual_count} != source count {expected_count}"
+                )
+            if staging is None:
+                commit_metadata()
+        except Exception as error:
+            return {
+                "ok": False, "scope": scope, "error_code": "BUILD_VERIFY_FAILED",
+                "error": f"failed to verify {scope} build: {error}", "retryable": True,
+            }
+        finally:
+            _close_chroma_client(client)
+
+    publish_error = _finish_full_build(
+        db_path, staging, scope, expected_count=expected_count,
+        after_publish=commit_metadata,
+    )
+    if publish_error is not None:
+        return publish_error
+    indexed = len(changed)
+    emit_progress({
+        "phase": "complete", "scope": scope, "mode": mode,
+        "indexed": indexed, "total": expected_count,
+    })
+    return {
+        "ok": True, "scope": scope, "indexed": indexed,
+        "document_count": expected_count, "source_document_count": expected_count,
+    }
+
+
 def action_index_discussions_v2(
     project_root: str,
     repo_hash: str,
     worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
-    """Index ``.gwt/work/discussions.md`` into the repo-scoped discussions store."""
+    """Index the discussion log into its repo-scoped store."""
     del worktree_hash
-    db_path = resolve_db_path(repo_hash, None, "discussions", db_root=db_root)
-    discussions, new_entries = _load_discussion_documents(project_root, repo_hash)
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "discussions",
-            "mode": mode,
-            "done": 0,
-            "total": len(discussions),
-        }
+    discussions, entries = _load_discussion_documents(project_root, repo_hash)
+    return _index_repo_records_v2(
+        repo_hash, "discussions", _build_discussion_records(discussions),
+        entries, mode, db_root, project_root, qos,
     )
-
-    indexed = 0
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_DISCUSSIONS_COLLECTION)
-        try:
-            old_entries = read_manifest(db_path, scope="discussions")
-            diff = compute_manifest_diff(old_entries, new_entries)
-            file_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
-
-            if mode != "incremental" or file_changed:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                records = _build_discussion_records(discussions)
-            else:
-                records = []
-
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": "discussions",
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
-            )
-
-            if records:
-                ids = [r["id"] for r in records]
-                documents = [r["document"] for r in records]
-                metadatas = [r["metadata"] for r in records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-                indexed = len(records)
-
-            write_manifest(db_path, scope="discussions", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=None,
-                scope="discussions",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": indexed,
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="discussions")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "discussions",
-            "mode": mode,
-            "indexed": indexed,
-            "total": indexed,
-        }
-    )
-    return {"ok": True, "scope": "discussions", "indexed": indexed}
 
 
 def _gwt_home() -> Path:
@@ -6457,102 +6325,14 @@ def action_index_board_v2(
     project_root: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
     """Index Board coordination history into the repo-scoped board store."""
-    db_path = resolve_db_path(repo_hash, None, "board", db_root=db_root)
-    entries, new_entries = _load_board_documents(repo_hash, project_root)
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "board",
-            "mode": mode,
-            "done": 0,
-            "total": len(entries),
-        }
+    entries, manifest = _load_board_documents(repo_hash, project_root)
+    return _index_repo_records_v2(
+        repo_hash, "board", _build_board_records(entries),
+        manifest, mode, db_root, project_root, qos,
     )
-
-    indexed = 0
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_BOARD_COLLECTION)
-        try:
-            old_entries = read_manifest(db_path, scope="board")
-            diff = compute_manifest_diff(old_entries, new_entries)
-            history_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
-
-            if mode != "incremental" or history_changed:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                records = _build_board_records(entries)
-            else:
-                records = []
-
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": "board",
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
-            )
-
-            if records:
-                ids = [r["id"] for r in records]
-                documents = [r["document"] for r in records]
-                metadatas = [r["metadata"] for r in records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-                indexed = len(records)
-
-            write_manifest(db_path, scope="board", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=None,
-                scope="board",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": indexed,
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="board")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "board",
-            "mode": mode,
-            "indexed": indexed,
-            "total": indexed,
-        }
-    )
-    return {"ok": True, "scope": "board", "indexed": indexed}
-
-
-# ---------------------------------------------------------------------
-# v2 actions: index-works (SPEC-2359 US-80)
-# ---------------------------------------------------------------------
 
 
 def _work_project_state_dir(repo_hash: str) -> Path:
@@ -7123,105 +6903,16 @@ def action_index_works_v2(
     worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
+    qos: str = "interactive",
 ) -> dict:
-    """Index past Work items into the repo-scoped works Chroma store.
-
-    `worktree_hash` is accepted for symmetry with the other v2 actions but is
-    ignored — Work history is repo-scoped. On first build, every existing Work
-    item (including completed and discarded ones) is folded into a document so
-    work done weeks ago remains discoverable (SPEC-2359 US-80 backfill).
-    """
-    del worktree_hash  # repo-scoped scope does not consume the worktree hash
-    db_path = resolve_db_path(repo_hash, None, "works", db_root=db_root)
-    works, new_entries = _load_work_documents(repo_hash, project_root)
-    new_entries.sort(key=lambda entry: entry["path"])
-
-    emit_progress(
-        {
-            "phase": "indexing",
-            "scope": "works",
-            "mode": mode,
-            "done": 0,
-            "total": len(works),
-        }
+    """Index every past Work, including completed and discarded items."""
+    del worktree_hash
+    works, entries = _load_work_documents(repo_hash, project_root)
+    entries.sort(key=lambda entry: entry["path"])
+    return _index_repo_records_v2(
+        repo_hash, "works", _build_work_records(works),
+        entries, mode, db_root, project_root, qos,
     )
-
-    indexed = 0
-    build_store, staging = _full_build_store(db_path, mode)
-    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
-        )
-        client, collection = make_collection(build_store, V2_WORKS_COLLECTION)
-        try:
-            old_entries = read_manifest(db_path, scope="works")
-            diff = compute_manifest_diff(old_entries, new_entries)
-            source_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
-
-            if mode != "incremental" or source_changed:
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-                records = _build_work_records(works)
-            else:
-                records = []
-
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": "works",
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
-            )
-
-            if records:
-                ids = [r["id"] for r in records]
-                documents = [r["document"] for r in records]
-                metadatas = [r["metadata"] for r in records]
-                batch = 100
-                for i in range(0, len(ids), batch):
-                    collection.upsert(
-                        ids=ids[i : i + batch],
-                        documents=documents[i : i + batch],
-                        metadatas=metadatas[i : i + batch],
-                    )
-                indexed = len(records)
-
-            write_manifest(db_path, scope="works", entries=new_entries)
-            _write_scope_meta(
-                repo_hash=repo_hash,
-                worktree_hash=None,
-                scope="works",
-                db_root=db_root,
-                updates={
-                    "last_repair_at": _now_utc().isoformat(),
-                    "document_count": indexed,
-                },
-            )
-        finally:
-            _close_chroma_client(client)
-
-    publish_error = _finish_full_build(db_path, staging, scope="works")
-    if publish_error is not None:
-        return publish_error
-
-    emit_progress(
-        {
-            "phase": "complete",
-            "scope": "works",
-            "mode": mode,
-            "indexed": indexed,
-            "total": indexed,
-        }
-    )
-    return {"ok": True, "scope": "works", "indexed": indexed}
 
 
 def _format_memory_results(
@@ -7483,7 +7174,7 @@ def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
             store = resolve_active_store(db_path)
             client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
             try:
-                return True, _safe_collection_count(collection)
+                return True, int(collection.count())
             finally:
                 _close_chroma_client(client)
     except Exception:
@@ -7505,10 +7196,46 @@ def _scope_status_v2(
     count_ok, document_count = _scope_document_count(db_path, scope)
     legacy_detected = _legacy_residue_detected(repo_hash, worktree_hash, db_root=db_root)
     scope_meta = _read_scope_meta(repo_hash, worktree_hash, scope, db_root=db_root)
+    saved_source_count = scope_meta.get("source_document_count")
+    source_document_count = (
+        saved_source_count if type(saved_source_count) is int and saved_source_count >= 0 else None
+    )
+    source_root = scope_meta.get("source_project_root")
+    if scope == "specs":
+        documents, source_entries = _load_cached_spec_documents(repo_hash)
+        if source_entries:
+            source_document_count = len({record["id"] for record in _build_spec_records(documents)})
+    elif scope == "memory":
+        documents, source_entries = _load_memory_documents(source_root or "", repo_hash)
+        try:
+            instructions, instruction_entries = _load_user_instruction_records(repo_hash)
+        except ValueError:
+            # A corrupt source must not invalidate the last verified store.
+            # Builds and multi-scope search retain strict source validation.
+            pass
+        else:
+            if source_entries or instruction_entries:
+                records = _build_memory_records(documents) + instructions
+                source_document_count = len({record["id"] for record in records})
+    elif scope == "board":
+        documents, _ = _load_board_documents(repo_hash, source_root)
+        source_document_count = len({record["id"] for record in _build_board_records(documents)})
+    elif scope == "discussions":
+        documents, _ = _load_discussion_documents(source_root or "", repo_hash)
+        source_document_count = len({record["id"] for record in _build_discussion_records(documents)})
+    elif scope == "works":
+        documents, _ = _load_work_documents(repo_hash, source_root)
+        source_document_count = len({record["id"] for record in _build_work_records(documents)})
 
     reason = "ready"
     healthy = True
     repair_required = False
+    source_drift = (
+        exists and count_ok and manifest_path.is_file()
+        and not pointer_corrupt and not legacy_detected
+        and source_document_count is not None and document_count != source_document_count
+        and type(saved_source_count) is int and document_count == saved_source_count
+    )
 
     if pointer_corrupt:
         # Phase 70 FR-390: an unreadable active pointer must classify for
@@ -7528,11 +7255,15 @@ def _scope_status_v2(
         reason = "legacy_residue"
         healthy = False
         repair_required = True
-    elif document_count == 0 and manifest_count > 0:
+    elif source_document_count is not None and document_count != source_document_count:
+        reason = "empty_collection" if document_count == 0 else "count_mismatch"
+        healthy = False
+        repair_required = not source_drift
+    elif source_document_count is None and document_count == 0 and manifest_count > 0:
         reason = "empty_collection"
         healthy = False
         repair_required = True
-    elif scope in ("specs", "memory", "discussions", "board", "works") and document_count < manifest_count:
+    elif scope in ("specs", "memory") and document_count < manifest_count:
         reason = "count_mismatch"
         healthy = False
         repair_required = True
@@ -7546,6 +7277,8 @@ def _scope_status_v2(
         "healthy": healthy,
         "repair_required": repair_required,
         "document_count": document_count,
+        **({"source_document_count": source_document_count} if source_document_count is not None else {}),
+        **({"source_drift": True} if source_drift else {}),
         "reason": reason,
         "legacy_residue_detected": legacy_detected,
         "last_repair_at": scope_meta.get("last_repair_at"),
@@ -8555,6 +8288,8 @@ def _classify_scope_for_search(
     health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
     if not health.get("exists"):
         return "missing", health
+    if health.get("source_drift"):
+        return "stale", health
     if health.get("repair_required"):
         return "corrupt", health
     if scope == "memory":
@@ -9915,6 +9650,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash=worktree_hash or "",
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0
@@ -9930,6 +9666,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash=None,
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0
@@ -9945,6 +9682,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash=None,
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0
@@ -9956,6 +9694,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     project_root=args.project_root or None,
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0
@@ -9968,6 +9707,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash=None,
                     mode=args.mode,
                     db_root=db_root,
+                    qos=args.qos or default_qos_for_action(action),
                 )
             )
             return 0

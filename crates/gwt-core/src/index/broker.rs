@@ -75,6 +75,11 @@ pub enum RefreshScope {
     Files,
     FilesDocs,
     Issues,
+    Specs,
+    Memory,
+    Discussions,
+    Board,
+    Works,
 }
 
 impl RefreshScope {
@@ -83,6 +88,11 @@ impl RefreshScope {
             RefreshScope::Files => "files",
             RefreshScope::FilesDocs => "files-docs",
             RefreshScope::Issues => "issues",
+            RefreshScope::Specs => "specs",
+            RefreshScope::Memory => "memory",
+            RefreshScope::Discussions => "discussions",
+            RefreshScope::Board => "board",
+            RefreshScope::Works => "works",
         }
     }
 }
@@ -1036,6 +1046,24 @@ mod tests {
             priority,
             reason: RefreshReason::DirtyEvent,
             resource_class: RefreshResourceClass::Embedding,
+        }
+    }
+
+    #[test]
+    fn every_search_scope_can_be_a_refresh_target() {
+        for name in [
+            "files",
+            "files-docs",
+            "issues",
+            "specs",
+            "memory",
+            "discussions",
+            "board",
+            "works",
+        ] {
+            let scope: RefreshScope = serde_json::from_value(serde_json::json!(name))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(scope.as_str(), name);
         }
     }
 

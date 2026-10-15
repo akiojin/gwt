@@ -26,7 +26,8 @@ use gwt_core::index::view::{
 use serde_json::{json, Map, Value};
 
 /// Repo-shared scopes every status payload reports, in emission order.
-pub(crate) const REPO_SHARED_SCOPES: [&str; 4] = ["specs", "memory", "discussions", "board"];
+pub(crate) const REPO_SHARED_SCOPES: [&str; 5] =
+    ["specs", "memory", "discussions", "board", "works"];
 const FILE_SCOPES: [&str; 2] = ["files", "files-docs"];
 const GENERATIONS_DIR_SUFFIX: &str = ".gen";
 const ACTIVE_POINTER_FILENAME: &str = "active.json";
@@ -289,7 +290,48 @@ fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
 fn repo_scope_status(repo_dir: &Path, scope: &str) -> Value {
     let db_path = repo_dir.join(scope);
     let manifest_path = repo_dir.join(format!("manifest-{scope}.json"));
-    scope_store_status(&db_path, &manifest_path, false)
+    let mut status = scope_store_status(&db_path, &manifest_path, false);
+    if !status["exists"].as_bool().unwrap_or(false) {
+        return status;
+    }
+    let meta = read_json(&db_path.join("meta.json")).unwrap_or(Value::Null);
+    let meta = &meta["scopes"][scope];
+    let pointer =
+        read_json(&generations_root(&db_path).join(ACTIVE_POINTER_FILENAME)).unwrap_or(Value::Null);
+    // Incremental updates advance metadata without moving the active pointer.
+    let count = meta["document_count"]
+        .as_u64()
+        .or_else(|| pointer["document_count"].as_u64());
+    if let Some(count) = count {
+        status["document_count"] = json!(count);
+        if let Some(expected) = meta["source_document_count"].as_u64() {
+            status["source_document_count"] = json!(expected);
+            if count != expected {
+                status["healthy"] = json!(false);
+                status["repair_required"] = json!(true);
+                status["reason"] = json!(if count == 0 && expected > 0 {
+                    "empty_collection"
+                } else {
+                    "count_mismatch"
+                });
+            }
+        }
+        // A zero generation with nonzero metadata is the failed-publication
+        // signature; do not call it ready just because its manifest exists.
+        if (count == 0 || pointer["document_count"].as_u64() == Some(0))
+            && meta["source_document_count"].is_null()
+        {
+            status["healthy"] = json!(false);
+            status["repair_required"] = json!(true);
+            status["reason"] = json!("empty_collection");
+        }
+    }
+    if status["document_count"].as_u64() == Some(0) && meta["source_document_count"].is_null() {
+        status["healthy"] = json!(false);
+        status["repair_required"] = json!(true);
+        status["reason"] = json!("empty_collection");
+    }
+    status
 }
 
 fn legacy_worktree_scope_status(repo_dir: &Path, worktree_hash: &str, scope: &str) -> Value {
@@ -724,7 +766,7 @@ mod tests {
     fn missing_index_projects_repair_required_for_every_scope() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let status = repo_shared_status(tmp.path(), "repo", &tmp.path().join("cache"));
-        for scope in ["issues", "specs", "memory", "discussions", "board"] {
+        for scope in ["issues", "specs", "memory", "discussions", "board", "works"] {
             let value = &status[scope];
             assert_eq!(value["healthy"], Value::Bool(false), "{scope}");
             assert_eq!(value["repair_required"], Value::Bool(true), "{scope}");
@@ -740,6 +782,47 @@ mod tests {
             !tmp.path().join("repo").exists(),
             "projection must not create index directories"
         );
+    }
+
+    #[test]
+    fn repo_scope_reports_published_documents_instead_of_source_file_count() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_dir = tmp.path().join("repo");
+        let generations = repo_dir.join("board.gen");
+        fs::create_dir_all(generations.join("gen-test")).unwrap();
+        fs::write(generations.join("gen-test/chroma.sqlite3"), b"db").unwrap();
+        fs::write(
+            generations.join("active.json"),
+            r#"{"generation":"gen-test","document_count":17}"#,
+        )
+        .unwrap();
+        fs::write(
+            repo_dir.join("manifest-board.json"),
+            r#"{"entries":[{"path":"segment.jsonl"}]}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(repo_dir.join("board")).unwrap();
+        fs::write(
+            repo_dir.join("board/meta.json"),
+            r#"{"scopes":{"board":{"document_count":17,"source_document_count":17}}}"#,
+        )
+        .unwrap();
+        let status = repo_shared_status(tmp.path(), "repo", &tmp.path().join("cache"));
+        assert_eq!(status["board"]["document_count"], json!(17));
+        assert_eq!(status["board"]["healthy"], json!(true));
+        fs::write(
+            generations.join("active.json"),
+            r#"{"generation":"gen-test","document_count":0}"#,
+        )
+        .unwrap();
+        fs::write(
+            repo_dir.join("board/meta.json"),
+            r#"{"scopes":{"board":{"document_count":0,"source_document_count":17}}}"#,
+        )
+        .unwrap();
+        let status = repo_shared_status(tmp.path(), "repo", &tmp.path().join("cache"));
+        assert_eq!(status["board"]["healthy"], json!(false));
+        assert_eq!(status["board"]["reason"], "empty_collection");
     }
 
     #[test]

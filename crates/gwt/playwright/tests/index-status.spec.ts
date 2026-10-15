@@ -333,6 +333,42 @@ test.describe("Project Index status surface", () => {
     expect(lastRebuild).not.toHaveProperty("worktree_hash");
   });
 
+  test("Index window Health shows Work status and rebuilds the repo-scoped works index", async ({ page }, testInfo) => {
+    const configuredUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    const errors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("pageerror", (error) => errors.push(String(error)));
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript((value) => localStorage.setItem("gwt:ui:theme", value), theme);
+    if (!configuredUrl) await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "ready",
+      scopes: {
+        works: { healthy: true, repair_required: false, document_count: 7, reason: "ready" },
+      },
+    });
+
+    const url = configuredUrl
+      ? new URL(new URL(APP_URL).pathname, configuredUrl).toString()
+      : APP_URL;
+    await page.goto(url);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const { root, table } = await openIndexHealthPanel(page);
+    const worksRow = table.locator("tr[data-scope='works']");
+    await expect(worksRow.locator(".settings-index-cell.ready")).toContainText("7 docs");
+    await worksRow.locator(".settings-index-rebuild-all[data-scope='works']").click();
+    const lastRebuild = await page.evaluate(() =>
+      window.__gwtFixtureWebSocket.recordedSends.map((raw) => JSON.parse(raw))
+        .filter((message) => message.kind === "rebuild_index_cell").pop(),
+    );
+    expect(lastRebuild).toEqual({ kind: "rebuild_index_cell", project_root: "/fixture", scope: "works" });
+    await root.locator("[data-index-tab='search']").click();
+    await expect(root.locator("[data-role='index-search-health-summary']")).toContainText("1 ready");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("Index window Search shows animated loading feedback in the results pane", async ({
     page,
   }) => {
