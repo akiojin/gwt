@@ -288,7 +288,7 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
         let comments = snapshot
             .comments
             .iter()
-            .map(|comment| gwt_github::Comment {
+            .map(|comment| gwt_github::body::Comment {
                 id: comment.id.0,
                 body: comment.body.clone(),
             })
