@@ -126,6 +126,7 @@ pub enum IndexSearchScope {
     Discussions,
     Board,
     Works,
+    Reports,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -157,6 +158,7 @@ impl IndexSearchScope {
             Self::Discussions => "discussions",
             Self::Board => "board",
             Self::Works => "works",
+            Self::Reports => "reports",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -187,6 +189,15 @@ pub enum IndexSearchTarget {
     },
     Work {
         work_id: String,
+    },
+    Report {
+        report_id: String,
+        created_at: String,
+        report_type: String,
+        source_kind: String,
+        question: String,
+        body: String,
+        issue_numbers: Vec<u64>,
     },
     File {
         path: String,

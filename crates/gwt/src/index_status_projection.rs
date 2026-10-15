@@ -26,8 +26,14 @@ use gwt_core::index::view::{
 use serde_json::{json, Map, Value};
 
 /// Repo-shared scopes every status payload reports, in emission order.
-pub(crate) const REPO_SHARED_SCOPES: [&str; 5] =
-    ["specs", "memory", "discussions", "board", "works"];
+pub(crate) const REPO_SHARED_SCOPES: [&str; 6] = [
+    "specs",
+    "memory",
+    "discussions",
+    "board",
+    "works",
+    "reports",
+];
 const FILE_SCOPES: [&str; 2] = ["files", "files-docs"];
 const GENERATIONS_DIR_SUFFIX: &str = ".gen";
 const ACTIVE_POINTER_FILENAME: &str = "active.json";
@@ -766,7 +772,15 @@ mod tests {
     fn missing_index_projects_repair_required_for_every_scope() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let status = repo_shared_status(tmp.path(), "repo", &tmp.path().join("cache"));
-        for scope in ["issues", "specs", "memory", "discussions", "board", "works"] {
+        for scope in [
+            "issues",
+            "specs",
+            "memory",
+            "discussions",
+            "board",
+            "works",
+            "reports",
+        ] {
             let value = &status[scope];
             assert_eq!(value["healthy"], Value::Bool(false), "{scope}");
             assert_eq!(value["repair_required"], Value::Bool(true), "{scope}");
