@@ -10,6 +10,11 @@ test('one model update reaches every view, including a newly mounted view', () =
   store.update(state => ({ ...state, turns: [{ id: '1' }, { id: '2' }] }));
   assert.deepEqual(chat, [[], ['1', '2']]);
   assert.deepEqual(log, chat);
+  const turns = store.read().turns;
+  store.update(state => ({ ...state, unrelated: true }));
+  assert.equal(store.read().turns, turns, 'owned children retain their identity');
+  assert.equal(chat.length, 2, 'unchanged selectors do not notify their views');
+  assert.equal(log.length, 2);
   let mounted;
   const unsubscribe = store.subscribe(state => state.turns, turns => { mounted = turns; });
   assert.deepEqual(mounted.map(turn => turn.id), ['1', '2']);
@@ -19,13 +24,26 @@ test('one model update reaches every view, including a newly mounted view', () =
 });
 
 test('push payloads and renderer code cannot mutate the canonical snapshot', () => {
-  const payload = { turns: [{ id: '1' }] };
+  const payload = JSON.parse('{"turns":[{"id":"1"}],"__proto__":{"kind":"data"}}');
   const store = createUiStateStore(payload);
+  assert.equal(Object.getPrototypeOf(store.read()), Object.prototype);
+  assert.equal(Object.hasOwn(store.read(), '__proto__'), true);
+  assert.throws(() => { store.read().__proto__.kind = 'renderer'; }, TypeError);
   payload.turns[0].id = 'outside';
   assert.equal(store.read().turns[0].id, '1');
   assert.throws(() => { store.read().turns[0].id = 'renderer'; }, TypeError);
   assert.throws(() => store.update(() => ({ node: { callback() {} } })), TypeError);
   assert.equal(store.read().turns[0].id, '1', 'invalid updates leave state intact');
+});
+
+test('snapshot reads all enumerable values before copying their children', () => {
+  const child = { value: 'before' };
+  const store = createUiStateStore({
+    child,
+    get updateChild() { child.value = 'after'; return true; },
+  });
+  assert.equal(store.read().child.value, 'after');
+  assert.equal(store.read().updateChild, true);
 });
 
 test('a throwing view does not leave other views stale and nested updates settle at the latest model', () => {

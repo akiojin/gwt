@@ -13,8 +13,18 @@ function snapshot(value) {
   if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
     throw new TypeError('UI state must contain plain objects and arrays');
   }
-  const copy = Array.isArray(value) ? value.map(snapshot)
-    : Object.fromEntries(Object.entries(value).map(([key, child]) => [key, snapshot(child)]));
+  let copy;
+  if (Array.isArray(value)) {
+    copy = value.map(snapshot);
+  } else {
+    copy = {};
+    const property = { __proto__: null, enumerable: true, configurable: true, writable: true, value: undefined };
+    // Preserve own data properties without a second entries array or per-key tuples.
+    for (const [key, child] of Object.entries(value)) {
+      property.value = snapshot(child);
+      Object.defineProperty(copy, key, property);
+    }
+  }
   owned.add(copy);
   return Object.freeze(copy);
 }
