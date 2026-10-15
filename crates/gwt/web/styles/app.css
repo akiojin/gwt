@@ -6860,35 +6860,6 @@ body {
   white-space: nowrap;
 }
 
-/* Issue #4538 AC-3: Project header link back to the Hub. It opens a new
-   browser tab so the Project tab keeps its URL. */
-.project-home-link {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex: 0 0 auto;
-  margin-right: var(--space-3);
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  color: var(--color-link);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: 600;
-  letter-spacing: var(--tracking-mono);
-  text-decoration: none;
-}
-
-.project-home-link:hover {
-  color: var(--color-link-hover);
-  border-color: var(--color-border-strong);
-}
-
-.project-home-link:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
 /* Issue #4538: Hub (`/`) and route not-found pages. They replace the
    Operator shell, so the body owns scrolling and the canvas background. */
 body.route-body {

@@ -46,7 +46,7 @@ export function createHubApp({ document: doc, window: win }) {
   let cloneState = initialCloneState();
   let socket = null;
   let reconnectTimer = null;
-  const queued = [];
+  let queued = [];
 
   const root = node("main", "gwt-hub");
   root.dataset.hub = "";
@@ -330,6 +330,8 @@ export function createHubApp({ document: doc, window: win }) {
       if (socket !== connection) return;
       closeController.connectionLost();
       picker.connectionLost();
+      queued = queued.filter(({ kind }) =>
+        !["open_project_dialog", "select_clone_project_parent"].includes(kind));
       reconnectTimer = win.setTimeout(connect, 1000);
     });
   }
@@ -353,8 +355,19 @@ export function createHubApp({ document: doc, window: win }) {
     });
   }
 
+  function openInitialAction() {
+    const action = new URL(win.location.href).searchParams.get("action");
+    if (action === "open-folder") {
+      beginOpenRequest();
+      picker.begin("open");
+    } else if (action === "clone") {
+      cloneState = { ...cloneState, open: true };
+      renderClone();
+    }
+  }
+
   render();
-  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, homeUrl: HUB_URL_PATH };
+  return { root, cloneModal, closeModal: closeController.modal, connect, receive, send, installTestBridge, openInitialAction, homeUrl: HUB_URL_PATH };
 }
 
 export function mountHubApp({ window: win, document: doc }) {
@@ -362,6 +375,9 @@ export function mountHubApp({ window: win, document: doc }) {
   const app = createHubApp({ window: win, document: doc });
   doc.body.className = "route-body";
   doc.body.replaceChildren(app.root, app.cloneModal, app.closeModal);
+  // Run once after mounting, before connecting: picker requests queue behind
+  // frontend_ready, while reconnect only re-establishes the Hub connection.
+  app.openInitialAction();
   app.installTestBridge();
   app.connect();
   return app;
