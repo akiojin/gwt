@@ -92,6 +92,10 @@ impl AppEventQueue {
     pub(crate) fn is_empty(&self) -> bool {
         self.foreground.is_empty() && self.layout.is_empty() && self.background.is_empty()
     }
+
+    fn len(&self) -> usize {
+        self.foreground.len() + self.layout.len() + self.background.len()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -187,6 +191,17 @@ pub enum AppEventProxy {
 }
 
 impl AppEventProxy {
+    /// Best-effort snapshot after a slow handler, excluding the active event.
+    /// Profiling must not wait for a producer holding the queue mutex.
+    pub(crate) fn pending_count(&self) -> Option<usize> {
+        match self {
+            Self::Real(delivery) => delivery.pending.try_lock().ok().map(|queue| queue.len()),
+            Self::Project { inner, .. } => inner.pending_count(),
+            #[cfg(test)]
+            Self::Stub(events) => events.try_lock().ok().map(|events| events.len()),
+        }
+    }
+
     pub(crate) fn for_project(&self, context: ProjectContext) -> Self {
         Self::Project {
             context: Box::new(context),
