@@ -45,6 +45,7 @@ async function harness(count = 1) {
   let projection = { active_works: [{ id: "work-1", branch: "work/one",
     linked_issue_numbers: [1], title: "Before", status_category: "active", agents: [] }] };
   const sent = [];
+  const windowMap = new Map();
   const surface = mod.createKnowledgeKanbanSurface({
     send(message) {
       sent.push(message);
@@ -53,7 +54,7 @@ async function harness(count = 1) {
         request_id: message.request_id, entries: [], selected_number: null, refresh_enabled: true,
       });
     },
-    windowMap: new Map(),
+    windowMap,
     workspaceWindowById: id => windows.find(window => window.id === id),
     getWorkspaceWindows: () => windows,
     knowledgeKindForPreset: () => "issue",
@@ -61,7 +62,7 @@ async function harness(count = 1) {
     isKnowledgeWindowVisible: id => visible.has(id),
   });
   for (const window of windows) surface.ensureKnowledgeBridgeState(window.id, "issue");
-  return { surface, visible, sent, setProjection: value => { projection = value; },
+  return { surface, visible, sent, windowMap, setProjection: value => { projection = value; },
     get projection() { return projection; },
     loads: () => sent.filter(message => message.kind === "load_knowledge_bridge") };
 }
@@ -123,6 +124,34 @@ test("Issue #5395: reordered snapshots do not reload; adding and removing an ass
   h.surface.scheduleKnowledgeRelatedWorkRefresh();
   timer.advance(2000);
   assert.equal(h.loads().length, 2, "an unassociated Work does not change Issue correlation");
+});
+
+test("Issue #5395: a cache revision load consumes earlier hidden event invalidation", async t => {
+  const timer = clock(t);
+  const h = await harness();
+  const previousDocument = globalThis.document;
+  globalThis.document = { hidden: false };
+  t.after(() => { globalThis.document = previousDocument; });
+  h.windowMap.set("issue-0", { querySelector: () => null });
+  const state = h.surface.knowledgeBridgeStateMap.get("issue-0");
+  state.cacheRevision = "before";
+  h.visible.clear();
+  h.surface.scheduleIssueMonitorProjectionRefresh();
+  state.autoRefreshDirty = true;
+  timer.advance(2000);
+  assert.equal(h.loads().length, 0);
+
+  h.visible.add("issue-0");
+  h.surface.resumeKnowledgeEventRefresh();
+  h.surface.refreshVisibleKnowledgeWindows();
+  h.surface.applyKnowledgeCacheRevision({ id: "issue-0", knowledge_kind: "issue", revision: "after" });
+  assert.equal(h.loads().length, 1);
+  timer.advance(2000);
+  assert.equal(h.loads().length, 1, "the revision load already consumed the earlier event");
+
+  h.surface.scheduleIssueMonitorProjectionRefresh();
+  timer.advance(2000);
+  assert.equal(h.loads().length, 2, "a later event still starts a fresh load");
 });
 
 test("Issue #5395: measures one minute of eight-agent event traffic", async t => {

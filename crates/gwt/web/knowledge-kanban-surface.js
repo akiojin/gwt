@@ -1921,6 +1921,9 @@ export function createKnowledgeKanbanSurface({
           state.queuedLoadRefresh = state.queuedLoadRefresh || Boolean(refresh);
           return;
         }
+        // Any newly dispatched load covers earlier event invalidation, including
+        // a hidden window's event when its cache revision changed on reveal.
+        state.eventRefreshDirty = false;
         if (state.pendingSearchTimer !== null) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
