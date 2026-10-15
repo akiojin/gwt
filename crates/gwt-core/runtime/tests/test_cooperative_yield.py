@@ -1,6 +1,6 @@
 """Phase 70 T-IDX-386 (Issue #3264): cooperative yield cross-process contract.
 
-FR-389: background embedding checkpoints at most every 16 documents. When a
+FR-389 / Issue #5431: background embedding checkpoints after each document. When a
 higher-priority claimant is pending on the host-wide heavy lease, the
 background build yields at the batch boundary, leaves a resumable
 continuation, keeps the previously active index intact (AS-5), and a
@@ -32,7 +32,7 @@ RUNNER_PATH = Path(runner.__file__).resolve()
 REPO_HASH = "abc1234567890def"
 WORKTREE_HASH = "111122223333ffff"
 TOTAL_DOCS = 40
-CHECKPOINT_BATCH = 16
+CHECKPOINT_BATCH = 1
 
 
 def _write_pending_claimant(coordinator_root: Path, priority: str) -> Path:
@@ -128,7 +128,7 @@ class CooperativeYieldTests(unittest.TestCase):
         self.assertEqual(status["document_count"], TOTAL_DOCS, status)
 
         # 2. An interactive claimant is pending on the heavy lease: the
-        #    background rebuild must yield at the 16-document boundary with a
+        #    background rebuild must yield at the next document boundary with a
         #    resumable continuation instead of finishing the batch. Every
         #    document is changed first so the rebuild has real embedding work
         #    (unchanged records are reused without checkpoints, FR-391).
@@ -148,7 +148,7 @@ class CooperativeYieldTests(unittest.TestCase):
         self.assertEqual(
             yielded.get("newly_embedded"),
             CHECKPOINT_BATCH,
-            f"yield must happen at the 16-document checkpoint boundary: {yielded}",
+            f"yield must happen at the next document checkpoint: {yielded}",
         )
 
         # 3. AS-5 / FR-390: the previously active index stays intact and
@@ -421,7 +421,7 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
 
     The v2 canonical-base + worktree-overlay build is the path production
     search actually uses (`--file-index-protocol v2`), so it is the path that
-    must checkpoint every 16 documents and hand the heavy lease back when an
+    must checkpoint after each document and hand the heavy lease back when an
     interactive search queues behind it. The repo-scoped Embedding CAS is the
     checkpoint: a yielded run leaves every vector it computed durably cached,
     so the follow-up run resumes without re-embedding them and publishes no
@@ -512,7 +512,7 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
         self.assertEqual(
             first.get("computed_embeddings"),
             CHECKPOINT_BATCH,
-            f"the yield must land on the 16-document checkpoint boundary: {first}",
+            f"the yield must land on the next document checkpoint: {first}",
         )
         self.assertFalse(
             self._worktree_head().exists(),
@@ -573,12 +573,7 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
         self.assertTrue(self._worktree_head().exists())
 
     def test_v2_build_yields_between_base_and_overlay_and_resumes(self):
-        # Commit one batch as the Base; leave two batches as Overlay input.
-        for index in range(TOTAL_DOCS, 3 * CHECKPOINT_BATCH):
-            (self.project_root / "src" / f"module_{index:02}.rs").write_text(
-                f"//! module {index}\nfn feature_{index}() {{}}\n",
-                encoding="utf-8",
-            )
+        # Commit one checkpoint as the Base; leave the rest as Overlay input.
         for args in (
             ["init"],
             ["add", *[f"src/module_{index:02}.rs" for index in range(CHECKPOINT_BATCH)]],
@@ -605,8 +600,36 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
         pending.unlink()
         final = self._run_v2()
         self.assertFalse(final.get("yielded"), final)
-        self.assertEqual(final.get("computed_embeddings"), CHECKPOINT_BATCH, final)
+        self.assertEqual(final.get("computed_embeddings"), TOTAL_DOCS - 2 * CHECKPOINT_BATCH, final)
         self.assertTrue(self._worktree_head().exists(), final)
+
+    def test_search_arriving_during_encode_preempts_before_the_next_document(self):
+        with mock.patch.dict(os.environ, {
+            "HOME": str(self.home), "USERPROFILE": str(self.home),
+            "GWT_INDEX_FAKE_EMBEDDING": "1",
+            "GWT_INDEX_COORDINATOR_ROOT": str(self.coordinator_root),
+        }):
+            model = runner._get_embedding_model(runner.FILE_INDEX_V2_MODEL_REVISION)
+            batches = []
+
+            def encode(inputs):
+                batches.append(len(inputs))
+                # Arrival is causally inside the non-interruptible encode,
+                # not dependent on a scheduler delay or a prequeued request.
+                _write_pending_claimant(self.coordinator_root, "interactive-search")
+                return model.encode(inputs)
+
+            with mock.patch.object(runner, "_get_embedding_model") as get_model:
+                get_model.return_value.encode.side_effect = encode
+                result = runner.action_index_files_v2(
+                    str(self.project_root), V2_REPO_HASH, V2_WORKTREE_HASH,
+                    mode="full", db_root=self.db_root, qos="background",
+                    file_index_protocol="v2",
+                )
+        self.assertTrue(result.get("yielded"), result)
+        self.assertEqual(batches, [1], "a pending search must not wait for 16 encodes")
+        self.assertEqual(result.get("computed_embeddings"), 1, result)
+        self.assertFalse(self._worktree_head().exists())
 
 
 if __name__ == "__main__":

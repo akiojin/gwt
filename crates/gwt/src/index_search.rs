@@ -1181,7 +1181,7 @@ fn run_batch_scope_search(
     // same model a build loads, so it is an ordinary claimant of the
     // host-wide heavy lease — not an exception to it. Registering as a
     // pending interactive claimant is also what makes a running background
-    // build hand the lease back at its next 16-document checkpoint.
+    // build hand the lease back at its next document checkpoint.
     let _heavy = acquire_search_heavy_lease(project_root, repo_hash, worktree_hash)?;
     // FR-103 (T-IDX-419): the interactive semantic attempt runs through the
     // shared process lifecycle boundary — captured output without terminal
