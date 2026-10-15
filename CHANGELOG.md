@@ -1,6 +1,69 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.124.0] - 2026-10-15
+
+### Bug Fixes
+
+- **settings:** Group Issues controls into readable sections
+- **settings:** Preserve nested dropdown values on host sync
+- **gui:** Isolate PM and agent surface ownership
+- **hub:** Discard queued picker requests after connection loss
+- **monitor:** Give wait declarations a durable ipc timeout
+- **issue-monitor:** Recheck close authority and audit spec acceptance
+- **verify:** Refresh holder state after activity sampling
+- **build:** Persist transaction causes and confirm completed work
+- **index:** Exclude explicit PR references from report issues
+- **verify:** Prevent credential wedges and expose safe recovery
+
+### Features
+
+- **tray:** Open project intake directly from the menu
+- **index:** Index and search project PM reports
+
+### Miscellaneous Tasks
+
+- **work:** PM 間メッセージ配信の再開履歴を記録する
+- **work:** PM 配信精算 PR のリンク履歴を記録する
+- **work:** Record PR #5533 delivery metadata
+- **work:** Record Issue #4777 delivery recovery
+- **work:** Preserve Issue #4777 GUI resume record
+- **work:** Settle restored tray implementation work
+- **work:** Record wait declaration delivery recovery
+- **work:** Record acceptance delivery for issue 5126
+- **work:** Link acceptance delivery pr
+- **work:** Issue #5514 の配送再開記録を保存
+- **work:** Record Issue #5514 delivery audit
+- **work:** PR #5551 の配信記録を追加
+- **work:** Record issue 5070 delivery resumption
+
+### Performance
+
+- **capacity:** Share host samples and suppress unchanged status
+
+### Testing
+
+- **settings:** Wait for authoritative update preference
+- **settings:** Align embedded labels contract with groups
+- **gui:** Align wizard visibility source contracts
+- **web:** Register managed hook trust before browser checks
+- **web:** Retain the transient server during fixture gaps
+- **tray:** Align retained menu contract with project intake
+- **tray:** Update Windows native menu command order
+- **board:** Isolate concurrent delivery from real time
+- **pm:** Isolate live report fixtures by suite and theme
+- **e2e:** 一時Shellの非永続化をfixtureで検証
+- **perf:** Record deployed monitor baseline and update boundary
+- **perf:** Verify deployed monitor CPU reduction
+- **perf:** Bind measurements to recorded source commits
+- **build:** Assert the logged unprojected close cause
+- **index:** Use safe Git helpers in reports fixtures
+- **capacity:** Isolate live windows and retain failure traces
+- **capacity:** Preserve isolated storage and avoid redundant writes
+- **capacity:** Focus headed coverage on sampler observations
+- **capacity:** Record integrated sampler cpu
+- **pane:** Prepare board before bridge latency measurements
+
 ## [9.123.2] - 2026-10-15
 
 ### Bug Fixes
