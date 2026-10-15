@@ -231,6 +231,8 @@ pub(crate) fn rebuild_runner_args(
                 &gwt_core::index::paths::gwt_index_root(),
                 context.repo_hash.as_str(),
             )
+        } else if qos == "background" && !action.needs_worktree_hash {
+            "incremental"
         } else {
             "full"
         }),
@@ -310,6 +312,7 @@ pub fn render_index_status(
             "memory",
             "discussions",
             "board",
+            "works",
             "files",
             "files-docs",
         ] {

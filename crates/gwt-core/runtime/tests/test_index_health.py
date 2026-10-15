@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,74 @@ import chroma_index_runner as runner
 class IndexHealthTests(unittest.TestCase):
     REPO_HASH = "abc1234567890def"
     WORKTREE_HASH = "111122223333ffff"
+
+    def _assert_repo_scope_noop_preserves_count(self, scope):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            notes = home / ".gwt" / "projects" / self.REPO_HASH / "work-notes"
+            notes.mkdir(parents=True)
+            (notes / "memory.md").write_text("## 2026-10-15 — Keep counts\n\nRemember existing documents.\n\n## 2026-10-14 — Verify counts\n\nCompare source and indexed documents.\n", encoding="utf-8")
+            self._write_cached_spec(home / ".gwt" / "cache" / "issues" / self.REPO_HASH)
+            spec = home / ".gwt" / "cache" / "issues" / self.REPO_HASH / "1939" / "sections" / "spec.md"
+            spec.write_text("## First requirement\nFirst document.\n\n## Second requirement\nSecond document.\n", encoding="utf-8")
+            db_root = home / "index"
+            action = getattr(runner, f"action_index_{scope}_v2")
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                built = action(str(home), self.REPO_HASH, None, db_root=db_root)
+                self.assertTrue(built["ok"], built)
+                noop = action(str(home), self.REPO_HASH, None, mode="incremental", db_root=db_root)
+                self.assertTrue(noop["ok"], noop)
+                self.assertEqual(noop["indexed"], 0)
+                meta = runner._read_scope_meta(self.REPO_HASH, None, scope, db_root)
+                self.assertEqual(meta["document_count"], built["indexed"])
+                self.assertEqual(meta["source_document_count"], built["indexed"])
+                with mock.patch.object(runner, "_scope_document_count", return_value=(True, 1)):
+                    partial = runner._scope_status_v2(self.REPO_HASH, None, scope, db_root)
+                self.assertFalse(partial["healthy"], partial)
+                self.assertEqual(partial["source_document_count"], 2)
+
+    def test_specs_incremental_noop_preserves_document_count(self):
+        self._assert_repo_scope_noop_preserves_count("specs")
+
+    def test_memory_incremental_noop_preserves_document_count(self):
+        self._assert_repo_scope_noop_preserves_count("memory")
+
+    def test_works_health_compares_source_documents_instead_of_source_file_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / ".gwt" / "projects" / self.REPO_HASH / "project-state"
+            state.mkdir(parents=True)
+            (state / "works.json").write_text(json.dumps({"work_items": [{"id": "one"}, {"id": "two"}]}), encoding="utf-8")
+            db_root = root / "index"
+            db_path = runner.resolve_db_path(self.REPO_HASH, None, "works", db_root)
+            db_path.mkdir(parents=True)
+            (db_path / "chroma.sqlite3").touch()
+            for indexed_count, manifest in ((0, []), (1, [{"path": "project-state/works.json"}])):
+                runner.write_manifest(db_path, "works", manifest)
+                with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False), mock.patch.object(runner, "_scope_document_count", return_value=(True, indexed_count)):
+                    status = runner._scope_status_v2(self.REPO_HASH, None, "works", db_root)
+                self.assertFalse(status["healthy"], status)
+                self.assertTrue(status["repair_required"], status)
+                self.assertEqual(status["source_document_count"], 2)
+
+    def test_header_only_notes_are_a_healthy_empty_corpus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            notes = root / ".gwt" / "projects" / self.REPO_HASH / "work-notes"
+            notes.mkdir(parents=True)
+            db_root = root / "index"
+            for scope in ("discussions", "memory"):
+                with self.subTest(scope=scope):
+                    source = notes / f"{scope}.md"
+                    source.write_text(f"# {scope}\n", encoding="utf-8")
+                    db_path = runner.resolve_db_path(self.REPO_HASH, None, scope, db_root)
+                    db_path.mkdir(parents=True)
+                    (db_path / "chroma.sqlite3").touch()
+                    runner.write_manifest(db_path, scope, [{"path": str(source)}])
+                    with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False), mock.patch.object(runner, "_scope_document_count", return_value=(True, 0)):
+                        status = runner._scope_status_v2(self.REPO_HASH, None, scope, db_root)
+                    self.assertTrue(status["healthy"], status)
+                    self.assertEqual(status["source_document_count"], 0)
 
     def _make_repo(self, root: Path) -> None:
         (root / "src").mkdir(parents=True)
