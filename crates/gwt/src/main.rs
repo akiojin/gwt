@@ -2577,7 +2577,8 @@ mod tests {
             "&tray_open,",
             "&tray_copy_url,",
             "&tray_projects,",
-            "&tray_about,",
+            "&tray_open_project,",
+            "&tray_clone,",
             "&tray_quit,",
         ];
         let positions: Vec<_> = ordered
@@ -3837,6 +3838,7 @@ mod tests {
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         }
     }
@@ -5777,7 +5779,8 @@ mod tests {
                 .create_window_events(
                     &runtime.test_context(),
                     WindowPreset::Branches,
-                    bounds.clone()
+                    bounds.clone(),
+                    None
                 )
                 .len(),
             3
@@ -5787,7 +5790,8 @@ mod tests {
                 .create_window_events(
                     &runtime.test_context(),
                     WindowPreset::FileTree,
-                    bounds.clone()
+                    bounds.clone(),
+                    None
                 )
                 .len(),
             3
@@ -5966,7 +5970,7 @@ mod tests {
         ] {
             assert_eq!(
                 runtime
-                    .create_window_events(&runtime.test_context(), preset, bounds.clone())
+                    .create_window_events(&runtime.test_context(), preset, bounds.clone(), None)
                     .len(),
                 3,
                 "{preset:?} should create through the normal window path",
@@ -6004,7 +6008,12 @@ mod tests {
             .z_index;
         assert_eq!(
             runtime
-                .create_window_events(&runtime.test_context(), WindowPreset::Work, bounds.clone())
+                .create_window_events(
+                    &runtime.test_context(),
+                    WindowPreset::Work,
+                    bounds.clone(),
+                    None
+                )
                 .len(),
             1,
             "Work must focus the existing Settings surface",
@@ -6942,6 +6951,7 @@ mod tests {
                     gwt::FrontendEvent::CreateWindow {
                         preset: WindowPreset::Settings,
                         bounds: bounds.clone(),
+                        surface_owner: None,
                     },
                 )
                 .len(),
@@ -10796,15 +10806,15 @@ fn main() -> std::io::Result<()> {
     if let Err(error) = std::thread::Builder::new()
         .name("gwt-agent-capacity".into())
         .spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(gwt::agent_capacity::CAPACITY_TICK_INTERVAL);
             let roots = capacity_roots
                 .read()
                 .map(|projects| projects.clone())
                 .unwrap_or_default();
+            if let Err(error) = gwt::agent_capacity::refresh_machine_capacity_for_projects(&roots) {
+                tracing::warn!(%error, "agent capacity observation failed");
+            }
             for root in roots {
-                if let Err(error) = gwt::agent_capacity::refresh_machine_capacity(&root) {
-                    tracing::warn!(%error, project_root = %root.display(), "agent capacity observation failed");
-                }
                 // Failed observations must also publish expiry instead of leaving
                 // an old positive Auto limit on a stopped Monitor.
                 if capacity_proxy
@@ -10853,7 +10863,7 @@ fn main() -> std::io::Result<()> {
 
     // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
     // native WebView path is removed; instead we build a tray-icon menu
-    // with `[Open] / About / [Quit]` and rely on the existing
+    // with Hub / project intake / Projects / Copy URL / Quit and rely on the existing
     // `EmbeddedServer` + browser UI for the actual GUI surface. The tao
     // event_loop is still used to keep the OS runloop alive (NSApp on
     // macOS, MS message pump on Windows, GTK main loop on Linux). The
@@ -10873,7 +10883,18 @@ fn main() -> std::io::Result<()> {
         true,
         None,
     );
-    let tray_about = MenuItem::with_id(gwt::cli::tray::menu::ids::ABOUT, "About GWT", true, None);
+    let tray_open_project = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::OPEN_PROJECT,
+        "Open Project…",
+        true,
+        None,
+    );
+    let tray_clone = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::CLONE,
+        "Clone from GitHub…",
+        true,
+        None,
+    );
     let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
     let tray_projects = Submenu::new("Projects", false);
     let mut tray_generation = gwt::cli::tray::menu::TrayMenuGeneration::new(
@@ -10887,7 +10908,8 @@ fn main() -> std::io::Result<()> {
             &tray_copy_url,
             &tray_projects,
             &PredefinedMenuItem::separator(),
-            &tray_about,
+            &tray_open_project,
+            &tray_clone,
             &PredefinedMenuItem::separator(),
             &tray_quit,
         ])
@@ -12312,18 +12334,19 @@ fn main() -> std::io::Result<()> {
                 )]);
             }
             // SPEC #2920 Phase 4: the tray menu event handler is now
-            // cross-platform. The tray icon menu (Open / About / Quit) is the
+            // cross-platform. The tray icon menu is the
             // only producer; the legacy macOS native menubar
             // (NativeMenuCommand) was removed alongside the wry
             // WebView.
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
                 use gwt::cli::tray::menu::MenuAction;
                 match MenuAction::from_id(event.id.as_ref()) {
-                    Some(MenuAction::Open) => {
+                    Some(action @ (MenuAction::Open | MenuAction::OpenProject | MenuAction::Clone)) => {
+                        let target_url = action.browser_url(&browser_url).expect("browser-opening menu action");
                         // Best-effort browser open. Failure is logged
                         // but does not interrupt the tray loop —
                         // `gwt open` from the CLI is a fallback.
-                        request_tray_browser_launch(&runtime, &browser_url, "Open");
+                        request_tray_browser_launch(&runtime, &target_url, "Open");
                         tracing::info!(target: "gwt_tray", "tray Open browser launch requested");
                     }
                     Some(MenuAction::CopyUrl) => {
@@ -12343,11 +12366,6 @@ fn main() -> std::io::Result<()> {
                         let _ = proxy.send_event(UserEvent::QuitApp {
                             reason: GuiShutdownReason::QuitApp,
                         });
-                    }
-                    Some(MenuAction::About) => {
-                        let about_url =
-                            gwt::cli::tray::menu::about_url_for_browser_url(&browser_url);
-                        request_tray_browser_launch(&runtime, &about_url, "About");
                     }
                     None => {
                         if let Some(action) = tray_generation.resolve(event.id.as_ref()) {

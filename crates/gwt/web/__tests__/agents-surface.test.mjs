@@ -175,6 +175,21 @@ test("tiles keep terminal input as the only input path and report unavailable se
   assert.match(first.textContent, /Interactive/);
 });
 
+test("the dedicated Start Work Shell is interactive without an agent session and retains stopped status gating", async () => {
+  const { setWindows, document } = await fixture();
+  const shell = { id: "start-work-shell", preset: "shell", title: "Start Work", surface_owner: "agents", status: "running" };
+  setWindows([shell, { id: "naming", preset: "codex", status: "running" }]);
+  const tile = document.querySelector('[data-agent-id="start-work-shell"]');
+  assert.ok(tile, "Start Work Shell belongs to Agents");
+  const input = tile.querySelector("textarea");
+  assert.ok(input);
+  assert.match(tile.textContent, /Interactive/);
+  assert.match(document.querySelector('[data-agent-id="naming"]').textContent, /Input unavailable/, "ordinary agents still require their session");
+  setWindows([{ ...shell, status: "stopped" }]);
+  assert.match(tile.textContent, /Input unavailable/);
+  assert.equal(tile.querySelector("textarea"), input);
+});
+
 test("agent tabs select existing terminals, navigate with keys and return to the equal grid", async () => {
   const { surface, setWindows, document, window, focused } = await fixture();
   setWindows(agents);

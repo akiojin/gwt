@@ -815,6 +815,7 @@ fn sample_window(
         session_id: None,
         linked_issue_number: None,
         runtime_started_at_ms: None,
+        surface_owner: None,
         is_pm: false,
     }
 }

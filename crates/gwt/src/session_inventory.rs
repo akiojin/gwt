@@ -123,6 +123,63 @@ pub fn observe_machine_sessions(sessions_dir: &Path) -> MachineSessionInventory 
     let candidates = read_candidates_scope(None, sessions_dir, None, &mut inventory);
     let attribution = candidate_attribution(&candidates);
     let resources = observe_live_candidates(candidates, &mut inventory, true, false);
+    finish_machine_inventory(inventory, attribution, &resources)
+}
+
+/// Share the capacity sampler's persistent CPU baseline and process census.
+pub(crate) fn observe_machine_sessions_with_system(
+    sessions_dir: &Path,
+    system: &mut sysinfo::System,
+) -> MachineSessionInventory {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+    observe_machine_sessions_with_system_refresh(sessions_dir, system, |system| {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_exe(UpdateKind::OnlyIfNotSet),
+        );
+    })
+}
+
+fn observe_machine_sessions_with_system_refresh(
+    sessions_dir: &Path,
+    system: &mut sysinfo::System,
+    mut refresh: impl FnMut(&mut sysinfo::System),
+) -> MachineSessionInventory {
+    let mut inventory = SessionInventory::default();
+    let mut process_evidence = None;
+    let candidates = read_candidates_with_liveness(
+        None,
+        sessions_dir,
+        None,
+        &mut inventory,
+        |host_pid, runtime| {
+            // The first callback runs only after every sidecar was captured.
+            // Reuse this snapshot for pruning, CPU and exact PTY observations.
+            let (observed, pids) = process_evidence.get_or_insert_with(|| {
+                refresh(system);
+                process_liveness_evidence(system)
+            });
+            runtime_has_live_process(host_pid, runtime) || !*observed || pids.contains(&host_pid)
+        },
+    );
+    if process_evidence.is_none() {
+        // An empty Session inventory still needs the GUI CPU observation.
+        refresh(system);
+    }
+    let attribution = candidate_attribution(&candidates);
+    let resources = capture_process_resources_with_system(&candidates, &inventory, true, system);
+    observe_candidate_resources(candidates, &mut inventory, &resources, false);
+    finish_machine_inventory(inventory, attribution, &resources)
+}
+
+fn finish_machine_inventory(
+    mut inventory: SessionInventory,
+    attribution: BTreeMap<String, (PathBuf, Option<String>)>,
+    resources: &MachineProcessResources,
+) -> MachineSessionInventory {
     inventory.uncertainties.retain(|uncertainty| {
         if !uncertainty.reason.starts_with("session_unreadable:") {
             return true;
@@ -156,13 +213,14 @@ pub fn observe_machine_sessions(sessions_dir: &Path) -> MachineSessionInventory 
                 direct_child,
             ))
     });
-    machine_inventory(inventory, attribution, &resources)
+    machine_inventory(inventory, attribution, resources)
 }
 
 #[derive(Default)]
 struct MachineProcessResources {
     memory: BTreeMap<u32, u64>,
     reviews: BTreeSet<u32>,
+    scalar_identities: BTreeMap<u32, u64>,
     processes: BTreeMap<u32, u64>,
     epochs: BTreeMap<u32, u64>,
     legacy_processes: Vec<LegacyProcessObservation>,
@@ -203,13 +261,16 @@ fn machine_inventory(
         .into_iter()
         .map(|session| {
             let (project_root, repo_hash) = attribution[&session.session_id].clone();
+            let scalars_match = session.child_started_at > 0
+                && resources.scalar_identities.get(&session.child_pid)
+                    == Some(&session.child_started_at);
             let role = if crate::pm_registry::pane_is_pm(
                 &project_root,
                 Some(&session.worktree_path),
                 Some(&session.session_id),
             ) {
                 MachineSessionRole::Pm
-            } else if resources.reviews.contains(&session.child_pid) {
+            } else if scalars_match && resources.reviews.contains(&session.child_pid) {
                 MachineSessionRole::Review
             } else {
                 MachineSessionRole::Implementation
@@ -218,7 +279,7 @@ fn machine_inventory(
                 .memory
                 .get(&session.child_pid)
                 .copied()
-                .filter(|bytes| *bytes > 0);
+                .filter(|bytes| scalars_match && *bytes > 0);
             if resident_memory_bytes.is_none() {
                 inventory.uncertainties.push(SessionObservationUncertainty {
                     runtime_path: PathBuf::new(),
@@ -379,6 +440,21 @@ fn capture_process_resources(
     measure_resources: bool,
     snapshot: Option<sysinfo::System>,
 ) -> MachineProcessResources {
+    if candidates.is_empty() && inventory.uncertainties.is_empty() {
+        return MachineProcessResources::default();
+    }
+    // Read process state after the sidecars so a newly published child is not
+    // compared with an OS snapshot taken before it was spawned.
+    let system = snapshot.unwrap_or_else(process_snapshot);
+    capture_process_resources_with_system(candidates, inventory, measure_resources, &system)
+}
+
+fn capture_process_resources_with_system(
+    candidates: &[RuntimeCandidate],
+    inventory: &SessionInventory,
+    measure_resources: bool,
+    system: &sysinfo::System,
+) -> MachineProcessResources {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     if candidates.is_empty() && inventory.uncertainties.is_empty() {
         return MachineProcessResources::default();
@@ -407,9 +483,6 @@ fn capture_process_resources(
         .map(|candidate| candidate.host_pid)
         .chain(orphan_hosts.iter().copied())
         .collect::<BTreeSet<_>>();
-    // Read process state after the sidecars so a newly published child is not
-    // compared with an OS snapshot taken before it was spawned.
-    let mut system = snapshot.unwrap_or_else(process_snapshot);
     let legacy_children = system
         .processes()
         .iter()
@@ -420,8 +493,22 @@ fn capture_process_resources(
         })
         .map(|(pid, _)| *pid)
         .collect::<Vec<_>>();
+    let legacy_identities = legacy_children
+        .iter()
+        .filter_map(|pid| {
+            system.process(*pid).map(|process| {
+                (
+                    pid.as_u32(),
+                    crate::process::snapshot_process_start_identity(pid.as_u32(), process),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    // Resource refreshes retain old values on access failure. Keep those probes
+    // transient so an earlier positive RSS/environment never survives a tick.
+    let mut scalar_system = System::new();
     if !legacy_children.is_empty() {
-        system.refresh_processes_specifics(
+        scalar_system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&legacy_children),
             true,
             ProcessRefreshKind::nothing()
@@ -434,42 +521,8 @@ fn capture_process_resources(
         .iter()
         .map(|(pid, process)| (pid.as_u32(), process.start_time()))
         .collect::<BTreeMap<_, _>>();
-    // Retain only the Session id needed for attribution. The complete process
-    // environment is never exposed in an observation or persisted anywhere.
-    let legacy_processes = system
-        .processes()
-        .iter()
-        .filter_map(|(pid, process)| {
-            let parent_pid = process.parent()?.as_u32();
-            if !legacy_hosts.contains(&parent_pid) {
-                return None;
-            }
-            let session_id = process
-                .environ()
-                .iter()
-                .filter_map(|entry| entry.to_str())
-                .find_map(|entry| entry.strip_prefix("GWT_SESSION_ID="))
-                .unwrap_or_default();
-            Some(LegacyProcessObservation {
-                pid: pid.as_u32(),
-                parent_pid,
-                parent_may_be_host: system
-                    .process(sysinfo::Pid::from_u32(parent_pid))
-                    .is_none_or(|parent| {
-                        let name = Path::new(parent.name())
-                            .file_stem()
-                            .and_then(|name| name.to_str());
-                        name.is_none_or(|name| {
-                            name.eq_ignore_ascii_case("gwt") || name.eq_ignore_ascii_case("gwtd")
-                        })
-                    }),
-                started_at: crate::process::snapshot_process_start_identity(pid.as_u32(), process),
-                session_id: session_id.to_string(),
-                // Retain present children even when attribution is unreadable.
-                cwd: process.cwd().map(Path::to_path_buf).unwrap_or_default(),
-            })
-        })
-        .collect::<Vec<_>>();
+    let legacy_processes =
+        legacy_process_observations(system, &scalar_system, &legacy_hosts, &legacy_identities);
     // Identity comes from the per-process start token, not the wall-clock
     // start time, which moves with the boot time on Linux (Issue #5089).
     // Only the PIDs a candidate can name are read.
@@ -488,36 +541,6 @@ fn capture_process_resources(
         .chain(uncertain_pids)
         .chain(orphan_hosts)
         .collect::<BTreeSet<_>>();
-    let mut resources = MachineProcessResources::default();
-    if measure_resources {
-        // Only named PTY identities are queried for resource/role scalars.
-        let pids = named
-            .iter()
-            .copied()
-            .map(sysinfo::Pid::from_u32)
-            .collect::<Vec<_>>();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::Some(&pids),
-            true,
-            ProcessRefreshKind::nothing()
-                .with_memory()
-                .with_environ(UpdateKind::Always),
-        );
-        for (pid, process) in system
-            .processes()
-            .iter()
-            .filter(|(pid, _)| named.contains(&pid.as_u32()))
-        {
-            resources.memory.insert(pid.as_u32(), process.memory());
-            if process
-                .environ()
-                .iter()
-                .any(|entry| entry == "GWT_REVIEW_DISPATCH=1")
-            {
-                resources.reviews.insert(pid.as_u32());
-            }
-        }
-    }
     let processes = system
         .processes()
         .iter()
@@ -529,6 +552,40 @@ fn capture_process_resources(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let mut resources = MachineProcessResources::default();
+    if measure_resources {
+        // Only named PTY identities are queried for resource/role scalars.
+        let pids = named
+            .iter()
+            .copied()
+            .map(sysinfo::Pid::from_u32)
+            .collect::<Vec<_>>();
+        scalar_system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&pids),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_memory()
+                .with_environ(UpdateKind::Always),
+        );
+        for (pid, process) in scalar_system
+            .processes()
+            .iter()
+            .filter(|(pid, _)| named.contains(&pid.as_u32()))
+        {
+            resources.memory.insert(pid.as_u32(), process.memory());
+            resources.scalar_identities.insert(
+                pid.as_u32(),
+                crate::process::snapshot_process_start_identity(pid.as_u32(), process),
+            );
+            if process
+                .environ()
+                .iter()
+                .any(|entry| entry == "GWT_REVIEW_DISPATCH=1")
+            {
+                resources.reviews.insert(pid.as_u32());
+            }
+        }
+    }
     let boot_epoch = System::boot_time();
     let tokens_are_epoch = cfg!(not(target_os = "linux"));
     resources.processes = epochs.clone();
@@ -595,6 +652,65 @@ fn process_snapshot() -> sysinfo::System {
     let mut system = System::new();
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     system
+}
+
+fn legacy_process_observations(
+    system: &sysinfo::System,
+    scalar_system: &sysinfo::System,
+    legacy_hosts: &BTreeSet<u32>,
+    legacy_identities: &BTreeMap<u32, u64>,
+) -> Vec<LegacyProcessObservation> {
+    // Preserve snapshot existence independently of readable attribution.
+    // Only matching fresh identities may supply the Session id and cwd.
+    system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            let parent_pid = process.parent()?.as_u32();
+            if !legacy_hosts.contains(&parent_pid) {
+                return None;
+            }
+            let started_at = legacy_identities
+                .get(&pid.as_u32())
+                .copied()
+                .unwrap_or_default();
+            let scalar = scalar_system.process(*pid).filter(|scalar| {
+                started_at > 0
+                    && crate::process::snapshot_process_start_identity(pid.as_u32(), scalar)
+                        == started_at
+            });
+            let session_id = scalar
+                .and_then(|scalar| {
+                    scalar
+                        .environ()
+                        .iter()
+                        .filter_map(|entry| entry.to_str())
+                        .find_map(|entry| entry.strip_prefix("GWT_SESSION_ID="))
+                })
+                .unwrap_or_default();
+            Some(LegacyProcessObservation {
+                pid: pid.as_u32(),
+                parent_pid,
+                parent_may_be_host: system
+                    .process(sysinfo::Pid::from_u32(parent_pid))
+                    .is_none_or(|parent| {
+                        let name = Path::new(parent.name())
+                            .file_stem()
+                            .and_then(|name| name.to_str());
+                        name.is_none_or(|name| {
+                            name.eq_ignore_ascii_case("gwt") || name.eq_ignore_ascii_case("gwtd")
+                        })
+                    }),
+                started_at,
+                session_id: session_id.to_string(),
+                // Retain present children even when attribution is unreadable.
+                cwd: scalar
+                    .and_then(sysinfo::Process::cwd)
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -744,12 +860,7 @@ fn read_candidates_scope_with_snapshot(
         session_id,
         inventory,
         |host_pid, runtime| {
-            if crate::process::is_host_process_alive(host_pid)
-                || runtime.child_pid.filter(|pid| *pid > 0).is_some_and(|pid| {
-                    crate::process::is_host_process_alive(pid)
-                        || crate::process::is_process_group_alive(pid)
-                })
-            {
+            if runtime_has_live_process(host_pid, runtime) {
                 return true;
             }
             // A legacy orphan may have no recorded child PID. Preserve the
@@ -760,23 +871,35 @@ fn read_candidates_scope_with_snapshot(
             // but before its direct probe. Never collect environments.
             let (observed, pids) = process_evidence.get_or_insert_with(|| {
                 let system = snapshot.get_or_insert_with(process_snapshot);
-                (
-                    !system.processes().is_empty(),
-                    system
-                        .processes()
-                        .keys()
-                        .map(|pid| pid.as_u32())
-                        .chain(
-                            system
-                                .processes()
-                                .values()
-                                .filter_map(|process| process.parent().map(|pid| pid.as_u32())),
-                        )
-                        .collect::<BTreeSet<_>>(),
-                )
+                process_liveness_evidence(system)
             });
             !*observed || pids.contains(&host_pid)
         },
+    )
+}
+
+fn runtime_has_live_process(host_pid: u32, runtime: &SessionRuntimeState) -> bool {
+    crate::process::is_host_process_alive(host_pid)
+        || runtime.child_pid.filter(|pid| *pid > 0).is_some_and(|pid| {
+            crate::process::is_host_process_alive(pid)
+                || crate::process::is_process_group_alive(pid)
+        })
+}
+
+fn process_liveness_evidence(system: &sysinfo::System) -> (bool, BTreeSet<u32>) {
+    (
+        !system.processes().is_empty(),
+        system
+            .processes()
+            .keys()
+            .map(|pid| pid.as_u32())
+            .chain(
+                system
+                    .processes()
+                    .values()
+                    .filter_map(|process| process.parent().map(|pid| pid.as_u32())),
+            )
+            .collect(),
     )
 }
 
@@ -1337,6 +1460,37 @@ mod tests {
     }
 
     #[test]
+    fn machine_capacity_reads_all_sidecars_before_one_shared_process_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        for id in ["first", "later"] {
+            save_runtime(&sessions, temp.path(), temp.path(), id, None);
+        }
+        let mut system = sysinfo::System::new();
+        let mut refreshes = 0;
+        let inventory =
+            observe_machine_sessions_with_system_refresh(&sessions, &mut system, |_| {
+                refreshes += 1;
+                for id in ["first", "later"] {
+                    let path = gwt_agent::runtime_state_path_for_pid(&sessions, 100, id);
+                    std::fs::write(path, b"changed after process observation").unwrap();
+                }
+            });
+        assert_eq!(refreshes, 1, "all machine observations share one refresh");
+        assert!(
+            inventory.uncertainties.is_empty(),
+            "sidecars must already be captured before the refresh: {:?}",
+            inventory.uncertainties
+        );
+        observe_machine_sessions_with_system_refresh(
+            &temp.path().join("empty"),
+            &mut system,
+            |_| refreshes += 1,
+        );
+        assert_eq!(refreshes, 2, "GUI CPU still refreshes without any Sessions");
+    }
+
+    #[test]
     fn orphan_child_keeps_live_count_and_missing_identity_uncertainty() {
         let temp = tempfile::tempdir().unwrap();
         let sessions = temp.path().join("sessions");
@@ -1548,6 +1702,7 @@ mod tests {
                 &BTreeMap::from([(201, 20), (202, 20)]),
                 &MachineProcessResources {
                     memory: BTreeMap::from([(201, 100), (202, 100)]),
+                    scalar_identities: BTreeMap::from([(201, 20), (202, 20)]),
                     ..MachineProcessResources::default()
                 }
             )
@@ -1587,6 +1742,7 @@ mod tests {
             &MachineProcessResources {
                 memory: BTreeMap::from([(201, 10), (202, 20), (203, 30)]),
                 reviews: BTreeSet::from([202]),
+                scalar_identities: BTreeMap::from([(201, 20), (202, 20), (203, 20)]),
                 ..MachineProcessResources::default()
             },
         );
@@ -1630,10 +1786,21 @@ mod tests {
         let inventory = machine_fixture(
             &sessions,
             &BTreeMap::from([(201, 20), (203, 99)]),
-            &MachineProcessResources::default(),
+            &MachineProcessResources {
+                memory: BTreeMap::from([(201, 100)]),
+                reviews: BTreeSet::from([201]),
+                scalar_identities: BTreeMap::from([(201, 99)]),
+                ..MachineProcessResources::default()
+            },
         );
         assert_eq!(inventory.sessions.len(), 1);
         assert_eq!(inventory.sessions[0].session.session_id, "live");
+        assert_eq!(inventory.sessions[0].resident_memory_bytes, None);
+        assert_eq!(
+            inventory.sessions[0].role,
+            MachineSessionRole::Implementation,
+            "a scalar observation from another PID incarnation must not mark a review"
+        );
         assert_eq!(inventory.uncertainties.len(), 1);
         assert_eq!(
             inventory.uncertainties[0].reason,
@@ -1866,6 +2033,39 @@ mod tests {
             1,
             "unreadable child is not absent"
         );
+    }
+
+    #[test]
+    fn legacy_snapshot_presence_survives_unavailable_scalar_observation() {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let process = system.process(pid).expect("current process snapshot");
+        let parent = process.parent().expect("current process parent").as_u32();
+        let started_at = crate::process::snapshot_process_start_identity(pid.as_u32(), process);
+        let identities = BTreeMap::from([(pid.as_u32(), started_at)]);
+        let rows = legacy_process_observations(
+            &system,
+            &System::new(),
+            &BTreeSet::from([parent]),
+            &identities,
+        );
+        assert_eq!(
+            rows.len(),
+            1,
+            "unreadable scalars must not erase a present child"
+        );
+        assert_eq!(
+            (rows[0].pid, rows[0].parent_pid, rows[0].started_at),
+            (pid.as_u32(), parent, started_at)
+        );
+        assert!(rows[0].session_id.is_empty());
+        assert!(rows[0].cwd.as_os_str().is_empty());
     }
 
     #[test]

@@ -1,0 +1,652 @@
+{
+  "schema_version": 1,
+  "issue": 5489,
+  "observed_at": "2026-10-15T13:07:54.0470188Z",
+  "gui_pid": 6372,
+  "gui_started_at": "2026-10-15T12:55:24.5175113Z",
+  "gui_binary": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Programs\\GWT\\gwt.exe",
+  "gui_version": "9.123.1",
+  "gui_sha256": "e7f91250802089b9cfa9f5ded27cf53d2b3dbcd1c452b845f35ec3966c8dc17b",
+  "roots": [
+    "E:\\gwt",
+    "E:\\160-Idina",
+    "E:\\KeibaSuite",
+    "E:\\unity-cli",
+    "E:\\llmlb"
+  ],
+  "runtime": {
+    "namespaces": 375,
+    "files": 3812,
+    "bytes": 1953338.0
+  },
+  "elapsed_seconds": 30.9205409,
+  "gui_cpu_before_seconds": 1835.046875,
+  "gui_cpu_after_seconds": 1901.46875,
+  "gui_cpu_seconds": 66.421875,
+  "gui_cores": 2.1481472531420045,
+  "monitor": {
+    "id": 7604,
+    "name": "gwt-monitor-runtime",
+    "cpu_before_seconds": 197.109375,
+    "cpu_after_seconds": 207.046875,
+    "cpu_seconds": 9.9375,
+    "cores": 0.3213882975766443,
+    "method": "GetThreadDescription and GetThreadTimes on one retained thread handle; exited thread refuses observation."
+  },
+  "rss_bytes": 859602944,
+  "threads": [
+    {
+      "id": 39448,
+      "cpu_seconds": 22.28125
+    },
+    {
+      "id": 7604,
+      "cpu_seconds": 10.28125
+    },
+    {
+      "id": 29980,
+      "cpu_seconds": 6.890625
+    },
+    {
+      "id": 32008,
+      "cpu_seconds": 5.140625
+    },
+    {
+      "id": 3952,
+      "cpu_seconds": 4.21875
+    },
+    {
+      "id": 49336,
+      "cpu_seconds": 3.671875
+    },
+    {
+      "id": 10936,
+      "cpu_seconds": 3.65625
+    },
+    {
+      "id": 33040,
+      "cpu_seconds": 2.375
+    },
+    {
+      "id": 2904,
+      "cpu_seconds": 2.15625
+    },
+    {
+      "id": 15084,
+      "cpu_seconds": 2.078125
+    },
+    {
+      "id": 44940,
+      "cpu_seconds": 1.90625
+    },
+    {
+      "id": 35128,
+      "cpu_seconds": 0.828125
+    },
+    {
+      "id": 27300,
+      "cpu_seconds": 0.21875
+    },
+    {
+      "id": 14824,
+      "cpu_seconds": 0.203125
+    },
+    {
+      "id": 31592,
+      "cpu_seconds": 0.15625
+    },
+    {
+      "id": 27684,
+      "cpu_seconds": 0.140625
+    },
+    {
+      "id": 42260,
+      "cpu_seconds": 0.109375
+    },
+    {
+      "id": 38904,
+      "cpu_seconds": 0.09375
+    },
+    {
+      "id": 48820,
+      "cpu_seconds": 0.09375
+    },
+    {
+      "id": 4792,
+      "cpu_seconds": 0.09375
+    },
+    {
+      "id": 28544,
+      "cpu_seconds": 0.09375
+    },
+    {
+      "id": 26008,
+      "cpu_seconds": 0.078125
+    },
+    {
+      "id": 46072,
+      "cpu_seconds": 0.078125
+    },
+    {
+      "id": 33576,
+      "cpu_seconds": 0.0625
+    },
+    {
+      "id": 32248,
+      "cpu_seconds": 0.046875
+    },
+    {
+      "id": 31508,
+      "cpu_seconds": 0.03125
+    },
+    {
+      "id": 34180,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 37644,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 45096,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 14652,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 35868,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 22612,
+      "cpu_seconds": 0.015625
+    },
+    {
+      "id": 32880,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 42836,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 39568,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 13376,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 42076,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 6004,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 25388,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 41704,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35728,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 6956,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 43160,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 26400,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 41268,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 30568,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 10092,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22128,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35756,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 45524,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22632,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 5272,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 38580,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 25680,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 44004,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 41860,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 39440,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 40592,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 31104,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 11200,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22352,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 34684,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 41264,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35052,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 40860,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 37168,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 38668,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 48892,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 23448,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 42384,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 15192,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36324,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 27432,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 41016,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35952,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 41384,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 39672,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 43656,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33856,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 37204,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35628,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 44964,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 42904,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 30888,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 21948,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 3320,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 42228,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 34936,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 20272,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 47476,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33824,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 29620,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 40056,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22880,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 13924,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 40840,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 34072,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 11380,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 32664,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 10964,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 33416,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36840,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 40848,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 15364,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 41932,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 39356,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 44316,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 41864,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 17128,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 13972,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 46940,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 42388,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 28636,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 11444,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 42964,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 47680,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 46812,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36648,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 42348,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 30372,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 19256,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 31040,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 32828,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 35164,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 34908,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 27236,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 10984,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22584,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 48700,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 44152,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 4904,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 42828,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 46628,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 28216,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 29808,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 22540,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 32844,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 31644,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 39908,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36476,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 11512,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 36668,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 47344,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 5460,
+      "cpu_seconds": 0.0
+    },
+    {
+      "id": 23740,
+      "cpu_seconds": 0.0
+    }
+  ],
+  "panes_before": [
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1463\trunning\tclaude\tStart Work\torigin=automatic_restore\tsession_created_at=2026-10-15T12:56:31.280799200+00:00\tworktree=C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\projects\\99a8660247f5bc49\\pm/worktree\tsource_session=c657ff3a-ec8c-4bee-92b8-e519d0990ed9\trole=pm",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1464\trunning\tcodex\tEldrin — 検証再開の通知経路レビュー\torigin=launch\tsession_created_at=2026-10-15T12:58:39.677371800+00:00\tworktree=E:/gwt/work/issue-5521\tsource_session=none\tagent_name=Eldrin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1465\trunning\tcodex\tOrelis — Issue #5531 受信バックプレッシャー\torigin=launch\tsession_created_at=2026-10-15T12:58:41.779164100+00:00\tworktree=E:/gwt/work/issue-5531\tsource_session=none\tagent_name=Orelis\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1466\trunning\tcodex\tOrvian — Settings の自動起動照会の応答性改善\torigin=launch\tsession_created_at=2026-10-15T12:58:45.217583600+00:00\tworktree=E:/gwt/work/issue-5532\tsource_session=none\tagent_name=Orvian\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1467\trunning\tcodex\tfix(monitor): issue.monitor.wait の宣言が publish ack timeout 200ms / control rejected で失敗し、待機中の agent が idle 扱いになる\torigin=launch\tsession_created_at=2026-10-15T12:58:49.725475300+00:00\tworktree=E:/gwt/work/issue-5524\tsource_session=none\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1468\trunning\tcodex\tOrlen — Issue #5514 の修正配信\torigin=launch\tsession_created_at=2026-10-15T12:58:50.279220100+00:00\tworktree=E:/gwt/work/issue-5514\tsource_session=none\tagent_name=Orlen\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1469\trunning\tcodex\tVelden — fix(update): Windows で更新を適用しても旧 GUI process が終了せず、新しい版が待機したまま切り替わらない\torigin=launch\tsession_created_at=2026-10-15T12:58:54.586932900+00:00\tworktree=E:/gwt/work/issue-5510\tsource_session=none\tagent_name=Velden\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1470\trunning\tcodex\tEldric — perf(monitor): duplicate runtime が 5 秒ごとに root ごとの global session census を繰り返し、GUI が平均約 1.8 コアを消費する\torigin=launch\tsession_created_at=2026-10-15T12:59:02.303801100+00:00\tworktree=E:/gwt/work/issue-5489\tsource_session=none\tagent_name=Eldric\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1471\trunning\tcodex\tIssue 5500 の実装と配信\torigin=launch\tsession_created_at=2026-10-15T12:59:03.919772800+00:00\tworktree=E:/gwt/work/issue-5500\tsource_session=none\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1473\trunning\tcodex\tVeylin — Issue #5126 AC未達のclose防止\torigin=launch\tsession_created_at=2026-10-15T12:59:10.292849+00:00\tworktree=E:/gwt/work/issue-5126\tsource_session=none\tagent_name=Veylin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1474\trunning\tcodex\tVelorin-3 — 終了診断の可視化\torigin=launch\tsession_created_at=2026-10-15T12:59:10.611189900+00:00\tworktree=E:/gwt/work/issue-5070\tsource_session=none\tagent_name=Velorin-3\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1475\trunning\tcodex\tOrvian-2 — 検証 lease 情報源の調査\torigin=launch\tsession_created_at=2026-10-15T13:02:07.890365300+00:00\tworktree=E:/gwt/work/issue-4496\tsource_session=none\tagent_name=Orvian-2\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1476\trunning\tcodex\tMerovan — 自律実行ポリシーの配信\torigin=launch\tsession_created_at=2026-10-15T13:02:25.550128300+00:00\tworktree=E:\\gwt\\work\\issue-4425\tsource_session=none\tagent_name=Merovan\trole=implementation_agent"
+  ],
+  "panes_after": [
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1463\tidle\tclaude\tStart Work\torigin=automatic_restore\tsession_created_at=2026-10-15T12:56:31.280799200+00:00\tworktree=C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\projects\\99a8660247f5bc49\\pm/worktree\tsource_session=c657ff3a-ec8c-4bee-92b8-e519d0990ed9\trole=pm",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1464\trunning\tcodex\tEldrin — 検証再開の通知経路レビュー\torigin=launch\tsession_created_at=2026-10-15T12:58:39.677371800+00:00\tworktree=E:/gwt/work/issue-5521\tsource_session=none\tagent_name=Eldrin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1465\trunning\tcodex\tOrelis — Issue #5531 受信バックプレッシャー\torigin=launch\tsession_created_at=2026-10-15T12:58:41.779164100+00:00\tworktree=E:/gwt/work/issue-5531\tsource_session=none\tagent_name=Orelis\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1466\trunning\tcodex\tOrvian — Settings の自動起動照会の応答性改善\torigin=launch\tsession_created_at=2026-10-15T12:58:45.217583600+00:00\tworktree=E:/gwt/work/issue-5532\tsource_session=none\tagent_name=Orvian\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1467\trunning\tcodex\tVelorin-4 — fix(monitor): issue.monitor.wait の宣言が publish ack timeout 200ms / control rejected で失敗し、待機中の agent が idle 扱いになる\torigin=launch\tsession_created_at=2026-10-15T12:58:49.725475300+00:00\tworktree=E:/gwt/work/issue-5524\tsource_session=none\tagent_name=Velorin-4\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1468\trunning\tcodex\tOrlen — Issue #5514 の修正配信\torigin=launch\tsession_created_at=2026-10-15T12:58:50.279220100+00:00\tworktree=E:/gwt/work/issue-5514\tsource_session=none\tagent_name=Orlen\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1469\trunning\tcodex\tVelden — fix(update): Windows で更新を適用しても旧 GUI process が終了せず、新しい版が待機したまま切り替わらない\torigin=launch\tsession_created_at=2026-10-15T12:58:54.586932900+00:00\tworktree=E:/gwt/work/issue-5510\tsource_session=none\tagent_name=Velden\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1470\trunning\tcodex\tEldric — perf(monitor): duplicate runtime が 5 秒ごとに root ごとの global session census を繰り返し、GUI が平均約 1.8 コアを消費する\torigin=launch\tsession_created_at=2026-10-15T12:59:02.303801100+00:00\tworktree=E:/gwt/work/issue-5489\tsource_session=none\tagent_name=Eldric\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1471\trunning\tcodex\tIssue 5500 の実装と配信\torigin=launch\tsession_created_at=2026-10-15T12:59:03.919772800+00:00\tworktree=E:/gwt/work/issue-5500\tsource_session=none\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1473\trunning\tcodex\tVeylin — Issue #5126 AC未達のclose防止\torigin=launch\tsession_created_at=2026-10-15T12:59:10.292849+00:00\tworktree=E:/gwt/work/issue-5126\tsource_session=none\tagent_name=Veylin\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1474\trunning\tcodex\tVelorin-3 — 終了診断の可視化\torigin=launch\tsession_created_at=2026-10-15T12:59:10.611189900+00:00\tworktree=E:/gwt/work/issue-5070\tsource_session=none\tagent_name=Velorin-3\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1475\trunning\tcodex\tOrvian-2 — 検証 lease 情報源の調査\torigin=launch\tsession_created_at=2026-10-15T13:02:07.890365300+00:00\tworktree=E:/gwt/work/issue-4496\tsource_session=none\tagent_name=Orvian-2\trole=implementation_agent",
+    "project-694f0f381b744cc59c1956d564ce1d1e::agent-1476\trunning\tcodex\tMerovan — 自律実行ポリシーの配信\torigin=launch\tsession_created_at=2026-10-15T13:02:25.550128300+00:00\tworktree=E:\\gwt\\work\\issue-4425\tsource_session=none\tagent_name=Merovan\trole=implementation_agent"
+  ],
+  "implementation_panes_before": 12,
+  "implementation_panes_after": 12,
+  "method": "GUI TotalProcessorTime and ProcessThread.TotalProcessorTime differences; Stopwatch seconds; core units are not divided by logical processors. Thread counters are read sequentially around the process interval; short-interval edge skew is retained."
+}

@@ -27,6 +27,33 @@ function doc() {
   return parseHTML(html).document;
 }
 
+test("AC-11: PM framing publishes its target without releasing the layout", () => {
+  const start = appJs.indexOf("      function frameWindow(");
+  const end = appJs.indexOf("      // A window the user asked", start);
+  const calls = [];
+  const data = { id: "pm", preset: "codex", is_pm: true };
+  const frame = new Function("workspaceWindowById", "windowWithSettingsSection", "surfaceForWindow", "windowCatalogModel", "splitSurfaces", `
+    ${appJs.slice(start, end)}; return frameWindow;
+  `)(() => data, value => value, () => "pm", {
+    update: reduce => { const state = reduce({}); if (state.navigation) calls.push(state.navigation); },
+  }, {
+    close: () => assert.fail("must not expose other Canvas windows"),
+    hasLayout: true,
+  });
+  frame("pm");
+  assert.deepEqual(calls, [{ windowId: "pm", notifyFocus: true, serial: 1 }]);
+});
+
+test("AC-11: opening an Issue never returns PM auxiliary Settings as its detail target", () => {
+  const start = appJs.indexOf("      function focusOrSpawnPreset(");
+  const end = appJs.indexOf("      document.addEventListener", start);
+  const document = doc();
+  const open = new Function("normalizeSurfacePreset", "document", "CustomEvent", "activeWorkspace",
+    `${appJs.slice(start, end)}; return focusOrSpawnPreset;`)(value => value, document,
+    document.defaultView.CustomEvent, () => ({ windows: [{ id: "pm-settings", preset: "settings", surface_owner: "pm" }] }));
+  assert.equal(open("issue"), null);
+});
+
 test("FR-018: PM launcher は rail の Navigate グループ先頭にある", () => {
   const document = doc();
   const entry = document.getElementById("op-pm-entry");

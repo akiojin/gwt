@@ -3076,11 +3076,10 @@ fn workspace_revalidation_error(code: AgentWorkspaceUpdateErrorCode) -> AgentWor
 }
 
 fn classify_workspace_transaction_error(error: &GwtError) -> AgentWorkspaceUpdateError {
-    // The refusal below tells the agent to inspect the Host gwt log, and the
-    // bridge withholds the message itself, so this is the only place the cause
-    // can be recovered from. It used to log nothing at all, which left a
-    // permanent `transaction_conflict` with no way to tell a lost race from a
-    // durable state defect (#4443).
+    // Checkout compatibility continuations run without a tracing subscriber.
+    // Persist before returning: the bridge intentionally withholds free-form
+    // causes, and a filtered/routed tracing event cannot promise a machine log.
+    let logged = persist_workspace_transaction_error(error).is_ok();
     tracing::warn!(
         error = %error,
         "Host workspace transaction failed without committing"
@@ -3095,10 +3094,55 @@ fn classify_workspace_transaction_error(error: &GwtError) -> AgentWorkspaceUpdat
             "workspace.update owner claim conflicts with the Session-bound Work",
         );
     }
-    AgentWorkspaceUpdateError::new(
+    let mut refusal = AgentWorkspaceUpdateError::new(
         AgentWorkspaceUpdateErrorCode::TransactionConflict,
-        "Host workspace transaction failed without committing; inspect the Host gwt log before retrying",
-    )
+        if logged {
+            "Host workspace transaction failed without committing; inspect ~/.gwt/logs/gwt.log.* for the original cause; run execution.status and inspect recovery_probes; do not retry until the cause is resolved"
+        } else {
+            "Host workspace transaction failed without committing; diagnostic logging failed; run execution.status and report the unavailable diagnostic to the PM; do not retry without resolving the cause"
+        },
+    );
+    refusal.diagnostic_reason = Some(
+        if logged {
+            "workspace_transaction_failed"
+        } else {
+            "workspace_transaction_log_unavailable"
+        }
+        .to_string(),
+    );
+    refusal
+}
+
+fn persist_workspace_transaction_error(error: &GwtError) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let log_dir = gwt_core::paths::gwt_logs_dir();
+    let mut directory = std::fs::DirBuilder::new();
+    directory.recursive(true);
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        directory.mode(0o700);
+        options.mode(0o600);
+    }
+    directory.create(&log_dir)?;
+    let mut file = options.open(gwt_core::logging::current_log_file(&log_dir))?;
+    let mut line = serde_json::to_vec(&serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "level": "WARN",
+        "target": module_path!(),
+        "fields": {
+            "message": "Host workspace transaction failed without committing",
+            "error": error.to_string(),
+            "process_id": std::process::id(),
+        }
+    }))
+    .map_err(std::io::Error::other)?;
+    line.push(b'\n');
+    file.write_all(&line)?;
+    file.sync_data()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3223,6 +3267,10 @@ pub(crate) struct BoundTerminalCompatibilityAuthority {
 }
 
 impl BoundTerminalCompatibilityAuthority {
+    pub(crate) fn is_confirmation_only(&self) -> bool {
+        self.disposition == BoundTerminalCompatibilityDisposition::ConfirmOnly
+    }
+
     pub(crate) fn owner_number(&self) -> u64 {
         self.identity.execution_binding.owner_number
     }
@@ -5027,6 +5075,104 @@ fn fill_option_path(target: &mut Option<PathBuf>, source: Option<&Path>) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_transaction_failure_persists_cause_without_a_subscriber() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("diagnostic home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let source = GwtError::Other("original transaction cause sentinel".to_string());
+
+        let refusal = classify_workspace_transaction_error(&source);
+
+        let path = gwt_core::logging::current_log_file(&gwt_core::paths::gwt_logs_dir());
+        let log = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            log.contains(&source.to_string()),
+            "cause missing from machine log: {log}"
+        );
+        let event: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+        assert_eq!(event["fields"]["error"], source.to_string());
+        assert_eq!(
+            refusal.code,
+            AgentWorkspaceUpdateErrorCode::TransactionConflict
+        );
+        assert_eq!(
+            refusal.diagnostic_reason.as_deref(),
+            Some("workspace_transaction_failed")
+        );
+        assert!(refusal.message.contains("~/.gwt/logs/gwt.log.*"));
+        assert!(refusal.message.contains("do not retry"));
+        assert_eq!(refusal.recovery_operations, vec!["execution.status"]);
+        assert!(!refusal.message.contains("sentinel"));
+    }
+
+    #[test]
+    fn workspace_transaction_failure_reports_unavailable_diagnostic_sink() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("diagnostic home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let log_dir = gwt_core::paths::gwt_logs_dir();
+        std::fs::create_dir_all(log_dir.parent().unwrap()).unwrap();
+        std::fs::write(&log_dir, "not a directory").unwrap();
+
+        let refusal =
+            classify_workspace_transaction_error(&GwtError::Other("private cause".into()));
+
+        assert_eq!(
+            refusal.diagnostic_reason.as_deref(),
+            Some("workspace_transaction_log_unavailable")
+        );
+        assert!(refusal.message.contains("diagnostic logging failed"));
+        assert!(!refusal.message.contains("inspect the Host gwt log"));
+        assert!(!refusal.message.contains("private cause"));
+        assert_eq!(refusal.recovery_operations, vec!["execution.status"]);
+    }
+
+    #[test]
+    fn workspace_transaction_failure_from_host_terminalization_is_logged() {
+        with_strict_target_fixture(|repo, session| {
+            seed_unique_mutation_target(repo, repo, session, "work-log-failure");
+            let works_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo);
+            let refusal = apply_authenticated_work_terminalization_inner(
+                repo,
+                &session.id,
+                AgentWorkTerminalizationRequest {
+                    schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+                    claimed_session_id: session.id.clone(),
+                    observation: observe_agent_runtime(repo).unwrap(),
+                    terminal_kind: AgentWorkTerminalKind::Done,
+                },
+                |_| std::fs::write(&works_path, "invalid WorkItems JSON").unwrap(),
+            )
+            .expect_err("injected persistence failure must refuse the close");
+
+            let source = gwt_core::workspace_projection::load_workspace_work_items(repo)
+                .expect_err("read the original persistence cause");
+            let log = std::fs::read_to_string(gwt_core::logging::current_log_file(
+                &gwt_core::paths::gwt_logs_dir(),
+            ))
+            .unwrap_or_default();
+            assert!(
+                log.contains(&serde_json::to_string(&source.to_string()).unwrap()),
+                "{log}"
+            );
+            assert_eq!(
+                refusal.code,
+                AgentWorkspaceUpdateErrorCode::TransactionConflict
+            );
+            assert!(
+                !gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(repo)
+                    .exists()
+            );
+        });
+    }
 
     /// Issues #4693/#3853: container ambiguity must not repeat the default
     /// ensure remedy. Canonical ownership and scoped detach candidates prove

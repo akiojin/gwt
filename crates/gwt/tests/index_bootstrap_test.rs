@@ -221,16 +221,17 @@ fn startup_and_frontend_ready_coalesce_one_canonical_base_without_direct_runner_
         RefreshScope::Discussions,
         RefreshScope::Board,
         RefreshScope::Works,
+        RefreshScope::Reports,
     ] {
         assert!(targets.contains(&&RefreshTarget::base(repo_hash.as_str(), [scope])));
     }
     assert_eq!(
         snapshot.target_count(),
-        7,
-        "one Files pair and six repo scopes, no overlays"
+        8,
+        "one Files pair and seven repo scopes, no overlays"
     );
     assert!(
-        snapshot.queue_depth() <= 7,
+        snapshot.queue_depth() <= 8,
         "startup queue must remain bounded by the distinct scope targets"
     );
     assert_eq!(

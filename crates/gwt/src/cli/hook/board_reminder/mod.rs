@@ -1572,6 +1572,12 @@ mod tests {
         use gwt_core::coordination::CoordinationEvent;
         use std::{fs::OpenOptions, io::Write, sync::mpsc};
 
+        // Exercise the real local tail and concurrent writers independently of
+        // host scheduling. The deadline tests below cover the bounded decoder.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+            std::rc::Rc::new(gwt_core::coordination::LocalProvider),
+        );
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let repo = home.path().join("project");

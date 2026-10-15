@@ -268,5 +268,5 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showLogs(false);
-  return { update, setSession, dispose };
+  return { update, setSession, showReports, dispose };
 }

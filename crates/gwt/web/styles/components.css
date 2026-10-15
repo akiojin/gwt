@@ -4938,8 +4938,44 @@ button.workspace-board-ref:focus-visible {
 }
 
 :root[data-theme] .settings-issues-options[open] {
-  max-height: 45%;
+  max-height: 65%;
   overflow: auto;
+}
+
+:root[data-theme] [data-settings-issues-controls] .settings-field {
+  grid-template-columns: 140px minmax(0, 1fr);
+  min-height: 32px;
+}
+
+:root[data-theme] [data-settings-issues-controls] .settings-field > :last-child {
+  grid-column: 2;
+  margin: 0;
+}
+
+:root[data-theme] [data-settings-issues-controls] .settings-section {
+  max-width: none;
+  margin-inline: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+}
+
+:root[data-theme] .settings-issues-capacity {
+  display: flex;
+  gap: var(--space-2);
+}
+
+:root[data-theme] .settings-issues-capacity .settings-input {
+  width: 6ch;
+}
+
+:root[data-theme] .settings-issues-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-theme] [data-settings-launch-action] .knowledge-monitor-switch__label {
+  display: none;
 }
 
 :root[data-theme] .settings-issues-options > summary {

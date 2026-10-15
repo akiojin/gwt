@@ -3214,6 +3214,10 @@ fn child_environment_contract() -> Vec<(&'static str, Option<&'static str>)> {
         // lease down with it (#4182 AC-7). GitHub's runners set this for
         // every step, which is precisely why CI never sees the hang.
         ("GIT_TERMINAL_PROMPT", Some("0")),
+        // Git's terminal flag does not disable GCM's GUI authentication.
+        // GCM detects required interaction and returns an error with this
+        // setting instead of keeping verification's lease indefinitely (#4425).
+        ("GCM_INTERACTIVE", Some("false")),
     ]
 }
 
@@ -9094,6 +9098,7 @@ mod tests {
                 std::env::var_os("GWT_ALLOW_REAL_GH").is_none(),
                 "verify.run must not expose its live GitHub opt-in to a test child"
             );
+            assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("false"));
             return;
         }
         let _env_lock = crate::env_test_lock()
@@ -9107,10 +9112,12 @@ mod tests {
         );
         let _probe = ScopedEnvVar::set(CHILD_PROBE, "1");
         let _allow_live = ScopedEnvVar::set("GWT_ALLOW_REAL_GH", "1");
+        let _interactive = ScopedEnvVar::set("GCM_INTERACTIVE", "true");
 
         let (record, transcript) = run_verification(dir.path(), "sess-env", &[command]).unwrap();
 
         assert!(record.all_passed, "{transcript}");
+        assert_eq!(std::env::var("GCM_INTERACTIVE").as_deref(), Ok("true"));
         assert_eq!(
             transcript.matches("GWT_ALLOW_REAL_GH").count(),
             1,
@@ -9134,6 +9141,7 @@ mod tests {
             vec![
                 ("GWT_ALLOW_REAL_GH", None),
                 ("GIT_TERMINAL_PROMPT", Some("0")),
+                ("GCM_INTERACTIVE", Some("false")),
             ],
             "the verify.run child environment contract changed — update #4182's rationale with it"
         );
@@ -9157,6 +9165,16 @@ mod tests {
             Some(Some(std::ffi::OsStr::new("0"))),
             "verify.run children must never be able to open a credential prompt"
         );
+        assert_eq!(
+            process
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("GCM_INTERACTIVE"))
+                .map(|(_, value)| value),
+            Some(Some(std::ffi::OsStr::new("false"))),
+            "credential manager must fail instead of opening a GUI or TTY prompt"
+        );
+        assert!(resolved_child_environment(false)
+            .contains(&("GCM_INTERACTIVE".to_string(), "false".to_string())));
     }
 
     // record is written even when a command fails.
