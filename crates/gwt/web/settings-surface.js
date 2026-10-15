@@ -433,7 +433,9 @@ export function switchSettingsTab(body, target, focus = false) {
       panel.tabIndex = -1;
       const destination = showCandidates ? panel.querySelector("[data-settings-candidates]") || panel : panel;
       destination.tabIndex = -1;
-      destination.scrollIntoView?.({ block: "start" });
+      const scroller = body.dataset.surfaceOwner === "pm" ? body.querySelector(".settings-body") : null;
+      if (scroller) scroller.scrollTop = Math.max(0, destination.offsetTop - scroller.offsetTop);
+      else destination.scrollIntoView?.({ block: "start" });
       destination.focus({ preventScroll: true });
     }
   });
@@ -452,20 +454,22 @@ export function installSettingsOpenHandler(options) {
   document.addEventListener("settings:open", (event) => {
     const target = event?.detail?.section || event?.detail?.target || "system";
     const projectRoot = event?.detail?.project_root || activeProjectTab?.()?.project_root || "";
+    const surfaceOwner = event?.detail?.surface_owner === "pm" ? "pm" : null;
     if (target === "index") {
       focusOrSpawnPreset("index");
       return;
     }
     const existingBody = Array.from(settingsWindowBodies).find(
-      (settingsBody) => settingsBody.isConnected && (settingsBody.dataset.settingsProjectRoot || "") === projectRoot,
+      (settingsBody) => settingsBody.isConnected && (settingsBody.dataset.settingsProjectRoot || "") === projectRoot
+        && (settingsBody.dataset.surfaceOwner || null) === surfaceOwner,
     );
     if (existingBody) {
       switchSettingsTab(existingBody, target, true);
-      focusOrSpawnPreset("settings");
+      focusOrSpawnPreset("settings", { surfaceOwner });
       return;
     }
-    setPendingTarget(target);
-    focusOrSpawnPreset("settings");
+    setPendingTarget(target, surfaceOwner);
+    focusOrSpawnPreset("settings", { surfaceOwner });
   });
 }
 
@@ -854,6 +858,7 @@ export function createSettingsSurface({
         const project = activeProjectTab();
         body.dataset.settingsSection = "issues";
         body.dataset.settingsWindowId = windowData.id;
+        body.dataset.surfaceOwner = windowData.surface_owner || "";
         body.dataset.settingsProjectRoot = project?.project_root || "";
         body.dataset.settingsProjectName = project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "No project";
 
@@ -1070,11 +1075,12 @@ export function createSettingsSurface({
 
         // Honour any pending settings:open dispatch (e.g. from the badge
         // click) by switching to the requested tab once the panel is mounted.
-        switchSettingsTab(body, pendingSettingsTabTarget || "issues", Boolean(pendingSettingsTabTarget));
-        pendingSettingsTabTarget = null;
+        const target = pendingSettingsTabTargets.get(windowData.surface_owner || null);
+        switchSettingsTab(body, target || "issues", Boolean(target));
+        pendingSettingsTabTargets.delete(windowData.surface_owner || null);
       }
 
-      let pendingSettingsTabTarget = null;
+      const pendingSettingsTabTargets = new Map();
 
       function renderIndexPanel(panel) {
         const activeProjectRoot = activeProjectTab()?.project_root || "";
@@ -1187,8 +1193,8 @@ export function createSettingsSurface({
         settingsWindowBodies,
         focusOrSpawnPreset,
         activeProjectTab,
-        setPendingTarget: (target) => {
-          pendingSettingsTabTarget = target;
+        setPendingTarget: (target, surfaceOwner) => {
+          pendingSettingsTabTargets.set(surfaceOwner, target);
         },
       });
 

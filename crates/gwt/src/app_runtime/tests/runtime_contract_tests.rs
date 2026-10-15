@@ -1,6 +1,124 @@
 use super::*;
 
 #[test]
+fn app_runtime_surface_owner_keeps_pm_settings_separate_and_reuses_them() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for owner in [
+        serde_json::Value::Null,
+        serde_json::json!("pm"),
+        serde_json::json!("pm"),
+    ] {
+        let request = serde_json::from_value(serde_json::json!({
+            "kind": "create_window", "preset": "settings",
+            "surface_owner": owner, "bounds": canvas_bounds()
+        }))
+        .expect("create request");
+        runtime.handle_frontend_event("client-1".to_string(), request);
+    }
+    runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
+    let tab = runtime.tab("tab-1").expect("tab");
+    let windows = &tab.workspace.persisted().windows;
+    assert_eq!(
+        windows.len(),
+        2,
+        "PM Settings reuse must not steal ordinary Settings"
+    );
+    assert!(
+        windows[0].z_index > windows[1].z_index,
+        "Work must reuse the ordinary view"
+    );
+    let snapshot = serde_json::to_value(runtime.workspace_view_for_tab(tab)).expect("snapshot");
+    assert_eq!(snapshot["windows"][1]["surface_owner"], "pm");
+    assert!(windows.iter().all(|window| !window.is_pm));
+}
+
+#[test]
+fn app_runtime_surface_owner_cannot_promote_an_agent_to_pm() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let request = serde_json::from_value(serde_json::json!({
+        "kind": "create_window", "preset": "codex", "surface_owner": "pm",
+        "bounds": canvas_bounds()
+    }))
+    .expect("agent request");
+    runtime.handle_frontend_event("client-1".to_string(), request);
+    for id in runtime.runtimes.keys().cloned().collect::<Vec<_>>() {
+        runtime.stop_window_runtime(&id);
+    }
+    let tab = runtime.tab("tab-1").expect("tab");
+    let snapshot = serde_json::to_value(runtime.workspace_view_for_tab(tab)).expect("snapshot");
+    assert_eq!(snapshot["windows"][0]["is_pm"], false);
+    assert!(snapshot["windows"][0].get("surface_owner").is_none());
+}
+
+#[test]
+fn app_runtime_surface_owner_start_work_shell_is_agents_and_temporary() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let config = gwt::ShellLaunchConfig {
+        working_dir: Some(temp.path().join("missing-worktree")),
+        branch: None,
+        base_branch: None,
+        display_name: "Shell".to_string(),
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        docker_service: None,
+        docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+        windows_shell: None,
+        env_vars: HashMap::new(),
+        remove_env: Vec::new(),
+        command_override: Some("missing-surface-owner-fixture".to_string()),
+        command_args_override: None,
+    };
+    runtime
+        .spawn_wizard_shell_window("tab-1", config, canvas_bounds())
+        .expect("Shell window");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !recorded_events.lock().expect("events").iter().any(|event| {
+        matches!(
+            recorded_project_payload(event),
+            UserEvent::ShellLaunchComplete { .. }
+        )
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "fixture Shell preparation must finish"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    let tab = runtime.tab("tab-1").expect("tab");
+    let window = &tab.workspace.persisted().windows[0];
+    assert_eq!(window.preset, WindowPreset::Shell);
+    assert!(!window.persist);
+    assert!(window.session_id.is_none());
+    let snapshot = serde_json::to_value(runtime.workspace_view_for_tab(tab)).expect("snapshot");
+    assert_eq!(snapshot["windows"][0]["surface_owner"], "agents");
+    assert!(tab.workspace.persistable_state().windows.is_empty());
+}
+
+#[test]
 fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
     let source = include_str!("../../project_runtime.rs");
     let direct = source
@@ -1041,8 +1159,12 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Memo, canvas_bounds());
+    let events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Memo,
+        canvas_bounds(),
+        None,
+    );
 
     assert!(events.is_empty());
     assert!(runtime.window_lookup.is_empty());
@@ -1070,7 +1192,8 @@ fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views()
         WindowPreset::Work,
         WindowPreset::Branches,
     ] {
-        let events = runtime.create_window_events(&runtime.test_context(), preset, canvas_bounds());
+        let events =
+            runtime.create_window_events(&runtime.test_context(), preset, canvas_bounds(), None);
         assert!(!events.is_empty());
         for window in &runtime
             .tab("tab-1")
@@ -1095,6 +1218,7 @@ fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views()
             &runtime.test_context(),
             WindowPreset::Settings,
             canvas_bounds(),
+            None,
         );
     }
     assert_eq!(
@@ -1123,8 +1247,12 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let first_events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    let first_events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let first = runtime
         .tab("tab-1")
         .expect("tab")
@@ -1135,8 +1263,12 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         .expect("first Work window")
         .clone();
 
-    let repeated_events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    let repeated_events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")

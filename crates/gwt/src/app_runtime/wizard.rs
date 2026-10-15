@@ -6200,6 +6200,8 @@ impl AppRuntime {
         let window = tab
             .workspace
             .add_window_with_title(WindowPreset::Shell, title, false, bounds);
+        tab.workspace
+            .set_surface_owner(&window.id, Some(gwt::WindowSurfaceOwner::Agents));
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 

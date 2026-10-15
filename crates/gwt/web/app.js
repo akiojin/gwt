@@ -648,6 +648,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           appendRenderKeyPart(parts, windowData?.session_id || "");
           appendRenderKeyPart(parts, "is_pm");
           appendRenderKeyPart(parts, Boolean(windowData?.is_pm));
+          appendRenderKeyPart(parts, "surface_owner");
+          appendRenderKeyPart(parts, windowData?.surface_owner || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, windowData?.agent_color || "");
           appendRenderKeyPart(parts, "worktree_form");
@@ -2121,6 +2123,7 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // Issue #4777: fixed surfaces share the rail and optional split host.
       function openSurface(surface) {
+        windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
         if (splitSurfaces?.show(surface)) {
           // A rail choice supersedes camera navigation still awaiting a window.
           pendingFrameWindowId = null;
@@ -2479,6 +2482,16 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (!windowData) {
           return;
         }
+        windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
+        const surface = surfaceForWindow(windowData);
+        if (surface === "pm" || (surface === "agents"
+            && (windowData.surface_owner === "agents"
+              || (splitSurfaces?.hasLayout && splitSurfaces.activeSurface() === "pm")))) {
+          windowCatalogModel.update(state => ({ ...state, navigation: {
+            windowId, notifyFocus, serial: (state.navigation?.serial || 0) + 1,
+          } }));
+          return;
+        }
         if (splitSurfaces?.hasLayout) {
           if (!splitSurfaces.containsWindow(windowId)) {
             splitSurfaces.select(surfaceForWindow(windowData));
@@ -2488,7 +2501,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             else focusWindowLocally(windowId);
             return;
           }
-          // PM and legacy surfaces keep their existing single-view route.
+          // Remaining legacy surfaces keep their existing Canvas route.
           splitSurfaces.close();
         }
         // The Windows rail also lists inactive members of saved window groups.
@@ -3578,6 +3591,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       let pendingPmFrame = false;
 
       function openPmAgent() {
+        windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
         if (agentsHost) setAgentsHost(null);
         if (pmWindowId && windowMap.has(pmWindowId)) {
           requestWindowFrame(pmWindowId);
@@ -5208,6 +5222,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // sendWizardAction (transport helpers), the receive() case arms, and
       // the frontendUnits registry entries, wired through this factory.
       const {
+        visibilityModel: launchWizardVisibilityModel,
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
@@ -6434,6 +6449,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         switch (event.kind) {
           case "hub_state": {
             receiveHubState(event.hub);
+            updatePmLauncher(activeWorkspace());
             break;
           }
           case "project_not_found": {
@@ -7562,6 +7578,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         agentsSurface?.dispose();
         splitSurfaces?.dispose();
         windowCatalogModel.dispose();
+        launchWizardVisibilityModel.dispose();
       }, { once: true });
 
       window.addEventListener(
@@ -7799,6 +7816,56 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       });
       installSurfaceRail(document, { openSurface });
+      launchWizardVisibilityModel.subscribe(model => model.open, open => {
+        if (open) openSurface("agents");
+      });
+      windowCatalogModel.subscribe(model => model.navigation, navigation => {
+        if (!navigation) return;
+        const { windowId, notifyFocus } = navigation;
+        const data = workspaceWindowById(windowId);
+        if (surfaceForWindow(data) === "pm") splitSurfaces.showWindow(windowId);
+        else {
+          openSurface("agents");
+          agentsSurface.reveal(windowId);
+        }
+        if (notifyFocus) focusWindowRemotely(windowId);
+        else focusWindowLocally(windowId);
+      });
+      pmLauncherModel.subscribe(state => state, () => {
+        if (splitSurfaces.activeSurface() === "pm") document.getElementById("split-view-button").disabled = true;
+      });
+      let initialSurfaceTabId = null;
+      let initialSurfaceSelected = false;
+      windowCatalogModel.subscribe(model => model.catalog, catalog => {
+        const pending = windowCatalogModel.read().pendingSurface;
+        if (pending && pending.tabId === catalog.appState.active_tab_id) {
+          const target = catalogActiveWindows(catalog).find(data => data.preset === pending.preset
+            && data.surface_owner === pending.surfaceOwner);
+          if (target && windowMap.has(target.id)) {
+            windowCatalogModel.update(state => ({ ...state, pendingSurface: null }));
+            requestWindowFrame(target.id);
+          }
+        }
+        const tabId = catalog.appState.active_tab_id;
+        if (tabId !== initialSurfaceTabId) {
+          initialSurfaceTabId = tabId;
+          initialSurfaceSelected = false;
+        }
+        if (!tabId || initialSurfaceSelected || splitSurfaces.hasLayout) return;
+        const windows = catalogActiveWindows(catalog).filter(data => !isOffCanvasPlacement(data));
+        const initial = windows.find(data => data.id === catalog.focusedId)
+          || windows.find(data => data.is_pm) || windows[0];
+        if (initial && windowMap.has(initial.id)) {
+          initialSurfaceSelected = true;
+          const surface = surfaceForWindow(windowWithSettingsSection(initial));
+          if (surface === "pm") frameWindow(initial.id, { animate: false });
+          else if (surface === "agents" && initial.surface_owner === "agents") {
+            openSurface("agents");
+            agentsSurface.reveal(initial.id);
+            focusWindowLocally(initial.id);
+          }
+        }
+      });
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command
       // Palette; users were trapped in branch-cleanup / migration / wizard
@@ -7955,15 +8022,16 @@ import { createUiStateStore } from "/ui-state-store.js";
         frameWindow(windowData.id, { animate: shouldAnimateWindowFrame() });
       }
 
-      function focusOrSpawnPreset(preset) {
+      function focusOrSpawnPreset(preset, { surfaceOwner = null } = {}) {
         preset = normalizeSurfacePreset(preset);
         if (preset === "issue") {
           document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
-          return (activeWorkspace().windows || []).find(w => w.preset === "settings")?.id || null;
+          return (activeWorkspace().windows || []).find(w => w.preset === "settings" && !w.surface_owner)?.id || null;
         }
         const allWindows = activeWorkspace().windows || [];
         const existing = isSingletonSurfacePreset(preset)
-          ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset)
+          ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset
+            && (w.surface_owner || null) === surfaceOwner)
           : null;
         if (existing) {
           openExistingSurfaceWindow(existing);
@@ -7974,6 +8042,12 @@ import { createUiStateStore } from "/ui-state-store.js";
           preset,
           bounds: visibleBounds(),
         };
+        if (surfaceOwner) {
+          message.surface_owner = surfaceOwner;
+          windowCatalogModel.update(state => ({ ...state, pendingSurface: {
+            preset, surfaceOwner, tabId: state.catalog.appState.active_tab_id,
+          } }));
+        }
         frontendUnits.socketTransport.send(message);
         return null;
       }

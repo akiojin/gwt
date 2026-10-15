@@ -60,7 +60,7 @@ use crate::{
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
         AgentKanbanLane, CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry,
-        WindowProcessStatus,
+        WindowProcessStatus, WindowSurfaceOwner,
     },
     preset::WindowPreset,
     worktree_inventory::WorktreeEntry,
@@ -494,6 +494,8 @@ pub enum FrontendEvent {
     CreateWindow {
         preset: WindowPreset,
         bounds: WindowGeometry,
+        #[serde(default)]
+        surface_owner: Option<WindowSurfaceOwner>,
     },
     FocusWindow {
         id: String,
@@ -3804,6 +3806,24 @@ mod tests {
         ProfileEnvEntryView, ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
         RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn create_window_surface_owner_accepts_legacy_requests_and_validates_owners() {
+        let legacy = serde_json::json!({
+            "kind": "create_window",
+            "preset": "settings",
+            "bounds": {"x": 0.0, "y": 0.0, "width": 1000.0, "height": 800.0}
+        });
+        let _: FrontendEvent = serde_json::from_value(legacy.clone()).expect("legacy request");
+        for owner in ["pm", "agents"] {
+            let mut owned = legacy.clone();
+            owned["surface_owner"] = serde_json::json!(owner);
+            let _: FrontendEvent = serde_json::from_value(owned).expect("owned request");
+        }
+        let mut invalid = legacy;
+        invalid["surface_owner"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<FrontendEvent>(invalid).is_err());
+    }
 
     #[test]
     fn pm_reports_wire_uses_safe_shared_markdown_and_client_scoped_snapshot() {
