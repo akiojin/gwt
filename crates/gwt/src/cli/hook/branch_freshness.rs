@@ -242,7 +242,7 @@ mod tests {
 
     fn repository(path: &Path) {
         std::fs::create_dir_all(path).unwrap();
-        assert!(std::process::Command::new("git")
+        assert!(gwt_core::process::hidden_command("git")
             .args(["init", "--quiet"])
             .arg(path)
             .status()
@@ -448,7 +448,7 @@ mod tests {
         repository(&repo);
         repository(&other);
         for repository in [&repo, &other] {
-            assert!(std::process::Command::new("git")
+            assert!(gwt_core::process::hidden_command("git")
                 .arg("-C")
                 .arg(repository)
                 .args([
