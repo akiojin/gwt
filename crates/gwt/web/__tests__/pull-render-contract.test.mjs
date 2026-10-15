@@ -30,6 +30,12 @@ test("receiver follows same-module helpers and diagnoses unresolved calls", () =
     function paint(event) { target.appendChild(event.node); }`, "fixture.js");
   assert.ok(findings.some(finding => finding.kind === "dom-call" && finding.path.includes("paint")));
   assert.ok(findings.some(finding => finding.kind === "unresolved-call"));
+  assert.deepEqual(scanModule(`function receive(event) {
+    const bytes = new TextEncoder().encode(event.body);
+    socket.send(JSON.stringify({ bytes: bytes.length }));
+  }`, "fixture.js"), []);
+  assert.ok(scanModule("function receive(event) { unknown.encode(event.body); }", "fixture.js")
+    .some(finding => finding.kind === "unresolved-call"));
 });
 
 test("model updates, subscriptions, and uncalled local handlers are legal", () => {

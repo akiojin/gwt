@@ -32,6 +32,7 @@ function fixture({ routeProjectKey = null } = {}) {
     closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
     projectPageMetadata: { resetConnection() {} },
     requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(),
+    resetPmWindowReports() {},
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
@@ -174,6 +175,8 @@ test("route-bound Project tab reconnects to the same Project only", () => {
 
 test("Reports history survives disconnect while the Project reconnects", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  const latestRequests = [];
+  context.requestVisiblePmReports = reset => latestRequests.push(reset);
   const reportsView = { sessionId: "pm-session", controller: { update() {} } };
   context.pmChatViews.set("pm-window", reportsView);
   context.connectSocket();
@@ -185,7 +188,36 @@ test("Reports history survives disconnect while the Project reconnects", () => {
   context.connectSocket();
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
+  assert.equal(latestRequests.at(-1), true, "reconnect requests Latest even when the prior page was history");
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+});
+
+test("revealing a history window polls a cursor invalidated while it was hidden", () => {
+  const { context, sockets, select } = fixture();
+  select(projectA.project_key);
+  sockets.at(-1).open();
+  const model = createPmWindowModel();
+  model.bindPmWindowState("pm", "session");
+  model.applyPmWindowReceiveEvent({ kind: "pm_reports", id: "pm", session_id: "session",
+    reports: [], reports_mode: "history", slice: { epoch: "server", base_revision: 0, revision: 1 } });
+  context.readPmWindowState = model.readPmWindowState;
+  context.activeWorkspace = () => ({ windows: [{ id: "pm", is_pm: true }] });
+  context.document.hidden = false;
+  let visible = true;
+  context.visibleWindowData = () => visible;
+  context.pmChatViews.set("pm", { logHost: { hidden: true } });
+  const requests = [];
+  context.requestPmReports = id => requests.push(id);
+  vm.runInContext(functionSource("requestVisiblePmReports"), context);
+  context.requestVisiblePmReports();
+  assert.deepEqual(requests, [], "a valid history cursor suppresses routine polling");
+  visible = false;
+  model.resetPmWindowReports();
+  context.requestVisiblePmReports(true);
+  assert.deepEqual(requests, [], "hidden windows stay outside the immediate reconnect request");
+  visible = true;
+  context.requestVisiblePmReports();
+  assert.deepEqual(requests, ["pm"], "reveal recovers the invalidated cursor through routine polling");
 });
 
 test("project not found stops every reconnect for the route", () => {
