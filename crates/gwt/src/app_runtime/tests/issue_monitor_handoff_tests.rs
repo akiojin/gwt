@@ -203,10 +203,49 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             case,
             MonitorProviderConversationFixture::Present,
             MonitorNativeHolderFixture::None,
-            true,
+            case != "completed-done",
             LinkedIssueKind::Spec,
             settlement,
         );
+        if case == "completed-done" {
+            // Issue #4783 AC-R4: derive this delivery from a reopened owner,
+            // rather than only seeding a fresh delivery over terminal history.
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+            let mut monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            );
+            let number = fixture.execution_owner.number;
+            monitor.record_closed(number, Some("2026-08-13T00:00:00Z".into()));
+            assert!(monitor.record_reopened(number, Some("2026-08-13T00:01:00Z".into())));
+            monitor.terminal_queue_push(&[number], "operator", "2026-08-13T00:01:00Z");
+            gwt::scan_issue_monitor_candidates_with_provenance(
+                &mut monitor,
+                &[gwt::IssueMonitorIssue {
+                    number,
+                    title: "SPEC: reopened Monitor owner".into(),
+                    labels: vec!["gwt-spec".into()],
+                    state: gwt::IssueMonitorIssueState::Open,
+                    body: Some("## Acceptance Criteria\n- [ ] AC-1: remaining work\n".into()),
+                    url: None,
+                    readiness: gwt::IssueMonitorReadiness::ReadyWithOpenTasks,
+                    updated_at: Some("2026-08-13T00:01:00Z".into()),
+                }],
+                gwt::IssueMonitorCandidateSource::Live,
+                &fixture.project_root,
+                "2026-08-13T00:01:01Z",
+            );
+            assert_eq!(monitor.queued_issue_numbers(), vec![number]);
+            assert!(monitor.apply_confirmed_claim(
+                number,
+                "claim-reopened",
+                "host/session",
+                "effect-reopened",
+                &Utc::now().to_rfc3339(),
+            ));
+            fixture.delivery_id = monitor.pending_launch_delivery_id(number);
+            gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        }
         let unique_head = if case.contains("ownerless") {
             fs::write(fixture.worktree.join("retained-source.txt"), case).unwrap();
             run_git(&fixture.worktree, &["add", "retained-source.txt"]);
@@ -496,6 +535,27 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             .runtime
             .pending_fresh_execution_launches
             .contains_key(&window_id));
+        if case == "completed-done" {
+            let observations =
+                super::super::terminal_convergence::observe_terminal_windows_in_background(
+                    &fixture.sessions_dir,
+                    fixture.runtime.terminal_window_snapshots(),
+                    Duration::from_secs(60),
+                );
+            let now = Instant::now();
+            fixture.runtime.terminal_convergence_observed_events_at(
+                Duration::from_secs(60),
+                observations,
+                now,
+            );
+            fixture
+                .runtime
+                .close_expired_terminal_window_candidates_at(now + Duration::from_secs(61));
+            assert!(
+                fixture.runtime.window_lookup.contains_key(&window_id),
+                "the reopened owner's launch survives terminal grace before Ready"
+            );
+        }
         let (spawner, _) = BlockingTaskSpawner::queued();
         fixture.runtime.blocking_tasks = spawner;
         let mut ready = runtime_hook_state_for_event("Working", "SessionStart", &session_id);
