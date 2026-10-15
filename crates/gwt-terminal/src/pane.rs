@@ -384,18 +384,18 @@ impl Pane {
 
     /// Check and update the pane's process status.
     ///
-    /// The `Running` guard makes the exited transition happen exactly once per
-    /// pane no matter how many watchers poll concurrently, which is why the
+    /// The receipt guard makes the exited transition happen exactly once per
+    /// pane no matter how many watchers observe it, which is why the
     /// exit receipt is captured and logged here rather than at a call site
     /// (Issue #3341): every teardown path above this layer drops the pane, and
     /// a clean `exit 0` leaves no other durable evidence at all.
     pub fn check_status(&mut self) -> Result<&PaneStatus, TerminalError> {
-        if self.status == PaneStatus::Running {
+        if self.last_exit.is_none() {
             if let Some(exit_status) = self.pty.try_wait()? {
-                if exit_status.success() {
-                    self.status = PaneStatus::Completed(0);
-                } else {
-                    self.status = PaneStatus::Completed(1);
+                // A display-only error does not prove exit, and must not
+                // suppress its eventual receipt or descriptor cleanup.
+                if self.status == PaneStatus::Running {
+                    self.status = PaneStatus::Completed(i32::from(!exit_status.success()));
                 }
                 let exit = PaneExit {
                     exit_code: exit_status.exit_code(),
@@ -771,6 +771,15 @@ mod tests {
         pane.kill().expect("kill child");
         for _ in 0..100 {
             if pane.process_has_exited().expect("probe killed child") {
+                pane.check_status().expect("capture killed child exit");
+                assert_eq!(
+                    pane.status(),
+                    &PaneStatus::Error("display-only failure".into())
+                );
+                assert!(
+                    pane.last_exit().is_some(),
+                    "a display error must not prevent recording the real child exit"
+                );
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));

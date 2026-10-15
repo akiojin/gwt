@@ -4917,6 +4917,9 @@ export function createKnowledgeKanbanSurface({
         if (!board || !detailPane || !status || !refreshButton || !searchInput) {
           return;
         }
+        const focusedCard = board.contains(document.activeElement)
+          ? document.activeElement.closest(".kanban-card[data-issue-number]") : null;
+        const focusedNumber = Number(focusedCard?.dataset.issueNumber);
 
         refreshButton.disabled =
           !state.refreshEnabled || (state.loading && !knowledgeEntriesAreEmpty(state));
@@ -4979,6 +4982,16 @@ export function createKnowledgeKanbanSurface({
         }
 
         renderKnowledgeDetailPane(windowId, state, detailPane);
+        if (focusedCard && !focusedCard.isConnected) {
+          let card = board.querySelector(`.kanban-card[data-issue-number="${focusedNumber}"]`);
+          if (!card) {
+            for (const body of board.querySelectorAll(".kanban-column-body")) {
+              if (keyedKnowledgeLists.get(body)?.reveal(focusedNumber)) break;
+            }
+            card = board.querySelector(`.kanban-card[data-issue-number="${focusedNumber}"]`);
+          }
+          card?.focus({ preventScroll: true });
+        }
       }
 
       function renderAllKnowledgeBridgeWindows() {

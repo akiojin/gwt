@@ -1225,6 +1225,7 @@ fn codex_project_trust_launch_registers_the_process_stable_host_worktree() {
             issue_number: 42,
             project_root: home.path().to_path_buf(),
             session_mode: mode,
+            review_dispatch: false,
         };
         let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .working_dir(worktree.path())
@@ -1429,6 +1430,7 @@ fn managed_project_trust_skips_worktree_relative_codex_home() {
         issue_number: 42,
         project_root: project.clone(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.clone(),
@@ -1487,6 +1489,7 @@ fn managed_project_trust_skips_absolute_process_codex_home_inside_worktree() {
         issue_number: 42,
         project_root: project.clone(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.clone(),
@@ -1548,6 +1551,7 @@ fn managed_project_trust_skips_profile_supplied_arbitrary_codex_home() {
         issue_number: 42,
         project_root: project.clone(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.clone(),
@@ -1607,6 +1611,7 @@ fn codex_project_trust_launch_is_codex_only_and_fail_closed() {
         issue_number: 42,
         project_root: home.path().to_path_buf(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let worktrees = vec![gwt_git::WorktreeInfo {
         path: worktree.path().to_path_buf(),
@@ -1678,6 +1683,90 @@ fn codex_project_trust_launch_is_codex_only_and_fail_closed() {
         )
         .expect_err("project trust failure must abort before Codex can prompt");
     assert!(error.contains("failed to trust gwt-managed Codex worktree"));
+}
+
+#[test]
+fn codex_project_trust_scope_accepts_only_exact_isolated_monitor_review() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("create project");
+    init_repo_with_initial_commit(&project);
+    let head = gwt_core::process::run_git_logged(&["rev-parse", "HEAD"], Some(&project))
+        .expect("read reviewed HEAD");
+    assert!(head.status.success());
+    let reviewed_sha = String::from_utf8(head.stdout).unwrap().trim().to_string();
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .linked_issue_number(42)
+        .build();
+    let mut request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(config));
+    request.set_review_dispatch_context(&reviewed_sha);
+    let gwt::LaunchWizardLaunchRequest::Agent(config) = request else {
+        unreachable!("agent request");
+    };
+    let mut config = *config;
+    crate::launch_runtime::resolve_launch_worktree(&project, &mut config)
+        .expect("resolve detached review checkout");
+    let worktrees = gwt_git::WorktreeManager::new(&project)
+        .list()
+        .expect("read authoritative repository worktrees");
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_project_root = Some(project.clone());
+    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+    feedback.issue_monitor_review_dispatch = true;
+    let candidate = super::super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&feedback),
+    )
+    .unwrap()
+    .unwrap();
+    let validate =
+        |candidate, config: &gwt_agent::LaunchConfig, worktrees: &[gwt_git::WorktreeInfo]| {
+            super::super::validate_issue_monitor_managed_codex_worktree(
+                candidate, &project, config, worktrees,
+            )
+        };
+
+    assert!(validate(Some(&candidate), &config, &worktrees)
+        .expect("the exact typed review checkout must receive managed project trust")
+        .is_some());
+    assert!(validate(None, &config, &worktrees).unwrap().is_none());
+    assert!(validate(Some(&candidate), &config, &[]).is_err());
+    let mut ordinary_feedback = feedback;
+    ordinary_feedback.issue_monitor_review_dispatch = false;
+    let ordinary_candidate = super::super::issue_monitor_trust_candidate_from_feedback(
+        &gwt_agent::AgentId::Codex,
+        Some(&ordinary_feedback),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(validate(Some(&ordinary_candidate), &config, &worktrees).is_err());
+
+    for missing in [
+        "ephemeral",
+        "read-only",
+        "marker",
+        "exact SHA",
+        "detached",
+        "managed path",
+    ] {
+        let mut invalid = config.clone();
+        match missing {
+            "ephemeral" => invalid.is_ephemeral = false,
+            "read-only" => invalid.suppress_execution_control = false,
+            "marker" => {
+                invalid.env_vars.remove("GWT_REVIEW_DISPATCH");
+            }
+            "exact SHA" => invalid.ephemeral_base_ref = Some("0".repeat(reviewed_sha.len())),
+            "detached" => invalid.branch = Some("work/issue-42".to_string()),
+            "managed path" => invalid.working_dir = Some(project.clone()),
+            _ => unreachable!(),
+        }
+        assert!(
+            validate(Some(&candidate), &invalid, &worktrees).is_err(),
+            "a review without {missing} evidence must fail closed"
+        );
+    }
 }
 
 #[test]
@@ -1957,6 +2046,7 @@ fn codex_project_trust_scope_refuses_arbitrary_working_dir_even_with_issue_metad
         issue_number: 42,
         project_root: project.path().to_path_buf(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(arbitrary.path())
@@ -1998,6 +2088,7 @@ fn codex_project_trust_scope_rejects_mismatched_issue_monitor_provenance() {
         issue_number: 42,
         project_root: project.path().to_path_buf(),
         session_mode: gwt_agent::SessionMode::Normal,
+        review_dispatch: false,
     };
     let valid_entry = gwt_git::WorktreeInfo {
         path: worktree.path().to_path_buf(),
@@ -2012,6 +2103,7 @@ fn codex_project_trust_scope_rejects_mismatched_issue_monitor_provenance() {
                 issue_number: 42,
                 project_root: other_project.path().to_path_buf(),
                 session_mode: gwt_agent::SessionMode::Normal,
+                review_dispatch: false,
             },
             base_config(),
             valid_entry.clone(),

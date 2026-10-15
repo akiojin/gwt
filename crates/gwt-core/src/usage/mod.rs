@@ -9,10 +9,12 @@
 //! and converts [`UsageSnapshot`] into frontend protocol views.
 
 pub mod api_error;
+pub mod cache;
 pub mod claude;
 pub mod codex;
 pub mod consumption;
 pub mod grok;
+pub(crate) mod incremental;
 pub mod limit_notice;
 pub mod model_context;
 pub mod snapshot_store;

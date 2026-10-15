@@ -1599,15 +1599,10 @@ pub fn prune_delivered_work_branches_with<E: gwt_git::merged_branch_prune::Prune
 
 /// Issue #3917: propose settling every delivered Issue whose work branch
 /// merged. Side-effect free like the rest of the scan: it only prepares
-/// `SettleMergedIssue` effects for the durable executor. Delegation
-/// evidence (PR body, Issue comments) is read only when unchecked criteria
-/// remain; a failed readback defers that Issue to the next scan instead of
-/// escalating it. Returns the Issue numbers proposed this scan.
+/// `SettleMergedIssue` effects for the durable executor. Unchecked criteria
+/// always keep the Issue open. Returns the Issue numbers proposed this scan.
 pub fn propose_merged_issue_settlements(
     monitor: &mut IssueMonitorState,
-    repo_path: &Path,
-    owner: &str,
-    repo: &str,
     deliveries: &BTreeMap<String, crate::MergedIssueDelivery>,
 ) -> Vec<u64> {
     if !monitor.config.enabled || deliveries.is_empty() {
@@ -1617,23 +1612,7 @@ pub fn propose_merged_issue_settlements(
     let mut proposed = Vec::new();
     for (issue, delivery) in monitor.merged_issue_settlement_candidates(deliveries) {
         let issue_number = issue.number;
-        let pr_number = delivery.pr_number;
-        let evidence = |_unmet: &[String]| -> Option<bool> {
-            match fetch_delegation_evidence(repo_path, owner, repo, issue_number, pr_number) {
-                Ok(texts) => Some(crate::delegation_recorded(texts.iter().map(String::as_str))),
-                Err(error) => {
-                    tracing::warn!(
-                        issue = issue_number,
-                        pr = pr_number,
-                        error = %error,
-                        "merged issue settlement evidence readback failed; deferring to the next scan"
-                    );
-                    None
-                }
-            }
-        };
-        let Some(action) = crate::decide_merged_issue_settlement(&issue, auto_close, evidence)
-        else {
+        let Some(action) = crate::decide_merged_issue_settlement(&issue, auto_close) else {
             continue;
         };
         if monitor.propose_merged_issue_settlement(issue_number, &delivery, action) {
@@ -1641,30 +1620,6 @@ pub fn propose_merged_issue_settlements(
         }
     }
     proposed
-}
-
-/// PR body plus Issue comment bodies, the two places a delegation record may
-/// live (Issue #3917 AC-2).
-fn fetch_delegation_evidence(
-    repo_path: &Path,
-    owner: &str,
-    repo: &str,
-    issue_number: u64,
-    pr_number: u64,
-) -> Result<Vec<String>, IssueMonitorScanFailure> {
-    let mut texts = Vec::new();
-    if let Some(body) =
-        run_scan_stage(IssueMonitorScanStage::MergedIssueSettlementReadback, || {
-            gwt_git::pr_status::try_fetch_pr_body(repo_path, pr_number)
-        })?
-    {
-        texts.push(body);
-    }
-    texts.extend(run_scan_stage(
-        IssueMonitorScanStage::MergedIssueSettlementReadback,
-        || gwt_git::issue::fetch_issue_comment_bodies(owner, repo, issue_number),
-    )?);
-    Ok(texts)
 }
 
 /// Parse `git symbolic-ref --short refs/remotes/origin/HEAD` output (e.g.

@@ -1017,6 +1017,32 @@ const SELECTION_FIRST_NUMBER = 4001;
 const SELECTION_ROW_COUNT = 500;
 const SELECTION_P95_BUDGET_MS = 50;
 
+test("Issue #5401 PR Kanban retains focus across phase columns and virtual destinations", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await installEmbeddedRoutes(page);
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  await installKnowledgeSelectionBackend(page, { preset: "pr", rowCount: 201, theme });
+  await page.goto(APP_URL);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await expect(page.locator(".kanban-card").first()).toBeVisible();
+  const number = SELECTION_FIRST_NUMBER + 200;
+  const card = page.locator(`.kanban-card[data-issue-number="${number}"]`);
+  const move = (phase: string) => page.evaluate(({ number, phase }) =>
+    window.__kbFixture.moveEntry(number, phase), { number, phase });
+  await move("review");
+  await expect(card).toBeVisible();
+  await card.focus();
+  for (const phase of ["backlog", "review"]) {
+    await move(phase);
+    await expect(page.locator(`.kanban-column[data-phase="${phase}"]`).locator(card)).toHaveCount(1);
+    await expect(card).toBeFocused();
+    expect(await page.locator(".kanban-card").count()).toBeLessThan(200);
+  }
+  expect(errors, "zero console/page errors").toEqual([]);
+});
+
 test.describe("SPEC #3170 immediate selection under delayed and reversed responses", () => {
   test.use({
     deviceScaleFactor: 1,
@@ -1542,6 +1568,12 @@ async function installKnowledgeSelectionBackend(
         socketOpenCount: 0,
         workspaceSent: false,
         activeSocket: null,
+        moveEntry(number, phase) {
+          entries.find(entry => entry.number === number).phase = phase;
+          fixture.activeSocket.emit({ kind: "knowledge_entries", id: fixtureWindowId,
+            knowledge_kind: "pr", request_id: fixture.loadRequests.at(-1).requestId,
+            entries, selected_number: null, refresh_enabled: true });
+        },
         closeSocketSilently() {
           // No `close` event: the frontend still believes it is online, so the
           // next retry hop has to detect the dead socket through readyState.

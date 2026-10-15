@@ -577,6 +577,47 @@ fn workspace_projection_changed_uses_supplied_snapshot_instead_of_rereading_disk
 }
 
 #[test]
+fn sync_agent_window_titles_preserves_review_purpose() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let (mut runtime, window_id) =
+        apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+    runtime
+        .issue_monitor_review_dispatch_windows
+        .insert(window_id.clone());
+    runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .set_purpose_title("agent-1", Some("Review · Issue #5478".to_string()));
+    let mut projection = apply_title_sync_sample_projection(&repo, &window_id, None, None);
+    projection
+        .linked_issues
+        .push(gwt_core::workspace_projection::WorkspaceIssueLink {
+            number: 5478,
+            title: Some("Implementation owner title".to_string()),
+            url: None,
+        });
+
+    assert!(!runtime.sync_agent_window_titles_from_workspace_projection(&repo, &projection));
+    commit_workspace_watcher_update(&mut runtime, &repo, &projection);
+
+    let window = runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .window("agent-1")
+        .unwrap();
+    assert!(window.dynamic_title.is_none());
+    assert_eq!(
+        window.purpose_title.as_deref(),
+        Some("Review · Issue #5478")
+    );
+}
+
+#[test]
 fn apply_workspace_projection_title_sync_writes_dynamic_title() {
     let _env_lock = env_test_lock()
         .lock()

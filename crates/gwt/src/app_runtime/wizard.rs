@@ -253,6 +253,7 @@ struct SilentIssueMonitorLaunchRequest {
     issue_number: u64,
     linked_issue_kind: gwt::LinkedIssueKind,
     review_prompt: Option<String>,
+    reviewed_sha: Option<String>,
     review_model: Option<String>,
     delivery_id: Option<String>,
     launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
@@ -3252,6 +3253,7 @@ impl AppRuntime {
                 issue_number,
                 linked_issue_kind,
                 review_prompt: None,
+                reviewed_sha: None,
                 review_model: None,
                 delivery_id: delivery_id.clone(),
                 launch_session_strategy,
@@ -3538,8 +3540,8 @@ impl AppRuntime {
             prompt_bytes = prompt.len(),
             "autonomous independent-review dispatch"
         );
-        // Spawn a FRESH-session review agent in the implementation work-branch
-        // worktree (idle by review time); it reviews the diff embedded in its
+        // Spawn a FRESH-session review agent in a separate detached worktree
+        // pinned to the reviewed SHA; it reviews the diff embedded in its
         // prompt and reports the verdict via the gwtd issue.monitor.review_verdict
         // op. skip_permissions is forced on the autonomous path so review runs
         // unattended.
@@ -3556,6 +3558,7 @@ impl AppRuntime {
                 issue_number: dispatch.issue_number,
                 linked_issue_kind: dispatch.linked_issue_kind,
                 review_prompt: Some(prompt),
+                reviewed_sha: Some(dispatch.reviewed_sha.clone()),
                 review_model,
                 delivery_id: None,
                 launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
@@ -3621,6 +3624,7 @@ impl AppRuntime {
             issue_number,
             linked_issue_kind,
             review_prompt,
+            reviewed_sha,
             review_model,
             delivery_id,
             launch_session_strategy,
@@ -4029,7 +4033,12 @@ impl AppRuntime {
         // environment so its hooks apply the review contract instead of the
         // producing-session gates it can never satisfy.
         if review_prompt.is_some() {
-            launch_request.set_review_dispatch_context();
+            let reviewed_sha = reviewed_sha
+                .as_deref()
+                .filter(|sha| !sha.trim().is_empty())
+                .ok_or_else(|| "Independent review requires its reviewed SHA".to_string())?;
+            launch_request.set_review_dispatch_context(reviewed_sha);
+            session.workspace_resume_context = None;
         }
         let launch_index = self
             .tab(&session.tab_id)

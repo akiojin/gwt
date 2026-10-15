@@ -119,6 +119,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
         $visit!($runtime, $id, window_output_bytes);
+        $visit!($runtime, $id, pending_runtime_outputs);
         $visit!($runtime, $id, window_last_output_at);
         $visit!($runtime, $id, window_hook_states);
         $visit!($runtime, $id, window_approval_waiting);
