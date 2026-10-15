@@ -169,6 +169,10 @@ pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
             .iter()
             .map(PmReport::from),
     );
+    reports.extend(crate::pm_peer::reports(
+        &crate::pm_peer::project_dir(repo_path),
+        Utc::now(),
+    )?);
     reports.sort_by_key(|report| report.created_at);
     Ok(reports)
 }
@@ -205,6 +209,183 @@ fn invalid_report_data(message: impl std::fmt::Display) -> io::Error {
 mod tests {
     use super::*;
     use crate::test_support::ScopedGwtHome;
+
+    #[test]
+    fn peer_roundtrip_projects_reports_and_expired_wait_from_one_source() {
+        use crate::pm_peer::{self, PeerKind, PeerProject, PeerSend};
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let a = PeerProject {
+            project: "project-a".into(),
+            project_dir: crate::paths::gwt_project_dir_for_repo_path(&home.path().join("a")),
+        };
+        let b = PeerProject {
+            project: "project-b".into(),
+            project_dir: crate::paths::gwt_project_dir_for_repo_path(&home.path().join("b")),
+        };
+        let now = DateTime::parse_from_rfc3339("2026-10-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let request = pm_peer::send(
+            PeerSend {
+                from: a.clone(),
+                to: b.clone(),
+                kind: PeerKind::Request,
+                text: "Please share capacity token=secret-sentinel".into(),
+                reply_to: None,
+                timeout_seconds: 900,
+                unavailable: None,
+            },
+            now,
+        )
+        .unwrap();
+        assert_eq!(pm_peer::pending(&b.project_dir).unwrap().len(), 1);
+        assert_eq!(
+            pm_peer::pending(&b.project_dir).unwrap().len(),
+            1,
+            "context reads must not acknowledge messages"
+        );
+        assert!(pm_peer::pending(&a.project_dir).unwrap().is_empty());
+        let reports =
+            pm_peer::reports(&a.project_dir, now + chrono::Duration::minutes(16)).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].body.contains("応答待ち"));
+        assert!(!reports[0].body.contains("secret-sentinel"));
+        let foreign = PeerProject {
+            project: "foreign".into(),
+            project_dir: home.path().join("foreign"),
+        };
+        let reply = PeerSend {
+            from: b.clone(),
+            to: a.clone(),
+            kind: PeerKind::Reply,
+            text: "One slot available".into(),
+            reply_to: Some(request.id.clone()),
+            timeout_seconds: 900,
+            unavailable: None,
+        };
+        assert!(pm_peer::send(
+            PeerSend {
+                from: foreign,
+                ..reply.clone()
+            },
+            now
+        )
+        .is_err());
+        let unavailable = pm_peer::send(
+            PeerSend {
+                unavailable: Some("stopped".into()),
+                ..reply.clone()
+            },
+            now,
+        )
+        .unwrap();
+        assert!(unavailable.unavailable.is_some());
+        assert_eq!(
+            pm_peer::pending(&b.project_dir).unwrap().len(),
+            1,
+            "failed reply never acknowledges"
+        );
+        pm_peer::send(reply.clone(), now).unwrap();
+        assert!(pm_peer::pending(&b.project_dir).unwrap().is_empty());
+        assert_eq!(pm_peer::pending(&a.project_dir).unwrap().len(), 1);
+        assert!(
+            pm_peer::send(reply, now).is_err(),
+            "one original cannot be settled twice"
+        );
+        let a_reports = load_reports(&home.path().join("a")).unwrap();
+        let b_reports = load_reports(&home.path().join("b")).unwrap();
+        assert_eq!(a_reports.len(), 2);
+        assert_eq!(b_reports.len(), 3);
+        assert_eq!(load_reports(&home.path().join("a")).unwrap(), a_reports);
+    }
+
+    #[test]
+    fn peer_text_limit_refuses_loss_instead_of_silently_truncating() {
+        let text = "x".repeat(1001);
+        assert!(
+            crate::pm_peer::validate(crate::pm_peer::PeerKind::Request, &text, None, 900).is_err()
+        );
+    }
+
+    #[test]
+    fn peer_redaction_expansion_refuses_message_loss() {
+        use crate::pm_peer::{self, PeerKind, PeerProject, PeerSend};
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let message = pm_peer::send(
+            PeerSend {
+                from: PeerProject {
+                    project: "a".into(),
+                    project_dir: home.path().join("a"),
+                },
+                to: PeerProject {
+                    project: "b".into(),
+                    project_dir: home.path().join("b"),
+                },
+                kind: PeerKind::Request,
+                text: format!("token=x {}TAIL", "a".repeat(987)),
+                reply_to: None,
+                timeout_seconds: 900,
+                unavailable: None,
+            },
+            Utc::now(),
+        );
+        assert!(
+            message.is_err(),
+            "redaction expansion must not discard the message tail"
+        );
+    }
+
+    #[test]
+    fn peer_reports_use_owning_store_from_originless_pm_runtime() {
+        use crate::pm_peer::{self, PeerKind, PeerProject, PeerSend};
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let root = home.path().join("project");
+        let project_dir = crate::paths::gwt_project_dir_for_repo_path(&root);
+        let runtime = project_dir.join("pm/runtime");
+        fs::create_dir_all(runtime.join("nested")).unwrap();
+        fs::create_dir_all(project_dir.join("pm/worktree")).unwrap();
+        pm_peer::send(
+            PeerSend {
+                from: PeerProject {
+                    project: "peer".into(),
+                    project_dir: home.path().join("other"),
+                },
+                to: PeerProject {
+                    project: root.display().to_string(),
+                    project_dir: project_dir.clone(),
+                },
+                kind: PeerKind::Notice,
+                text: "Runtime report sentinel".into(),
+                reply_to: None,
+                timeout_seconds: 900,
+                unavailable: None,
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        for path in [
+            &runtime,
+            &runtime.join("nested"),
+            &project_dir.join("pm/worktree"),
+        ] {
+            assert!(
+                load_reports(path)
+                    .unwrap()
+                    .iter()
+                    .any(|report| report.body.contains("Runtime report sentinel")),
+                "{}",
+                path.display()
+            );
+        }
+        let canonical = dunce::canonicalize(&runtime).unwrap();
+        assert!(load_reports(&canonical)
+            .unwrap()
+            .iter()
+            .any(|report| report.body.contains("Runtime report sentinel")));
+    }
 
     #[test]
     fn reports_survive_reload_in_project_order() {

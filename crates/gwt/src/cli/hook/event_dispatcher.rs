@@ -660,7 +660,11 @@ fn append_pm_standing_context(
          Do not assume there are no standing instructions."
             .into()
     });
-    append_additional_context(output, event, (!text.is_empty()).then_some(text))
+    let output = append_additional_context(output, event, (!text.is_empty()).then_some(text));
+    let peer = crate::cli::pm::peer_context(worktree_root).unwrap_or_else(|_| {
+        "Peer PM messages unavailable: the machine-local store could not be read. Do not assume there are no pending requests.".into()
+    });
+    append_additional_context(output, event, (!peer.is_empty()).then_some(peer))
 }
 
 fn append_additional_context(
@@ -1618,6 +1622,78 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Standing user instructions unavailable"));
+    }
+
+    #[test]
+    fn peer_messages_reach_only_registered_pm_prompts_without_consumption() {
+        use gwt_core::{
+            pm_peer::{self, PeerKind, PeerProject, PeerSend},
+            test_support::{ScopedEnvVar, ScopedGwtHome},
+        };
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "peer-recipient");
+        let a = home.path().join("a");
+        let b = home.path().join("b");
+        let pm = crate::pm_registry::pm_worktree_path_for_repo_path(&b);
+        std::fs::create_dir_all(&pm).unwrap();
+        assert!(super::super::is_resident_pm_worktree(&pm));
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&b),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: "peer-recipient".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: b.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let message = pm_peer::send(
+            PeerSend {
+                from: PeerProject {
+                    project: a.display().to_string(),
+                    project_dir: gwt_core::paths::gwt_project_dir_for_repo_path(&a),
+                },
+                to: PeerProject {
+                    project: b.display().to_string(),
+                    project_dir: gwt_core::paths::gwt_project_dir_for_repo_path(&b),
+                },
+                kind: PeerKind::Request,
+                text: "Please checkpoint peer request".into(),
+                reply_to: None,
+                timeout_seconds: 900,
+                unavailable: None,
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let event = IntentBoundaryEvent::UserPromptSubmit;
+        for _ in 0..2 {
+            let output = append_pm_standing_context(HookOutput::Silent, event, &pm, true);
+            let HookOutput::HookSpecificAdditionalContext { text, .. } = output else {
+                panic!("missing peer prompt context")
+            };
+            assert!(text.contains(&message.id) && text.contains("Please checkpoint peer request"));
+            assert!(text.contains("not owner authorization"));
+        }
+        assert_eq!(
+            append_pm_standing_context(HookOutput::Silent, event, &pm, false),
+            HookOutput::Silent
+        );
+        assert_eq!(
+            append_pm_standing_context(HookOutput::Silent, IntentBoundaryEvent::Stop, &pm, true),
+            HookOutput::Silent
+        );
+        let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "foreign");
+        assert_eq!(
+            append_pm_standing_context(HookOutput::Silent, event, &pm, true),
+            HookOutput::Silent
+        );
     }
 
     #[test]
