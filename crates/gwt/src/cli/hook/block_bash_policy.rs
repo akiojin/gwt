@@ -115,12 +115,25 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
             let verb = next_gh_workflow_word(&mut args);
             match subcommand {
                 "auth" | "release" => continue,
-                "repo" if is_blocked_repo_subcommand(verb) => {
+                "repo" => {
+                    let nested = if matches!(verb, Some("autolink" | "deploy-key")) {
+                        next_gh_workflow_word(&mut args)
+                    } else {
+                        None
+                    };
+                    if !is_blocked_repo_subcommand(verb, nested) {
+                        continue;
+                    }
                     let trailing: Vec<_> = args.collect();
-                    let help_only = trailing.iter().any(|arg| matches!(*arg, "--help" | "-h"))
+                    // `create` (alias `new`) and `edit` use -h for homepage.
+                    let help_flag = |arg: &str| {
+                        arg == "--help"
+                            || (arg == "-h" && !matches!(verb, Some("create" | "new" | "edit")))
+                    };
+                    let help_only = trailing.iter().any(|arg| help_flag(arg))
                         && trailing
                             .iter()
-                            .all(|arg| matches!(*arg, "--help" | "-h") || !arg.starts_with('-'));
+                            .all(|arg| help_flag(arg) || !arg.starts_with('-'));
                     if !help_only {
                         return Some(github_workflow_block_decision(command));
                     }
@@ -256,8 +269,16 @@ fn is_blocked_issue_subcommand(subcommand: Option<&str>) -> bool {
     )
 }
 
-fn is_blocked_repo_subcommand(subcommand: Option<&str>) -> bool {
-    matches!(subcommand, Some("edit" | "archive" | "unarchive"))
+fn is_blocked_repo_subcommand(subcommand: Option<&str>, nested: Option<&str>) -> bool {
+    match subcommand {
+        Some(
+            "edit" | "archive" | "unarchive" | "create" | "new" | "delete" | "rename" | "sync"
+            | "fork",
+        ) => true,
+        Some("autolink") => matches!(nested, Some("create" | "new" | "delete")),
+        Some("deploy-key") => matches!(nested, Some("add" | "delete")),
+        _ => false,
+    }
 }
 
 fn is_blocked_pr_subcommand(subcommand: Option<&str>) -> bool {
@@ -868,6 +889,48 @@ mod tests {
             assert!(
                 github_mutation_policy(command).is_none(),
                 "read/help must pass: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocks_known_repository_mutations_and_preserves_nested_reads_and_local_selection() {
+        for command in [
+            "gh repo delete owner/repo --yes",
+            "gh repo edit owner/repo -h https://example.com",
+            "gh repo rename renamed --yes",
+            "gh repo sync owner/repo --force",
+            "gh repo create owner/new --private",
+            "gh repo create owner/new -h https://example.com",
+            "gh repo new owner/new -h https://example.com",
+            "gh repo fork owner/repo --clone=false",
+            "gh -R owner/repo repo deploy-key add key.pub --allow-write",
+            "gh repo deploy-key delete 1",
+            "gh repo autolink --repo=owner/repo create TICKET- https://example.com/num",
+            "gh repo autolink new TICKET- https://example.com/num",
+            "gh repo autolink delete 1 --yes",
+        ] {
+            assert!(
+                github_mutation_policy(command).is_some(),
+                "remote mutation must be blocked: {command}"
+            );
+        }
+        for command in [
+            "gh repo autolink list -R owner/repo",
+            "gh repo autolink -R owner/repo view 1",
+            "gh repo deploy-key list --repo owner/repo",
+            "gh repo set-default owner/repo",
+            "gh repo set-default --unset",
+            "gh repo clone owner/repo local-copy",
+            "gh repo delete --help",
+            "gh repo create --help",
+            "gh repo new --help",
+            "gh repo autolink create --help",
+            "gh repo deploy-key delete 1 -h",
+        ] {
+            assert!(
+                github_mutation_policy(command).is_none(),
+                "read/help/local selection must pass: {command}"
             );
         }
     }

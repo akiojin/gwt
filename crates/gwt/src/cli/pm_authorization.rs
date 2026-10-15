@@ -273,28 +273,31 @@ fn request_with(
 fn native_confirm(prompt: &str) -> Result<Option<bool>, String> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        let show = |label: &str, description: &str| {
+        let show = |first: &str, second: &str, third: &str, description: &str| {
             rfd::MessageDialog::new()
                 .set_title("GWT — PM operation approval")
                 .set_description(description)
                 .set_level(rfd::MessageLevel::Warning)
                 .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
-                    "Cancel".into(),
-                    label.into(),
-                    "Close".into(),
+                    first.into(),
+                    second.into(),
+                    third.into(),
                 ))
                 .show()
         };
-        if !matches!(show("Approve once",prompt),rfd::MessageDialogResult::Custom(label)if label=="Approve once")
+        if !matches!(show("Cancel", "Approve once", "Close", prompt),rfd::MessageDialogResult::Custom(label)if label=="Approve once")
         {
             return Ok(None);
         }
-        // Default and Escape both decline in each dialog; remembering is a
-        // separate explicit choice, never the third/Escape button.
-        let remember=format!("{prompt}\n\nAllow future operations of this kind in this repository without asking again?");
-        Ok(Some(
-            matches!(show("Remember permission",&remember),rfd::MessageDialogResult::Custom(label)if label=="Remember permission"),
-        ))
+        // The first dialog defaults to decline. After explicit consent, the
+        // final default keeps it one-time; Escape still withdraws consent.
+        let remember=format!("{prompt}\n\nChoose one-time approval, remember permission for this operation kind in this repository, or cancel without recording permission.");
+        Ok(final_native_decision(show(
+            "Approve once only",
+            "Remember permission",
+            "Cancel",
+            &remember,
+        )))
     }
     #[cfg(target_os = "linux")]
     {
@@ -323,6 +326,14 @@ fn native_confirm(prompt: &str) -> Result<Option<bool>, String> {
     {
         let _ = prompt;
         Err("Native PM approval is unavailable on this platform".into())
+    }
+}
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn final_native_decision(result: rfd::MessageDialogResult) -> Option<bool> {
+    match result {
+        rfd::MessageDialogResult::Custom(label) if label == "Approve once only" => Some(false),
+        rfd::MessageDialogResult::Custom(label) if label == "Remember permission" => Some(true),
+        _ => None,
     }
 }
 #[cfg(test)]
@@ -844,6 +855,50 @@ mod tests {
             pm_authorization::approvals(&repo).unwrap()[0].id,
             approval.id
         );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn final_native_cancellation_records_no_authority() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let intent = OperationIntent {
+            operation: "update.settings.set".into(),
+            params: json!({"auto_apply_updates":false}),
+        };
+        for result in [
+            rfd::MessageDialogResult::Custom("Cancel".into()),
+            rfd::MessageDialogResult::Cancel,
+        ] {
+            assert!(super::request_with(
+                &repo,
+                &intent,
+                "Disable updates",
+                "Enable updates",
+                |_| Ok(super::final_native_decision(result)),
+            )
+            .is_err());
+            assert!(pm_authorization::approvals(&repo).unwrap().is_empty());
+        }
+        for (label, standing) in [("Approve once only", false), ("Remember permission", true)] {
+            let approval =
+                super::request_with(&repo, &intent, "Disable updates", "Enable updates", |_| {
+                    Ok(super::final_native_decision(
+                        rfd::MessageDialogResult::Custom(label.into()),
+                    ))
+                })
+                .unwrap();
+            assert_eq!(approval.standing, standing);
+            assert_eq!(
+                pm_authorization::approvals(&repo)
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .id,
+                approval.id
+            );
+        }
     }
 
     #[test]
