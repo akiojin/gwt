@@ -1651,6 +1651,7 @@ mod tests {
                 issue_numbers: vec![5342],
                 kind: gwt_core::user_instruction::UserInstructionKind::Standing,
                 supersedes: vec![],
+                authorizations: vec![],
             },
         )
         .unwrap();
@@ -1770,6 +1771,7 @@ mod tests {
             issue_numbers: vec![5342],
             kind: UserInstructionKind::Standing,
             supersedes: vec![],
+            authorizations: vec![],
         };
         let first = record(&repo, input.clone()).unwrap();
         let initial = append_pm_standing_context(

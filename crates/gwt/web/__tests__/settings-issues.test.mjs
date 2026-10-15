@@ -38,6 +38,20 @@ test("Settings entry points reuse only the requested surface owner", () => {
   assert.deepEqual(pending, [["project-manager", "pm"]]);
 });
 
+test("Reopening an existing System Settings window reloads CLI update preferences", () => {
+  const { document, CustomEvent } = parseHTML('<html><body><div id="settings"></div></body></html>');
+  const body = document.getElementById("settings");
+  body.dataset.settingsProjectRoot = "/A";
+  const sent = [];
+  load("installSettingsOpenHandler", { switchSettingsTab: () => {} })({
+    document, settingsWindowBodies: new Set([body]), activeProjectTab: () => ({ project_root: "/A" }),
+    focusOrSpawnPreset: () => {}, setPendingTarget: () => assert.fail("reuse the existing window"),
+    send: message => sent.push(message),
+  });
+  document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "system" } }));
+  assert.deepEqual(sent, [{ kind: "get_update_settings" }]);
+});
+
 test("PM auxiliary Settings scrolls its own content without scrolling app chrome", () => {
   const { document } = parseHTML('<div id="settings" data-surface-owner="pm"><div class="settings-body"><section class="settings-panel" data-settings-panel="project-manager"></section></div></div>');
   const body = document.getElementById("settings"), scroller = body.querySelector(".settings-body"), panel = body.querySelector("section");

@@ -7114,23 +7114,7 @@ impl AppRuntime {
 
         // Record the terminal close in the work history. Idempotent against an
         // already-closed Work, so a duplicate close emits no new event.
-        let now = chrono::Utc::now();
-        let recorded = match close_kind {
-            gwt_core::workspace_projection::WorkCloseKind::Done => {
-                gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
-                    &project_root,
-                    work_id,
-                    now,
-                )
-            }
-            gwt_core::workspace_projection::WorkCloseKind::Discarded => {
-                gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
-                    &project_root,
-                    work_id,
-                    now,
-                )
-            }
-        };
+        let recorded = Self::record_work_close(&project_root, work_id, close_kind);
         if let Err(error) = recorded {
             tracing::warn!(
                 work_id = %work_id,
@@ -7144,6 +7128,114 @@ impl AppRuntime {
         self.active_work_projection_broadcast_for_tab(&context.tab_id)
             .into_iter()
             .collect()
+    }
+
+    fn record_work_close(
+        project_root: &Path,
+        work_id: &str,
+        close_kind: gwt_core::workspace_projection::WorkCloseKind,
+    ) -> Result<bool, String> {
+        use gwt_core::workspace_projection as work;
+        let changed = match close_kind {
+            work::WorkCloseKind::Done => {
+                work::emit_workspace_done_event_if_absent(project_root, work_id, chrono::Utc::now())
+            }
+            work::WorkCloseKind::Discarded => work::emit_workspace_discard_event_if_absent(
+                project_root,
+                work_id,
+                chrono::Utc::now(),
+            ),
+        }
+        .map_err(|error| error.to_string())?;
+        let items = work::load_workspace_work_items(project_root)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Work state is unavailable after close".to_string())?;
+        let target = items
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)
+            .ok_or_else(|| "Work no longer exists".to_string())?;
+        let matches = match close_kind {
+            work::WorkCloseKind::Done => {
+                target.status_category == work::WorkspaceStatusCategory::Done && !target.discarded
+            }
+            work::WorkCloseKind::Discarded => target.discarded,
+        };
+        if !matches {
+            return Err("Work did not reach the requested terminal state; inspect Work state before retrying".into());
+        }
+        Ok(changed)
+    }
+
+    pub(super) fn close_work_for_agent(
+        &mut self,
+        principal: &gwt::agent_capability::AgentSessionPrincipal,
+        work_id: &str,
+        close_kind: &str,
+    ) -> Result<bool, (String, bool)> {
+        use gwt_core::workspace_projection as work;
+        let kind = match close_kind {
+            "done" => work::WorkCloseKind::Done,
+            "discarded" => work::WorkCloseKind::Discarded,
+            _ => return Err(("close_kind must be done or discarded".into(), false)),
+        };
+        if work_id.is_empty() || work_id.trim() != work_id {
+            return Err(("an exact nonempty work_id is required".into(), false));
+        }
+        let context = self
+            .project_context_for_root(principal.canonical_project_root())
+            .ok_or_else(|| ("authenticated project is not open".into(), false))?;
+        let window_id = self
+            .agent_principal_session_window(principal)
+            .map_err(|error| (error, false))?;
+        if !gwt::pm_registry::session_is_registered_pm(
+            &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+            principal.session_id(),
+        ) || self.live_pm_window_id(principal.session_id()).as_deref()
+            != Some(window_id.as_str())
+        {
+            return Err((
+                "workspace.close requires the live registered PM of this project".into(),
+                false,
+            ));
+        }
+        let items = work::load_workspace_work_items(&context.project_root)
+            .map_err(|error| (error.to_string(), false))?
+            .ok_or_else(|| ("current Work state is unavailable".into(), false))?;
+        let mut matches = items.work_items.iter().filter(|item| item.id == work_id);
+        let target = matches
+            .next()
+            .ok_or_else(|| ("Work no longer exists in this project".into(), false))?;
+        if matches.next().is_some() || target.is_terminal() {
+            return Err((
+                "current Work identity is ambiguous or already terminal".into(),
+                false,
+            ));
+        }
+        // The canonical membership may have changed since the accepted cache.
+        // Check the exact child, allowing a live sibling on the same branch.
+        if self.active_agent_sessions.values().any(|session| {
+            self.tab(&session.tab_id)
+                .is_some_and(|tab| principal.authorizes_project_root(&tab.project_root))
+                && (target
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == session.session_id)
+                    || work_id.strip_prefix("work-session-") == Some(session.session_id.as_str()))
+        }) {
+            return Err((
+                "Work close refused: a current member agent is live; stop it before closing".into(),
+                false,
+            ));
+        }
+        self.cached_work_close_target(&context, work_id)?;
+        if !self.project_context_is_current(&context) {
+            return Err(("project changed before Work close".into(), false));
+        }
+        let changed = Self::record_work_close(&context.project_root, work_id, kind)
+            .map_err(|error| (error, false))?;
+        let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
+        Ok(changed)
     }
 
     pub(crate) fn mark_agent_session_stopped(&mut self, window_id: &str) {

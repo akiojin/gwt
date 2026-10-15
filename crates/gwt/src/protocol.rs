@@ -1271,8 +1271,7 @@ pub enum FrontendEvent {
     /// for agent-session Works); `close_kind` is `"done"` or `"discarded"`.
     /// Done records a terminal completion, Discarded a terminal discard; both
     /// remove the Work from the active surface. The backend blocks the close
-    /// when the owning agent session is still live (the worktree is only
-    /// removed for Paused Works that have no running agent).
+    /// when the owning agent session is still live. Worktree and branch remain.
     CloseWork {
         work_id: String,
         close_kind: String,
@@ -2134,6 +2133,15 @@ pub enum BackendEvent {
         window_id: String,
         reason: Option<String>,
     },
+    WorkCloseResult {
+        work_id: String,
+        close_kind: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        changed: Option<bool>,
+        retryable: bool,
+        error: Option<String>,
+    },
     /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
     /// active project tab.
     ///
@@ -2982,6 +2990,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
+    BackendEventPolicy::new(
+        "work_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
     // SPEC-3431 FR-026: the PM settings snapshot is a whole-state view; only
     // the newest one matters.
     BackendEventPolicy::new(
@@ -3428,6 +3441,7 @@ impl BackendEvent {
             }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
+            BackendEvent::WorkCloseResult { .. } => "work_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
@@ -3933,6 +3947,28 @@ mod tests {
         assert_eq!(event.event_kind(), "pane_send_result");
 
         let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #4249 AC-19: the close result reaches its origin client reliably.
+    #[test]
+    fn work_close_result_has_client_scoped_snapshot_policy() {
+        let event = BackendEvent::WorkCloseResult {
+            work_id: "work-1".into(),
+            close_kind: "done".into(),
+            ok: false,
+            changed: None,
+            retryable: true,
+            error: Some("refresh and retry".into()),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "work_close_result");
+        assert!(value.get("changed").is_none());
+        let policy = event.delivery_policy();
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
         assert_eq!(
             policy.backpressure,

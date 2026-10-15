@@ -12865,6 +12865,27 @@ impl AppRuntime {
                     WorktreeFormProjection::Persisted,
                 )]
             }
+            AgentFrontendRequest::CloseWork {
+                work_id,
+                close_kind,
+            } => {
+                let result = self.close_work_for_agent(&principal, &work_id, &close_kind);
+                let (ok, changed, retryable, error) = match result {
+                    Ok(changed) => (true, Some(changed), false, None),
+                    Err((error, retryable)) => (false, None, retryable, Some(error)),
+                };
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::WorkCloseResult {
+                        work_id,
+                        close_kind,
+                        ok,
+                        changed,
+                        retryable,
+                        error,
+                    },
+                )]
+            }
             AgentFrontendRequest::CloseWindow {
                 id,
                 request_id,

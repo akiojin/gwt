@@ -14,6 +14,43 @@ pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     type Client = E::Client;
 
+    fn github_repository(&self) -> io::Result<(String, String)> {
+        self.inner.github_repository()
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.pm_settings_snapshot(operation, params)
+    }
+    fn pm_settings_mutate(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+        before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.pm_settings_mutate(operation, params, before)
+    }
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion> {
+        self.inner.create_github_discussion(category, title, body)
+    }
+    fn required_status_checks(&mut self, branch: &str) -> io::Result<serde_json::Value> {
+        self.inner.required_status_checks(branch)
+    }
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.update_required_status_checks(branch, settings)
+    }
+
     fn client(&self) -> &Self::Client {
         self.inner.client()
     }
