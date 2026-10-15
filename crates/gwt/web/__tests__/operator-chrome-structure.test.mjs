@@ -1114,6 +1114,17 @@ test("Agent window chrome resolves dynamic purpose titles before legacy titles",
   );
 });
 
+test("Agent window title starts with assigned identity before its current purpose", () => {
+  const displayTitle = new Function("windowData", "isAgentWindowPreset", "PM_WINDOW_TITLE",
+    extractFunctionBody(appSource, "windowDisplayTitle"));
+  const agentPreset = preset => ["agent", "claude", "codex"].includes(preset);
+  const data = { preset: "agent", agent_id: "codex", title: "Codex", purpose_title: "Initial task", dynamic_title: "Fix cache" };
+  assert.equal(displayTitle({ ...data, agent_name: "Lumen" }, agentPreset, "Project Manager"), "Lumen — Fix cache");
+  assert.equal(displayTitle(data, agentPreset, "Project Manager"), "Naming… — Fix cache");
+  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager — Fix cache");
+  assert.equal(displayTitle({ preset: "shell", title: "Shell" }, agentPreset, "Project Manager"), "Shell");
+});
+
 test("Branches preset is removed — branch browsing is part of the Work surface", () => {
   const branchPreset = document.querySelector('.preset-button[data-preset="branches"]');
   assert.equal(branchPreset, null, "Branches preset button must not exist — use Work surface");
@@ -4392,6 +4403,7 @@ test("Workspace Windows render key ignores viewport and includes window shell fi
     "dynamic_title_detail",
     "purpose_title",
     "agent_id",
+    "agent_name",
     "agent_color",
     "status",
     "geometry",

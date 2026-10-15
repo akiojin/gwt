@@ -1291,6 +1291,49 @@ fn issue_3693_recorded_argv(path: &Path) -> Vec<String> {
 }
 
 #[test]
+fn issue_4323_pr_view_names_a_confirmed_issue_and_preserves_other_failures() {
+    crate::cli::test_support::with_fake_gh("issue-4323", |repo_path| {
+        let _home = gwt_core::test_support::ScopedGwtHome::set(repo_path.join("home"));
+        let _sandbox = crate::cli::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let mut env = DefaultCliEnv::new("akiojin", "gwt", repo_path.to_path_buf());
+
+        let error = env.fetch_pr(4323).unwrap_err().to_string();
+        assert!(error.contains("Issue #4323"), "{error}");
+        assert!(error.contains("issue.view"), "{error}");
+        assert!(!error.contains("Could not resolve"), "{error}");
+
+        // A PR, failed probe, invalid JSON, or mismatched number is not proof
+        // that the requested number is an Issue.
+        for number in [4122, 404, 403, 502, 17, 18, 19] {
+            let error = env.fetch_pr(number).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!(
+                    "Could not resolve to a PullRequest with the number of {number}"
+                )),
+                "{error}"
+            );
+            assert!(!error.contains("issue.view"), "{error}");
+        }
+    });
+}
+
+#[test]
+fn issue_4323_successful_pr_view_does_not_probe_the_issue_endpoint() {
+    crate::cli::test_support::with_fake_gh("issue-4323", |repo_path| {
+        let _home = gwt_core::test_support::ScopedGwtHome::set(repo_path.join("home"));
+        let _sandbox = crate::cli::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let log_path = repo_path.join("gh-argv");
+        let _log = crate::cli::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log_path);
+        let mut env = DefaultCliEnv::new("akiojin", "gwt", repo_path.to_path_buf());
+
+        assert_eq!(env.fetch_pr(12).unwrap().number, 12);
+        let calls = issue_3693_recorded_argv(&log_path);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].starts_with("[\"pr\", \"view\""), "{calls:?}");
+    });
+}
+
+#[test]
 fn issue_3693_base_only_edit_reaches_rest_patch_through_default_env() {
     crate::cli::test_support::with_fake_gh("issue-3693-success", |repo_path| {
         let _home = gwt_core::test_support::ScopedGwtHome::set(repo_path.join("home"));

@@ -90,6 +90,7 @@ fn write_state_with_status(
     status: &str,
     pending_discussion: Option<PendingDiscussionResume>,
 ) -> Result<(), HookError> {
+    let _publication = gwt_agent::session::runtime_publication_lease(path)?;
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let state = RuntimeState {
         status: status.to_string(),
@@ -157,6 +158,9 @@ pub(crate) fn record_hook_event_completed_from_env() {
         return;
     };
     let runtime_path = PathBuf::from(runtime_path);
+    let Ok(_publication) = gwt_agent::session::runtime_publication_lease(&runtime_path) else {
+        return;
+    };
     let Ok(raw) = std::fs::read_to_string(&runtime_path) else {
         return;
     };

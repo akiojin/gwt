@@ -737,6 +737,53 @@ impl AppRuntime {
             })
     }
 
+    pub(super) fn update_settings_event(
+        &self,
+        project_root: Option<&std::path::Path>,
+    ) -> BackendEvent {
+        let status = match project_root {
+            Some(root) => gwt::update_settings::status(root),
+            None => {
+                gwt::update_settings::configured().map(|configured| gwt::update_settings::Status {
+                    auto_apply_updates: configured,
+                    auto_apply_updates_effective: configured.unwrap_or(false),
+                    update_drain: None,
+                })
+            }
+        };
+        match status {
+            Ok(mut status) => {
+                if let Some(drain) = status.update_drain.as_mut() {
+                    if drain.blocking.is_empty() {
+                        if let Some(cached) = project_root
+                            .and_then(|root| self.project_state_for_root(root))
+                            .and_then(|state| {
+                                state
+                                    .issue_monitor_status_cache
+                                    .borrow()
+                                    .as_ref()
+                                    .and_then(|status| status.update_drain.clone())
+                            })
+                            .filter(|cached| {
+                                cached.version == drain.version && cached.since == drain.since
+                            })
+                        {
+                            drain.blocking = cached.blocking;
+                        }
+                    }
+                    self.enrich_update_drain_blockers(drain);
+                }
+                BackendEvent::UpdateSettings {
+                    project_root: project_root.map(|root| root.display().to_string()),
+                    status,
+                }
+            }
+            Err(error) => BackendEvent::SystemSettingsError {
+                message: error.to_string(),
+            },
+        }
+    }
+
     pub(super) fn set_global_auto_apply_updates_events(
         &mut self,
         client_id: &str,
@@ -754,11 +801,7 @@ impl AppRuntime {
         for context in self.project_contexts() {
             if !enabled {
                 if let Some((prefs, drain)) = self.project_auto_update_drain(&context) {
-                    if drain
-                        .automatic
-                        .or(prefs.auto_apply_updates)
-                        .unwrap_or(prefs.autonomous_mode)
-                    {
+                    if drain.automatic.unwrap_or(prefs.autonomous_mode) {
                         events.extend(
                             self.release_update_auto_apply_for_project(&context, &drain.version),
                         );
@@ -776,7 +819,12 @@ impl AppRuntime {
                     monitor,
                 ));
             }
+            events.push(OutboundEvent::project(
+                context.project_key,
+                self.update_settings_event(Some(&context.project_root)),
+            ));
         }
+        events.push(OutboundEvent::hub(self.update_settings_event(None)));
         let path = gwt_core::paths::gwt_config_path();
         events.push(OutboundEvent::broadcast(gwt::system_settings::get_event(
             &path,

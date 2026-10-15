@@ -718,6 +718,36 @@ fn pm_ensure_refuses_a_second_in_flight_worktree_preparation() {
 /// The synchronous path only logged, so a PM that never appeared — a Git error,
 /// a full disk — was indistinguishable from one that was simply disabled.
 #[test]
+fn pm_git_metadata_failure_waits_for_repair_then_starts_normally() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    fs::rename(repo.join(".git"), temp.path().join("saved-git")).unwrap();
+    fs::write(repo.join(".git"), "gitdir: /mnt/e/gwt/worktrees/develop\n").unwrap();
+    let first = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .unwrap_err()
+        .to_string();
+    let after_first = gwt_core::process::thread_git_spawn_count();
+    let second = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(gwt_core::process::thread_git_spawn_count(), after_first);
+    assert_eq!(first, second);
+    assert!(first.contains("Git needs attention"), "{first}");
+    assert!(first.contains(".git:1"), "{first}");
+    assert!(first.contains("E:/gwt/worktrees/develop"), "{first}");
+    fs::remove_file(repo.join(".git")).unwrap();
+    fs::rename(temp.path().join("saved-git"), repo.join(".git")).unwrap();
+    let prepared = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo).unwrap();
+    assert!(prepared.worktree.join(".git").is_file());
+}
+
+#[test]
 fn failed_pm_worktree_preparation_is_reported_and_spawns_nothing() {
     let _env_lock = env_test_lock()
         .lock()
@@ -860,6 +890,60 @@ fn restore_drain_with_no_restored_windows_finishes_inside_500ms() {
     assert!(
         fastest < RESTORE_DRAIN_BUDGET,
         "restore_drain took {fastest:?} in its fastest of 3 runs (budget {RESTORE_DRAIN_BUDGET:?})"
+    );
+}
+
+#[test]
+fn pm_startup_worker_keeps_its_budget_when_the_parent_deadline_has_expired() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
+        .expect("trusted PM checkout with managed assets")
+        .worktree;
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    {
+        let expired = gwt_core::operation_deadline::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(expired);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expired);
+        let error = gwt_core::operation_deadline::ensure_remaining("parent dispatch")
+            .expect_err("the parent budget really has expired");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        runtime.spawn_pm_worktree_preparation(
+            super::super::pm::PmWorktreeContinuation::FreshSpawn {
+                tab_id: "tab-1".to_string(),
+                project_root: repo.clone(),
+            },
+        );
+    }
+
+    drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+
+    let windows = &runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows;
+    assert_eq!(windows.len(), 1, "the worker must prepare and start the PM");
+    assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert!(worktree.join(".git").is_file());
+    assert_eq!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_launches
+            .len(),
+        1
     );
 }
 
@@ -2593,8 +2677,56 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         source.launch_route = gwt_agent::LaunchRoute::Autonomous;
         source.save(&runtime.sessions_dir).expect("save source");
         let source_session_id = source.id.clone();
+        let placeholder = runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .add_window(WindowPreset::Agent, canvas_bounds());
+        runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .set_session_id(&placeholder.id, Some(source_session_id.clone()));
+        runtime
+            .tab_mut("tab-1")
+            .unwrap()
+            .workspace
+            .set_agent_name(&placeholder.id, Some("Falcon-2".into()));
+        runtime.tab_mut("tab-1").unwrap().workspace.set_status(
+            &placeholder.id,
+            if origin == super::super::startup::RestoreOrigin::UserRequested {
+                WindowProcessStatus::Error
+            } else {
+                WindowProcessStatus::Stopped
+            },
+        );
+        runtime.register_window("tab-1", &placeholder.id);
 
         runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
+        assert_eq!(
+            runtime
+                .tab("tab-1")
+                .unwrap()
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .find_map(|window| window.agent_name.as_deref()),
+            Some("Falcon-2")
+        );
+        assert_eq!(
+            runtime
+                .tab("tab-1")
+                .unwrap()
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .filter(|window| window.preset.is_agent_terminal())
+                .count(),
+            1,
+            "restart replaces its old pane"
+        );
         wait_for_recorded_event("restore launch preparation", &recorded_events, |events| {
             events.iter().any(|event| {
                 matches!(

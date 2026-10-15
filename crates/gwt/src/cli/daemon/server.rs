@@ -386,6 +386,10 @@ async fn run_bound_server(
         mut listener,
         authority_lease,
     } = bound;
+    let _runtime_namespace_gc =
+        crate::runtime_gc::RuntimeNamespaceGcTask::start(gwt_core::paths::gwt_sessions_dir())
+            .map_err(|error| tracing::warn!(%error, "runtime namespace GC worker could not start"))
+            .ok();
     // Keep one handle through listener and worker shutdown: a failed worker
     // must not admit a second daemon while this server still answers IPC.
     let authority_lease = Arc::new(authority_lease);
@@ -724,9 +728,12 @@ fn spawn_issue_monitor_worker_with_lease(
             if Instant::now() >= startup_deadline {
                 loaded.authority_retry_pending = false;
                 loaded.recovery_blocked = true;
-                loaded.monitor.record_scan_error(
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    "Issue Monitor authority recovery is blocked: startup retry budget exhausted; automation disabled and durable state preserved".to_string(),
+                loaded.monitor.record_authority_recovery_blocked(
+                    format!(
+                        "Issue Monitor authority recovery is blocked: startup retry budget exhausted; prefs={} authority_marker={}; automation disabled and durable state preserved",
+                        prefs_path.display(),
+                        issue_monitor_shutdown_revoke_marker_path(&prefs_path).display(),
+                    ),
                 );
                 break;
             }
@@ -1676,15 +1683,16 @@ fn load_issue_monitor_state_for_daemon_with_lease(
             authority_lease,
         },
         Err(error)
-            if (gwt_core::operation_deadline::is_lock_contended(&error)
-                || error.kind() == io::ErrorKind::TimedOut)
-                && matches!(
-                    crate::load_issue_monitor_authority_fence(prefs_path),
-                    Ok(crate::IssueMonitorAuthorityFenceState::Missing)
-                ) =>
+            if error.kind() == io::ErrorKind::TimedOut
+                || (gwt_core::operation_deadline::is_lock_contended(&error)
+                    && matches!(
+                        crate::load_issue_monitor_authority_fence(prefs_path),
+                        Ok(crate::IssueMonitorAuthorityFenceState::Missing)
+                    )) =>
         {
             // An exhausted attempt budget says nothing about durable ambiguity.
-            // Retry a missing fence under the separate startup-wide budget.
+            // Retry under the startup-wide budget even when a retained fence
+            // still needs the normal lease acquisition and fenced replay.
             // A GUI-only fallback owns the same lifetime lock only for one
             // bounded remote-effect pass and deliberately writes no fence.
             // Keep the public control lane in Starting and retry after that
@@ -1706,10 +1714,11 @@ fn load_issue_monitor_state_for_daemon_with_lease(
             let prefs = crate::load_issue_monitor_prefs(prefs_path)
                 .unwrap_or_else(|_| crate::IssueMonitorPrefs::recovery_default());
             let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
-            monitor.record_scan_error(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            monitor.record_authority_recovery_blocked(
                 format!(
-                    "Issue Monitor authority recovery is blocked; automation disabled and durable state preserved: {error}"
+                    "Issue Monitor authority recovery is blocked; prefs={} authority_marker={}; automation disabled and durable state preserved: {error}",
+                    prefs_path.display(),
+                    issue_monitor_shutdown_revoke_marker_path(prefs_path).display(),
                 ),
             );
             LoadedDaemonIssueMonitorState {
@@ -2017,8 +2026,6 @@ enum IssueMonitorControl {
         max_active_auto: bool,
         /// Issue #3917 AC-5: explicit auto-close override.
         auto_close_merged_issues: Option<bool>,
-        /// Issue #3906 AC-1: explicit auto-apply-updates override.
-        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
         /// Issue #4037 AC-5: raise or clear the non-destructive update drain.
@@ -2415,7 +2422,6 @@ fn try_apply_issue_monitor_control(
             max_active_agents,
             max_active_auto,
             auto_close_merged_issues,
-            auto_apply_updates,
             launch_agent,
             update_drain,
         } => {
@@ -2428,7 +2434,6 @@ fn try_apply_issue_monitor_control(
                     && max_active_agents.is_none()
                     && !max_active_auto
                     && auto_close_merged_issues.is_none()
-                    && auto_apply_updates.is_none()
                     && launch_agent.is_none()
                     && update_drain.is_none())
             {
@@ -2459,11 +2464,6 @@ fn try_apply_issue_monitor_control(
                 candidate.set_auto_close_merged_issues_with_effect_revocation(Some(
                     auto_close_merged_issues,
                 ))?;
-            }
-            if let Some(auto_apply_updates) = auto_apply_updates {
-                candidate
-                    .set_auto_apply_updates(Some(auto_apply_updates))
-                    .ok()?;
             }
             // Issue #4037 AC-3: the drain touches admission only, so it needs
             // no authority-epoch advance and revokes nothing.
@@ -3331,6 +3331,9 @@ fn decode_issue_monitor_control_in_repo(
                 .get("config_set")
                 .and_then(serde_json::Value::as_object)
             {
+                if config.contains_key("auto_apply_updates") {
+                    return None;
+                }
                 let allowed_labels = match config.get("allowed_labels") {
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(serde_json::from_value::<Vec<String>>(value.clone()).ok()?),
@@ -3356,10 +3359,6 @@ fn decode_issue_monitor_control_in_repo(
                     },
                 };
                 let auto_close_merged_issues = match config.get("auto_close_merged_issues") {
-                    None | Some(serde_json::Value::Null) => None,
-                    Some(value) => Some(value.as_bool()?),
-                };
-                let auto_apply_updates = match config.get("auto_apply_updates") {
                     None | Some(serde_json::Value::Null) => None,
                     Some(value) => Some(value.as_bool()?),
                 };
@@ -3410,7 +3409,6 @@ fn decode_issue_monitor_control_in_repo(
                         && max_active_agents.is_none()
                         && !max_active_auto
                         && auto_close_merged_issues.is_none()
-                        && auto_apply_updates.is_none()
                         && launch_agent.is_none()
                         && update_drain.is_none())
                 {
@@ -3423,7 +3421,6 @@ fn decode_issue_monitor_control_in_repo(
                     max_active_agents,
                     max_active_auto,
                     auto_close_merged_issues,
-                    auto_apply_updates,
                     launch_agent,
                     update_drain,
                 });
@@ -4162,6 +4159,7 @@ fn commit_issue_monitor_scan_if_current(
     // A long scan owns its proposals, while the live driver owns the latest
     // machine observation. Preserve refreshed capacity even when its numeric
     // cap did not change (and therefore did not fence the scan by revision).
+    scanned.config.max_active = monitor.effective_max_active_agents();
     scanned.set_agent_capacity(monitor.status_view().agent_capacity);
     scanned.set_process_held_issues(monitor.process_held_issues().clone());
     let proposed_effects = scanned.pending_effects().to_vec();
@@ -11681,41 +11679,11 @@ exit 0
                 max_active_agents: Some(4),
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
-                launch_agent: None,
-                update_drain: None,
-            }
-        );
-        // Issue #3906 AC-1: the GUI toggle publishes the override alone and
-        // the daemon commits it without touching any other switch.
-        let auto_apply_payload = crate::runtime_daemon_events::issue_monitor_payload(
-            "control",
-            serde_json::json!({ "config_set": { "auto_apply_updates": true } }),
-            std::process::id() + 1,
-        );
-        let auto_apply_control =
-            decode_issue_monitor_control(auto_apply_payload).expect("auto-apply control");
-        assert_eq!(
-            auto_apply_control,
-            IssueMonitorControl::ConfigSet {
-                allowed_labels: None,
-                enabled: None,
-                autonomous_mode: None,
-                max_active_agents: None,
-                max_active_auto: false,
-                auto_close_merged_issues: None,
-                auto_apply_updates: Some(true),
                 launch_agent: None,
                 update_drain: None,
             }
         );
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
-        assert!(apply_issue_monitor_control(
-            &mut monitor,
-            auto_apply_control
-        ));
-        assert_eq!(monitor.auto_apply_updates(), Some(true));
-        assert!(monitor.auto_apply_updates_enabled());
         // Issue #3906 AC-3: the update mechanism raises an Auto drain for the
         // staged version through the same control.
         let raise_payload = crate::runtime_daemon_events::issue_monitor_payload(
@@ -11733,7 +11701,6 @@ exit 0
                 max_active_agents: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Raise {
                     reason: crate::IssueMonitorUpdateDrainReason::Auto,
                     automatic: None,
@@ -11783,6 +11750,23 @@ exit 0
     }
 
     #[test]
+    fn issue_monitor_config_set_rejects_auto_apply_updates() {
+        for enabled in [true, false] {
+            for config in [
+                serde_json::json!({"auto_apply_updates": enabled}),
+                serde_json::json!({"auto_apply_updates": enabled, "enabled": false}),
+            ] {
+                let payload = crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    serde_json::json!({"config_set": config}),
+                    std::process::id() + 1,
+                );
+                assert!(decode_issue_monitor_control(payload).is_none());
+            }
+        }
+    }
+
+    #[test]
     fn agent_capacity_control_restores_auto_without_changing_running_work() {
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
             max_active: 7,
@@ -11796,8 +11780,8 @@ exit 0
         let control = decode_issue_monitor_control(payload).expect("explicit Auto control");
         assert!(apply_issue_monitor_control(&mut monitor, control));
         assert_eq!(
-            monitor.config.max_active, 0,
-            "unknown automatic capacity blocks new work"
+            monitor.config.max_active, 7,
+            "unknown automatic capacity retains the saved limit"
         );
     }
 
@@ -11819,7 +11803,7 @@ exit 0
                 .expect("Auto config control is a complete operation");
         assert!(apply_issue_monitor_control(&mut monitor, control));
         assert_eq!(monitor.max_active_agents_override(), None);
-        assert_eq!(monitor.effective_max_active_agents(), 0);
+        assert_eq!(monitor.effective_max_active_agents(), 7);
         assert!(decode_issue_monitor_control(payload(serde_json::json!({
             "max_active_mode":"auto", "max_active_agents":7,
         })))
@@ -11863,7 +11847,6 @@ exit 0
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
-                auto_apply_updates: None,
             }
         );
 
@@ -12101,7 +12084,6 @@ exit 0
                 max_active_agents: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             }
@@ -12365,7 +12347,6 @@ exit 0
                 max_active_agents: Some(4),
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             },
@@ -14384,6 +14365,7 @@ exit 0
                 state: crate::issue_monitor::IssueCompletionState::Completed,
                 issue_updated_at: Some("2026-08-15T00:00:00Z".to_string()),
                 evidence: crate::issue_monitor::IssueCompletionEvidence::LinkedPr,
+                released_reason: None,
             }],
             ..crate::IssueMonitorPrefs::default()
         };
@@ -15802,12 +15784,22 @@ exit 1
         // startup-wide budget has already expired.
         drop(local_lease);
         let status = tokio::time::timeout(HANG_GUARD, hub.wait_for_issue_monitor_status()).await;
+        let control = hub.publish_issue_monitor_control(DaemonFrame::Ack).await;
         shutdown.request();
         tokio::time::timeout(HANG_GUARD, worker)
             .await
             .expect("worker shutdown is bounded")
             .expect("worker exits cleanly");
-        assert!(status.expect("startup reaches a terminal state").is_none());
+        let status = status
+            .expect("startup reaches a terminal state")
+            .expect("blocked recovery remains readable");
+        assert!(status["last_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("startup retry budget exhausted")));
+        assert_eq!(
+            control,
+            Err(super::IssueMonitorControlQueueError::RecoveryBlocked)
+        );
         assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
         assert!(matches!(
             crate::load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
@@ -15869,6 +15861,7 @@ exit 1
             let queued = tokio::time::timeout(HANG_GUARD, submitted.notified()).await;
             let status =
                 tokio::time::timeout(HANG_GUARD, hub.wait_for_issue_monitor_status()).await;
+            let control = hub.publish_issue_monitor_control(DaemonFrame::Ack).await;
             // Always release our blocking thread before assertions, including
             // RED, so Runtime::drop cannot hang waiting for the test fixture.
             release_tx.send(()).expect("release occupied slot");
@@ -15880,7 +15873,16 @@ exit 1
                 .expect("worker shutdown")
                 .expect("worker exits");
             queued.expect("retry was actually queued in the occupied pool");
-            assert!(status.expect("queue wait obeys startup budget").is_none());
+            let status = status
+                .expect("queue wait obeys startup budget")
+                .expect("blocked recovery remains readable");
+            assert!(status["last_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("startup retry budget exhausted")));
+            assert_eq!(
+                control,
+                Err(super::IssueMonitorControlQueueError::RecoveryBlocked)
+            );
             assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
             assert!(matches!(
                 crate::load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
@@ -16441,7 +16443,9 @@ exit 1
         crate::save_issue_monitor_prefs(
             &prefs_path,
             &crate::IssueMonitorPrefs {
+                enabled: true,
                 effect_authority_epoch: 7,
+                last_scan_at: Some("2000-01-01T00:00:00Z".to_string()),
                 ..crate::IssueMonitorPrefs::default()
             },
         )
@@ -16456,6 +16460,20 @@ exit 1
         );
 
         assert!(loaded.recovery_blocked);
+        let status = loaded.monitor.agent_status_at("2026-10-14T09:05:00Z");
+        assert_eq!(status.last_scan_at.as_deref(), Some("2000-01-01T00:00:00Z"));
+        let stall = status
+            .scan_stall
+            .expect("blocked recovery explains the scan stall");
+        assert!(stall.contains(&marker.display().to_string()), "{stall}");
+        assert!(
+            stall.contains("parse Issue Monitor authority fence failed"),
+            "{stall}"
+        );
+        assert_eq!(
+            status.stall_reason,
+            Some(crate::IssueMonitorStallReason::Unknown)
+        );
         assert_eq!(fs::read(&marker).expect("reload fence"), malformed);
         assert!(
             loaded.authority_lease.is_some(),
@@ -16559,7 +16577,7 @@ exit 1
     }
 
     #[test]
-    fn startup_marker_lock_timeout_is_recovery_blocked_until_retry() {
+    fn startup_marker_lock_timeout_remains_retryable_without_changing_authority() {
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         crate::save_issue_monitor_prefs(
@@ -16591,7 +16609,8 @@ exit 1
         };
 
         assert!(started.elapsed() < CONTENDED_BUDGET * 8);
-        assert!(blocked.recovery_blocked);
+        assert!(!blocked.recovery_blocked);
+        assert!(blocked.authority_retry_pending);
         assert!(marker.exists());
         assert_eq!(fs::read(&prefs_path).expect("reload locked prefs"), before);
         FileExt::unlock(&lock).expect("release prefs lock");
@@ -16609,6 +16628,147 @@ exit 1
             crate::load_issue_monitor_authority_fence(&prefs_path)
                 .expect("load replacement authority fence"),
             crate::IssueMonitorAuthorityFenceState::Active(_)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)] // isolate the worker's process-wide project store
+    async fn retained_v2_marker_retries_prefs_timeout_then_resumes_periodic_scans() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _worker_prefs_budget =
+            ScopedEnvVar::set("GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS", "60000");
+        let temp = TempDir::new().expect("tempdir");
+        let home = temp.path().join("home");
+        let _home = ScopedGwtHome::set(&home);
+        let _worker_home = ScopedEnvVar::set("HOME", &home);
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        init_git_repo(&repo);
+        // No origin: scan/effect failures stay local and cannot contact GitHub.
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            repo,
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let stale_scan = "2000-01-01T00:00:00Z";
+        let effect = crate::PendingIssueMonitorEffect {
+            effect_id: "remove-queue-label:5321:7".to_string(),
+            authority_epoch: 7,
+            attempt: 0,
+            state: crate::IssueMonitorEffectState::Attempting,
+            payload: crate::IssueMonitorEffectPayload::RemoveQueueLabel { issue_number: 5321 },
+        };
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                effect_authority_epoch: 7,
+                pending_effects: vec![effect.clone()],
+                last_scan_at: Some(stale_scan.to_string()),
+                last_scan_driver: Some(crate::IssueMonitorScanDriver {
+                    kind: crate::IssueMonitorScanDriverKind::Daemon,
+                    pid: i32::MAX as u32,
+                    at: stale_scan.to_string(),
+                }),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed interrupted monitor");
+        let stale_fence = crate::IssueMonitorAuthorityFence::current_process();
+        crate::persist_issue_monitor_authority_fence(&prefs_path, &stale_fence)
+            .expect("seed unlocked same-PID v2 marker");
+        let lease = crate::issue_monitor::acquire_issue_monitor_daemon_lease(&prefs_path)
+            .expect("reserve the production pre-bind lifetime lease");
+        let before = fs::read(&prefs_path).expect("seeded bytes");
+        let lock = issue_monitor_prefs_lock_for_test(&prefs_path);
+        let submitted = Arc::new(tokio::sync::Notify::new());
+        let hub = BroadcastHub::new();
+        let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+        let shutdown = Arc::new(DaemonShutdown::new());
+        let initial_budget = super::ScopedIssueMonitorPrefsTimeout::set(Duration::from_millis(250));
+        let worker = super::spawn_issue_monitor_worker_with_lease(
+            scope,
+            hub.clone(),
+            Arc::clone(&shutdown),
+            crate::IssueMonitorConfig {
+                poll_interval_secs: 1,
+                ..crate::IssueMonitorConfig::default()
+            },
+            super::ISSUE_MONITOR_SCAN_TIMEOUT,
+            super::IssueMonitorWorkerTestHooks {
+                startup_timeout: Some(HANG_GUARD),
+                startup_retry_submitted: Some(Arc::clone(&submitted)),
+                ..Default::default()
+            },
+            Some(Arc::new(lease)),
+        );
+        drop(initial_budget);
+        let retry_observed = tokio::time::timeout(HANG_GUARD, async {
+            tokio::select! {
+                _ = submitted.notified() => true,
+                _ = hub.wait_for_issue_monitor_status() => false,
+            }
+        })
+        .await
+        .unwrap_or(false);
+        let unchanged = fs::read(&prefs_path).expect("contended bytes") == before;
+        FileExt::unlock(&lock).expect("release prefs lock");
+        let first = if retry_observed {
+            recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+                status
+                    .last_scan_at
+                    .as_deref()
+                    .is_some_and(|at| at != stale_scan)
+                    && status.last_error.as_deref().is_some_and(|error| {
+                        error.contains("remote-resolution") && error.contains("launch_suppressed")
+                    })
+            })
+            .await
+        } else {
+            None
+        };
+        let next = if let Some(first) = &first {
+            recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+                status.last_scan_at != first.last_scan_at
+            })
+            .await
+        } else {
+            None
+        };
+        let recovered_fence =
+            crate::load_issue_monitor_authority_fence(&prefs_path).expect("recovered fence");
+        let recovered = crate::load_issue_monitor_prefs(&prefs_path).expect("recovered prefs");
+        shutdown.request();
+        tokio::time::timeout(HANG_GUARD, worker)
+            .await
+            .expect("bounded shutdown")
+            .expect("worker joins");
+
+        assert!(
+            retry_observed,
+            "a retained v2 marker must not make lock timeout terminal"
+        );
+        assert!(
+            unchanged,
+            "failed authority acquisition preserves the durable journal"
+        );
+        assert!(first.is_some(), "the recovered daemon resumes scanning");
+        assert!(
+            next.is_some(),
+            "a staged failure retries at the next poll interval"
+        );
+        assert_eq!(recovered.effect_authority_epoch, 8);
+        assert!(recovered.pending_effects.iter().any(|pending| {
+            pending.effect_id == effect.effect_id && pending.payload == effect.payload
+        }));
+        assert!(matches!(
+            recovered_fence,
+            crate::IssueMonitorAuthorityFenceState::Active(fence) if fence != stale_fence
         ));
     }
 
@@ -17532,7 +17692,10 @@ exit 1
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
-        let initial = crate::IssueMonitorPrefs::default();
+        let initial = crate::IssueMonitorPrefs {
+            max_active_agents: 9,
+            ..crate::IssueMonitorPrefs::default()
+        };
         crate::save_issue_monitor_prefs(&prefs_path, &initial).expect("seed prefs");
         let mut canonical =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), initial);
@@ -17550,7 +17713,7 @@ exit 1
         assert!(super::commit_issue_monitor_scan_if_current(
             &prefs_path,
             &mut canonical,
-            stale_scan,
+            stale_scan.clone(),
             epoch,
         ));
         assert_eq!(canonical.status_view().agent_capacity, latest);
@@ -17558,6 +17721,16 @@ exit 1
             canonical.process_held_issues(),
             &std::collections::BTreeSet::from([42])
         );
+        assert_eq!(canonical.effective_max_active_agents(), 3);
+        let incomplete = crate::agent_capacity::AgentCapacity::default();
+        canonical.set_agent_capacity(incomplete.clone());
+        assert!(super::commit_issue_monitor_scan_if_current(
+            &prefs_path,
+            &mut canonical,
+            stale_scan,
+            epoch,
+        ));
+        assert_eq!(canonical.status_view().agent_capacity, incomplete);
         assert_eq!(canonical.effective_max_active_agents(), 3);
         let persisted = std::fs::read_to_string(&prefs_path).expect("read prefs");
         assert!(!persisted.contains("latest machine measurement"));
@@ -20241,6 +20414,8 @@ exit 1
 
         let disk_profile = sample_issue_monitor_profile();
         let newer_disk = crate::IssueMonitorPrefs {
+            // Manual settings are disk-owned; Auto retains its accepted runtime limit.
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             legacy_git_launch_failure_migration_version:
                 crate::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
             launch_profile: Some(disk_profile.clone()),

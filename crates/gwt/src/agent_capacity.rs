@@ -305,7 +305,7 @@ fn fresh(observed_at: u64, expires_at: u64, now: u64) -> bool {
 }
 
 /// Read the shared census only. Missing, expired or uncertain observations
-/// produce a zero Auto cap; callers may offer an explicit manual override.
+/// remain incomplete; Monitor admission retains its previously accepted limit.
 pub fn project_capacity(
     project_root: &Path,
     monitored_session_ids: &BTreeSet<String>,
@@ -1447,6 +1447,15 @@ mod tests {
         let pending = project_capacity_at(&snapshot, temp.path(), &BTreeSet::new(), 0, 101);
         assert!(!pending.measurement_complete);
         assert!(pending.reason.contains("wait"), "{}", pending.reason);
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                max_active_agents: 7,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_agent_capacity(pending);
+        assert_eq!(monitor.effective_max_active_agents(), 7);
         snapshot.diagnostics.clear();
         let missing = project_capacity_at(&snapshot, temp.path(), &BTreeSet::new(), 0, 101);
         assert!(missing.reason.contains("build"), "{}", missing.reason);
@@ -1458,6 +1467,78 @@ mod tests {
                 .contains(&normalized(temp.path()).join("target").display().to_string()),
             "{}",
             missing.reason
+        );
+        monitor.set_agent_capacity(missing);
+        assert_eq!(monitor.effective_max_active_agents(), 7);
+    }
+
+    #[test]
+    fn agent_capacity_reductions_report_the_limiting_resource_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        use gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};
+        let scope = RuntimeScope::from_project_root(temp.path(), RuntimeTarget::Host).unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            "unavailable-capacity-test-transport".into(),
+            "fixture-only".into(),
+            env!("CARGO_PKG_VERSION").into(),
+        );
+        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        std::fs::create_dir_all(endpoint_path.parent().unwrap()).unwrap();
+        std::fs::write(&endpoint_path, serde_json::to_vec(&endpoint).unwrap()).unwrap();
+        let mut sample = snapshot(temp.path());
+        let now = epoch_seconds();
+        sample.observed_at = now;
+        sample.expires_at = now + SNAPSHOT_TTL_SECS;
+        for measurement in sample.targets.values_mut() {
+            measurement.observed_at = now;
+        }
+        for measurement in sample.disk_observations.values_mut() {
+            measurement.observed_at = now;
+        }
+        std::fs::create_dir_all(capacity_directory()).unwrap();
+        std::fs::write(snapshot_path(), serde_json::to_vec(&sample).unwrap()).unwrap();
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                max_active_agents: 9,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        // The daemon refreshes on a Tokio worker; diagnostics must not panic or
+        // close its authoritative control lane even when publication fails.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { monitor.refresh_agent_capacity(temp.path()) });
+        crate::error_report::flush_backend_errors();
+        assert_eq!(monitor.agent_status().max_active, 7);
+        assert_eq!(
+            monitor.agent_status().agent_capacity.limiting_constraint,
+            "cpu"
+        );
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row.message.contains("Auto capacity reduced"))
+            .expect("capacity reduction must be reported");
+        assert_eq!(row.context["previous_limit"], "9");
+        assert_eq!(row.context["effective_limit"], "7");
+        assert_eq!(row.context["limiting_constraint"], "cpu");
+        assert!(row.message.contains("P cores 8"));
+        assert!(row.message.contains("pm_reserve=1"));
+        assert_eq!(row.target.project_root.as_deref(), temp.path().to_str());
+        monitor.refresh_agent_capacity(temp.path());
+        assert_eq!(
+            gwt_core::error_ledger::list_since(None)
+                .unwrap()
+                .iter()
+                .filter(|row| row.message.contains("Auto capacity reduced"))
+                .count(),
+            1
         );
     }
 

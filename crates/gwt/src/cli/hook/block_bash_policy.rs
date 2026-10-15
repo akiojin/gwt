@@ -12,17 +12,18 @@ use super::{
 
 pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<HookOutput> {
     effect_classifier::observe_bash_command(command, worktree_root, worktree_root);
-    evaluate_bash_command_without_observation(command, worktree_root)
+    evaluate_bash_command_without_observation(command, worktree_root, worktree_root)
 }
 
 fn evaluate_bash_command_without_observation(
     command: &str,
     worktree_root: &Path,
+    command_cwd: &Path,
 ) -> Option<HookOutput> {
     let decision = block_git_branch_ops::evaluate_bash_command(command)
         .or_else(|| block_cd_command::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_file_ops::evaluate_bash_command(command, worktree_root))
-        .or_else(|| block_git_dir_override::evaluate_bash_command(command))
+        .or_else(|| block_git_dir_override::evaluate_bash_command_in(command, command_cwd))
         .or_else(|| evaluate_long_pr_ci_polling_sleep(command))
         .or_else(|| evaluate_github_workflow_cli(command))
         .or_else(|| evaluate_github_mutation_sinks(command));
@@ -69,16 +70,21 @@ pub(crate) fn evaluate_without_observation(
     event: &HookEvent,
     worktree_root: &Path,
 ) -> Result<HookOutput, HookError> {
-    if event.tool_name.as_deref() != Some("Bash") {
+    if !matches!(
+        event.tool_name.as_deref(),
+        Some("Bash" | "exec_command" | "functions.exec_command")
+    ) {
         return Ok(HookOutput::Silent);
     }
     let Some(command) = event.command() else {
         return Ok(HookOutput::Silent);
     };
-    Ok(
-        evaluate_bash_command_without_observation(command, worktree_root)
-            .unwrap_or(HookOutput::Silent),
+    Ok(evaluate_bash_command_without_observation(
+        command,
+        worktree_root,
+        &event.command_cwd(worktree_root),
     )
+    .unwrap_or(HookOutput::Silent))
 }
 
 pub fn handle() -> Result<HookOutput, HookError> {

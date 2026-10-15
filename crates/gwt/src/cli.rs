@@ -260,6 +260,8 @@ pub enum HookCommand {
 /// SPEC-1942 command model for update and internal updater operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateCommand {
+    /// Read the app-wide update preference and this project's update drain.
+    SettingsStatus { project_root: Option<PathBuf> },
     /// Update check-only mode.
     CheckOnly,
     /// Check and, with approval, download and apply.
@@ -294,6 +296,8 @@ pub enum WorkflowCommand {
 pub enum PaneCommand {
     /// `pane.list`.
     List,
+    /// Assign the authenticated producing Session's own stable Agent name.
+    Name { candidate: String },
     /// `pane.read`.
     Read { id: String, lines: usize },
     /// `pane.close` / `pane.stop`.
@@ -699,6 +703,9 @@ pub(crate) fn run_collect<E: CliEnv>(
             0
         }
         CliCommand::Diagnostics(inner) => diagnostics::run(env, inner, &mut out)?,
+        CliCommand::Update(UpdateCommand::SettingsStatus { project_root }) => {
+            update::run_settings_status(env, project_root.as_deref(), &mut out)?
+        }
         CliCommand::Update(UpdateCommand::CheckOnly) => {
             std::process::exit(update::run(update::UpdateRunMode::CheckOnly));
         }

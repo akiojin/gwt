@@ -29,6 +29,8 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    time::SystemTime,
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -44,6 +46,8 @@ use crate::{
 
 pub const ISSUE_VALIDATION_RECEIPT_FILE: &str = "issue-validation.json";
 const ISSUE_VALIDATION_RECEIPT_VERSION: u32 = 1;
+const SUMMARY_GENERATION_FILE: &str = ".summary-generation";
+const SUMMARY_CACHE_ROOT_LIMIT: usize = 8;
 
 /// Errors reported by cache operations.
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +99,68 @@ pub struct CacheEntry {
     /// cannot be parsed. `spec_body` is then empty and must not drive a
     /// section write (Issue #4392).
     pub spec_parse_error: Option<String>,
+}
+
+/// Issue fields needed by lists, without comment hydration or SPEC parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueSummary {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    pub state: IssueState,
+    pub updated_at: String,
+}
+
+impl From<&IssueSnapshot> for IssueSummary {
+    fn from(snapshot: &IssueSnapshot) -> Self {
+        Self {
+            number: snapshot.number.0,
+            title: snapshot.title.clone(),
+            body: snapshot.body.clone(),
+            labels: snapshot.labels.clone(),
+            state: snapshot.state,
+            updated_at: snapshot.updated_at.0.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SummaryFileStamp {
+    modified: SystemTime,
+    created: Option<SystemTime>,
+    length: u64,
+}
+
+impl SummaryFileStamp {
+    fn read(path: &Path) -> std::io::Result<Option<Self>> {
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(Some(Self {
+                modified: metadata.modified()?,
+                created: metadata.created().ok(),
+                length: metadata.len(),
+            })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SummaryCacheKey {
+    root: SummaryFileStamp,
+    generation: Option<SummaryFileStamp>,
+}
+
+struct SummaryCacheEntry {
+    root: PathBuf,
+    key: SummaryCacheKey,
+    summaries: Arc<Vec<IssueSummary>>,
+}
+
+fn summary_cache() -> &'static Mutex<Vec<SummaryCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Vec<SummaryCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// Proof that a complete Issue snapshot was validated against GitHub.
@@ -293,14 +359,68 @@ impl Cache {
         number: IssueNumber,
         mutation: impl FnOnce() -> Result<T, CacheError>,
     ) -> Result<T, CacheError> {
+        self.invalidate_summaries()?;
         self.invalidate_validation_receipt_unlocked(number)?;
+        let before = self.load_entry(number);
         let result = mutation();
         let final_invalidation = self.invalidate_validation_receipt_unlocked(number);
-        match (result, final_invalidation) {
+        let summary_invalidation = self.invalidate_summaries();
+        let after = self.load_entry(number);
+        let unchanged = match (&before, &after) {
+            (Some(before), Some(after)) => {
+                persisted_snapshots_match(&before.snapshot, &after.snapshot)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        // Publish after the mutation, including partial failures. Receipt and
+        // per-Issue generation renewal alone do not invalidate list readers.
+        if !unchanged || result.is_err() {
+            write_atomic(
+                &self.root.join("source-revision"),
+                Uuid::new_v4().to_string().as_bytes(),
+            )?;
+        }
+        match (result, final_invalidation.and(summary_invalidation)) {
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),
             (Ok(value), Ok(())) => Ok(value),
         }
+    }
+
+    /// O(1) source revision for list readers, shared across cache writers.
+    /// Legacy caches start at the empty revision until their first mutation.
+    pub fn revision(&self) -> Result<String, CacheError> {
+        match fs::read_to_string(self.root.join("source-revision")) {
+            Ok(revision) => Ok(revision),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn invalidate_summaries(&self) -> Result<(), CacheError> {
+        summary_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|entry| entry.root != self.root);
+        // Every canonical writer publishes a new disk stamp, including edits
+        // inside an existing issue directory that do not change root mtime.
+        write_atomic_with_durability(
+            &self.root.join(SUMMARY_GENERATION_FILE),
+            Uuid::new_v4().to_string().as_bytes(),
+            Durability::RenameOnly,
+        )?;
+        Ok(())
+    }
+
+    fn summary_cache_key(&self) -> Result<Option<SummaryCacheKey>, CacheError> {
+        let Some(root) = SummaryFileStamp::read(&self.root)? else {
+            return Ok(None);
+        };
+        Ok(Some(SummaryCacheKey {
+            root,
+            generation: SummaryFileStamp::read(&self.root.join(SUMMARY_GENERATION_FILE))?,
+        }))
     }
 
     /// Load a cache entry only when one stable, content-bound validation
@@ -563,8 +683,8 @@ impl Cache {
         if !dir.is_dir() {
             return None;
         }
-        let body = fs::read_to_string(dir.join("body.md")).ok()?;
-        let meta_bytes = fs::read(dir.join("meta.json")).ok()?;
+        let body = read_payload_string(&dir.join("body.md")).ok()?;
+        let meta_bytes = read_payload(&dir.join("meta.json")).ok()?;
         let meta: CacheMeta = serde_json::from_slice(&meta_bytes).ok()?;
 
         // Re-hydrate comment snapshots from the comments/ directory.
@@ -573,7 +693,7 @@ impl Cache {
         if comments_dir.is_dir() {
             for cid in &meta.comment_ids {
                 let path = comments_dir.join(format!("{cid}.md"));
-                if let Ok(body) = fs::read_to_string(&path) {
+                if let Ok(body) = read_payload_string(&path) {
                     comments.push(CommentSnapshot {
                         id: CommentId(*cid),
                         body,
@@ -666,6 +786,80 @@ impl Cache {
         Ok(out)
     }
 
+    /// List readable Issue fields without opening comments or parsing SPECs.
+    /// Unchanged roots reuse one shared, bounded cache across `Cache` instances;
+    /// warm reads inspect only root and writer-stamp metadata.
+    pub fn list_summaries(&self) -> Result<Arc<Vec<IssueSummary>>, CacheError> {
+        let Some(key) = self.summary_cache_key()? else {
+            return Ok(Arc::new(Vec::new()));
+        };
+        {
+            let cached = summary_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(entry) = cached
+                .iter()
+                .find(|entry| entry.root == self.root && entry.key == key)
+            {
+                return Ok(Arc::clone(&entry.summaries));
+            }
+        }
+
+        let mut summaries = Vec::new();
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir()
+                || entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u64>().ok())
+                    .is_none()
+            {
+                continue;
+            }
+            let directory = entry.path();
+            let Ok(body) = read_payload_string(&directory.join("body.md")) else {
+                continue;
+            };
+            let Ok(meta_bytes) = read_payload(&directory.join("meta.json")) else {
+                continue;
+            };
+            let Ok(meta) = serde_json::from_slice::<CacheMeta>(&meta_bytes) else {
+                continue;
+            };
+            summaries.push(IssueSummary {
+                number: meta.number,
+                title: meta.title,
+                body,
+                labels: meta.labels,
+                state: if meta.state == "closed" {
+                    IssueState::Closed
+                } else {
+                    IssueState::Open
+                },
+                updated_at: meta.updated_at,
+            });
+        }
+        let summaries = Arc::new(summaries);
+        // A refresh overlapping the scan must not make that scan reusable.
+        // Like list_entries, a single scan is not a multi-Issue transaction.
+        if self.summary_cache_key()?.as_ref() == Some(&key) {
+            let mut cached = summary_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cached.retain(|entry| entry.root != self.root);
+            if cached.len() >= SUMMARY_CACHE_ROOT_LIMIT {
+                cached.remove(0);
+            }
+            cached.push(SummaryCacheEntry {
+                root: self.root.clone(),
+                key,
+                summaries: Arc::clone(&summaries),
+            });
+        }
+        Ok(summaries)
+    }
+
     /// Read a single section by name. Returns `Ok(None)` if the section is
     /// absent from the cache.
     pub fn read_section(
@@ -721,6 +915,51 @@ impl Cache {
             Ok(())
         })
     }
+}
+
+fn read_payload(path: &Path) -> std::io::Result<Vec<u8>> {
+    let bytes = fs::read(path)?;
+    #[cfg(test)]
+    record_payload_read(path, bytes.len());
+    Ok(bytes)
+}
+
+fn read_payload_string(path: &Path) -> std::io::Result<String> {
+    let text = fs::read_to_string(path)?;
+    #[cfg(test)]
+    record_payload_read(path, text.len());
+    Ok(text)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+struct PayloadReads {
+    bytes: usize,
+    comment_bytes: usize,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PAYLOAD_READS: std::cell::Cell<PayloadReads> = const {
+        std::cell::Cell::new(PayloadReads { bytes: 0, comment_bytes: 0 })
+    };
+}
+
+#[cfg(test)]
+fn record_payload_read(path: &Path, bytes: usize) {
+    PAYLOAD_READS.with(|counter| {
+        let mut reads = counter.get();
+        reads.bytes += bytes;
+        if path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("comments")) {
+            reads.comment_bytes += bytes;
+        }
+        counter.set(reads);
+    });
+}
+
+#[cfg(test)]
+fn take_payload_reads() -> PayloadReads {
+    PAYLOAD_READS.with(std::cell::Cell::take)
 }
 
 fn persisted_snapshots_match(left: &IssueSnapshot, right: &IssueSnapshot) -> bool {
@@ -848,5 +1087,177 @@ fn section_filename(name: &SectionName) -> String {
         sanitized
     } else {
         format!("{sanitized}.md")
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+    use std::{sync::Arc, time::Instant};
+    use tempfile::TempDir;
+
+    fn fixture(root: &Path, number: u64, body: &str, comment: &str) {
+        let directory = root.join(number.to_string());
+        fs::create_dir_all(directory.join("comments")).unwrap();
+        fs::write(directory.join("body.md"), body).unwrap();
+        fs::write(directory.join("comments/1.md"), comment).unwrap();
+        fs::write(
+            directory.join("meta.json"),
+            serde_json::to_vec(&CacheMeta {
+                number,
+                title: format!("Issue {number}"),
+                labels: vec!["phase/ready".to_owned()],
+                state: "open".to_owned(),
+                updated_at: "2026-10-14T00:00:00Z".to_owned(),
+                comment_ids: vec![1],
+                generation: Some("fixture".to_owned()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn summaries_share_warm_cache_without_payload_or_comment_reads() {
+        let temp = TempDir::new().unwrap();
+        fixture(temp.path(), 1, "summary body", "large comment");
+        let cache = Cache::new(temp.path().to_path_buf());
+        let _ = take_payload_reads();
+        let cold = cache.list_summaries().unwrap();
+        let reads = take_payload_reads();
+        assert_eq!(cold[0].body, "summary body");
+        assert_eq!(reads.comment_bytes, 0);
+        assert!(reads.bytes > 0);
+
+        let warm = Cache::new(temp.path().to_path_buf())
+            .list_summaries()
+            .unwrap();
+        assert!(Arc::ptr_eq(&cold, &warm));
+        assert_eq!(take_payload_reads().bytes, 0);
+    }
+
+    #[test]
+    fn summaries_invalidate_for_every_canonical_writer_and_root_changes() {
+        let temp = TempDir::new().unwrap();
+        fixture(temp.path(), 1, "body", "comment");
+        let reader = Cache::new(temp.path().to_path_buf());
+        let writer = Cache::new(temp.path().to_path_buf());
+        let first = reader.list_summaries().unwrap();
+        writer
+            .apply_phase_change(IssueNumber(1), vec!["phase/verify".to_owned()])
+            .unwrap();
+        assert_eq!(reader.list_summaries().unwrap()[0].labels, ["phase/verify"]);
+
+        let mut snapshot = writer.load_entry(IssueNumber(1)).unwrap().snapshot;
+        snapshot.title = "snapshot write".to_owned();
+        writer.write_snapshot(&snapshot).unwrap();
+        assert_eq!(reader.list_summaries().unwrap()[0].title, snapshot.title);
+        let generation = writer.current_generation(IssueNumber(1)).unwrap();
+        snapshot.title = "conditional write".to_owned();
+        assert!(writer
+            .write_snapshot_if_generation(&snapshot, generation.as_ref())
+            .unwrap()
+            .is_some());
+        assert_eq!(reader.list_summaries().unwrap()[0].title, snapshot.title);
+        snapshot.title = "receipt write".to_owned();
+        writer.write_snapshot_with_receipt(&snapshot).unwrap();
+        let updated = reader.list_summaries().unwrap();
+        assert_eq!(updated[0].title, snapshot.title);
+        assert!(!Arc::ptr_eq(&first, &updated));
+
+        fixture(temp.path(), 2, "new issue", "comment");
+        assert_eq!(reader.list_summaries().unwrap().len(), 2);
+        fs::remove_dir_all(temp.path().join("2")).unwrap();
+        assert_eq!(reader.list_summaries().unwrap().len(), 1);
+
+        let other = TempDir::new().unwrap();
+        fixture(other.path(), 1, "other root", "comment");
+        assert_eq!(
+            Cache::new(other.path().to_path_buf())
+                .list_summaries()
+                .unwrap()[0]
+                .body,
+            "other root"
+        );
+        assert_eq!(reader.list_summaries().unwrap()[0].body, "body");
+    }
+
+    #[test]
+    fn summaries_skip_malformed_entries_and_absent_roots() {
+        let temp = TempDir::new().unwrap();
+        let cache = Cache::new(temp.path().join("absent"));
+        assert!(cache.list_summaries().unwrap().is_empty());
+        fixture(temp.path(), 1, "readable", "comment");
+        fixture(temp.path(), 2, "bad", "comment");
+        fs::write(temp.path().join("2/meta.json"), "broken").unwrap();
+        let summaries = Cache::new(temp.path().to_path_buf())
+            .list_summaries()
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].number, 1);
+    }
+
+    #[test]
+    fn summaries_observe_an_external_generation_stamp() {
+        let temp = TempDir::new().unwrap();
+        fixture(temp.path(), 1, "before external write", "comment");
+        let cache = Cache::new(temp.path().to_path_buf());
+        let before = cache.list_summaries().unwrap();
+
+        // An independent process cannot evict this process's memory cache.
+        // Publish its disk change directly, including the writer stamp.
+        fs::write(temp.path().join("1/body.md"), "after external write").unwrap();
+        write_atomic_with_durability(
+            &temp.path().join(SUMMARY_GENERATION_FILE),
+            Uuid::new_v4().to_string().as_bytes(),
+            Durability::RenameOnly,
+        )
+        .unwrap();
+        let after = cache.list_summaries().unwrap();
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert_eq!(after[0].body, "after external write");
+    }
+
+    #[test]
+    fn summaries_1500_issue_read_cost() {
+        let temp = TempDir::new().unwrap();
+        let body = "body content\n".repeat(160);
+        let comment = "comment content\n".repeat(1024);
+        for number in 1..=1500 {
+            fixture(temp.path(), number, &body, &comment);
+        }
+        let cache = Cache::new(temp.path().to_path_buf());
+        // Compare repeated reads on both sides, after the old path has also
+        // warmed the operating system's filesystem cache.
+        assert_eq!(cache.list_entries().unwrap().len(), 1500);
+        let _ = take_payload_reads();
+        let started = Instant::now();
+        let old = cache.list_entries().unwrap();
+        let before_time = started.elapsed();
+        let before_reads = take_payload_reads();
+        let started = Instant::now();
+        let cold = cache.list_summaries().unwrap();
+        let cold_time = started.elapsed();
+        let cold_reads = take_payload_reads();
+        let started = Instant::now();
+        let warm = cache.list_summaries().unwrap();
+        let warm_time = started.elapsed();
+        let warm_reads = take_payload_reads();
+        assert_eq!(old.len(), 1500);
+        assert_eq!(cold.len(), old.len());
+        assert!(Arc::ptr_eq(&cold, &warm));
+        assert_eq!(before_reads.comment_bytes, comment.len() * 1500);
+        assert_eq!(cold_reads.comment_bytes, 0);
+        assert!(cold_reads.bytes < before_reads.bytes);
+        assert_eq!(warm_reads.bytes, 0);
+        println!(
+            "1500 issues: before={}us/{}bytes, cold={}us/{}bytes, warm={}us/{}bytes",
+            before_time.as_micros(),
+            before_reads.bytes,
+            cold_time.as_micros(),
+            cold_reads.bytes,
+            warm_time.as_micros(),
+            warm_reads.bytes,
+        );
     }
 }

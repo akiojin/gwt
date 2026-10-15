@@ -69,6 +69,23 @@ where
     run_gh_in(label, None, args)
 }
 
+/// Diagnose a failed PR lookup only when GitHub confirms the same number is
+/// an Issue. An unavailable or malformed probe leaves the original error intact.
+pub fn number_is_issue_via_gh(repo_slug: &str, repo_path: &Path, number: u64) -> bool {
+    let endpoint = format!("repos/{repo_slug}/issues/{number}");
+    let Ok(output) = run_gh_in("gh api issue kind", Some(repo_path), ["api", &endpoint]) else {
+        return false;
+    };
+    if !output.success() {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&output.stdout) else {
+        return false;
+    };
+    value.get("number").and_then(serde_json::Value::as_u64) == Some(number)
+        && value.get("pull_request").is_none()
+}
+
 fn run_git_in<I, S>(label: &str, repo_path: &Path, args: I) -> io::Result<SpawnOutput>
 where
     I: IntoIterator<Item = S>,

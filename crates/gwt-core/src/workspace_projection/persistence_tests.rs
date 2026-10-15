@@ -5,6 +5,199 @@ use crate::paths::{gwt_repo_local_work_event_shard_path, gwt_repo_local_work_eve
 
 use super::*;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SyncCall {
+    File(PathBuf),
+    Directory(PathBuf),
+}
+
+struct TestSyncState {
+    skip: bool,
+    calls: Vec<SyncCall>,
+}
+
+thread_local! {
+    static TEST_SYNC_STATE: std::cell::RefCell<Option<TestSyncState>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Only individual non-durability tests may opt in; shared fixtures stay real.
+struct TestSyncPolicy {
+    previous: Option<TestSyncState>,
+    // A scope must be restored on the thread where it was installed.
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl TestSyncPolicy {
+    fn new(skip: bool) -> Self {
+        Self {
+            previous: TEST_SYNC_STATE.with(|state| {
+                state.replace(Some(TestSyncState {
+                    skip,
+                    calls: Vec::new(),
+                }))
+            }),
+            _thread: std::marker::PhantomData,
+        }
+    }
+
+    fn calls(&self) -> Vec<SyncCall> {
+        TEST_SYNC_STATE.with(|state| state.borrow().as_ref().unwrap().calls.clone())
+    }
+}
+
+impl Drop for TestSyncPolicy {
+    fn drop(&mut self) {
+        TEST_SYNC_STATE.with(|state| {
+            state.replace(self.previous.take());
+        });
+    }
+}
+
+pub(super) fn skip_test_sync(call: SyncCall) -> bool {
+    TEST_SYNC_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        state.calls.push(call);
+        state.skip
+    })
+}
+
+#[test]
+fn atomic_write_records_file_then_directory_sync_requests() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("current.json");
+    let policy = TestSyncPolicy::new(false);
+    write_atomic(&path, b"replacement").unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"replacement");
+    assert_eq!(
+        policy.calls(),
+        vec![
+            SyncCall::File(path),
+            SyncCall::Directory(temp.path().to_path_buf()),
+        ]
+    );
+}
+
+#[test]
+fn test_sync_policy_is_thread_local_and_restores_after_nested_panic() {
+    let call = SyncCall::Directory(PathBuf::from("scope-check"));
+    assert!(!skip_test_sync(call.clone()), "the default is real sync");
+    let real = TestSyncPolicy::new(false);
+    {
+        let _skip = TestSyncPolicy::new(true);
+        assert!(skip_test_sync(call.clone()));
+        let child_call = call.clone();
+        assert!(!std::thread::spawn(move || skip_test_sync(child_call))
+            .join()
+            .unwrap());
+    }
+    assert!(!skip_test_sync(call.clone()));
+    let panic = std::panic::catch_unwind(|| {
+        let _skip = TestSyncPolicy::new(true);
+        panic!("exercise scope restoration");
+    });
+    assert!(panic.is_err());
+    assert!(!skip_test_sync(call.clone()));
+    assert_eq!(real.calls(), vec![call.clone(), call.clone()]);
+    drop(real);
+    assert!(!skip_test_sync(call));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_sync_policy_skips_sync_without_skipping_writes_or_real_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("missing");
+    assert!(sync_directory(&missing).is_err());
+    {
+        let _skip = TestSyncPolicy::new(true);
+        assert!(sync_directory(&missing).is_ok());
+        let path = temp.path().join("current.json");
+        write_atomic(&path, b"written and renamed").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"written and renamed");
+        assert!(write_atomic(&path.join("invalid-parent"), b"error").is_err());
+    }
+    assert!(sync_directory(&missing).is_err());
+}
+
+#[test]
+fn external_commit_syncs_receipt_before_committed_markers_and_fold() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(temp.path());
+    let events = temp.path().join("events.jsonl");
+    let (mut transaction, _) = marker_path_contract_transaction(temp.path(), 3, events.clone());
+    transaction.external_commit = Some(ExternalWorkspaceCommit {
+        operation_id: "sync-order".to_string(),
+        phase: ExternalWorkspaceCommitPhase::Prepared,
+        reconciliation_work_items_path: None,
+    });
+    let receipt = external_workspace_commit_receipt_path(
+        &transaction.current_path,
+        &transaction.work_items_path,
+        "sync-order",
+    );
+    let coordinator = pending_workspace_state_transaction_coordinator_path(&transaction);
+    let mut markers = pending_workspace_state_transaction_paths(&transaction);
+    markers.sort_by_key(|path| coordinator.as_ref() != Some(path));
+    // Exclude directory creation from the publication sequence under test.
+    for path in markers
+        .iter()
+        .chain([&receipt, &transaction.current_path, &events])
+    {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+    }
+    let policy = TestSyncPolicy::new(false);
+    write_workspace_state_transaction_markers(&transaction, true).unwrap();
+    assert_eq!(
+        resolve_workspace_state_external_commit_at(
+            &transaction.current_path,
+            &transaction.work_items_path,
+            "sync-order",
+            ExternalWorkspaceCommitDecision::Commit,
+        )
+        .unwrap(),
+        ExternalWorkspaceCommitResolution::Committed
+    );
+    let calls = policy.calls();
+    let expected_files: Vec<_> = markers
+        .iter()
+        .cloned()
+        .chain([receipt])
+        .chain(markers.iter().cloned())
+        .chain([events, transaction.current_path.clone()])
+        .collect();
+    let publication: Vec<_> = expected_files
+        .iter()
+        .flat_map(|path| {
+            [
+                SyncCall::File(path.clone()),
+                SyncCall::Directory(path.parent().unwrap().to_path_buf()),
+            ]
+        })
+        .collect();
+    assert!(calls.starts_with(&publication), "{calls:?}");
+    let cleanup: HashSet<_> = markers
+        .iter()
+        .map(|path| path.parent().unwrap().to_path_buf())
+        .collect();
+    assert_eq!(calls.len(), publication.len() + cleanup.len());
+    assert_eq!(
+        calls[publication.len()..]
+            .iter()
+            .map(|call| match call {
+                SyncCall::Directory(path) => path.clone(),
+                SyncCall::File(path) => panic!("unexpected file sync: {}", path.display()),
+            })
+            .collect::<HashSet<_>>(),
+        cleanup
+    );
+}
+
 /// Compaction removes inline IDs without making their durable events unprojected.
 #[test]
 fn issue_5313_recovery_does_not_replay_compacted_local_history() {
@@ -434,6 +627,8 @@ fn issue_5335_rebuild_refuses_detachments_only_change_and_retries() {
 /// not require a separate workspace.ensure before the first update.
 #[test]
 fn launch_transaction_repairs_inactive_foreign_container_before_update() {
+    // Tests normal launch authority and container detachment, not crash recovery.
+    let _sync = TestSyncPolicy::new(true);
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().unwrap();
     let _home = ScopedHome::set(&temp.path().join("home"));
@@ -5633,6 +5828,8 @@ fn session_bound_work_authority_uniqueness_rejects_unresolvable_authoritative_ta
 
 #[test]
 fn session_bound_update_ignores_terminal_and_paused_foreign_container_history() {
+    // Tests update authority beside historical containers, not crash durability.
+    let _sync = TestSyncPolicy::new(true);
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
     let _home = ScopedHome::set(home.path());
@@ -5688,6 +5885,8 @@ fn session_bound_update_ignores_terminal_and_paused_foreign_container_history() 
 
 #[test]
 fn session_bound_terminalization_ignores_terminal_and_paused_foreign_container_history() {
+    // Tests terminal authority beside historical containers, not crash durability.
+    let _sync = TestSyncPolicy::new(true);
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
     let _home = ScopedHome::set(home.path());
@@ -5753,6 +5952,8 @@ fn session_bound_terminalization_ignores_terminal_and_paused_foreign_container_h
 
 #[test]
 fn session_bound_update_rejects_nonhistorical_or_current_paused_container_shadows() {
+    // Tests authority rejection and unchanged bytes, not crash durability.
+    let _sync = TestSyncPolicy::new(true);
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
     let _home = ScopedHome::set(home.path());
@@ -5800,6 +6001,8 @@ fn session_bound_update_rejects_nonhistorical_or_current_paused_container_shadow
 
 #[test]
 fn session_bound_terminalization_rejects_nonhistorical_or_current_paused_container_shadows() {
+    // Tests terminal authority rejection and unchanged ledgers, not crash durability.
+    let _sync = TestSyncPolicy::new(true);
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
     let _home = ScopedHome::set(home.path());
@@ -14517,6 +14720,8 @@ fn session_bound_board_origin_without_target_container_remains_board_only() {
 
 #[test]
 fn session_bound_board_invalid_origins_remain_board_only_with_byte_equivalent_work_state() {
+    // Tests invalid Board origin rejection and unchanged Work state, not replay.
+    let _sync = TestSyncPolicy::new(true);
     for (case, entry_index) in [("missing", 1), ("invalid", 2), ("foreign", 3), ("stale", 4)] {
         let temp = tempfile::tempdir().expect("tempdir");
         let fixture = session_bound_board_seed_fixture(temp.path());

@@ -25,6 +25,7 @@ from unittest import mock
 from pathlib import Path
 
 import chroma_index_runner as runner
+from tests.git_fixture import git_fixture_env
 
 RUNNER_PATH = Path(runner.__file__).resolve()
 
@@ -586,7 +587,7 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
         ):
             subprocess.run(
                 ["git", *args], cwd=self.project_root, check=True,
-                capture_output=True,
+                capture_output=True, env=git_fixture_env(),
             )
         pending = _write_pending_claimant(self.coordinator_root, "interactive-search")
 

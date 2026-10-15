@@ -2,7 +2,7 @@ import { surfaceForWindow } from "./surface-rail.js";
 
 // The grid owns presentation only. Sessions and terminal runtimes remain shared
 // with the existing window model; column changes never persist canvas geometry.
-export function createAgentsSurface({ document, windowCatalogModel, getWindows,
+export function createAgentsSurface({ document, windowCatalogModel, getWindows, windowDisplayTitle,
   isMounted = () => true, mountTerminal, mountPreview, onLayout,
   onFocus = () => {}, onPreviewFocus = onFocus }) {
   const element = document.createElement("section");
@@ -112,12 +112,13 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
   }
   function openTab(id) {
     const tile = tiles.get(id);
-    if (!tile) return;
+    if (!tile) return false;
     if (!tabs.has(id)) {
       addTab(id, tile.querySelector("h3").textContent);
     }
     select(id);
     tabs.get(id).focus();
+    return true;
   }
   function addTab(id, label) {
     const entry = document.createElement("div");
@@ -201,7 +202,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
         addTab(data.id, "");
         changed = true;
       }
-      const title = data.dynamic_title || data.title || data.id;
+      const title = windowDisplayTitle(data);
       const open = tile.querySelector(".agent-tile__open");
       tile.querySelector("h3").textContent = title;
       open.setAttribute("aria-label", `Open ${title} tab`);
@@ -222,7 +223,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows,
     if (changed) onLayout();
   }
   const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
-  return { element, sync, setPreviewHost,
+  return { element, sync, setPreviewHost, openTab,
     dispose() { unsubscribe(); setPreviewHost(null); },
     contains: (id) => tiles.has(id),
     isVisible: (id) => tiles.has(id) && !tiles.get(id).hidden,

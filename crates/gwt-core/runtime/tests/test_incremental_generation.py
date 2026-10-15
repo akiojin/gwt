@@ -26,6 +26,7 @@ from typing import Optional
 from unittest import mock
 
 import chroma_index_runner as runner
+from tests.git_fixture import git_fixture_env
 
 REPO_HASH = "abc1234567890def"
 SECOND_REPO_HASH = "fedcba0987654321"
@@ -180,26 +181,13 @@ class _IncrementalFixture(unittest.TestCase):
         return project
 
     def _run_git(self, *args: str) -> None:
-        git_env = os.environ.copy()
-        git_env["GIT_CONFIG_NOSYSTEM"] = "1"
-        git_env["GIT_CONFIG_GLOBAL"] = os.devnull
-        git_env["GIT_ATTR_NOSYSTEM"] = "1"
-        git_env.pop("GIT_CONFIG_PARAMETERS", None)
-        git_env.pop("GIT_CONFIG_SYSTEM", None)
-        for key in list(git_env):
-            if (
-                key == "GIT_CONFIG_COUNT"
-                or key.startswith("GIT_CONFIG_KEY_")
-                or key.startswith("GIT_CONFIG_VALUE_")
-            ):
-                git_env.pop(key)
         try:
             completed = subprocess.run(
                 ["git", *args],
                 check=False,
                 capture_output=True,
                 text=True,
-                env=git_env,
+                env=git_fixture_env(),
                 timeout=30,
             )
         except subprocess.TimeoutExpired as error:
@@ -590,6 +578,7 @@ class IncrementalGenerationTests(_IncrementalFixture):
             check=True,
             capture_output=True,
             text=True,
+            env=git_fixture_env(),
         )
         commit_oid = completed.stdout.strip()
         object_path = repo / ".git" / "objects" / commit_oid[:2] / commit_oid[2:]
