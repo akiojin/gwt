@@ -176,7 +176,8 @@ def _heavy_target_stem(repo_hash: str, scope: str, worktree_hash: Optional[str] 
 
 
 def _write_heavy_progress(
-    target: str, done: int, total: int, batch_size: int, batch_ms: int
+    target: str, done: int, total: int, batch_size: int, batch_ms: int,
+    *, model_revision: Optional[str] = None,
 ) -> None:
     """Publish batch progress next to the heavy ticket (Issue #4086 AC-4) so
     a refused verification claimant can estimate the remaining wait. Best
@@ -188,6 +189,12 @@ def _write_heavy_progress(
         "total": int(total),
         "batch_size": int(batch_size),
         "batch_ms": int(max(batch_ms, 0)),
+        # CAS hits do not load a model. Only the expected cached revision
+        # makes the current runner warm (Issue #5431).
+        "model_state": "warm" if (
+            _MODEL_CACHE is not None and _MODEL_CACHE_REVISION == model_revision
+        ) else "warming",
+        "model_load_ms": _MODEL_LOAD_MS,
         "updated_at_ms": int(time.time() * 1000),
     }
     try:
@@ -3472,6 +3479,12 @@ def _materialize_file_artifact_pair(
             # longer than a search can wait. Check priority after each
             # non-interruptible encode; keep batching for foreground work.
             checkpoint_batch = 1 if qos == "background" else FILE_INDEX_V2_VECTOR_BATCH
+            if heavy_target is not None:
+                _write_heavy_progress(
+                    heavy_target, progress_offset,
+                    progress_total if progress_total is not None else len(records),
+                    checkpoint_batch, 0, model_revision=FILE_INDEX_V2_MODEL_REVISION,
+                )
             for start in range(0, len(records), checkpoint_batch):
                 stop = min(start + checkpoint_batch, len(records))
                 batch_records = records[start:stop]
@@ -3491,6 +3504,7 @@ def _materialize_file_artifact_pair(
                         progress_total if progress_total is not None else len(records),
                         len(batch_records),
                         int((time.monotonic() - batch_started) * 1000),
+                        model_revision=FILE_INDEX_V2_MODEL_REVISION,
                     )
                 manifest_entries.extend(
                     _manifest_entry_with_vector(plan, vector)
@@ -5249,6 +5263,9 @@ def _index_files_full_with_staging(
 
             heavy_target = _heavy_target_stem(repo_hash, scope, worktree_hash)
             checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
+            _write_heavy_progress(
+                heavy_target, len(staged_ids), total, checkpoint_batch, 0,
+            )
             for start in range(0, len(pending_paths), checkpoint_batch):
                 batch_paths = pending_paths[start : start + checkpoint_batch]
                 batch_started = time.monotonic()
@@ -7835,6 +7852,9 @@ def _index_issues_v2_locked(
                     issue for issue in issues if str(issue.get("number", 0)) not in staged_ids
                 ]
                 checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
+                _write_heavy_progress(
+                    heavy_target, len(staged_ids), total, checkpoint_batch, 0,
+                )
                 for start in range(0, len(pending), checkpoint_batch):
                     if (db_path / "cancel-requested").exists():
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
