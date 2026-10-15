@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::Path,
 };
 
@@ -5896,21 +5896,92 @@ pub fn issue_monitor_launch_plan(issue: &IssueMonitorIssue) -> IssueMonitorLaunc
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static PREFS_IO_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(crate) fn prefs_io_counts_for_test() -> (usize, usize) {
+    PREFS_IO_COUNTS.get()
+}
+
+struct CachedIssueMonitorPrefs {
+    modified: std::time::SystemTime,
+    size: u64,
+    prefs: IssueMonitorPrefs,
+}
+
+fn issue_monitor_prefs_cache(
+) -> &'static std::sync::Mutex<BTreeMap<std::path::PathBuf, CachedIssueMonitorPrefs>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<BTreeMap<std::path::PathBuf, CachedIssueMonitorPrefs>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
 fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPrefs> {
-    if !path.exists() {
-        return Ok(IssueMonitorPrefs::default());
+    let key = std::path::absolute(path)?;
+    // Serialize misses as well as hits so concurrent readers parse a generation once.
+    // The cross-process sibling writer lock still owns every mutation transaction.
+    let mut cache = issue_monitor_prefs_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut file = match fs::File::open(&key) {
+        Ok(file) => file,
+        Err(error) => {
+            cache.remove(&key);
+            return if error.kind() == io::ErrorKind::NotFound {
+                Ok(IssueMonitorPrefs::default())
+            } else {
+                Err(error)
+            };
+        }
+    };
+    // Stamp the opened file, not a path that an atomic rename could replace
+    // between stat and read. Never retain an old value on any read/decode error.
+    let previous = cache.remove(&key);
+    let metadata = file.metadata()?;
+    let modified = metadata.modified()?;
+    let size = metadata.len();
+    if let Some(previous) = previous {
+        if previous.modified == modified && previous.size == size {
+            let prefs = previous.prefs.clone();
+            cache.insert(key, previous);
+            return Ok(prefs);
+        }
     }
-    let content = fs::read_to_string(path)?;
-    crate::update_settings::decode_project_prefs(&content).map_err(|error| {
-        let kind = match error.classify() {
-            serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
-                io::ErrorKind::InvalidData
-            }
-            serde_json::error::Category::Data => io::ErrorKind::InvalidInput,
-            serde_json::error::Category::Io => io::ErrorKind::Other,
-        };
-        io::Error::new(kind, error)
-    })
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    #[cfg(test)]
+    PREFS_IO_COUNTS.set((PREFS_IO_COUNTS.get().0 + 1, PREFS_IO_COUNTS.get().1));
+    let prefs: IssueMonitorPrefs =
+        crate::update_settings::decode_project_prefs(&content).map_err(|error| {
+            let kind = match error.classify() {
+                serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+                    io::ErrorKind::InvalidData
+                }
+                serde_json::error::Category::Data => io::ErrorKind::InvalidInput,
+                serde_json::error::Category::Io => io::ErrorKind::Other,
+            };
+            io::Error::new(kind, error)
+        })?;
+    let after = file.metadata()?;
+    if after.len() == size && after.modified()? == modified {
+        // Bound retention when a long-running GUI opens many repositories.
+        if cache.len() >= 32 {
+            cache.pop_first();
+        }
+        cache.insert(
+            key,
+            CachedIssueMonitorPrefs {
+                modified,
+                size,
+                prefs: prefs.clone(),
+            },
+        );
+    }
+    Ok(prefs)
 }
 
 /// Per-process-unique scratch path for the atomic prefs write, placed in the
@@ -6015,7 +6086,16 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
     crate::update_settings::migrate_before_project_save(path, false)?;
-    durable_atomic_write(path, content.as_bytes())?;
+    let committed = durable_atomic_write(path, content.as_bytes());
+    // Invalidate even if parent sync failed after the rename became visible.
+    // Local writers cannot rely on metadata granularity to distinguish a save.
+    issue_monitor_prefs_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&std::path::absolute(path)?);
+    committed?;
+    #[cfg(test)]
+    PREFS_IO_COUNTS.set((PREFS_IO_COUNTS.get().0, PREFS_IO_COUNTS.get().1 + 1));
     // Issue #3883 AC-2: keep the generation this commit just made readable from
     // somewhere the canonical file's own corruption cannot reach. The recovery
     // below needs a floor, and without one it resets to `Default` — losing
@@ -36135,6 +36215,64 @@ mod tests {
             original,
             "a refused/no-op transaction must not rewrite or drop unknown fields"
         );
+    }
+
+    #[test]
+    fn prefs_cache_reuses_snapshots_and_invalidates_on_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issue-monitor.json");
+        let mut prefs = IssueMonitorPrefs::default();
+        fs::write(&path, serde_json::to_vec(&prefs).unwrap()).unwrap();
+        let before = prefs_io_counts_for_test().0;
+        let mut copy = load_issue_monitor_prefs(&path).unwrap();
+        copy.merged_issues.push(42);
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+        assert_eq!(
+            prefs_io_counts_for_test().0 - before,
+            1,
+            "one parse per generation"
+        );
+
+        // Change only mtime, then only size: neither invalidation may depend on sleeps.
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let stamp =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        file.set_times(fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+        assert_eq!(prefs_io_counts_for_test().0 - before, 2);
+        prefs.merged_issues.push(99);
+        fs::write(&path, serde_json::to_vec(&prefs).unwrap()).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+        assert_eq!(prefs_io_counts_for_test().0 - before, 3);
+        drop(file);
+
+        // Local writers and lock-held mutations must observe the newest generation.
+        prefs.enabled = !prefs.enabled;
+        save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+        let (latest, ()) = try_mutate_issue_monitor_prefs(&path, |latest| {
+            assert_eq!(*latest, prefs);
+            latest.merged_issues.push(100);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), latest);
+
+        fs::write(&path, b"{broken").unwrap();
+        assert_eq!(
+            load_issue_monitor_prefs(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            load_issue_monitor_prefs(&path).unwrap(),
+            IssueMonitorPrefs::default()
+        );
+        fs::write(&path, serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
     }
 
     #[test]
