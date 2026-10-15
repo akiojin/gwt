@@ -17,6 +17,7 @@ const CHECK_HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
 const REPO_ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? "";
 const GWTD = process.env.GWT_PLAYWRIGHT_GWTD ?? "";
 const PROJECT_HASH = process.env.GWT_PLAYWRIGHT_PROJECT_HASH ?? "";
+const PM_SESSION_ID = randomUUID();
 
 function fixtureApproval(enabled: boolean) {
   return {
@@ -41,6 +42,7 @@ function command(operation: string, params: object = {}) {
   for (const key of Object.keys(env)) {
     if (key.startsWith("GWT_")) delete env[key];
   }
+  env.GWT_SESSION_ID = PM_SESSION_ID;
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
   const reply = JSON.parse(execFileSync(GWTD, [], {
@@ -84,6 +86,8 @@ test.describe("Issue #4249 PM update settings", () => {
         .enabled).toBe(false);
 
       const storePath = join(state, "pm-authorizations.json");
+      const pmPath = join(state, "pm.json");
+      const previousPm = await readFile(pmPath);
       const previous = await readFile(storePath).catch(error => {
         if (error.code === "ENOENT") return null;
         throw error;
@@ -109,6 +113,13 @@ test.describe("Issue #4249 PM update settings", () => {
           enableTestBridge: true, suppressUpdateApplyStart: true,
         });
         await openLiveGwtProject(page, REPO_ROOT);
+        // Test-only PM registration, never the parent agent's identity.
+        await writeFile(pmPath, JSON.stringify({
+          ...JSON.parse(previousPm.toString("utf8")),
+          registration: {
+            session_id: PM_SESSION_ID, agent_id: "codex", worktree_path: REPO_ROOT,
+          },
+        }));
         await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
         await setPreference(true, enable.id);
         await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", {
@@ -136,6 +147,7 @@ test.describe("Issue #4249 PM update settings", () => {
         } finally {
           if (previous) await writeFile(storePath, previous);
           else await rm(storePath, { force: true });
+          await writeFile(pmPath, previousPm);
         }
       }
       expect(errors, "console and page errors while reloading update settings").toEqual([]);
