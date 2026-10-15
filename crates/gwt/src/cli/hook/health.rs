@@ -605,6 +605,33 @@ fn cached_surface_audit(
     audit
 }
 
+/// File inputs for the Work projection's hook health snapshot. Runtime state
+/// and the error ledger are fingerprinted separately by the projection.
+pub fn managed_hook_health_dependency_paths(worktree: &Path) -> Vec<PathBuf> {
+    let mut paths = watched_surface_paths(worktree);
+    paths.extend([
+        worktree.join(SELF_HEALED_MARKER),
+        gwt_core::paths::gwt_work_notes_discussions_path(worktree),
+        worktree.join(crate::discussion_resume::CANONICAL_DISCUSSIONS_DISPLAY_PATH),
+        worktree.join(crate::discussion_resume::DISCUSSION_RELATIVE_PATH),
+    ]);
+    let input = ManagedHookHealthInput::new(worktree);
+    let key = SurfaceAuditKey {
+        worktree: input.worktree_root,
+        expected_hook_bin: input.expected_hook_bin,
+    };
+    if let Some(cache) = SURFACE_AUDITS.get() {
+        if let Some(cached) = cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            paths.extend(cached.dependencies.iter().cloned());
+        }
+    }
+    paths
+}
+
 /// Every path whose presence or content decides the surface audit.
 fn watched_surface_paths(worktree: &Path) -> Vec<PathBuf> {
     let runtime = crate::pm_registry::pm_runtime_dir_for_pm_worktree(worktree);

@@ -30,7 +30,7 @@ pub const REGISTRY_SESSION_CAP: usize = 8;
 /// Group this project's sessions by canonical branch identity, newest first
 /// (`last_activity_at` descending, id ascending as a deterministic tiebreak).
 pub fn branch_session_registry<'a>(
-    sessions: &'a [gwt_agent::Session],
+    sessions: impl IntoIterator<Item = &'a gwt_agent::Session>,
     project_repo_hash: Option<&str>,
 ) -> HashMap<String, Vec<&'a gwt_agent::Session>> {
     let Some(project_repo_hash) = project_repo_hash else {
@@ -121,7 +121,7 @@ mod tests {
             session("s-no-hash", "develop", None, 50),
         ];
 
-        let registry = branch_session_registry(&sessions, Some("hash-a"));
+        let registry = branch_session_registry(sessions.iter(), Some("hash-a"));
 
         let develop = registry.get("develop").expect("develop group");
         let ids: Vec<&str> = develop.iter().map(|s| s.id.as_str()).collect();

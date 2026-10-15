@@ -11416,20 +11416,10 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.handle_daemon_runtime_approval_wait_state(&id, waiting));
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionChanged { project_root }) => {
-                // `begin` takes `&mut` state, so this cannot become a match
-                // guard; bind it first to keep `collapsible_match` quiet.
-                let started = active_work_refresh_queue.begin(&project_root);
-                if started {
-                    match app.active_work_projection_refresh_job(&project_root) {
-                        Some(job) => spawn_active_work_projection_refresh(
-                            runtime.handle(),
-                            &proxy,
-                            job,
-                        ),
-                        // No open tab owns the project — nothing to rebuild.
-                        None => drop(active_work_refresh_queue.finish(&project_root)),
-                    }
-                }
+                // RuntimeHook already schedules the same project. Use its
+                // memoized latest-wins broker instead of a second worker/GUI
+                // clone pipeline for this notification (Issue #5404).
+                clients.dispatch(app.refresh_active_work_projection_for_project_root(&project_root));
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionRefreshed {
                 project_root,
