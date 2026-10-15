@@ -117,7 +117,23 @@ HOOK_DOCTOR_ENVELOPE="$(
     '{schema_version:1,operation:"hook.doctor",params:{repair:true,expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
     | env -u GWT_BIN_PATH GWT_HOOK_BIN="$CHECK_HOOK_BIN" "$CHECKOUT_GWTD"
 )"
-HOOK_DOCTOR_HEALTH_JSON="$(printf '%s' "$HOOK_DOCTOR_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson | .health')"
+# Issue #5270: the shared root can retain an older managed-hook identity
+# after repair. Apply the diagnostic's canonical recovery, limited to verified
+# gwt-managed commands, then require the full health audit to pass.
+printf '%s' "$HOOK_DOCTOR_ENVELOPE" | jq -e 'select(.ok == true)' >/dev/null
+HOOK_TRUST_ENVELOPE="$(
+  jq -n --arg root "$REPO_ROOT" --arg config "$HOME/.codex/config.toml" \
+    '{schema_version:1,operation:"hook.register_codex_managed_hook_trust",params:{project_root:$root,codex_config:$config,codex_hook_discovery:"both"}}' \
+    | env -u GWT_BIN_PATH GWT_HOOK_BIN="$CHECK_HOOK_BIN" "$CHECKOUT_GWTD"
+)"
+printf '%s' "$HOOK_TRUST_ENVELOPE" | jq -e 'select(.ok == true)' >/dev/null
+HOOK_RECOVERY_ENVELOPE="$(
+  jq -n --arg expected_hook_bin "$CHECK_HOOK_BIN" \
+    --arg runtime_state_path "$CHECK_HOME/.gwt/browser-check-missing-runtime-state.json" \
+    '{schema_version:1,operation:"hook.health",params:{expected_hook_bin:$expected_hook_bin,runtime_state_path:$runtime_state_path}}' \
+    | env -u GWT_BIN_PATH "$CHECKOUT_GWTD"
+)"
+HOOK_DOCTOR_HEALTH_JSON="$(printf '%s' "$HOOK_RECOVERY_ENVELOPE" | jq -er 'select(.ok == true) | .output | fromjson')"
 printf '%s' "$HOOK_DOCTOR_HEALTH_JSON" | assert_hook_health
 # browser-check-hook-repair-end
 
