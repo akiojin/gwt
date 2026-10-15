@@ -36,6 +36,7 @@ test.describe('Issue #5538 dispatch measurement (isolated live checkout)', () =>
     watchErrors(page);
     try {
       expect(projects).toHaveLength(FLEET ? 8 : 1);
+      await ownedProcesses(fixture.gui_pid);
       await gotoLiveGwt(page, BASE, { enableTestBridge: true, projectKey: projects[0].project_key });
       await retainWorkspaceState(page);
       await clearLiveLaunchWizard(page);
@@ -236,6 +237,11 @@ async function ownedProcesses(guiPid: number): Promise<ProcessIdentity[]> {
   expect(Number.isInteger(guiPid) && guiPid > 0).toBe(true);
   const command = `Get-CimInstance Win32_Process | Where-Object {$_.CreationDate} | Select-Object @{n='pid';e={$_.ProcessId}},@{n='parent_pid';e={$_.ParentProcessId}},@{n='name';e={$_.Name}},@{n='started_at';e={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress -AsArray`;
   const all: ProcessIdentity[] = JSON.parse(execFileSync('pwsh', ['-NoProfile', '-Command', command], { encoding: 'utf8', timeout: 30_000 }));
+  const fixture = JSON.parse(await readFile(join(HOME, 'fixture.json'), 'utf8'));
+  const root = all.find(process => process.pid === guiPid);
+  expect(guiPid).toBe(fixture.gui_pid);
+  expect(root?.name.toLowerCase(), 'owned GUI still exists before recording descendants').toBe('gwt.exe');
+  expect(Date.parse(root!.started_at), 'GUI PID must retain its owned creation time').toBe(Date.parse(fixture.gui_started_at));
   const descendants = new Set<number>([guiPid]);
   for (let changed = true; changed;) {
     changed = false;
