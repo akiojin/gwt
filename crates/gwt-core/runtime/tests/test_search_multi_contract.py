@@ -589,6 +589,13 @@ class SearchMultiContractTests(unittest.TestCase):
             self.assertTrue(payload.get("ok"), payload)
             self.assertEqual(payload.get("model_load_ms"), 2500, payload)
             self.assertEqual(warm.get("model_load_ms"), 0, warm)
+            for measured in (payload, warm):
+                phases = measured["timings_ms"]
+                self.assertEqual(set(phases), {
+                    "index_read", "model_load", "query_encode", "query", "assemble",
+                })
+                self.assertEqual(phases["model_load"], measured["model_load_ms"])
+                self.assertTrue(all(value >= 0 for value in phases.values()), phases)
 
     def test_search_multi_dispatch_forwards_explicit_file_index_protocol(self):
         args = argparse.Namespace(
@@ -1195,11 +1202,13 @@ class SearchWorkerTests(unittest.TestCase):
                                   encoding="utf-8")
                 invoke("--action", "index-memory")
                 warm_seconds = []
+                warm_timings_ms = []
                 for query in ("beta update", "published memory", "persistent model"):
                     started = time.monotonic()
                     second = invoke("--action", "search-multi", "--scopes", "memory",
                                     "--query", query)
                     warm_seconds.append(time.monotonic() - started)
+                    warm_timings_ms.append(second.get("timings_ms"))
                     self.assertEqual(second["worker_pid"], worker_pid)
                     self.assertEqual(second["model_load_ms"], 0)
                     self.assertIn("beta update", json.dumps(second))
@@ -1209,6 +1218,8 @@ class SearchWorkerTests(unittest.TestCase):
                                       "cold_seconds": cold_seconds,
                                       "cold_model_load_ms": first["model_load_ms"],
                                       "warm_seconds": warm_seconds,
+                                      "cold_timings_ms": first.get("timings_ms"),
+                                      "warm_timings_ms": warm_timings_ms,
                                       "warm_model_load_ms": second["model_load_ms"]}), flush=True)
                     self.assertGreater(first["model_load_ms"], 0)
                     self.assertLessEqual(max(warm_seconds), 2.0)

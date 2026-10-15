@@ -1135,10 +1135,27 @@ pub fn classify_exact_session_runtime(
             }
             continue;
         }
-        let Some(runtime_incarnation) = runtime.runtime_incarnation.filter(|value| *value > 0)
+        let Some((child_pid, child_started_at)) = runtime
+            .child_pid
+            .zip(runtime.child_started_at)
+            .filter(|(pid, started_at)| *pid > 0 && *started_at > 0)
         else {
             if host_alive {
                 saw_unknown = true;
+            } else {
+                saw_dead_host = true;
+            }
+            continue;
+        };
+        if crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at) {
+            return Ok(ExactSessionRuntimeDisposition::Live);
+        }
+        // Issue #5535: the child identity proves runtime absence even when
+        // the sidecar cannot supply a unique successor-fencing proof.
+        let Some(runtime_incarnation) = runtime.runtime_incarnation.filter(|value| *value > 0)
+        else {
+            if host_alive {
+                saw_exited_child = true;
             } else {
                 saw_dead_host = true;
             }
@@ -1152,49 +1169,15 @@ pub fn classify_exact_session_runtime(
             runtime.status,
             gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
         );
-        if runtime_is_terminal {
-            match (runtime.child_pid, runtime.child_started_at) {
-                (Some(child_pid), Some(child_started_at))
-                    if child_pid > 0 && child_started_at > 0 =>
-                {
-                    if crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at)
-                    {
-                        return Ok(ExactSessionRuntimeDisposition::Live);
-                    }
-                }
-                _ => {
-                    if host_alive {
-                        saw_unknown = true;
-                    } else {
-                        saw_dead_host = true;
-                    }
-                    continue;
-                }
-            }
-        } else {
+        if !runtime_is_terminal {
             let Some(host_started_at) = runtime.host_started_at.filter(|value| *value > 0) else {
                 if host_alive {
-                    saw_unknown = true;
+                    saw_exited_child = true;
                 } else {
                     saw_dead_host = true;
                 }
                 continue;
             };
-            let Some((child_pid, child_started_at)) = runtime
-                .child_pid
-                .zip(runtime.child_started_at)
-                .filter(|(pid, started_at)| *pid > 0 && *started_at > 0)
-            else {
-                if host_alive {
-                    saw_unknown = true;
-                } else {
-                    saw_dead_host = true;
-                }
-                continue;
-            };
-            if crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at) {
-                return Ok(ExactSessionRuntimeDisposition::Live);
-            }
             if host_alive {
                 // Issue #4131: one GUI Host owns many independent PTYs. Its
                 // survival says nothing about this exact child's survival.
@@ -1242,12 +1225,11 @@ pub fn classify_exact_session_runtime(
     }
     if conflicting_proof || (terminal.is_some() && defunct.is_some()) {
         // Issue #3934: more than one exact record cannot name the single
-        // incarnation a successor would have to fence against. When every Host
-        // that wrote one is gone, the conclusion about the runtime still holds
-        // even though the proof does not, and the durable holder state decides
-        // from there. A reachable Host anywhere in the set stays ambiguous.
+        // incarnation a successor would have to fence against. Every exact
+        // child was checked above, so proof ambiguity does not erase runtime
+        // absence while a shared GUI Host survives (Issue #5535).
         return Ok(if saw_reachable_proof {
-            ExactSessionRuntimeDisposition::Unknown
+            ExactSessionRuntimeDisposition::ChildExited
         } else {
             ExactSessionRuntimeDisposition::HostDead
         });
@@ -2055,6 +2037,9 @@ pub fn reap_startup_defunct_active_generation(
             {
                 return Ok(StartupActiveGenerationReapOutcome::Unchanged);
             }
+            super::verification_record::archive_untracked_work_events_for_recovery(
+                &context.worktree,
+            )?;
             let recorded_at = Utc::now();
             record.status = ExecutionControlStatus::Blocked;
             record.blocked_reason = Some(reason.to_string());
@@ -2431,6 +2416,7 @@ fn release_launch_generation(
                 detail,
             });
         }
+        super::verification_record::archive_untracked_work_events_for_recovery(&context.worktree)?;
         let operation_id = launch_release_operation_id(
             authority,
             &current.identity.generation_id,
@@ -3345,10 +3331,11 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
                     "The holder is live. Continue work in that session instead of launching again."
                         .to_string();
             } else {
-                diagnosis.recommended_recovery = "execution.continue".to_string();
-                diagnosis.recommended_recovery_reason =
-                    "The holder cannot be proven dead, so the generation is held fail-closed. Continue work from the holding session, or stop it so the reaper can release it."
-                        .to_string();
+                diagnosis.recommended_recovery = "issue.monitor.stop".to_string();
+                diagnosis.recommended_recovery_reason = format!(
+                    "The holder cannot be proven dead, so automatic reaping stays fail-closed. The PM can revoke this launch with issue.monitor.stop params {{\"number\":{},\"reason\":\"release stranded execution\"}}. If its pane remains, close it with pane.close before requeueing the Issue.",
+                    owner.number,
+                );
             }
         }
     }
@@ -20620,11 +20607,10 @@ mod tests {
 
     /// Issue #3934: two Hosts that both recorded a terminal exit cannot name
     /// the single incarnation a successor would fence against, so the proof is
-    /// unusable. The conclusion is not: if both of those Hosts are gone,
-    /// nothing is running the holder. A reachable Host anywhere in the set
-    /// keeps the reading ambiguous.
+    /// unusable. The runtime conclusion remains decisive: every exact child
+    /// is absent, including when one of the shared GUI Hosts remains alive.
     #[test]
-    fn conflicting_terminal_proofs_are_host_dead_only_while_no_host_is_reachable() {
+    fn issue_5535_conflicting_terminal_proofs_still_prove_exited_children() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -20685,8 +20671,51 @@ mod tests {
 
         assert_eq!(
             classify_exact_session_runtime(&sessions_dir, &identity).unwrap(),
-            ExactSessionRuntimeDisposition::Unknown,
-            "a reachable Host in the set keeps the conflicting proof ambiguous"
+            ExactSessionRuntimeDisposition::ChildExited,
+            "conflicting terminal proofs cannot hide the absence of every exact child"
+        );
+    }
+
+    #[test]
+    fn issue_5535_unknown_holder_names_the_pm_stop_recovery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 5535,
+        };
+        let session_id = "unknown-stopped-holder";
+        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+            worktree.path(),
+            owner,
+            session_id,
+            gwt_agent::AgentStatus::Stopped,
+        );
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, session_id);
+        fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        fs::write(&runtime_path, b"{malformed runtime").unwrap();
+
+        let diagnosis = diagnose_owner(worktree.path(), owner);
+        assert_eq!(diagnosis.holder_runtime.as_deref(), Some("unknown"));
+        assert!(!diagnosis.reclaimable);
+        assert_eq!(diagnosis.recommended_recovery, "issue.monitor.stop");
+        assert!(diagnosis
+            .recommended_recovery_reason
+            .contains("\"number\":5535"));
+        assert!(diagnosis.recommended_recovery_reason.contains("\"reason\""));
+        assert_eq!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Unchanged,
+            "a recovery instruction does not authorize evidence-based reaping"
         );
     }
 

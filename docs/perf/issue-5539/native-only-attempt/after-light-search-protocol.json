@@ -1,0 +1,521 @@
+{
+  "phase": "ui",
+  "sent": [
+    {
+      "kind": "search_project_index",
+      "request_id": 553901,
+      "id": "search-route-5539::index-1",
+      "at_ms": 7118.8947,
+      "phase": "warmup"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553902,
+      "id": "search-route-5539::index-1",
+      "at_ms": 14514.0256,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553903,
+      "id": "search-route-5539::index-1",
+      "at_ms": 15668.4199,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553904,
+      "id": "search-route-5539::index-1",
+      "at_ms": 18819.5441,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553905,
+      "id": "search-route-5539::index-1",
+      "at_ms": 20286.144,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553906,
+      "id": "search-route-5539::index-1",
+      "at_ms": 20967.3457,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553907,
+      "id": "search-route-5539::index-1",
+      "at_ms": 21903.7585,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553908,
+      "id": "search-route-5539::index-1",
+      "at_ms": 22510.531,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553909,
+      "id": "search-route-5539::index-1",
+      "at_ms": 23021.7873,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553910,
+      "id": "search-route-5539::index-1",
+      "at_ms": 23580.6714,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553911,
+      "id": "search-route-5539::index-1",
+      "at_ms": 24334.684,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553912,
+      "id": "search-route-5539::index-1",
+      "at_ms": 24985.7973,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553913,
+      "id": "search-route-5539::index-1",
+      "at_ms": 25666.3857,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553914,
+      "id": "search-route-5539::index-1",
+      "at_ms": 26311.8708,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553915,
+      "id": "search-route-5539::index-1",
+      "at_ms": 26895.454,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553916,
+      "id": "search-route-5539::index-1",
+      "at_ms": 28503.1223,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553917,
+      "id": "search-route-5539::index-1",
+      "at_ms": 29021.081,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553918,
+      "id": "search-route-5539::index-1",
+      "at_ms": 30026.7671,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553919,
+      "id": "search-route-5539::index-1",
+      "at_ms": 31171.6116,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553920,
+      "id": "search-route-5539::index-1",
+      "at_ms": 32574.2445,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553921,
+      "id": "search-route-5539::index-1",
+      "at_ms": 34281.0918,
+      "phase": "sequential"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553922,
+      "id": "search-route-5539::index-1",
+      "at_ms": 43839.5104,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553923,
+      "id": "search-route-5539::index-1",
+      "at_ms": 43839.5328,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553924,
+      "id": "search-route-5539::index-1",
+      "at_ms": 43840.2627,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553925,
+      "id": "search-route-5539::index-1",
+      "at_ms": 43840.2938,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553926,
+      "id": "search-route-5539::index-1",
+      "at_ms": 43840.3022,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553927,
+      "id": "search-route-5539::index-1",
+      "at_ms": 43840.5844,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553928,
+      "id": "search-route-5539::index-1",
+      "at_ms": 43841.3302,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 553929,
+      "id": "search-route-5539::index-1",
+      "at_ms": 43841.3652,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "get_system_settings",
+      "at_ms": 43842.7917,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "list_custom_agent_presets",
+      "at_ms": 43842.804,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "search_project_index",
+      "request_id": 4,
+      "id": "search-route-5539::index-1",
+      "at_ms": 59090.4359,
+      "phase": "ui"
+    }
+  ],
+  "received": [
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553901,
+      "at_ms": 8779.9585,
+      "phase": "warmup",
+      "wall_ms": 1678.5043999999998,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553902,
+      "at_ms": 15659.3883,
+      "phase": "sequential",
+      "wall_ms": 1149.5487000000012,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553903,
+      "at_ms": 18801.8287,
+      "phase": "sequential",
+      "wall_ms": 3142.387899999998,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553904,
+      "at_ms": 20282.1869,
+      "phase": "sequential",
+      "wall_ms": 1480.3148999999976,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553905,
+      "at_ms": 20962.0875,
+      "phase": "sequential",
+      "wall_ms": 679.8582000000024,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553906,
+      "at_ms": 21897.3439,
+      "phase": "sequential",
+      "wall_ms": 935.2170000000006,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553907,
+      "at_ms": 22506.9701,
+      "phase": "sequential",
+      "wall_ms": 609.5818999999974,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553908,
+      "at_ms": 23016.8314,
+      "phase": "sequential",
+      "wall_ms": 509.8220000000001,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553909,
+      "at_ms": 23575.7744,
+      "phase": "sequential",
+      "wall_ms": 558.8947000000007,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553910,
+      "at_ms": 24331.2371,
+      "phase": "sequential",
+      "wall_ms": 755.4016999999985,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553911,
+      "at_ms": 24981.4388,
+      "phase": "sequential",
+      "wall_ms": 650.148799999999,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553912,
+      "at_ms": 25660.9567,
+      "phase": "sequential",
+      "wall_ms": 679.4896000000008,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553913,
+      "at_ms": 26307.3592,
+      "phase": "sequential",
+      "wall_ms": 646.2837,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553914,
+      "at_ms": 26891.503,
+      "phase": "sequential",
+      "wall_ms": 584.1123999999982,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553915,
+      "at_ms": 28499.8546,
+      "phase": "sequential",
+      "wall_ms": 1608.3192999999992,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553916,
+      "at_ms": 29011.8905,
+      "phase": "sequential",
+      "wall_ms": 512.0073000000011,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553917,
+      "at_ms": 30020.9948,
+      "phase": "sequential",
+      "wall_ms": 1009.0574000000015,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553918,
+      "at_ms": 31166.5213,
+      "phase": "sequential",
+      "wall_ms": 1145.4972000000016,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553919,
+      "at_ms": 32570.9846,
+      "phase": "sequential",
+      "wall_ms": 1404.4320000000007,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553920,
+      "at_ms": 34275.4627,
+      "phase": "sequential",
+      "wall_ms": 1704.4484999999986,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553921,
+      "at_ms": 36203.3121,
+      "phase": "sequential",
+      "wall_ms": 1927.818299999999,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "system_settings",
+      "at_ms": 44112.4683,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "custom_agent_preset_list",
+      "at_ms": 44112.4996,
+      "phase": "concurrent"
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553927,
+      "at_ms": 46452.877,
+      "phase": "concurrent",
+      "wall_ms": 2622.3148999999976,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553922,
+      "at_ms": 47070.4606,
+      "phase": "concurrent",
+      "wall_ms": 3239.913999999997,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553925,
+      "at_ms": 47544.4752,
+      "phase": "concurrent",
+      "wall_ms": 3713.916299999997,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553926,
+      "at_ms": 48638.9011,
+      "phase": "concurrent",
+      "wall_ms": 4808.3416,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553923,
+      "at_ms": 49527.2914,
+      "phase": "concurrent",
+      "wall_ms": 5696.734200000006,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553929,
+      "at_ms": 50157.7484,
+      "phase": "concurrent",
+      "wall_ms": 6327.185400000002,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553924,
+      "at_ms": 51480.0226,
+      "phase": "concurrent",
+      "wall_ms": 7649.4643,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 553928,
+      "at_ms": 52909.2934,
+      "phase": "concurrent",
+      "wall_ms": 9078.731100000005,
+      "result_count": 1,
+      "fixture_returned": true
+    },
+    {
+      "kind": "project_index_search_results",
+      "request_id": 4,
+      "at_ms": 62322.5873,
+      "phase": "ui",
+      "result_count": 1,
+      "fixture_returned": true
+    }
+  ],
+  "controls": [
+    {
+      "kind": "system_settings",
+      "wall_ms": 281.79159999999683,
+      "pending_searches": 8
+    },
+    {
+      "kind": "custom_agent_preset_list",
+      "wall_ms": 281.83870000000024,
+      "pending_searches": 8
+    }
+  ],
+  "pending_request_ids": [],
+  "failures": [],
+  "console_and_page_errors": []
+}

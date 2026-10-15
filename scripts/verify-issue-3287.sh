@@ -244,8 +244,9 @@ fi
 # canonical verify.run's --headed and embedded reporter.
 GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
   GWT_PLAYWRIGHT_PROJECT_ROOT="$REPO_ROOT" \
+  GWT_PLAYWRIGHT_GWTD="$CHECKOUT_GWTD" GWT_PLAYWRIGHT_PROJECT_HASH="$CHECK_REPO_HASH" \
   bash "$REPO_ROOT/scripts/run-visual-tests.sh" \
-    --workers=1 crates/gwt/playwright/tests/project-hub.spec.ts "$@"
+    --workers=1 "${GWT_PLAYWRIGHT_LIVE_SPEC:-crates/gwt/playwright/tests/project-hub.spec.ts}" "$@"
 
 if ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then
   cat "$CHECK_HOME/keepalive.log" >&2

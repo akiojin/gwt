@@ -9143,8 +9143,40 @@ def _action_search_multi_v2_pinned(
     stores, broken scopes are reported in ``scopes`` instead of failing the
     whole batch or silently returning empty results (FR-387 / FR-388). The
     Rust caller owns repair scheduling and the stale refresh queue.
+
+    Timings separate View/health inspection, model loading, warm query encoding,
+    scope search and batch payload assembly. Scope search includes store open,
+    match filtering and per-scope formatting inside the existing search helpers;
+    assembly measures combining those results, not their JSON serialization.
     """
     model_load_started = _MODEL_LOAD_MS
+    timings_ms = {
+        "index_read": 0.0,
+        "model_load": 0,
+        "query_encode": 0.0,
+        "query": 0.0,
+        "assemble": 0.0,
+    }
+
+    def timed(phase: str, action: Callable[[], Any]) -> Any:
+        started = time.monotonic()
+        model_load_before = _MODEL_LOAD_MS
+        try:
+            return action()
+        finally:
+            elapsed_ms = (time.monotonic() - started) * 1000
+            if phase == "query_encode":
+                elapsed_ms -= _MODEL_LOAD_MS - model_load_before
+            timings_ms[phase] += max(0.0, elapsed_ms)
+
+    def finish(result: Dict[str, Any]) -> Dict[str, Any]:
+        started = time.monotonic()
+        result["model_load_ms"] = _MODEL_LOAD_MS - model_load_started
+        timings_ms["model_load"] = result["model_load_ms"]
+        result["timings_ms"] = timings_ms
+        timings_ms["assemble"] += (time.monotonic() - started) * 1000
+        return result
+
     valid_scopes = {
         "issues",
         "specs",
@@ -9160,11 +9192,11 @@ def _action_search_multi_v2_pinned(
         raise ValueError(f"unknown file index protocol: {file_index_protocol}")
     invalid_scopes = [scope for scope in scopes if scope not in valid_scopes]
     if invalid_scopes:
-        return {
+        return finish({
             "ok": False,
             "error_code": "BAD_ARGS",
             "error": f"unsupported search scope {invalid_scopes[0]}",
-        }
+        })
     v2_file_scopes = [
         scope for scope in scopes if scope in {"files", "files-docs"}
     ]
@@ -9174,18 +9206,24 @@ def _action_search_multi_v2_pinned(
     if file_index_protocol == "v2" and v2_file_scopes:
         if not worktree_hash:
             raise ValueError("file-index-v2 search requires worktree_hash")
-        file_selection = _select_file_index_v2_view(
-            repo_hash,
-            worktree_hash,
-            db_root,
-            repair_corruption=True,
+        file_selection = timed(
+            "index_read",
+            lambda: _select_file_index_v2_view(
+                repo_hash,
+                worktree_hash,
+                db_root,
+                repair_corruption=True,
+            ),
         )
         pinned_file_view = file_selection["view"]
         if pinned_file_view is None:
             unresolved: List[str] = []
             for scope in dict.fromkeys(v2_file_scopes):
-                state, health = _classify_scope_for_search(
-                    repo_hash, worktree_hash, scope, db_root=db_root
+                state, health = timed(
+                    "index_read",
+                    lambda: _classify_scope_for_search(
+                        repo_hash, worktree_hash, scope, db_root=db_root
+                    ),
                 )
                 if state in ("missing", "corrupt"):
                     unresolved.append(scope)
@@ -9198,7 +9236,7 @@ def _action_search_multi_v2_pinned(
                     "health": health,
                 }
             if unresolved and all(scope in unresolved for scope in scopes):
-                return {
+                return finish({
                     "ok": False,
                     "error_code": "INDEX_NOT_READY",
                     "retryable": True,
@@ -9206,7 +9244,7 @@ def _action_search_multi_v2_pinned(
                     "waited_ms": 0,
                     "affected_scopes": unresolved,
                     "error": "file index v2 has no compatible readable corpus",
-                }
+                })
     payload: Dict[str, Any] = {"ok": True}
     scope_states: Dict[str, Dict[str, Any]] = {}
     scope_results: Dict[str, Any] = {}
@@ -9225,8 +9263,11 @@ def _action_search_multi_v2_pinned(
                 health = legacy_file_selections[scope]
                 state = health["state"]
         else:
-            state, health = _classify_scope_for_search(
-                repo_hash, scope_worktree, scope, db_root=db_root
+            state, health = timed(
+                "index_read",
+                lambda: _classify_scope_for_search(
+                    repo_hash, scope_worktree, scope, db_root=db_root
+                ),
             )
         if state in ("missing", "corrupt"):
             scope_states[scope] = {
@@ -9237,33 +9278,56 @@ def _action_search_multi_v2_pinned(
         if query_embedding is None:
             try:
                 if pinned_file_view is not None:
-                    query_embedding = _encode_file_index_v2_query(
-                        pinned_file_view, query
+                    query_embedding = timed(
+                        "query_encode",
+                        lambda: _encode_file_index_v2_query(pinned_file_view, query),
                     )
                 else:
-                    query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+                    query_embedding = timed(
+                        "query_encode",
+                        lambda: E5EmbeddingFunction().embed_query([query])[0],
+                    )
             except Exception as error:
                 affected_scopes = [
                     candidate for candidate in scopes if candidate in valid_scopes
                 ]
-                return _search_failed_payload(
+                return finish(_search_failed_payload(
                     affected_scopes,
                     "query embedding",
                     error,
-                )
+                ))
         try:
             if is_v2_file_scope:
                 if pinned_file_view is not None:
-                    result = _search_file_index_v2_scope(
-                        pinned_file_view,
-                        scope,
-                        query,
-                        n_results,
-                        match_mode,
-                        query_embedding,
+                    result = timed(
+                        "query",
+                        lambda: _search_file_index_v2_scope(
+                            pinned_file_view,
+                            scope,
+                            query,
+                            n_results,
+                            match_mode,
+                            query_embedding,
+                        ),
                     )
                 else:
-                    result = _search_scope_collection(
+                    result = timed(
+                        "query",
+                        lambda: _search_scope_collection(
+                            repo_hash,
+                            scope_worktree,
+                            scope,
+                            query,
+                            n_results,
+                            match_mode,
+                            db_root,
+                            query_embedding,
+                        ),
+                    )
+            else:
+                result = timed(
+                    "query",
+                    lambda: _search_scope_collection(
                         repo_hash,
                         scope_worktree,
                         scope,
@@ -9272,28 +9336,21 @@ def _action_search_multi_v2_pinned(
                         match_mode,
                         db_root,
                         query_embedding,
-                    )
-            else:
-                result = _search_scope_collection(
-                    repo_hash,
-                    scope_worktree,
-                    scope,
-                    query,
-                    n_results,
-                    match_mode,
-                    db_root,
-                    query_embedding,
+                    ),
                 )
         except Exception as error:
             if is_v2_file_scope:
-                return _search_failed_payload([scope], "query", error)
+                return finish(_search_failed_payload([scope], "query", error))
             # Phase 70a FR-400: query-contract failures (for example an
             # unsupported embedding scalar type) do not prove the verified
             # store is corrupt. Re-check the same canonical health source used
             # by status; only an actually missing/corrupt store enters repair.
             try:
-                current_state, current_health = _classify_scope_for_search(
-                    repo_hash, scope_worktree, scope, db_root=db_root
+                current_state, current_health = timed(
+                    "index_read",
+                    lambda: _classify_scope_for_search(
+                        repo_hash, scope_worktree, scope, db_root=db_root
+                    ),
                 )
             except Exception:
                 current_state, current_health = state, health
@@ -9303,7 +9360,8 @@ def _action_search_multi_v2_pinned(
                     "reason": current_health.get("reason", current_state),
                 }
                 continue
-            return _search_failed_payload([scope], "query", error)
+            return finish(_search_failed_payload([scope], "query", error))
+        assembly_started = time.monotonic()
         scope_states[scope] = {"state": state}
         if is_v2_file_scope:
             if pinned_file_view is not None:
@@ -9321,12 +9379,14 @@ def _action_search_multi_v2_pinned(
                 payload.setdefault("suggestions", {})[scope] = value
             else:
                 payload[key] = value
+        timings_ms["assemble"] += (time.monotonic() - assembly_started) * 1000
+    assembly_started = time.monotonic()
     payload["scopes"] = scope_states
     payload["scope_results"] = scope_results
-    payload["model_load_ms"] = _MODEL_LOAD_MS - model_load_started
     if stale_scopes:
         payload["stale_scopes"] = stale_scopes
-    return payload
+    timings_ms["assemble"] += (time.monotonic() - assembly_started) * 1000
+    return finish(payload)
 
 
 def action_search_multi_v2(
@@ -9566,7 +9626,8 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
         "fake_embedding": os.environ.get("GWT_INDEX_FAKE_EMBEDDING", ""),
         "qos": qos,
     })
-    worker_dir = _gwt_home() / "runtime" / "search-workers" / identity
+    worker_dir = (Path(args.worker_dir) if getattr(args, "worker_dir", None) else
+                  _gwt_home() / "runtime" / "search-workers" / identity)
     endpoint_path = worker_dir / "endpoint.json"
 
     def connect():

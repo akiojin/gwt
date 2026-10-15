@@ -151,10 +151,6 @@ fn frontend_bundle_source() -> &'static str {
         // app.js.
         include_str!("../web/launch-wizard-surface.js"),
         "\n",
-        // SPEC-3064 Phase 3 (E6a) — File Tree window surface moved out of
-        // app.js.
-        include_str!("../web/file-tree-surface.js"),
-        "\n",
         // SPEC-3064 Phase 3 (E6b) — Branches window & cleanup surface moved
         // out of app.js.
         include_str!("../web/branches-cleanup-surface.js"),
@@ -1723,18 +1719,8 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
         "expected a shared presetRoleLabel helper",
     );
     for label in [
-        "Shell",
-        "Claude",
-        "Codex",
-        "Agent",
-        "File Tree",
-        "Branches",
-        "Settings",
-        "Profile",
-        "Logs",
-        "Issue",
+        "Shell", "Claude", "Codex", "Agent", "Branches", "Settings", "Profile", "Logs", "Issue",
         "Board",
-        "PR",
     ] {
         assert!(
             js.contains(label),
@@ -2418,7 +2404,7 @@ fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
     assert!(
         knowledge_status_block.contains("!issueSurface && state.searching")
             && knowledge_status_block.contains("Searching semantic index"),
-        "expected Issue/SPEC semantic progress to stay invisible while preserving PR behavior",
+        "expected semantic progress to stay invisible on the Issue/SPEC surface",
     );
     let direct_send_block = html
         .split("function sendKnowledgeSemanticSearchNow")
@@ -2590,19 +2576,10 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
                 .next()
         })
         .expect("knowledge load request block");
-    let pr_compatibility_block = load_request_block
-        .split("if (normalizeKnowledgeKind(state.kind) === \"pr\") {")
-        .nth(1)
-        .and_then(|tail| tail.split("\n        }").next())
-        .expect("PR compatibility reset block");
     assert!(
         load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")
-            && load_request_block
-                .matches("state.detailRequestId = 0;")
-                .count()
-                == 1
-            && pr_compatibility_block.contains("state.detailRequestId = 0;"),
-        "expected Issue/SPEC refresh to preserve an independently correlated detail request while PR keeps its legacy full-view reset",
+            && !load_request_block.contains("state.detailRequestId = 0;"),
+        "expected refresh to preserve an independently correlated detail request",
     );
     assert!(
         html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
@@ -3354,7 +3331,7 @@ fn embedded_web_frontend_units_group_stateful_surfaces() {
                 && html.contains("boardSurface,")
                 && html.contains("logsSurface,")
                 && html.contains("knowledgeSettingsSurface,"),
-            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Profile, Board, Logs, and knowledge/settings surfaces",
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, branches, Profile, Board, Logs, and knowledge/settings surfaces",
         );
     assert!(
         !html.contains("window.__POC__"),
@@ -3521,7 +3498,6 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
     let html = frontend_styles_bundle();
 
     let panel_surfaces = [
-        ".surface-file-tree",
         ".surface-branches",
         ".surface-board",
         ".surface-logs",
@@ -3532,11 +3508,11 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
 
     for (anchor, role) in [
         (
-            ".workspace-window.surface-file-tree,",
+            ".workspace-window.surface-branches,",
             "workspace-window background",
         ),
-        (".surface-file-tree .titlebar,", "titlebar background"),
-        (".surface-file-tree .window-body,", "window-body background"),
+        (".surface-branches .titlebar,", "titlebar background"),
+        (".surface-branches .window-body,", "window-body background"),
     ] {
         let rule_start = html
             .find(anchor)
@@ -3701,7 +3677,6 @@ fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
     let scroll_adopters = [
         "knowledge-detail-scroll workspace-scroll",
         "board-timeline-scroll board-scroll-surface workspace-scroll",
-        "file-tree-scroll workspace-scroll",
         "branch-scroll workspace-scroll",
     ];
     for needle in scroll_adopters {
@@ -3798,7 +3773,6 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
 
     let pairs: &[(WindowSurface, &str)] = &[
         (WindowSurface::Terminal, "terminal"),
-        (WindowSurface::FileTree, "file-tree"),
         // Branches and Work redirect to Knowledge in JS. Their enum variants
         // remain for persisted backend compatibility without a separate UI.
         (WindowSurface::Profile, "profile"),
@@ -3807,7 +3781,6 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
         (WindowSurface::Knowledge, "knowledge"),
         (WindowSurface::Index, "index"),
         (WindowSurface::AgentKanban, "agent-kanban"),
-        (WindowSurface::Console, "console"),
         (WindowSurface::Mock, "mock"),
     ];
 

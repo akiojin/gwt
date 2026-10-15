@@ -117,6 +117,20 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
                 }
             };
 
+            match ops.apply_in_running_gui(&latest, &asset_url, &payload) {
+                Ok(true) => {
+                    ops.write_stdout(&format!("Update v{latest} requested in the running GUI.\n"));
+                    return RunOutcome::Code(0);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    ops.write_stderr(&format!(
+                        "Could not request the update in the running GUI: {error}. Use its update button, or quit it and retry this command.\n"
+                    ));
+                    return RunOutcome::Code(1);
+                }
+            }
+
             let current_exe = match ops.current_exe() {
                 Ok(path) => path,
                 Err(error) => {

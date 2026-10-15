@@ -27,8 +27,8 @@ Agent workspace を materialize するために worktree を使いますが、�
 - **Managed workflow skills** — discussion、Issue routing、planning、
   TDD implementation、PR、architecture review、project search、agent 管理用の
   bundled `gwt-*` skills を使えます。
-- **Operator canvas** — Agent、Board、Issue、SPEC、Logs、Profile、
-  File Tree、Branches、PR surface を mission-control 風 workspace に並べられます。
+- **Operator canvas** — Agent、Board、Logs、Profile、Index、Settings の
+  surface を mission-control 風 workspace に並べられます。
 
 ## インストール
 
@@ -400,7 +400,6 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
 - `Profile` — environment/profile 管理
-- `File Tree` — 実リポジトリの read-only tree
 - `Branches` — branch 確認、filter、cleanup、Git detail
 - `Settings` — application と agent の設定。`System` タブで Workspace summary
   と Board 投稿本文の出力言語を `Auto / English / 日本語` から選択できます
@@ -414,10 +413,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   `System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
-  System には保存値・有効値と、更新の保留理由も表示します。変更は GUI から
-  行い、エージェントは `update.settings.status` で読み取れます。
+  System には保存値・有効値と、更新の保留理由も表示します。GUI で変更するか、
+  PM に `update.settings.set` の `auto_apply_updates` で変更を依頼できます。
+  `update.settings.status` で状態を読み取れます。
   この設定は Issue Monitor の設定から除外されています。
-- `PR` — pull-request workflow surface。詳細な一覧機能は cache-backed PR source の整備に依存します
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
 Agent が status、decision、handoff、request を外部化する coordination surface です。
@@ -516,8 +515,8 @@ Agent や自動化からは `issue.monitor.status` で確認し、`issue.monitor
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
 `issue.monitor.config.set` は処理停止、Autonomous
-モード無効化、正の `max_active` 上限設定に対応します。安全のため `enabled=true` と
-`autonomous_mode=true` は拒否され、有効化には GUI での明示操作が必要です。
+モード無効化、正の `max_active` 上限設定に対応します。リポジトリの登録済み PM は
+`enabled` / `autonomous_mode` の有効化もできます。他のエージェントは GUI から有効化します。
 idle になったエージェント窓はスロットを自動的に解放します。各 scan は起動中の窓を
 `review_verdict_published` / `execution_settled` / `binding_dead` /
 `stuck_unknown` に分類し（`issue.monitor.status` の行と `idle_windows` で確認可能）、
@@ -710,6 +709,28 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
   `pm.status` はリポジトリ内の全登録を一覧し、`pm.stop` は CLI から PM を
   停止します。登録済み PM は孤児化した PM を停止でき、自分自身も GUI 操作なしで
   停止できます。
+- 稼働中の登録済み PM は `workspace.close` で指定した非稼働 Work を閉じられます。
+  `work_id` と `close_kind: "done"` または `"discarded"` を指定し、GUI と同じく
+  手動 close が許可され、その Work の稼働 agent がいないことを確認します。
+  終了履歴を記録し、branch と worktree は保持します。
+
+PM に GitHub Discussion の作成と Board 接続、`develop` / `main` の必須チェック変更、
+全プロジェクト共通の Auto-apply updates 変更を依頼できます。操作対象を明確にした
+指示の記録、または OS ネイティブの承認ダイアログで許可します。**Approve once** で
+今回だけ許可するか、同じリポジトリ・操作種別の許可を記憶できます。保存した許可の確認・
+取り消しは PM に `pm.approval.status` / `pm.approval.revoke` で依頼できます。
+必須チェックの変更には `repository.required_checks.update` を使い、ブランチの strict
+設定と、残すチェックの app との関連付けを維持します。
+
+同じ範囲付き許可で、`pr.reopen` による指定 PR の再開、`pr.review.submit` による
+GitHub review、`release.metadata.set` による既存 release の名前・説明・prerelease の変更、
+`repository.settings.set` による対応済みの可逆な metadata・機能・merge 設定・archive 状態の
+変更も依頼できます。topics の置換は `topics` だけを指定します。既存の review・CI チェックは
+維持し、release の公開・asset・latest の選択には既存の gated workflow を使います。
+
+明示的に許可した PR の close、ビルドキャッシュ削除、provider 承認への応答には、PM が
+`pm.operation.execute` を使います。対象は既存の `pr.close` / `worktree.gc_build_artifacts` /
+`pm.message.send` の3種類に限られ、それぞれの既存のチェックを維持します。
 
 同じマシンの別プロジェクトの PM と相談したい場合は、相手プロジェクトの絶対パスを
 添えて自分の PM に依頼してください。登録済み PM は `pm.peer.send` で依頼・応答・
@@ -883,7 +904,16 @@ worktree にプロジェクトタブが切り替わります。
 
 ## GitHub Discussions でローカル Board の節目を共有する
 
-別マシンと `decision` / `blocked` / `handoff` を共有するには、Board provider を
+別マシンと `decision` / `blocked` / `handoff` を共有するには、PM に
+`discussion.create` の `sync_board:true` で Discussion 作成と接続を依頼できます。
+既存の Discussion に接続する場合は `board.config.set` の `github_discussion` に番号を
+指定します。接続だけ失敗した場合も、Discussion を重複作成せずに復旧できます。
+現在の Board provider が Local 以外なら、作成時は `board_provider:"local"`、
+既存への接続時は `provider:"local"` を明示して切替を依頼してください。
+対象プロジェクトの provider 上書きと接続先を同時に保存し、全体設定や他プロジェクトの
+provider 設定は維持します。明示的な切替がなければ、同期付き作成は GitHub 上に
+Discussion を作る前に拒否されます。
+どちらも現在のリポジトリが対象です。手動で接続する場合は Board provider を
 **Local** のままにして `.gwt/work/board.toml` に接続先を追加します。
 
 ```toml
@@ -1134,6 +1164,10 @@ Issue 内に表示された Agent も含み、PM と Shell はスキップしま
 分割表示を維持し、選んだターミナルに入力フォーカスを移します。
 選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
 再び開けます。
+
+Agent のカードとタブのタイトルは1行表示で、先頭の名前は固定されます。
+作業内容を横にスクロールするか、タイトルへのホバー・キーボードフォーカスで全文を読めます。
+Issue と Project Manager の設定項目も、ホバーとキーボードフォーカスで説明を表示します。
 
 ## Operator デザイン言語 (SPEC-2356)
 

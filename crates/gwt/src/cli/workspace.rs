@@ -812,6 +812,19 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match cmd {
+        WorkspaceCommand::Close {
+            work_id,
+            close_kind,
+        } => {
+            let result = super::pane::close_work(&work_id, &close_kind).map_err(string_error)?;
+            out.push_str(&result.to_string());
+            out.push('\n');
+            Ok(if result["ok"].as_bool() == Some(true) {
+                0
+            } else {
+                1
+            })
+        }
         WorkspaceCommand::Receipt { operation_id } => {
             let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).map_err(|_| {
                 string_error("workspace.receipt requires ambient GWT_SESSION_ID".to_string())

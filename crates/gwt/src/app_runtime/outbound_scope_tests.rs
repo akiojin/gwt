@@ -131,14 +131,15 @@ fn global_broadcast_direct_all_construction_inventory() {
     // Existing test-only constructions/patterns are inventoried explicitly:
     // embedded_server: broadcast_runtime_hook_event;
     // project_transport: transport_all;
-    // main: transport_all and the update_available_event assertion pattern.
+    // main: transport_all, update_available_event, and the CLI staging-refusal
+    // broadcast assertion pattern.
     // New test fixtures also require deliberate review of this inventory.
     assert_eq!(
         inventory,
         BTreeMap::from([
             ("project_transport.rs".into(), 3),
             ("embedded_server.rs".into(), 1),
-            ("main.rs".into(), 2),
+            ("main.rs".into(), 3),
         ]),
         "new direct All targets must use the audited global constructors"
     );
