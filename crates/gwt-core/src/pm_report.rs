@@ -249,7 +249,9 @@ mod tests {
         let reports =
             pm_peer::reports(&a.project_dir, now + chrono::Duration::minutes(16)).unwrap();
         assert_eq!(reports.len(), 1);
-        assert!(reports[0].body.contains("応答待ち"));
+        assert!(reports[0]
+            .body
+            .contains("Waiting for the peer PM to respond"));
         assert!(!reports[0].body.contains("secret-sentinel"));
         let foreign = PeerProject {
             project: "foreign".into(),

@@ -6375,7 +6375,9 @@ mod tests {
             json!({"project":home.path().join("absent"),"kind":"notice","text":"Update pending"});
         assert_eq!(send(&a, missing).unwrap()["status"], "unavailable");
         let reports = gwt_core::pm_report::load_reports(&a).unwrap();
-        assert!(reports.iter().any(|r| r.body.contains("対応待ち")));
+        assert!(reports
+            .iter()
+            .any(|r| r.body.contains("Waiting for the peer project")));
         crate::pm_registry::save_pm_prefs(
             &crate::pm_registry::pm_prefs_path_for_repo_path(&a),
             &Default::default(),

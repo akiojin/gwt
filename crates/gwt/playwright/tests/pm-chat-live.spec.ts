@@ -71,7 +71,7 @@ test.describe('PM reports', () => {
       await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
       const outgoingReport = reports.locator('article').filter({ hasText: `PM peer ${outgoing.message.id} →` });
       const incomingReport = reports.locator('article').filter({ hasText: `PM peer ${incoming.id} ←` });
-      const outgoingBody = `PM peer ${outgoing.message.id} → Request ${peer}: ${outgoingText.replace(/\n/g, ' ')} — 相手プロジェクトの対応待ち（PM 不在・停止または生存未確認）`;
+      const outgoingBody = `PM peer ${outgoing.message.id} → Request ${peer}: ${outgoingText.replace(/\n/g, ' ')} — Waiting for the peer project (PM absent, stopped, or liveness unconfirmed)`;
       const incomingBody = `PM peer ${incoming.id} ← Notice ${peer}: ${incoming.text.replace(/\n/g, ' ')}`;
       for (const [report, body] of [[outgoingReport, outgoingBody], [incomingReport, incomingBody]] as const) {
         await expect(report).toHaveCount(1);

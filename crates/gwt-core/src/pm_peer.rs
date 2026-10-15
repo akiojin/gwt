@@ -248,13 +248,13 @@ pub fn reports(project_dir: &Path, now: DateTime<Utc>) -> io::Result<Vec<PmRepor
                 return None;
             }
             let waiting = if message.unavailable.is_some() {
-                " — 相手プロジェクトの対応待ち（PM 不在・停止または生存未確認）"
+                " — Waiting for the peer project (PM absent, stopped, or liveness unconfirmed)"
             } else if sent
                 && message.kind == PeerKind::Request
                 && message.answered_by.is_none()
                 && now >= message.expires_at
             {
-                " — 相手プロジェクトの PM の応答待ち"
+                " — Waiting for the peer PM to respond"
             } else {
                 ""
             };
