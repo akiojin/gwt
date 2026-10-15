@@ -156,9 +156,11 @@ function reconcileKnowledgeList(host, entries, options) {
       },
       reveal(number) {
         forced = items.findIndex(entry => entry.number === number);
+        if (forced < 0) return false;
         draw();
         cache.get(number)?.node.scrollIntoView?.({ block: "nearest", inline: "nearest" });
         forced = -1;
+        return true;
       },
       dispose() { root.removeEventListener("scroll", onScroll); observer?.disconnect(); keyedKnowledgeLists.delete(host); },
     };
@@ -4791,6 +4793,12 @@ export function createKnowledgeKanbanSurface({
         if (!list || !detailPane || !refreshButton || !searchInput) {
           return;
         }
+        // A queue transition changes the owning column. Preserve the logical
+        // control across both lists, including a destination outside the viewport.
+        const focused = list.contains(document.activeElement) ? document.activeElement : null;
+        const focusedNumber = Number(focused?.closest("[data-issue-number]")?.dataset.issueNumber);
+        const focusedAction = focused?.dataset.action;
+        const focusedSummary = focused?.matches("summary");
 
         refreshButton.disabled =
           !state.refreshEnabled || (state.loading && !knowledgeEntriesAreEmpty(state));
@@ -4861,6 +4869,19 @@ export function createKnowledgeKanbanSurface({
         }
         renderOtherWork(list, windowId, { laneFilter: state.issueLaneFilter || "all" });
         renderIssueDetailPane(windowId, state, detailPane, { agentPreview: !splitMode });
+        if (Number.isFinite(focusedNumber) && !focused.isConnected) {
+          let row = list.querySelector(`.knowledge-row[data-issue-number="${focusedNumber}"]`);
+          if (!row) {
+            for (const host of list.querySelectorAll(".issue-queue-items")) {
+              if (keyedKnowledgeLists.get(host)?.reveal(focusedNumber)) break;
+            }
+            row = list.querySelector(`.knowledge-row[data-issue-number="${focusedNumber}"]`);
+          }
+          const target = focusedAction
+            ? [...(row?.querySelectorAll("[data-action]") || [])].find(node => node.dataset.action === focusedAction)
+            : focusedSummary ? row?.querySelector("summary") : null;
+          (target || row?.querySelector(".knowledge-row-select"))?.focus({ preventScroll: true });
+        }
         publishIssueControlExplanations(windowId, focus);
       }
 

@@ -162,6 +162,21 @@ test("Issue #5401 large collections retain scroll, selection and native keyboard
   await info.attach("virtual-row-counts", { body: JSON.stringify({ total: 1545, mounted: await mounted(), limit: 200 }), contentType: "application/json" });
 });
 
+test("Issue #5401 preserves focused controls across column moves and identical detail replays", async ({ page }) => {
+  const selection = row(page, 1).locator('[data-action="queue-select"]');
+  await selection.focus();
+  await confirm(page, [1, 3, 4]);
+  await expect(column(page, "queued").locator('[data-issue-number="1"]')).toBeVisible();
+  await expect(selection).toBeFocused();
+  await row(page, 2).locator(".knowledge-row-select").click();
+  const detail = page.locator(".knowledge-detail-pane");
+  await expect(detail).toContainText("Description for #2");
+  const detailTab = detail.getByRole("button", { name: "Issue", exact: true });
+  await detailTab.focus();
+  await page.evaluate(() => (window as any).__queueEntries(undefined));
+  await expect(detailTab).toBeFocused();
+});
+
 test("Issue #5321 responsive summary and on-demand preview", async ({ page }, info) => {
   const before = process.env.GWT_ISSUE_5321_PHASE === "before";
   const phase = before ? "before" : "after";
