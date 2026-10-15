@@ -4335,11 +4335,21 @@ mod tests {
         for state in [crate::WindowState::Running, crate::WindowState::Idle] {
             let mut snapshot = running_snapshot.clone();
             snapshot.windows[0].status = state;
+            let mut successor = snapshot.windows[0].clone();
+            successor.window_id = "tab-1::successor".to_string();
+            successor.status = crate::WindowState::Idle;
+            snapshot.windows.push(successor);
             monitor.record_window_snapshot(snapshot);
+            let active_before = monitor.active_count();
+            let occupied_before = monitor.agent_status_at(now).occupied_slot_count;
             let protected = monitor.reconcile_idle_windows(&held, now);
             assert!(protected.released.is_empty(), "{state:?}");
-            assert_eq!(monitor.active_count(), 1);
-            assert_eq!(monitor.agent_status_at(now).occupied_slot_count, Some(1));
+            assert!(protected.pane_closes.is_empty(), "{state:?}");
+            assert_eq!(monitor.active_count(), active_before);
+            assert_eq!(
+                monitor.agent_status_at(now).occupied_slot_count,
+                occupied_before
+            );
         }
 
         for (case, snapshot) in [

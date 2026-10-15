@@ -20552,15 +20552,6 @@ impl IssueMonitorState {
             if classified.iter().any(|idle| idle.window_id == *window_id) {
                 continue;
             }
-            // A successor/process or registration grace also vetoes the
-            // ordinary canvas-based path for the dead predecessor.
-            if settlements
-                .get(issue_number)
-                .is_some_and(|observation| observation.holder_host_dead)
-                && self.binding_recovery_pending(*issue_number, now, settlements)
-            {
-                continue;
-            }
             let owned_here = issue_monitor_qualified_window_id(window_id)
                 .is_some_and(|(tab_id, _)| tab_id == snapshot.project_tab_id);
             if !owned_here
@@ -20626,7 +20617,11 @@ impl IssueMonitorState {
                     | WindowState::Interrupted => continue,
                 },
             };
-            if idle_kind == IssueMonitorIdleKind::BindingDead
+            if (idle_kind == IssueMonitorIdleKind::BindingDead
+                || (idle_kind == IssueMonitorIdleKind::ExecutionSettled
+                    && settlements
+                        .get(issue_number)
+                        .is_some_and(|observation| observation.holder_host_dead)))
                 && self.binding_recovery_pending(*issue_number, &snapshot.observed_at, settlements)
             {
                 idle_kind = IssueMonitorIdleKind::BindingPending;
@@ -20667,6 +20662,16 @@ impl IssueMonitorState {
             let Some(issue_number) = observed.issue_number else {
                 continue;
             };
+            // The terminal ECR belongs to the dead predecessor, not an
+            // unbound successor whose process still owns this worktree.
+            if !observed.review_dispatch
+                && settlements
+                    .get(&issue_number)
+                    .is_some_and(|observation| observation.holder_host_dead)
+                && self.binding_recovery_pending(issue_number, now, settlements)
+            {
+                continue;
+            }
             if issue_monitor_qualified_window_id(&observed.window_id)
                 .is_none_or(|(tab, _)| tab != snapshot.project_tab_id)
                 || !self.window_observation_covers_launch(
