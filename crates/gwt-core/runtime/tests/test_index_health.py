@@ -67,21 +67,24 @@ class IndexHealthTests(unittest.TestCase):
                 self.assertTrue(status["repair_required"], status)
                 self.assertEqual(status["source_document_count"], 2)
 
-    def test_header_only_discussions_are_a_healthy_empty_corpus(self):
+    def test_header_only_notes_are_a_healthy_empty_corpus(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             notes = root / ".gwt" / "projects" / self.REPO_HASH / "work-notes"
             notes.mkdir(parents=True)
-            (notes / "discussions.md").write_text("# Discussions\n", encoding="utf-8")
             db_root = root / "index"
-            db_path = runner.resolve_db_path(self.REPO_HASH, None, "discussions", db_root)
-            db_path.mkdir(parents=True)
-            (db_path / "chroma.sqlite3").touch()
-            runner.write_manifest(db_path, "discussions", [{"path": str(notes / "discussions.md")}])
-            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False), mock.patch.object(runner, "_scope_document_count", return_value=(True, 0)):
-                status = runner._scope_status_v2(self.REPO_HASH, None, "discussions", db_root)
-            self.assertTrue(status["healthy"], status)
-            self.assertEqual(status["source_document_count"], 0)
+            for scope in ("discussions", "memory"):
+                with self.subTest(scope=scope):
+                    source = notes / f"{scope}.md"
+                    source.write_text(f"# {scope}\n", encoding="utf-8")
+                    db_path = runner.resolve_db_path(self.REPO_HASH, None, scope, db_root)
+                    db_path.mkdir(parents=True)
+                    (db_path / "chroma.sqlite3").touch()
+                    runner.write_manifest(db_path, scope, [{"path": str(source)}])
+                    with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False), mock.patch.object(runner, "_scope_document_count", return_value=(True, 0)):
+                        status = runner._scope_status_v2(self.REPO_HASH, None, scope, db_root)
+                    self.assertTrue(status["healthy"], status)
+                    self.assertEqual(status["source_document_count"], 0)
 
     def _make_repo(self, root: Path) -> None:
         (root / "src").mkdir(parents=True)

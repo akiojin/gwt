@@ -7263,7 +7263,7 @@ def _scope_status_v2(
         reason = "empty_collection"
         healthy = False
         repair_required = True
-    elif scope in ("specs", "memory") and document_count < manifest_count:
+    elif source_document_count is None and scope in ("specs", "memory") and document_count < manifest_count:
         reason = "count_mismatch"
         healthy = False
         repair_required = True
