@@ -93,6 +93,90 @@ test("Issue #5400 unchanged entry revisions retain the list and current detail",
   await expect(page.getByText("Issue load failed", { exact: true })).toHaveCount(0);
 });
 
+test("Issue #5401 replays retain focus and only changed Issue keys replace rows", async ({ page }, info) => {
+  const select = row(page, 2).locator(".knowledge-row-select");
+  await select.focus();
+  await page.evaluate(() => {
+    (window as any).__keptRow = document.querySelector('[data-issue-number="2"].knowledge-row');
+    (window as any).__rowAdds = 0;
+    const observer = new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node instanceof Element) (window as any).__rowAdds += Number(node.matches(".knowledge-row")) + node.querySelectorAll(".knowledge-row").length;
+      }
+    });
+    observer.observe(document.querySelector(".knowledge-list")!, { childList: true, subtree: true });
+    (window as any).__queueEntries(undefined);
+  });
+  await expect(select).toBeFocused();
+  expect(await page.evaluate(() => (window as any).__rowAdds)).toBe(0);
+  await page.evaluate(() => (window as any).__queueEntries("new-revision-same-content"));
+  await expect(select).toBeFocused();
+  expect(await page.evaluate(() => (window as any).__rowAdds)).toBe(0);
+  await page.evaluate(() => (window as any).__queueTitle(1, "Updated key one"));
+  await expect(row(page, 1)).toContainText("Updated key one");
+  expect(await row(page, 2).evaluate(node => node === (window as any).__keptRow)).toBe(true);
+  await expect(select).toBeFocused();
+  expect(await page.evaluate(() => (window as any).__rowAdds)).toBe(1);
+  await info.attach("keyed-row-counts", { body: JSON.stringify({ identical_replay_created: 0, one_changed_key_created: 1 }), contentType: "application/json" });
+  await row(page, 1).locator(".knowledge-row-select").focus();
+  await page.evaluate(() => (window as any).__queueTitle(1, "Updated focused key"));
+  await expect(row(page, 1)).toContainText("Updated focused key");
+  await expect(row(page, 1).locator(".knowledge-row-select")).toBeFocused();
+});
+
+test("Issue #5401 large collections retain scroll, selection and native keyboard across virtual rows", async ({ page }, info) => {
+  await page.evaluate(() => (window as any).__queueSetEntries(Array.from({ length: 1545 }, (_, index) => ({
+    number: index + 1000, title: `Virtual issue ${index + 1000}`, state: "open", labels: [], is_spec: false,
+  }))));
+  const pane = page.locator(".knowledge-list-pane");
+  const mounted = () => page.locator(".knowledge-row").count();
+  await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 1545");
+  expect(await mounted()).toBeLessThan(200);
+  await pane.evaluate(node => { node.scrollTop = 10000; });
+  await expect.poll(() => row(page, 1000).count()).toBe(0);
+  const position = await pane.evaluate(node => node.scrollTop);
+  const visible = column(page, "backlog").locator(".knowledge-row:visible").first();
+  const number = Number(await visible.getAttribute("data-issue-number"));
+  await page.evaluate(() => (window as any).__queueEntries(undefined));
+  expect(await pane.evaluate(node => node.scrollTop)).toBe(position);
+  expect(await mounted()).toBeLessThan(200);
+  const select = row(page, number).locator(".knowledge-row-select");
+  await expect(select).toHaveAttribute("aria-description", /open on GitHub/);
+  await page.mouse.move(1590, 1090);
+  await select.focus();
+  await select.press("Enter");
+  const detail = page.locator(".knowledge-detail-pane");
+  await expect(detail).toBeFocused();
+  await detail.press("Escape");
+  await expect(row(page, number).locator(".knowledge-row-select")).toBeFocused();
+  await pane.evaluate(node => { node.scrollTop = node.scrollHeight; });
+  await expect(row(page, 2544)).toBeAttached();
+  await pane.evaluate(node => { node.scrollTop = 0; });
+  await expect(row(page, 1000)).toBeAttached();
+  const boundary = column(page, "backlog").locator(".knowledge-row").last();
+  const boundaryNumber = Number(await boundary.getAttribute("data-issue-number"));
+  const lastControl = row(page, boundaryNumber).locator("button:visible, input:visible, summary:visible").last();
+  await lastControl.focus();
+  await lastControl.press("Tab");
+  await expect(row(page, boundaryNumber + 1).locator('[data-action="queue-select"]')).toBeFocused();
+  await info.attach("virtual-row-counts", { body: JSON.stringify({ total: 1545, mounted: await mounted(), limit: 200 }), contentType: "application/json" });
+});
+
+test("Issue #5401 preserves focused controls across column moves and identical detail replays", async ({ page }) => {
+  const selection = row(page, 1).locator('[data-action="queue-select"]');
+  await selection.focus();
+  await confirm(page, [1, 3, 4]);
+  await expect(column(page, "queued").locator('[data-issue-number="1"]')).toBeVisible();
+  await expect(selection).toBeFocused();
+  await row(page, 2).locator(".knowledge-row-select").click();
+  const detail = page.locator(".knowledge-detail-pane");
+  await expect(detail).toContainText("Description for #2");
+  const detailTab = detail.getByRole("button", { name: "Issue", exact: true });
+  await detailTab.focus();
+  await page.evaluate(() => (window as any).__queueEntries(undefined));
+  await expect(detailTab).toBeFocused();
+});
+
 test("Issue #5321 responsive summary and on-demand preview", async ({ page }, info) => {
   const before = process.env.GWT_ISSUE_5321_PHASE === "before";
   const phase = before ? "before" : "after";
@@ -291,6 +375,9 @@ test("Issue #5321 Settings integrates Issues at 1280px without duplicate surface
   await max.fill("3");
   await max.press("Tab");
   await expect(max).toHaveValue("3");
+  // Wait for the saved Manual status before requesting Auto; the input's
+  // optimistic value alone does not acknowledge the fixture's async reply.
+  await expect(root.locator('[data-metric="active"]')).toHaveText("Active 1/3");
   await mode.selectOption("auto");
   await expect(max).toBeDisabled();
   await expect(settings.getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
@@ -407,15 +494,15 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
   await expect(page.locator(".knowledge-row")).toHaveCount(6);
   await assertInbox();
   await page.evaluate(() => {
-    const original = Element.prototype.appendChild;
-    Element.prototype.appendChild = function <T extends Node>(child: T): T {
+    const original = Element.prototype.insertBefore;
+    Element.prototype.insertBefore = function <T extends Node>(child: T, before: Node | null): T {
       if (child instanceof Element && child.classList.contains("knowledge-row")) {
-        Element.prototype.appendChild = original;
+        Element.prototype.insertBefore = original;
         throw new Error("Issue card render failed");
       }
-      return original.call(this, child) as T;
+      return original.call(this, child, before) as T;
     };
-    (window as any).__queueConfirm([3, 4]);
+    (window as any).__queueTitle(1, "Changed entry exercises keyed insertion");
   });
   const renderBadge = page.getByRole("button", { name: "Issue rendering failed · Details", exact: true });
   const renderNotice = page.locator('[data-error-key="issue-window:tab-queue::issue-1:render"]');
@@ -890,6 +977,10 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
           if (entry && patch) entry.title=patch.title;
           this.dispatchEvent(new MessageEvent("message",{data:JSON.stringify({kind:"knowledge_entries",
             ...fixture.__queueBaseLoad,revision,entries,selected_number:null,refresh_enabled:true})}));
+        };
+        fixture.__queueSetEntries=(next:any[])=>{
+          entries.splice(0, entries.length, ...next);
+          fixture.__queueEntries(undefined);
         };
         fixture.__queueLoadError=()=>this.emit({kind:"knowledge_error",...fixture.__queueLoad,
           message:"Issue cache read failed"});

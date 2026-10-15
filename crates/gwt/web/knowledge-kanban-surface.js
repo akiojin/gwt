@@ -28,6 +28,147 @@ import { createUiStateStore } from "./ui-state-store.js";
 import { createFocusTrap } from "/focus-trap.js";
 import { createLaunchOperationId } from "./launch-pending-controller.js";
 
+// Keep only the visible window of large collections. Heights are measured per
+// Issue identity; estimates apply only to rows that have never been mounted.
+const keyedKnowledgeLists = new WeakMap();
+function reconcileKnowledgeList(host, entries, options) {
+  let view = keyedKnowledgeLists.get(host);
+  if (!view) {
+    const doc = host.ownerDocument;
+    const cache = new Map();
+    const heights = new Map();
+    let items = [], settings, offsets = [], forced = -1, measuredWidth = null;
+    const spacer = () => {
+      const node = doc.createElement("div");
+      node.className = "knowledge-virtual-spacer";
+      node.setAttribute("aria-hidden", "true");
+      return node;
+    };
+    function draw(measure = true) {
+      const root = settings.scrollRoot;
+      const virtual = settings.virtualize;
+      if (measuredWidth !== root.clientWidth) heights.clear();
+      measuredWidth = root.clientWidth;
+      const gap = Number.parseFloat(doc.defaultView?.getComputedStyle?.(host).rowGap) || 0;
+      offsets = [0];
+      for (const entry of items) offsets.push(offsets.at(-1) + (heights.get(entry.number) || 160) + gap);
+      const relativeTop = (host.getBoundingClientRect?.().top || 0) - (root.getBoundingClientRect?.().top || 0);
+      const top = Math.max(0, root === host ? root.scrollTop || 0 : -relativeTop);
+      const bottom = top + (root.clientHeight || 800);
+      const active = doc.activeElement;
+      const focusedNumber = Number(active?.closest?.("[data-issue-number]")?.dataset.issueNumber);
+      const wanted = [];
+      for (let index = 0; index < items.length; index++) {
+        if (!virtual || (offsets[index + 1] >= top - 640 && offsets[index] <= bottom + 640) ||
+            items[index].number === focusedNumber || index === forced) wanted.push(index);
+      }
+      const nodes = [];
+      let changed = false;
+      let previous = 0;
+      const addSpace = (start, end) => {
+        if (end <= start) return;
+        // Reuse spacers as well so an identical update makes no DOM mutations.
+        const node = [...host.children].find(child => child.dataset.virtualRange === `${start}:${end}`) || spacer();
+        node.dataset.virtualRange = `${start}:${end}`;
+        const height = `${Math.max(0, offsets[end] - offsets[start] - gap)}px`;
+        if (node.style.height !== height) node.style.height = height;
+        nodes.push(node);
+      };
+      const retained = new Set();
+      for (const index of wanted) {
+        if (virtual) addSpace(previous, index);
+        const entry = items[index];
+        const version = settings.version(entry);
+        let saved = cache.get(entry.number);
+        if (!saved || saved.version !== version) {
+          changed = true;
+          const node = settings.render(entry);
+          if (saved?.node.querySelector(".knowledge-row-menu[open]")) node.querySelector(".knowledge-row-menu")?.setAttribute("open", "");
+          const focusIndex = saved?.node === active ? -2 : saved?.node.contains(active)
+            ? [...saved.node.querySelectorAll("button, input, summary, [tabindex]")].indexOf(active) : -1;
+          saved = { node, version, focusIndex };
+          cache.set(entry.number, saved);
+        }
+        nodes.push(saved.node);
+        settings.update?.(saved.node, entry);
+        retained.add(entry.number);
+        previous = index + 1;
+      }
+      if (virtual) addSpace(previous, items.length);
+      const keep = new Set(nodes);
+      for (const child of [...host.childNodes]) if (!keep.has(child)) { child.remove(); changed = true; }
+      let cursor = host.firstChild;
+      for (const node of nodes) {
+        if (node === cursor) cursor = cursor.nextSibling;
+        else host.insertBefore(node, cursor);
+      }
+      while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
+      let resized = false;
+      for (const [number, saved] of cache) {
+        if (!retained.has(number)) { cache.delete(number); continue; }
+        const height = saved.node.getBoundingClientRect?.().height;
+        if (height > 0) {
+          const margin = Number.parseFloat(doc.defaultView?.getComputedStyle?.(saved.node).marginBottom) || 0;
+          resized ||= heights.get(number) !== height + margin;
+          heights.set(number, height + margin);
+        }
+        if (saved.focusIndex === -2) {
+          saved.node.focus({ preventScroll: true });
+          saved.focusIndex = -1;
+        } else if (saved.focusIndex >= 0) {
+          saved.node.querySelectorAll("button, input, summary, [tabindex]")[saved.focusIndex]?.focus({ preventScroll: true });
+          saved.focusIndex = -1;
+        }
+      }
+      if (active?.isConnected && host.contains(active) && doc.activeElement !== active) active.focus?.({ preventScroll: true });
+      if (changed) settings.mounted?.();
+      if (virtual && resized && measure) draw(false);
+    }
+    const root = options.scrollRoot;
+    const onScroll = () => { if (settings.virtualize && items.length) draw(); };
+    root.addEventListener("scroll", onScroll, { passive: true });
+    // Native Tab crosses virtual boundaries just as it crosses mounted rows.
+    host.addEventListener("keydown", event => {
+      if (!settings.virtualize || event.key !== "Tab" || event.ctrlKey || event.altKey || event.metaKey) return;
+      const row = event.target.closest?.("[data-issue-number]");
+      if (!row) return;
+      const controls = [...(row.matches("button") ? [row] : []), ...row.querySelectorAll("button, input, summary, [tabindex]")]
+        .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
+      const direction = event.shiftKey ? -1 : 1;
+      if (event.target !== controls[direction > 0 ? controls.length - 1 : 0]) return;
+      const index = items.findIndex(entry => String(entry.number) === row.dataset.issueNumber) + direction;
+      if (index < 0 || index >= items.length) return;
+      event.preventDefault();
+      view.reveal(items[index].number);
+      const target = cache.get(items[index].number)?.node;
+      const next = [...(target?.matches("button") ? [target] : []), ...(target?.querySelectorAll("button, input, summary, [tabindex]") || [])]
+        .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
+      next[direction > 0 ? 0 : next.length - 1]?.focus();
+    });
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(onScroll) : null;
+    observer?.observe(root);
+    view = {
+      update(next, config) {
+        items = next; settings = config;
+        const keys = new Set(items.map(entry => entry.number));
+        for (const key of heights.keys()) if (!keys.has(key)) heights.delete(key);
+        draw();
+      },
+      reveal(number) {
+        forced = items.findIndex(entry => entry.number === number);
+        if (forced < 0) return false;
+        draw();
+        cache.get(number)?.node.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+        forced = -1;
+        return true;
+      },
+      dispose() { root.removeEventListener("scroll", onScroll); observer?.disconnect(); keyedKnowledgeLists.delete(host); },
+    };
+    keyedKnowledgeLists.set(host, view);
+  }
+  view.update(entries, options);
+}
+
 const MONITOR_STATE_VIEWS = Object.freeze({
   queued: Object.freeze({ label: "Queued", tone: "idle" }),
   not_ready: Object.freeze({ label: "Not ready", tone: "needs-input" }),
@@ -1013,6 +1154,7 @@ export function createKnowledgeKanbanSurface({
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
+      const knowledgeBoardViewModel = createUiStateStore({ windowId: null });
       const issueDetailRenderKeys = new WeakMap();
       // Receive publishes invalidation; the view owns projection/layout reads.
       const knowledgeEventRefreshModel = createUiStateStore({ kind: null, revision: 0 });
@@ -1795,6 +1937,9 @@ export function createKnowledgeKanbanSurface({
       }
 
       function clearKnowledgeBridgeState(windowId) {
+        for (const host of windowMap.get(windowId)?.querySelectorAll(".issue-queue-items, .kanban-column-body") || []) {
+          keyedKnowledgeLists.get(host)?.dispose();
+        }
         issueControlExplanations.get(windowId)?.dispose();
         issueControlExplanations.delete(windowId);
         terminalPreviewText.delete(windowId);
@@ -3105,12 +3250,17 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderIssueQueueBoard(windowId, state, list, entries) {
-        const feedback = createNode("div", "issue-queue-feedback");
+        const feedback = list.querySelector(".issue-queue-feedback") || createNode("div", "issue-queue-feedback");
         feedback.setAttribute("role", "status");
-        const board = createNode("div", "issue-queue-board");
+        const board = list.querySelector(".issue-queue-board") || createNode("div", "issue-queue-board");
+        if (!board.parentNode) list.prepend(feedback, board);
+        // Drop handlers read this current snapshot, never a previous render's array.
+        state.queueBoardEntries = entries;
         state.queueSelection ??= new Set();
+        const queued = canonicalQueuedKnowledgeEntries(state);
+        const queuePositions = new Map(queued.map((entry, index) => [entry.number, index]));
         for (const phase of ["backlog", "queued", "active", "done"]) {
-          const column = createNode("section", "issue-queue-column");
+          const column = board.querySelector(`[data-queue-column="${phase}"]`) || createNode("section", "issue-queue-column");
           column.dataset.queueColumn = phase;
           const label = phase[0].toUpperCase() + phase.slice(1);
           column.setAttribute("aria-label", `${label} column`);
@@ -3122,74 +3272,112 @@ export function createKnowledgeKanbanSurface({
             active: "Issues with an agent launching or running. Card output is a read-only preview.",
             done: "Closed issues or issues the monitor reports as merged or released.",
           };
-          column.appendChild(createNode("h3", "issue-queue-heading", `${label} · ${items.length}`));
-          explainIssueControl(column.lastElementChild, explanations[phase], `column-${phase}`);
-          if (!items.length) column.appendChild(createNode("div", "knowledge-empty", phase === "queued"
-            ? "Nothing will launch until an issue is queued." : `No ${phase} items`));
-          for (const entry of items) {
-            const row = renderIssueRow(windowId, state, entry);
-            if (phase === "active") {
-              const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
-              const agents = work?.agents || [];
-              const windows = getWorkspaceWindows?.() || [];
-              for (const target of windows) {
-                if (!target.agent_id || target.preset === "pm" ||
-                    !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
-                const linked = Number(target.linked_issue_number ?? target.placement?.issue_number);
-                const belongs = Number.isFinite(linked)
-                  ? linked === entry.number
-                  : agents.some(agent => agent.window_id === target.id ||
-                    (target.session_id && agent.session_id === target.session_id));
-                if (!belongs) continue;
-                if (!row.classList.contains("has-live-output")) {
-                  row.querySelector(".issue-agent-status")?.remove();
-                  row.classList.add("has-live-output");
-                }
-                const output = renderIssueAgentStatusRow(windowId, state, entry,
-                  target.placement?.kind === "issue_preview"
-                    ? { inlineWindow: target } : { canvasWindow: target });
-                output.classList.add("issue-card-output");
-                output.setAttribute("role", "group");
-                const title = windowDisplayTitle?.(target) || target.title || target.id;
-                output.setAttribute("aria-label", `Read-only live output: ${title}`);
-                output.querySelector(".issue-agent-status-output")?.remove();
-                const label = output.querySelector(".issue-agent-status-meta");
-                label.classList.add("issue-card-output-label");
-                label.textContent = `Read-only · ${label.textContent}`;
-                const screen = createNode("div", "issue-card-output-screen");
-                screen.appendChild(createNode("pre", "issue-card-output-text",
-                  terminalPreviewText.get(target.id) ?? "Waiting for output"));
-                output.appendChild(screen);
-                row.appendChild(output);
-              }
-            }
-            if (phase === "backlog" || phase === "queued") {
-              const selection = createNode("label", "issue-queue-select");
-              const checkbox = createNode("input");
-              checkbox.type = "checkbox";
-              checkbox.dataset.action = "queue-select";
-              checkbox.checked = state.queueSelection.has(entry.number);
-              checkbox.setAttribute("aria-label", `Select issue #${entry.number} for queue move`);
-              checkbox.addEventListener("click", event => {
-                event.stopPropagation();
-                if (state.queueSelection.has(entry.number)) state.queueSelection.delete(entry.number);
-                else state.queueSelection.add(entry.number);
-              });
-              selection.addEventListener("click", event => event.stopPropagation());
-              selection.append(checkbox, createNode("span", "", "Select"));
-              row.prepend(selection);
-              row.draggable = true;
-              row.addEventListener("dragstart", event => {
-                event.dataTransfer?.setData("text/plain", String(entry.number));
-              });
-            }
-            column.appendChild(row);
+          let heading = column.querySelector("h3");
+          let body = column.querySelector(".issue-queue-items");
+          if (!heading) {
+            heading = createNode("h3", "issue-queue-heading");
+            body = createNode("div", "issue-queue-items");
+            column.append(heading, body);
           }
+          const headingText = `${label} · ${items.length}`;
+          if (heading.textContent !== headingText) heading.textContent = headingText;
+          explainIssueControl(heading, explanations[phase], `column-${phase}`);
+          reconcileKnowledgeList(body, items, {
+            scrollRoot: list.closest(".knowledge-list-pane") || list,
+            virtualize: entries.length > 200,
+            mounted: () => publishIssueControlExplanations(windowId),
+            version: entry => {
+              const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+              const faces = issueRowFaces(windowId, entry, work);
+              return JSON.stringify([{ ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
+                work ? workAttentionFor?.(work) : null,
+                issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
+                phase === "active" ? (getWorkspaceWindows?.() || []).filter(target =>
+                  target.agent_id && (Number(target.linked_issue_number ?? target.placement?.issue_number) === entry.number ||
+                    work?.agents?.some(agent => agent.window_id === target.id || (target.session_id && agent.session_id === target.session_id)))) : null]);
+            },
+            update: (row, entry) => {
+              row.classList.toggle("selected", state.selectedNumber === entry.number);
+              const select = row.querySelector(".knowledge-row-select");
+              if (state.selectedNumber === entry.number) {
+                if (select.getAttribute("aria-current") !== "true") select.setAttribute("aria-current", "true");
+              } else if (select.hasAttribute("aria-current")) select.removeAttribute("aria-current");
+              const checkbox = row.querySelector('[data-action="queue-select"]');
+              if (checkbox) checkbox.checked = state.queueSelection.has(entry.number);
+            },
+            render: entry => {
+              const row = renderIssueRow(windowId, state, entry);
+              if (phase === "active") {
+                const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+                const agents = work?.agents || [];
+                const windows = getWorkspaceWindows?.() || [];
+                for (const target of windows) {
+                  if (!target.agent_id || target.preset === "pm" ||
+                      !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
+                  const linked = Number(target.linked_issue_number ?? target.placement?.issue_number);
+                  const belongs = Number.isFinite(linked)
+                    ? linked === entry.number
+                    : agents.some(agent => agent.window_id === target.id ||
+                      (target.session_id && agent.session_id === target.session_id));
+                  if (!belongs) continue;
+                  if (!row.classList.contains("has-live-output")) {
+                    row.querySelector(".issue-agent-status")?.remove();
+                    row.classList.add("has-live-output");
+                  }
+                  const output = renderIssueAgentStatusRow(windowId, state, entry,
+                    target.placement?.kind === "issue_preview"
+                      ? { inlineWindow: target } : { canvasWindow: target });
+                  output.classList.add("issue-card-output");
+                  output.setAttribute("role", "group");
+                  const title = windowDisplayTitle?.(target) || target.title || target.id;
+                  output.setAttribute("aria-label", `Read-only live output: ${title}`);
+                  output.querySelector(".issue-agent-status-output")?.remove();
+                  const label = output.querySelector(".issue-agent-status-meta");
+                  label.classList.add("issue-card-output-label");
+                  label.textContent = `Read-only · ${label.textContent}`;
+                  const screen = createNode("div", "issue-card-output-screen");
+                  screen.appendChild(createNode("pre", "issue-card-output-text",
+                    terminalPreviewText.get(target.id) ?? "Waiting for output"));
+                  output.appendChild(screen);
+                  row.appendChild(output);
+                }
+              }
+              if (phase === "backlog" || phase === "queued") {
+                const selection = createNode("label", "issue-queue-select");
+                const checkbox = createNode("input");
+                checkbox.type = "checkbox";
+                checkbox.dataset.action = "queue-select";
+                checkbox.checked = state.queueSelection.has(entry.number);
+                checkbox.setAttribute("aria-label", `Select issue #${entry.number} for queue move`);
+                checkbox.addEventListener("click", event => {
+                  event.stopPropagation();
+                  if (state.queueSelection.has(entry.number)) state.queueSelection.delete(entry.number);
+                  else state.queueSelection.add(entry.number);
+                });
+                selection.addEventListener("click", event => event.stopPropagation());
+                selection.append(checkbox, createNode("span", "", "Select"));
+                row.prepend(selection);
+                row.draggable = true;
+                row.addEventListener("dragstart", event => {
+                  event.dataTransfer?.setData("text/plain", String(entry.number));
+                });
+              }
+              return row;
+            },
+          });
+          let empty = column.querySelector(".knowledge-empty");
+          if (!items.length && !empty) {
+            empty = createNode("div", "knowledge-empty", phase === "queued"
+              ? "Nothing will launch until an issue is queued." : `No ${phase} items`);
+            column.appendChild(empty);
+          } else if (items.length) empty?.remove();
+          if (column.parentNode) continue;
           column.addEventListener("dragover", event => event.preventDefault());
           column.addEventListener("drop", event => {
             event.preventDefault();
             const number = Number.parseInt(event.dataTransfer?.getData("text/plain"), 10);
-            const entry = entries.find(item => item.number === number);
+            const currentEntries = state.queueBoardEntries;
+            const entry = currentEntries.find(item => item.number === number);
             if (!entry) return;
             if (phase === "active" || phase === "done") {
               feedback.textContent = `${label} is controlled by the monitor and work lifecycle; drop into Backlog or Queued.`;
@@ -3207,7 +3395,7 @@ export function createKnowledgeKanbanSurface({
               send({kind:"issue_monitor_queue_move", issue_number:number, position:targetIndex < 0 ? Math.max(0, queued.length - 1) : targetIndex});
             } else if (origin !== phase) {
               const numbers = state.queueSelection.has(number)
-                ? entries.filter(item => state.queueSelection.has(item.number) && issueQueueColumnForEntry(item) === origin).map(item => item.number)
+                ? currentEntries.filter(item => state.queueSelection.has(item.number) && issueQueueColumnForEntry(item) === origin).map(item => item.number)
                 : [number];
               send({kind:phase === "queued" ? "issue_monitor_queue_push" : "issue_monitor_queue_remove", issue_numbers:numbers});
             } else return;
@@ -3215,7 +3403,6 @@ export function createKnowledgeKanbanSurface({
           });
           board.appendChild(column);
         }
-        list.prepend(feedback, board);
       }
 
       function kanbanEmptyMessage(state, phase) {
@@ -3780,6 +3967,9 @@ export function createKnowledgeKanbanSurface({
       function closeIssuePreview(windowId, state) {
         state.previewHidden = true;
         renderKnowledgeBridge(windowId);
+        for (const host of windowMap.get(windowId)?.querySelectorAll(".issue-queue-items") || []) {
+          keyedKnowledgeLists.get(host)?.reveal(state.selectedNumber);
+        }
         windowMap.get(windowId)?.querySelector(`.knowledge-row[data-issue-number="${state.selectedNumber}"] .knowledge-row-select`)?.focus();
       }
 
@@ -4098,6 +4288,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderKnowledgeDetailOnly(windowId, state, { focusPreview = false } = {}) {
+        if (!windowMap.get(windowId)?.querySelector(".knowledge-detail-pane")) return;
         if (state.kind === "issue") {
           issueWindowViewModel.update(() => ({ windowId, detailOnly: true, focusPreview }));
           return;
@@ -4602,6 +4793,12 @@ export function createKnowledgeKanbanSurface({
         if (!list || !detailPane || !refreshButton || !searchInput) {
           return;
         }
+        // A queue transition changes the owning column. Preserve the logical
+        // control across both lists, including a destination outside the viewport.
+        const focused = list.contains(document.activeElement) ? document.activeElement : null;
+        const focusedNumber = Number(focused?.closest("[data-issue-number]")?.dataset.issueNumber);
+        const focusedAction = focused?.dataset.action;
+        const focusedSummary = focused?.matches("summary");
 
         refreshButton.disabled =
           !state.refreshEnabled || (state.loading && !knowledgeEntriesAreEmpty(state));
@@ -4637,7 +4834,9 @@ export function createKnowledgeKanbanSurface({
         // replacing it between pointerdown and pointerup loses the user's click.
         const other = list.querySelector(".issue-other-group");
         for (const child of Array.from(list.childNodes)) {
-          if (child !== other) child.remove();
+          if (child === other || (!splitMode && (child.classList?.contains("issue-queue-board") || child.classList?.contains("issue-queue-feedback")))) continue;
+          for (const host of child.querySelectorAll?.(".issue-queue-items") || []) keyedKnowledgeLists.get(host)?.dispose();
+          child.remove();
         }
         const visibleEntries = filteredIssueEntries(state);
         if (state.error) {
@@ -4670,6 +4869,19 @@ export function createKnowledgeKanbanSurface({
         }
         renderOtherWork(list, windowId, { laneFilter: state.issueLaneFilter || "all" });
         renderIssueDetailPane(windowId, state, detailPane, { agentPreview: !splitMode });
+        if (Number.isFinite(focusedNumber) && !focused.isConnected) {
+          let row = list.querySelector(`.knowledge-row[data-issue-number="${focusedNumber}"]`);
+          if (!row) {
+            for (const host of list.querySelectorAll(".issue-queue-items")) {
+              if (keyedKnowledgeLists.get(host)?.reveal(focusedNumber)) break;
+            }
+            row = list.querySelector(`.knowledge-row[data-issue-number="${focusedNumber}"]`);
+          }
+          const target = focusedAction
+            ? [...(row?.querySelectorAll("[data-action]") || [])].find(node => node.dataset.action === focusedAction)
+            : focusedSummary ? row?.querySelector("summary") : null;
+          (target || row?.querySelector(".knowledge-row-select"))?.focus({ preventScroll: true });
+        }
         publishIssueControlExplanations(windowId, focus);
       }
 
@@ -4684,11 +4896,18 @@ export function createKnowledgeKanbanSurface({
         );
         // An error changes the list presentation outside the data revision.
         // The next successful completion must rebuild it to remove that state.
-        if (state.error) state.entriesRevision = null;
+        if (state.error) {
+          state.entriesRevision = null;
+          state.entriesContent = null;
+        }
         if (state.kind === "issue") {
           issueWindowViewModel.update(() => ({ windowId }));
           return;
         }
+        knowledgeBoardViewModel.update(() => ({ windowId }));
+      }
+
+      function renderKnowledgeBoardView(windowId, element, state) {
         const board = element.querySelector(".kanban-board");
         const detailPane = element.querySelector(".knowledge-detail-pane");
         const status = element.querySelector(".knowledge-status");
@@ -4722,33 +4941,33 @@ export function createKnowledgeKanbanSurface({
           : filteredKnowledgeEntries(state);
         const columnsByPhase = new Map();
         for (const column of board.querySelectorAll(".kanban-column[data-phase]")) {
-          const body = column.querySelector("[data-role='body']");
-          if (body) {
-            body.innerHTML = "";
-          }
           columnsByPhase.set(column.dataset.phase, column);
           if (column.dataset.kanbanWired !== "true") {
             wireKanbanColumnDropTarget(windowId, column);
             column.dataset.kanbanWired = "true";
           }
         }
-        const counts = new Map();
-        for (const entry of visibleEntries) {
-          const phaseKey = effectiveKnowledgePhase(entry);
-          const column = columnsByPhase.get(phaseKey) || columnsByPhase.get("backlog");
-          if (!column) continue;
-          const body = column.querySelector("[data-role='body']");
-          if (!body) continue;
-          const card = renderKanbanCard(windowId, state, entry);
-          body.appendChild(card);
-          counts.set(phaseKey, (counts.get(phaseKey) || 0) + 1);
-        }
         for (const [phase, column] of columnsByPhase) {
+          const items = visibleEntries.filter(entry => {
+            const key = effectiveKnowledgePhase(entry);
+            return key === phase || (phase === "backlog" && !columnsByPhase.has(key));
+          });
           const countLabel = column.querySelector("[data-role='count']");
-          if (countLabel) {
-            countLabel.textContent = String(counts.get(phase) || 0);
+          if (countLabel && countLabel.textContent !== String(items.length)) {
+            countLabel.textContent = String(items.length);
           }
           const body = column.querySelector("[data-role='body']");
+          if (body) reconcileKnowledgeList(body, items, {
+            scrollRoot: body, virtualize: visibleEntries.length > 200,
+            version: entry => JSON.stringify([entry, state.pendingPhaseUpdates?.has(entry.number)]),
+            update: (card, entry) => {
+              card.classList.toggle("is-selected", state.selectedNumber === entry.number);
+              if (state.selectedNumber === entry.number) {
+                if (card.getAttribute("aria-current") !== "true") card.setAttribute("aria-current", "true");
+              } else if (card.hasAttribute("aria-current")) card.removeAttribute("aria-current");
+            },
+            render: entry => renderKanbanCard(windowId, state, entry),
+          });
           if (body && body.childElementCount === 0) {
             const empty = createNode(
               "div",
@@ -5095,13 +5314,14 @@ export function createKnowledgeKanbanSurface({
             }
             const queuedQuery = state.query.trim();
             const previousNumber = state.selectedNumber;
-            const unchangedEntries =
-              typeof event.revision === "string" && event.revision.length > 0 &&
-              event.revision === state.entriesRevision && !state.error && !state.renderError;
-            // Missing revisions keep the legacy full-render path. The revision
-            // belongs to the base list; search and detail retain their owners.
-            state.entriesRevision = event.revision || null;
             const incomingEntries = event.entries || [];
+            const entriesContent = JSON.stringify(incomingEntries);
+            const unchangedEntries = !state.error && !state.renderError &&
+              ((typeof event.revision === "string" && event.revision.length > 0 &&
+                event.revision === state.entriesRevision) || entriesContent === state.entriesContent);
+            // Legacy senders without revisions also preserve identical rows.
+            state.entriesContent = entriesContent;
+            state.entriesRevision = event.revision || null;
             const keepSelectedNumber =
               state.selectedNumber &&
               incomingEntries.some((entry) => entry.number === state.selectedNumber);
@@ -5443,6 +5663,11 @@ export function createKnowledgeKanbanSurface({
         if (kind === "resume") resumeVisibleKnowledgeEventRefresh();
       });
       knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
+      knowledgeBoardViewModel.subscribe(model => model, ({ windowId }) => {
+        const element = windowMap.get(windowId);
+        const state = knowledgeBridgeStateMap.get(windowId);
+        if (element && state) renderKnowledgeBoardView(windowId, element, state);
+      });
       // List completion publishes data in receive; the synchronous view owns
       // both the full rebuild and revision-preserving selection updates.
       knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber }) => {
@@ -5493,6 +5718,7 @@ export function createKnowledgeKanbanSurface({
           const message = String(error?.message || error);
           const list = element.querySelector(detailOnly ? ".knowledge-detail-pane" : ".knowledge-list");
           if (list) {
+            for (const host of list.querySelectorAll(".issue-queue-items")) keyedKnowledgeLists.get(host)?.dispose();
             list.replaceChildren(createIssueNoticeBadge("Issue rendering failed", `issue-window:${windowId}:render`, message));
           }
           if (state.renderError !== message) {
