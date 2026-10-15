@@ -965,9 +965,15 @@ mod tests {
 
     #[test]
     fn gwt_project_dir_scopes_by_repo_hash() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(home.path());
         let repo_hash = compute_repo_hash("https://github.com/example/project.git");
         let p = gwt_project_dir(&repo_hash);
-        assert!(p.ends_with(gwt_home_suffix(&["projects", repo_hash.as_str()])));
+        assert_eq!(
+            p,
+            home.path()
+                .join(gwt_home_suffix(&["projects", repo_hash.as_str()]))
+        );
     }
 
     #[test]
@@ -1189,6 +1195,8 @@ mod tests {
 
     #[test]
     fn gwt_project_logs_dir_scopes_by_repo_hash() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(home.path());
         let repo_hash = compute_repo_hash("https://github.com/example/project.git");
         let p = gwt_project_logs_dir(&repo_hash);
         assert!(p.ends_with(gwt_home_suffix(&["projects", repo_hash.as_str(), "logs"])));
@@ -1197,6 +1205,7 @@ mod tests {
     #[test]
     fn gwt_project_logs_dir_for_project_path_uses_origin_hash() {
         let dir = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(dir.path());
         let repo = dir.path().join("repo");
         init_git_repo(&repo);
         add_origin(&repo, "https://github.com/example/project.git");
@@ -1210,6 +1219,7 @@ mod tests {
     #[test]
     fn gwt_project_logs_dir_for_project_path_uses_path_hash_without_origin() {
         let dir = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(dir.path());
 
         let p = gwt_project_logs_dir_for_project_path(dir.path());
         let path_hash = compute_path_hash(dir.path());
@@ -1219,6 +1229,8 @@ mod tests {
 
     #[test]
     fn gwt_coordination_dir_scopes_by_repo_hash() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(home.path());
         let repo_hash = compute_repo_hash("https://github.com/example/project.git");
         let p = gwt_coordination_dir(&repo_hash);
         assert!(p.ends_with(gwt_home_suffix(&[
@@ -1353,6 +1365,7 @@ mod tests {
     #[test]
     fn workspace_close_events_path_is_home_scoped_and_distinct() {
         let dir = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(dir.path());
         let repo = dir.path().join("repo");
         init_git_repo(&repo);
 
@@ -1373,6 +1386,8 @@ mod tests {
 
     #[test]
     fn gwt_workspace_work_events_intake_state_path_uses_project_state_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = crate::test_support::ScopedGwtHome::set(home.path());
         let repo_hash = compute_repo_hash("git@github.com:akiojin/gwt.git");
         let path = gwt_workspace_work_events_intake_state_path(&repo_hash);
         assert!(path
