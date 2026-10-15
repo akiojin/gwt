@@ -92,6 +92,31 @@ fn project_index_git_context_result(
     if !project_root.exists() {
         return Ok(None);
     }
+    gwt_core::operation_deadline::ensure_remaining("project index git context")?;
+    // Known checkout roots already carry the same gitdir/commondir identity
+    // used by the shared root resolvers. Avoid two Git launches per search.
+    // Explicit Git path overrides and unresolved layouts retain bounded probes.
+    if ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none())
+        && project_root.join(".git").exists()
+    {
+        if let Some(common_dir) = gwt_core::repo_hash::repository_common_dir(project_root)
+            .filter(|dir| dir.join("HEAD").is_file() && dir.join("objects").is_dir())
+        {
+            let repo_root = if common_dir.file_name().is_some_and(|name| name == ".git") {
+                common_dir.parent().unwrap_or(&common_dir)
+            } else {
+                &common_dir
+            };
+            let context = ProjectIndexGitContext {
+                repo_root: normalize_git_root(repo_root.to_path_buf()),
+                current_worktree_root: Some(normalize_git_root(project_root.to_path_buf())),
+            };
+            gwt_core::operation_deadline::ensure_remaining("project index git context")?;
+            return Ok(Some(context));
+        }
+    }
     let current_worktree_root = resolve_current_git_worktree_root_result(project_root)?;
     let Some(repo_root) = resolve_main_git_worktree_root_result(project_root)?
         .or_else(|| current_worktree_root.clone())
@@ -3676,6 +3701,11 @@ detached
 
         for path in [&standalone, &linked_worktree, &bare, temp.path()] {
             let expected = project_index_git_context(path).expect("public git context");
+            // Known checkout roots must use their existing git metadata rather
+            // than launching Git twice for every warmed search.
+            let _git_unavailable = path.join(".git").exists().then(|| {
+                gwt_core::test_support::ScopedEnvVar::set("GWT_INDEX_TEST_GIT_SPAWN_FAILURE", "1")
+            });
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                 Instant::now() + Duration::from_secs(10),
             );
