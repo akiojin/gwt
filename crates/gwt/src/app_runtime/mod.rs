@@ -118,6 +118,9 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
         | UserEvent::PmConversationLoaded { .. }
         | UserEvent::MenuEvent(_)
         | UserEvent::QuitApp { .. }
+        | UserEvent::ApplyUpdateRestartNow { .. }
+        | UserEvent::ApplyUpdateGraceful { .. }
+        | UserEvent::UpdateApplyResolutionFailed(_)
         | UserEvent::StartupReady
         | UserEvent::StartupStopped => AppEventPriority::Foreground,
         _ => AppEventPriority::Background,

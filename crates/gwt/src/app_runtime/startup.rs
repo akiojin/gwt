@@ -133,6 +133,9 @@ pub(super) enum RestoreRefusal {
     /// is finished even while a settlement obligation is open, so its agent
     /// is not restarted; the placeholder is kept as the diagnostic.
     CompletedWork,
+    /// Canonical terminal Work cannot resume in the old Session. Keep its
+    /// placeholder for the Monitor's existing fresh-launch recovery.
+    FreshSessionRequired,
     AlreadyRunning,
     NoProjectTab,
     TabNotRestorable,
@@ -166,6 +169,7 @@ impl RestoreRefusal {
             Self::WorktreeAlreadyRestoring => "worktree_already_restoring".to_string(),
             Self::ClosedWorkDiagnostic => "closed_work_diagnostic_retained".to_string(),
             Self::CompletedWork => "completed_work_retained".to_string(),
+            Self::FreshSessionRequired => "fresh_session_required".to_string(),
             Self::AlreadyRunning => "already_running".to_string(),
             Self::NoProjectTab => "no_project_tab".to_string(),
             Self::TabNotRestorable => "tab_not_restorable".to_string(),
@@ -1193,6 +1197,7 @@ impl AppRuntime {
             RestoreAdmission::RefuseRetainedTerminal => Err(RestoreRefusal::ClosedWorkDiagnostic),
             RestoreAdmission::RefuseHeld(cause) => Err(RestoreRefusal::MonitorHold(cause)),
             RestoreAdmission::RefuseCompletedWork => Ok(true),
+            RestoreAdmission::RefuseFreshSession => Err(RestoreRefusal::FreshSessionRequired),
             RestoreAdmission::Admit => Ok(false),
         }
     }

@@ -77,6 +77,7 @@ pub mod spec_tasks;
 pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
+pub mod update_control;
 pub mod update_drain;
 pub mod update_settings;
 pub mod web_protocol_enums;
@@ -105,7 +106,8 @@ pub use agent_project_state::{
     apply_authenticated_workspace_update,
     apply_bound_authenticated_blocked_build_abort_terminalization,
     apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_update,
-    apply_bound_authenticated_workspace_update_with_operation_id, continue_authenticated_execution,
+    apply_bound_authenticated_workspace_update_with_operation_id,
+    continuation_requires_new_session, continue_authenticated_execution,
     describe_authenticated_host_contract, observe_agent_runtime,
     prepare_resume_producing_authority, probe_authenticated_execution_binding,
     probe_authenticated_prepared_execution_binding, probe_bound_authenticated_work_materialization,
