@@ -635,6 +635,7 @@ impl Drop for EventLoopDispatchTimer {
 }
 
 const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
+const UPDATE_CONTROL_CLIENT_ID: &str = "update-control";
 
 /// Issue #3633: how often the GUI re-checks that a runtime daemon is serving
 /// each enabled project, and therefore the worst-case gap after one dies.
@@ -783,11 +784,12 @@ fn spawn_update_apply_resolution(
     stage: &'static str,
     log_stage: &'static str,
 ) {
+    let pending_dir = gwt_core::update::pending_update_dir();
     std::thread::spawn(move || {
         let log_path = gwt_core::update::update_log_path()
             .to_string_lossy()
             .to_string();
-        let resolved = match gwt_core::update::load_pending_update_manifest() {
+        let resolved = match gwt_core::update::load_pending_update_manifest_in(&pending_dir) {
             Some(manifest)
                 if matches!(
                     &state, gwt_core::update::UpdateState::Available { latest, .. }
@@ -796,6 +798,10 @@ fn spawn_update_apply_resolution(
             {
                 Ok(manifest)
             }
+            _ if client_id == UPDATE_CONTROL_CLIENT_ID => Err(
+                "The staged update changed; use the update button or retry the CLI update."
+                    .to_string(),
+            ),
             _ => update_front_door::prepare_and_persist_pending_update(state),
         };
         match resolved {
@@ -813,17 +819,18 @@ fn spawn_update_apply_resolution(
                     "fail",
                     &[("stage", log_stage), ("reason", &message)],
                 );
-                let _ = proxy.send_event(UserEvent::UpdateApplyResolutionFailed(
-                    OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::UpdateApplyError {
-                            message: Some(message.clone()),
-                            stage: Some(stage.to_string()),
-                            reason: Some(message),
-                            log_path: Some(log_path),
-                        },
-                    ),
-                ));
+                let failure = BackendEvent::UpdateApplyError {
+                    message: Some(message.clone()),
+                    stage: Some(stage.to_string()),
+                    reason: Some(message),
+                    log_path: Some(log_path),
+                };
+                let failure = if client_id == UPDATE_CONTROL_CLIENT_ID {
+                    OutboundEvent::broadcast(failure)
+                } else {
+                    OutboundEvent::reply(client_id, failure)
+                };
+                let _ = proxy.send_event(UserEvent::UpdateApplyResolutionFailed(failure));
             }
         }
     });
@@ -2467,6 +2474,26 @@ mod tests {
             );
         }
         assert!(proxy.take_next().is_none());
+    }
+
+    #[test]
+    fn pending_bootstrap_apply_requires_both_singleton_locks() {
+        let source = include_str!("main.rs");
+        let startup = source
+            .rsplit_once("fn main() -> std::io::Result<()> {")
+            .unwrap()
+            .1;
+        let apply = startup
+            .find("if update_front_door::try_apply_pending_update_at_bootstrap()")
+            .unwrap();
+        assert!(
+            startup
+                .find("gwt::gui_single_instance::acquire_instance_lock(")
+                .unwrap()
+                < apply
+        );
+        assert!(startup.find("let mut tray_lock_handle = match").unwrap() < apply,
+            "a second launch must not apply a pending update while the resident owns its tray guard");
     }
 
     #[test]
@@ -5050,6 +5077,35 @@ mod tests {
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
         )));
+    }
+
+    #[test]
+    fn cli_update_resolution_refuses_changed_staging_without_download() {
+        let home = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (proxy, events) = AppEventProxy::stub();
+        super::spawn_update_apply_resolution(
+            proxy,
+            gwt_core::update::UpdateState::Available {
+                current: "1.0.0".into(),
+                latest: "2.0.0".into(),
+                release_url: String::new(),
+                asset_url: None,
+                checked_at: Utc::now(),
+            },
+            super::UPDATE_CONTROL_CLIENT_ID.into(),
+            "Restart now",
+            "restart_now",
+        );
+        wait_for_recorded_event("CLI staging refusal", &events, |events| !events.is_empty());
+        let mut events = events.lock().unwrap();
+        assert!(
+            matches!(events.pop(), Some(UserEvent::UpdateApplyResolutionFailed(
+            OutboundEvent {target: DispatchTarget::All,
+                event: BackendEvent::UpdateApplyError {reason: Some(reason), ..}, ..}
+        )) if reason.contains("staged update changed")),
+            "an accepted CLI request must fail visibly when its staged payload changes"
+        );
     }
 
     #[test]
@@ -10440,16 +10496,6 @@ fn main() -> std::io::Result<()> {
         tracing::warn!(%error, "automatic-update preference migration failed; runtime auto-apply remains disabled");
     }
 
-    // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
-    // update manifest (via the post-click modal's Later flow, or because the
-    // user killed gwt before clicking Restart now), hand off to the helper
-    // subprocess so the new version takes over before any GUI surfaces.
-    // Returns true only when an apply was attempted and exit(0) was already
-    // called inside; false continues the regular launch.
-    if update_front_door::try_apply_pending_update_at_bootstrap() {
-        return Ok(());
-    }
-
     // SPEC #2920: `gwt serve` is removed, so `main()` only ever reaches
     // this point on the GUI route. Phase 3 will rework the kind taxonomy
     // entirely to `(gwt_home, "tray", user_id)`; until then keep the
@@ -10505,6 +10551,12 @@ fn main() -> std::io::Result<()> {
             1,
         ),
     };
+
+    // Only the singleton owner may bootstrap a staged update. A duplicate
+    // launch must never install while another GUI still owns running panes.
+    if update_front_door::try_apply_pending_update_at_bootstrap() {
+        return Ok(());
+    }
 
     let runtime = {
         let _phase =
@@ -12151,6 +12203,20 @@ fn main() -> std::io::Result<()> {
                 if !update_apply_admission.begin_resolution() {
                     return;
                 }
+                if client_id == UPDATE_CONTROL_CLIENT_ID {
+                    if let gwt_core::update::UpdateState::Available { latest, .. } = &state {
+                        clients.dispatch(vec![
+                            OutboundEvent::global_update_notice("info", format!(
+                                "Update v{latest} requested. Restarting gwt; open panes will be restored."
+                            )),
+                            OutboundEvent::broadcast(BackendEvent::UpdateAutoApply {
+                                version: latest.clone(),
+                                phase: gwt::protocol::UpdateAutoApplyPhase::Applying,
+                                grace_secs: None,
+                            }),
+                        ]);
+                    }
+                }
                 gwt_core::update::log_update_event("restart_now_requested", &[]);
                 // SPEC-2041 Phase 19 (T-130/T-133) + Issue #4038 (AC-2):
                 // consume the persisted manifest if it exists so we don't
@@ -12227,20 +12293,23 @@ fn main() -> std::io::Result<()> {
                         // Issue #3906 AC-12: the failure is recorded in the
                         // notification center for every client, not only the
                         // one that clicked (the automatic path has none).
+                        let failure = BackendEvent::UpdateApplyError {
+                            message: Some(message.clone()),
+                            stage: Some("Restart now".to_string()),
+                            reason: Some(message.clone()),
+                            log_path: Some(log_path),
+                        };
+                        let failure = if client_id == UPDATE_CONTROL_CLIENT_ID {
+                            OutboundEvent::broadcast(failure)
+                        } else {
+                            OutboundEvent::reply(client_id, failure)
+                        };
                         clients.dispatch(vec![
                             OutboundEvent::global_update_notice(
                                 "error",
                                 format!("Update v{} could not be applied: {message}", marker.to_version),
                             ),
-                            OutboundEvent::reply(
-                                client_id,
-                                BackendEvent::UpdateApplyError {
-                                    message: Some(message.clone()),
-                                    stage: Some("Restart now".to_string()),
-                                    reason: Some(message),
-                                    log_path: Some(log_path),
-                                },
-                            ),
+                            failure,
                         ]);
                     }
                 }

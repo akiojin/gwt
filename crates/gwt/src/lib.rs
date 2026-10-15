@@ -77,6 +77,7 @@ pub mod spec_tasks;
 pub mod spotlight;
 pub mod start_work;
 pub mod system_settings;
+pub mod update_control;
 pub mod update_drain;
 pub mod update_settings;
 pub mod web_protocol_enums;

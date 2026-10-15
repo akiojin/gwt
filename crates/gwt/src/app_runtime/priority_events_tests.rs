@@ -1,6 +1,34 @@
 use super::{AppEventQueue, ProjectContext, UserEvent};
 use gwt::{FrontendEvent, KnowledgeKind, WindowGeometry};
 
+#[test]
+fn explicit_update_handoff_overtakes_eight_panes_output_backlog() {
+    let mut queue = AppEventQueue::default();
+    for pane in 0..8 {
+        queue
+            .push_back(UserEvent::RuntimeOutput {
+                id: format!("pane-{pane}"),
+                incarnation: 1,
+                data: b"redraw".to_vec(),
+                seq: 1,
+            })
+            .unwrap();
+    }
+    queue
+        .push_back(UserEvent::ApplyUpdateRestartNow {
+            state: gwt_core::update::UpdateState::UpToDate { checked_at: None },
+            client_id: "update-control".into(),
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            queue.pop_front(),
+            Some(UserEvent::ApplyUpdateRestartNow { .. })
+        ),
+        "an explicit apply must reach the shutdown coordinator before queued terminal output"
+    );
+}
+
 fn frontend(event: FrontendEvent) -> UserEvent {
     UserEvent::Frontend {
         client_id: "client".to_string(),
