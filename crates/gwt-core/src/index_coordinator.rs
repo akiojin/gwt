@@ -40,6 +40,8 @@ pub const VERIFICATION_RESERVATION_TTL: Duration = Duration::from_secs(10 * 60);
 /// Keep retry priority briefly, then let resident verification work use idle
 /// capacity without deleting the absent claimant's remembered FIFO position.
 pub const VERIFICATION_RESERVATION_GRACE: Duration = Duration::from_secs(3 * 60);
+/// Bound later shared backfill; older FIFO predecessors retain priority.
+pub const VERIFICATION_EXCLUSIVE_BACKFILL_WINDOW: Duration = Duration::from_secs(60);
 /// Issue #4086: TTL horizon on index-job heavy leases. The kernel lock still
 /// decides exclusion; the TTL makes a runaway runner visible as `expired` in
 /// status output instead of `expires_at_ms=unknown`.
@@ -50,7 +52,9 @@ pub const INDEX_HEAVY_LEASE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 pub const SEARCH_SCOPE: &str = "search";
 /// SC-065: how long an interactive search waits for the heavy lease before
 /// its admission is treated as a stall. A running background build yields at
-/// its 16-document checkpoint, so a handover fits well inside this budget;
+/// its next document checkpoint (Issue #5431). A single encode and runner
+/// startup are non-interruptible, so this remains a bounded wait, not a
+/// guarantee about model latency;
 /// the search hard limit is 30 s, which leaves room for the query itself.
 pub const INTERACTIVE_SEARCH_ADMISSION_DEADLINE: Duration = Duration::from_secs(10);
 /// TTL horizon on an interactive search's heavy lease (FR-417). A query
@@ -423,6 +427,9 @@ pub struct HeavyLeaseStatus {
     /// Best-effort wait estimate: `remaining_batches × batch_ms`, or the TTL
     /// remainder for a verification holder that has not finished a command.
     pub estimated_remaining_ms: Option<u64>,
+    /// Current runner model readiness, attributed only to this live lease.
+    pub model_state: Option<String>,
+    pub model_load_ms: Option<u64>,
     /// Issue #4470 AC-2: whether the ticket owner's process still exists.
     /// `None` when no ticket describes the lock.
     pub holder_alive: Option<bool>,
@@ -525,8 +532,18 @@ struct JobState {
     updated_at_ms: u64,
 }
 
-/// Waiter / pending-heavy registration payload (diagnostics only; liveness
-/// comes from the kernel shared lock each registrant keeps on its file).
+/// Whether a queued command needs one pool slot or excludes all pool slots.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeavyQueueMode {
+    Shared,
+    /// Missing mode metadata belongs to an older or unclassified claimant.
+    #[default]
+    Exclusive,
+}
+
+/// Waiter / pending-heavy registration payload. Liveness comes from the
+/// kernel shared lock each registrant keeps on its file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Registration {
     schema_version: u32,
@@ -540,6 +557,8 @@ struct Registration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     job_epoch: Option<u64>,
     priority: JobPriority,
+    #[serde(default)]
+    mode: HeavyQueueMode,
     registered_at_ms: u64,
     /// Issue #4086: a reservation is a registration that stays live until
     /// this instant even though nobody holds its shared lock.
@@ -605,6 +624,9 @@ pub struct HeavyQueueEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     pub priority: JobPriority,
+    /// Older payloads conservatively describe an exclusive request.
+    #[serde(default)]
+    pub mode: HeavyQueueMode,
     /// When this target joined the queue, preserved across its retries.
     pub queued_at_ms: u64,
     /// How long it has been queued, as of the snapshot.
@@ -619,6 +641,9 @@ pub struct HeavyQueueEntry {
     pub job_status: Option<JobStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bypass_reason: Option<String>,
+    /// The bounded backfill or drain policy currently applied to this request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduling_reason: Option<String>,
 }
 
 /// A claimant as the queue sees it, before it is published.
@@ -626,6 +651,7 @@ pub struct HeavyQueueEntry {
 struct QueueRecord {
     target: Option<String>,
     priority: JobPriority,
+    mode: HeavyQueueMode,
     queued_at_ms: u64,
     /// Issue #4210: arrival as a number rather than a millisecond, so two
     /// claimants that joined inside the same millisecond still have an order.
@@ -670,16 +696,38 @@ impl QueueRecord {
             && self.rank().cmp(&me.rank()) == Ordering::Less
     }
 
-    fn published(&self, now: u64) -> HeavyQueueEntry {
+    fn permits_shared_backfill(&self, me: &QueueRecord, now: u64) -> bool {
+        me.mode == HeavyQueueMode::Shared
+            && self.mode == HeavyQueueMode::Exclusive
+            && self.present
+            && now.saturating_sub(self.queued_at_ms)
+                < VERIFICATION_EXCLUSIVE_BACKFILL_WINDOW.as_millis() as u64
+    }
+
+    fn published(&self, now: u64, verification_pool: bool) -> HeavyQueueEntry {
         HeavyQueueEntry {
             target: self.target.clone(),
             priority: self.priority,
+            mode: self.mode,
             queued_at_ms: self.queued_at_ms,
             waiting_ms: now.saturating_sub(self.queued_at_ms),
             resident: self.present,
             attempt_id: self.attempt_id.clone(),
             job_status: self.job_status,
             bypass_reason: self.bypass_reason.map(str::to_string),
+            scheduling_reason: (verification_pool
+                && self.mode == HeavyQueueMode::Exclusive
+                && self.present)
+                .then(|| {
+                    if now.saturating_sub(self.queued_at_ms)
+                        < VERIFICATION_EXCLUSIVE_BACKFILL_WINDOW.as_millis() as u64
+                    {
+                        "later shared backfill allowed during the exclusive wait window"
+                    } else {
+                        "draining later shared requests; older FIFO predecessors retain priority"
+                    }
+                    .to_string()
+                }),
         }
     }
 }
@@ -726,6 +774,11 @@ pub struct HeavyProgress {
     /// Wall-clock milliseconds of the most recent batch.
     pub batch_ms: u64,
     pub updated_at_ms: u64,
+    /// Optional for older runners and verification progress records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_load_ms: Option<u64>,
 }
 
 impl HeavyProgress {
@@ -1017,6 +1070,7 @@ impl IndexCoordinator {
                         attempt_id: None,
                         job_epoch: None,
                         priority,
+                        mode: HeavyQueueMode::Exclusive,
                         registered_at_ms: now_ms(),
                         reserved_until_ms: None,
                         reason: None,
@@ -1168,6 +1222,8 @@ impl IndexCoordinator {
                 holder_context: ticket.holder_context,
                 remaining_batches: None,
                 estimated_remaining_ms: None,
+                model_state: None,
+                model_load_ms: None,
                 holder_alive,
                 holder_job_status,
                 holder_stale,
@@ -1219,6 +1275,15 @@ impl IndexCoordinator {
             holder_context: ticket.holder_context,
             remaining_batches,
             estimated_remaining_ms,
+            model_state: progress.as_ref().and_then(|progress| {
+                progress
+                    .model_state
+                    .clone()
+                    .filter(|state| matches!(state.as_str(), "warming" | "warm"))
+            }),
+            model_load_ms: progress
+                .as_ref()
+                .and_then(|progress| progress.model_load_ms),
             holder_alive,
             holder_job_status,
             holder_stale,
@@ -1636,7 +1701,7 @@ fn acquire_heavy_at(
     priority: JobPriority,
     timeout: Duration,
     ttl: Option<Duration>,
-    verification_pool: bool,
+    shared_pool_request: bool,
     disk_budgets: Option<&[VerificationDiskBudget]>,
     attempt: Option<&HeavyAttempt<'_>>,
 ) -> Result<HeavyLease, CoordinatorError> {
@@ -1645,9 +1710,14 @@ fn acquire_heavy_at(
     // Preserve the target's FIFO position across deferred attempts (#4169).
     // Enrollment precedes the lock probe so a newcomer cannot skip the queue.
     let target = key.file_stem();
+    let mode = if shared_pool_request {
+        HeavyQueueMode::Shared
+    } else {
+        HeavyQueueMode::Exclusive
+    };
     let started = Instant::now();
     let (queued_at_ms, queue_seq) = loop {
-        match enroll_in_heavy_queue_for_attempt(&pending_dir, &target, priority, attempt) {
+        match enroll_in_heavy_queue_for_attempt(&pending_dir, &target, priority, mode, attempt) {
             Ok(arrival) => break arrival,
             Err(err)
                 if attempt.is_some()
@@ -1667,6 +1737,7 @@ fn acquire_heavy_at(
     let me = QueueRecord {
         target: Some(target.clone()),
         priority,
+        mode,
         queued_at_ms,
         queue_seq,
         waiting: true,
@@ -1682,6 +1753,7 @@ fn acquire_heavy_at(
         attempt_id: attempt.map(|attempt| attempt.id.to_string()),
         job_epoch: current_heavy_job_epoch(&pending_dir, &target),
         priority,
+        mode,
         registered_at_ms: now_ms(),
         reserved_until_ms: None,
         reason: None,
@@ -1708,7 +1780,7 @@ fn acquire_heavy_at(
                 let _queue_state = lock_heavy_queue_entries(&pending_dir)?;
                 check_heavy_attempt_locked(&pending_dir, &target, attempt)?;
             }
-            match try_acquire_heavy_storage(root, &me, verification_pool, disk_budgets) {
+            match try_acquire_heavy_storage(root, &me, shared_pool_request, disk_budgets) {
                 Ok(Some(locks)) => {
                     // Cancellation may have arrived while probing or creating a
                     // slot. Never publish a grant or consume a successor claim
@@ -1771,7 +1843,13 @@ fn acquire_heavy_at(
             }
             if started.elapsed() >= timeout {
                 // A deferred retry resumes its existing place in the queue.
-                match enroll_in_heavy_queue_for_attempt(&pending_dir, &target, priority, attempt) {
+                match enroll_in_heavy_queue_for_attempt(
+                    &pending_dir,
+                    &target,
+                    priority,
+                    mode,
+                    attempt,
+                ) {
                     Err(CoordinatorError::Io(err)) if is_contended(&err) => {}
                     Err(err) if attempt.is_some() => return Err(err),
                     _ => {}
@@ -1814,6 +1892,10 @@ struct HeavyLockFiles {
 
 fn heavy_claim_must_defer(root: &Path, me: &QueueRecord) -> bool {
     let queued = heavy_queue(&root.join("heavy.pending"));
+    // Pool membership differs from this command's shared/exclusive mode.
+    // Legacy and model lanes retain their original FIFO behavior.
+    let verification_pool = read_verification_capacity(root).is_ok();
+    let now = now_ms();
     let burst_spent = read_interactive_burst(root) >= MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS;
     // An incomplete scan cannot establish that it is this claimant's turn.
     queued.as_ref().map_or(true, |queued| {
@@ -1840,7 +1922,7 @@ fn heavy_claim_must_defer(root: &Path, me: &QueueRecord) -> bool {
                     return false;
                 }
             }
-            other.blocks(me)
+            other.blocks(me) && !(verification_pool && other.permits_shared_backfill(me, now))
         })
     })
 }
@@ -2189,6 +2271,8 @@ impl HeavyLease {
                 batch_size: 1,
                 batch_ms: unit_ms,
                 updated_at_ms: now_ms(),
+                model_state: None,
+                model_load_ms: None,
             },
         )?;
         Ok(())
@@ -2743,6 +2827,10 @@ fn heavy_queue_entry(
         attempt_id: None,
         job_epoch: current_heavy_job_epoch(dir, target),
         priority,
+        mode: existing
+            .as_ref()
+            .map(|entry| entry.mode)
+            .unwrap_or_default(),
         registered_at_ms: now,
         reserved_until_ms: existing.as_ref().and_then(|entry| entry.reserved_until_ms),
         reason: existing.as_ref().and_then(|entry| entry.reason.clone()),
@@ -2762,18 +2850,20 @@ fn enroll_in_heavy_queue(
     target: &str,
     priority: JobPriority,
 ) -> Result<(u64, Option<u64>), CoordinatorError> {
-    enroll_in_heavy_queue_for_attempt(dir, target, priority, None)
+    enroll_in_heavy_queue_for_attempt(dir, target, priority, HeavyQueueMode::Exclusive, None)
 }
 
 fn enroll_in_heavy_queue_for_attempt(
     dir: &Path,
     target: &str,
     priority: JobPriority,
+    mode: HeavyQueueMode,
     attempt: Option<&HeavyAttempt<'_>>,
 ) -> Result<(u64, Option<u64>), CoordinatorError> {
     let _queue_state = lock_heavy_queue_entries(dir)?;
     check_heavy_attempt_locked(dir, target, attempt)?;
     let mut entry = heavy_queue_entry(dir, target, priority)?;
+    entry.mode = mode;
     entry.attempt_id = attempt.map(|attempt| attempt.id.to_string());
     entry.position_until_ms =
         Some(now_ms().saturating_add(HEAVY_QUEUE_POSITION_TTL.as_millis() as u64));
@@ -2799,6 +2889,7 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
             untargeted.push(QueueRecord {
                 target: None,
                 priority: JobPriority::Background,
+                mode: HeavyQueueMode::Exclusive,
                 queued_at_ms: now,
                 queue_seq: None,
                 waiting: true,
@@ -2812,6 +2903,7 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
         let record = QueueRecord {
             target: registration.target.clone(),
             priority: registration.priority,
+            mode: registration.mode,
             queued_at_ms: registration.queued_at(),
             queue_seq: registration.queue_seq,
             waiting: live.locked || registration.has_live_reservation(now),
@@ -2837,6 +2929,11 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
                         kept.priority = kept.priority.min(record.priority);
                         kept.waiting |= record.waiting;
                         kept.present |= record.present;
+                        // A resident claimant knows its current command mode;
+                        // its durable reservation may predate classification.
+                        if record.present {
+                            kept.mode = record.mode;
+                        }
                         if kept.present {
                             kept.bypass_reason = None;
                         } else if record.waiting {
@@ -2860,10 +2957,13 @@ fn heavy_queue(dir: &Path) -> Result<Vec<QueueRecord>, CoordinatorError> {
 /// The claimants actually waiting for a turn, as published in status output.
 fn published_heavy_queue(dir: &Path) -> Result<Vec<HeavyQueueEntry>, CoordinatorError> {
     let now = now_ms();
+    let verification_pool = dir
+        .parent()
+        .is_some_and(|root| read_verification_capacity(root).is_ok());
     Ok(heavy_queue(dir)?
         .iter()
         .filter(|record| record.waiting)
-        .map(|record| record.published(now))
+        .map(|record| record.published(now, verification_pool))
         .collect())
 }
 
@@ -4142,6 +4242,121 @@ mod tests {
         );
     }
 
+    fn resident_verification_claim(
+        coordinator: &IndexCoordinator,
+        key: &TargetKey,
+        waited: Duration,
+    ) -> (File, PathBuf) {
+        let dir = coordinator.heavy_pending_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let mut registration =
+            heavy_queue_entry(&dir, &key.file_stem(), JobPriority::ManualRebuild).unwrap();
+        registration.queued_at_ms = Some(now_ms().saturating_sub(waited.as_millis() as u64));
+        registration.position_until_ms =
+            Some(now_ms().saturating_add(HEAVY_QUEUE_POSITION_TTL.as_millis() as u64));
+        // A payload without a mode represents an older binary. It must be
+        // treated conservatively as exclusive by a new pool reader.
+        let mut payload = serde_json::to_value(registration).unwrap();
+        payload.as_object_mut().unwrap().remove("mode");
+        let registration = serde_json::from_value(payload).unwrap();
+        // Real acquisition enrolls durably before publishing its resident
+        // poller, so the same arrival must survive the fixture's next acquire.
+        write_json_atomic(&coordinator.heavy_reservation_path(key), &registration).unwrap();
+        let path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+        let file = publish_live_registration(&path, &registration).unwrap();
+        (file, path)
+    }
+
+    #[test]
+    fn verification_pool_backfills_behind_a_resident_exclusive_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 3).unwrap();
+        let holder = own(
+            &coordinator,
+            &TargetKey::verification("repo", "holder"),
+            JobPriority::ManualRebuild,
+        );
+        let first = holder.acquire_heavy(Duration::ZERO).unwrap();
+        let exclusive_key = TargetKey::verification("repo", "exclusive");
+        let exclusive = own(&coordinator, &exclusive_key, JobPriority::ManualRebuild);
+        let (pending, path) =
+            resident_verification_claim(&coordinator, &exclusive_key, Duration::ZERO);
+        let later = own(
+            &coordinator,
+            &TargetKey::verification("repo", "later"),
+            JobPriority::ManualRebuild,
+        );
+        let second = later
+            .acquire_heavy(Duration::ZERO)
+            .expect("a queued exclusive must allow bounded use of an idle shared slot");
+        let status = coordinator.heavy_pool_status().unwrap();
+        assert_eq!((status.capacity, status.used, status.available), (3, 2, 1));
+        let head = serde_json::to_value(&status.queue[0]).unwrap();
+        assert_eq!(head["mode"], "exclusive");
+        assert!(head["scheduling_reason"]
+            .as_str()
+            .unwrap()
+            .contains("backfill"));
+        assert!(matches!(
+            exclusive.acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[]),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+        second.release().unwrap();
+        first.release().unwrap();
+        exclusive
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .expect("exclusive admission still waits until all shared holders leave")
+            .release()
+            .unwrap();
+        drop(pending);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn verification_pool_drains_after_the_exclusive_backfill_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 3).unwrap();
+        let holder = own(
+            &coordinator,
+            &TargetKey::verification("repo", "holder"),
+            JobPriority::ManualRebuild,
+        );
+        let first = holder.acquire_heavy(Duration::ZERO).unwrap();
+        let exclusive_key = TargetKey::verification("repo", "exclusive");
+        let exclusive = own(&coordinator, &exclusive_key, JobPriority::ManualRebuild);
+        let (pending, path) =
+            resident_verification_claim(&coordinator, &exclusive_key, Duration::from_secs(61));
+        let later = own(
+            &coordinator,
+            &TargetKey::verification("repo", "later"),
+            JobPriority::ManualRebuild,
+        );
+        assert!(matches!(
+            later.acquire_heavy(Duration::ZERO),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+        let status = coordinator.heavy_pool_status().unwrap();
+        assert_eq!((status.used, status.available), (1, 2));
+        let head = serde_json::to_value(&status.queue[0]).unwrap();
+        assert!(head["scheduling_reason"]
+            .as_str()
+            .unwrap()
+            .contains("draining"));
+        first.release().unwrap();
+        let lease = exclusive
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .expect("draining must admit the exclusive before the later shared request");
+        assert_eq!(coordinator.heavy_pool_status().unwrap().available, 0);
+        lease.release().unwrap();
+        drop(pending);
+        fs::remove_file(path).unwrap();
+        later
+            .acquire_heavy(Duration::ZERO)
+            .expect("later shared work resumes after the exclusive releases")
+            .release()
+            .unwrap();
+    }
+
     #[test]
     fn reservation_diagnostics_identify_an_absent_attempt_head() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4442,6 +4657,7 @@ mod tests {
                 attempt_id: None,
                 job_epoch: None,
                 priority: JobPriority::ManualRebuild,
+                mode: HeavyQueueMode::Exclusive,
                 registered_at_ms: queued_at_ms,
                 reserved_until_ms: None,
                 reason: None,
@@ -4959,6 +5175,7 @@ mod tests {
                                 records.push(QueueRecord {
                                     target: target.map(str::to_string),
                                     priority,
+                                    mode: HeavyQueueMode::Exclusive,
                                     queued_at_ms,
                                     queue_seq,
                                     waiting,
@@ -5066,12 +5283,16 @@ mod tests {
                 batch_size: 16,
                 batch_ms: 2_000,
                 updated_at_ms: now_ms(),
+                model_state: Some("warming".into()),
+                model_load_ms: Some(0),
             })
             .unwrap();
         let status = coordinator.heavy_lease_status().unwrap();
         // ceil(90 / 16) = 6 batches × 2 s each.
         assert_eq!(status.remaining_batches, Some(6));
         assert_eq!(status.estimated_remaining_ms, Some(12_000));
+        assert_eq!(status.model_state.as_deref(), Some("warming"));
+        assert_eq!(status.model_load_ms, Some(0));
 
         // Progress written for another target is not attributed to this holder.
         coordinator
@@ -5082,11 +5303,15 @@ mod tests {
                 batch_size: 16,
                 batch_ms: 9_000,
                 updated_at_ms: now_ms(),
+                model_state: Some("warm".into()),
+                model_load_ms: Some(16_000),
             })
             .unwrap();
         let status = coordinator.heavy_lease_status().unwrap();
         assert_eq!(status.remaining_batches, None);
         assert_eq!(status.estimated_remaining_ms, None);
+        assert_eq!(status.model_state, None);
+        assert_eq!(status.model_load_ms, None);
         drop(heavy);
         index.complete(JobOutcome::Completed).unwrap();
 

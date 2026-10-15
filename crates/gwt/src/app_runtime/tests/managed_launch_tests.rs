@@ -3145,23 +3145,62 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
         sample_active_agent_session("tab-1", &window_id),
     );
 
-    // Record activity immediately while deferring the monitor lookup and
-    // daemon control publication to the blocking worker.
-    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-        "Running",
-        "PostToolUse",
-        "session-1",
-    ));
-
-    assert!(
-        runtime.last_agent_activity_for_test(&window_id).is_some(),
-        "a hook arrival must refresh the activity clock for its window"
-    );
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.clone(), issue_monitor_feedback(4975));
+    let hook = runtime_hook_state_for_event("Running", "PostToolUse", "session-1");
+    // The worker is queued: receipt/window evidence must not claim application yet.
+    let captured = capture_tracing_events(|| {
+        runtime.handle_daemon_runtime_hook_event(hook.clone());
+        assert!(
+            runtime.last_agent_activity_for_test(&window_id).is_some(),
+            "a hook arrival must refresh the activity clock for its window"
+        );
+        assert_eq!(
+            tasks.lock().expect("queued tasks").len(),
+            1,
+            "RuntimeHook must defer heartbeat lookup and publication to one blocking worker"
+        );
+        tasks.lock().unwrap().pop().unwrap()();
+        let mut unmatched = hook.clone();
+        unmatched.gwt_session_id = Some("unmatched-session".into());
+        runtime.handle_daemon_runtime_hook_event(unmatched);
+        drop(runtime);
+    });
+    let delivery: Vec<_> = captured
+        .iter()
+        .filter(|event| event.target == "gwt.hook.delivery")
+        .collect();
+    let outcomes: Vec<_> = delivery
+        .iter()
+        .map(|event| {
+            (
+                event.fields["stage"].as_str(),
+                event.fields["outcome"].as_str(),
+            )
+        })
+        .collect();
     assert_eq!(
-        tasks.lock().expect("queued tasks").len(),
-        1,
-        "RuntimeHook must defer heartbeat lookup and publication to one blocking worker"
+        outcomes,
+        [
+            ("window", "matched"),
+            ("heartbeat", "publish_unconfirmed"),
+            ("window", "unmatched")
+        ]
     );
+    for event in delivery {
+        assert_eq!(event.level, Level::INFO);
+        assert_eq!(event.fields["source_event"], "PostToolUse");
+        assert_eq!(event.fields["occurred_at"], hook.occurred_at);
+        assert_eq!(
+            event.fields["gwt_session_id"],
+            if event.fields["outcome"] == "unmatched" {
+                "unmatched-session"
+            } else {
+                "session-1"
+            }
+        );
+    }
 }
 
 /// Issue #4608: the heartbeat throttle is measured from the last heartbeat it
@@ -3229,6 +3268,27 @@ fn issue_monitor_window_observation_carries_the_last_pane_output_time() {
         .expect("rfc3339")
         .with_timezone(&chrono::Utc);
     assert!(last_output_at >= before, "{last_output_at} < {before}");
+}
+
+#[test]
+fn issue_4905_window_observation_carries_session_identity_for_hook_delivery() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("codex-1", Some("session-41".into())));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let snapshot = runtime
+        .issue_monitor_window_snapshot_for_tab("tab-1", "2026-10-15T00:00:01Z")
+        .unwrap();
+    let observed = serde_json::to_value(&snapshot.windows[0]).unwrap();
+    assert_eq!(observed["session_id"], "session-41");
 }
 
 /// SPEC-3431 FR-067: an agent that exits cleanly also frees its slot.

@@ -10,8 +10,7 @@ export function createPmWindowModel() {
   const snapshotTime = value => value.replace(/(?:\.(\d+))?Z$/, (_, digits = '') => `.${digits.padEnd(9, '0')}Z`);
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
-      reports: [], current: null, error: null, loaded: false, reportsCursor: null,
-      terminalCursor: null, terminalNeedsSnapshot: false, reportsPage: false, reportsBefore: null, reportsRequestId: 0, reportsRequestPending: false };
+      reports: [], current: null, error: null, loaded: false };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -22,83 +21,24 @@ export function createPmWindowModel() {
       return { windows: { ...state.windows, [windowId]: { ...next, revision: (previous?.revision || 0) + 1 } }, changedWindowId: windowId };
     });
   }
-  const validSlice = slice => typeof slice?.epoch === 'string' && slice.epoch.length > 0
-    && slice.epoch.length <= 128 && Number.isSafeInteger(slice.revision) && slice.revision >= 0
-    && Number.isSafeInteger(slice.base_revision) && slice.base_revision >= 0 && slice.base_revision <= slice.revision;
-  const boundedReports = reports => Array.isArray(reports) && reports.length <= 200
-    && reports.every(report => typeof report.id === 'string' && typeof report.body === 'string')
-    && new Set(reports.map(report => report.id)).size === reports.length
-    && reports.reduce((bytes, report) => bytes + new TextEncoder().encode(report.body).length, 0) <= 2 * 1024 * 1024;
   function applyPmWindowReceiveEvent(event) {
-    let resync = null;
     model.update(state => {
       const previous = state.windows[event.id];
       let next = previous || emptyWindow(event.id);
-      const slice = event.slice;
       if (event.kind === 'pm_reports') {
         if (!previous || event.session_id !== previous.sessionId) return state;
-        if (previous.reportsRequestId && event.request_id !== previous.reportsRequestId) return state;
-        if (event.error) next = { ...next, error: event.error, loaded: true, reportsRequestPending: false };
-        else {
-          if (!validSlice(slice)) { resync = 'reports'; return state; }
-          const cursor = previous.reportsCursor;
-          if (cursor?.epoch === slice.epoch && slice.revision < cursor.revision) return state;
-          let reports = previous.reports;
-          if (event.reports_mode === 'snapshot' || event.reports_mode === 'history') reports = event.reports;
-          else if (event.reports_mode === 'delta') {
-            if (previous.reportsPage) return state;
-            if (cursor?.epoch === slice.epoch && slice.revision <= cursor.revision) return state;
-            if (!cursor || cursor.epoch !== slice.epoch || cursor.revision !== slice.base_revision) {
-              resync = 'reports'; return state;
-            }
-            if (slice.revision === cursor.revision) return state;
-            const byId = new Map(reports.map(report => [report.id, report]));
-            for (const id of event.removed_ids || []) byId.delete(id);
-            for (const report of event.reports || []) byId.set(report.id, report);
-            reports = (event.ordered_ids || []).map(id => byId.get(id));
-            if (reports.length !== byId.size || reports.some(report => !report)) { resync = 'reports'; return state; }
-          } else if (event.reports_mode !== 'unchanged' || !cursor || cursor.epoch !== slice.epoch
-            || cursor.revision !== slice.revision) { resync = 'reports'; return state; }
-          if (!boundedReports(reports)) { resync = 'reports'; return state; }
-          const staleCurrent = event.current?.observed_at && previous.current?.observed_at
-            && snapshotTime(event.current.observed_at) < snapshotTime(previous.current.observed_at);
-          next = { ...next, error: null, loaded: true, reports, reportsRequestPending: false,
-            reportsCursor: { epoch: slice.epoch, revision: slice.revision },
-            reportsPage: event.reports_mode === 'unchanged' ? previous.reportsPage : event.reports_mode === 'history',
-            reportsBefore: event.reports_mode === 'unchanged' ? previous.reportsBefore : event.before || null,
-            current: staleCurrent ? previous.current : (event.current || null) };
-        }
+        // The durable ledger only appends. Ignore older concurrent reads.
+        if (!event.error && (event.reports || []).length < previous.reports.length) return state;
+        if (!event.error && event.current?.observed_at && previous.current?.observed_at
+          && snapshotTime(event.current.observed_at) < snapshotTime(previous.current.observed_at)) return state;
+        next = { ...next, error: event.error || null, loaded: true,
+          current: event.error ? previous.current : (event.current || null),
+          reports: event.error ? previous.reports : (event.reports || []) };
       } else if (event.kind === 'terminal_output' || event.kind === 'terminal_snapshot') {
-        const cursor = next.terminalCursor;
-        if (!validSlice(slice)) { resync = 'terminal'; return state; }
-        if (cursor?.epoch === slice.epoch && slice.revision <= cursor.revision) return state;
-        if (event.kind === 'terminal_output' && (next.terminalNeedsSnapshot
-          || (cursor ? cursor.epoch !== slice.epoch || cursor.revision !== slice.base_revision : slice.base_revision !== 0))) {
-          resync = next.terminalNeedsSnapshot ? null : 'terminal';
-          if (next.terminalNeedsSnapshot) return state;
-          return { windows: { ...state.windows, [event.id]: { ...next, terminalNeedsSnapshot: true } }, changedWindowId: event.id };
-        }
-        next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 },
-          terminalCursor: { epoch: slice.epoch, revision: slice.revision }, terminalNeedsSnapshot: false };
+        next = { ...next, terminal: { kind: event.kind, dataBase64: event.data_base64 } };
       } else return state;
       return { windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
     });
-    return resync;
-  }
-  function preparePmReportsRequest(windowId, { reset = false, before = null } = {}) {
-    const previous = model.read().windows[windowId];
-    if (!previous || (!reset && !before && previous.reportsRequestPending)) return null;
-    const request_id = previous.reportsRequestId + 1;
-    if (!Number.isSafeInteger(request_id)) throw new Error('PM Reports request generation exhausted');
-    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: {
-      ...state.windows[windowId], reportsRequestId: request_id, reportsRequestPending: true,
-    } } }));
-    return { id: windowId, request_id, cursor: reset || before ? null : previous.reportsCursor, before };
-  }
-  function resetPmWindowSlices() {
-    model.update(state => ({ ...state, windows: Object.fromEntries(Object.entries(state.windows).map(([id, value]) =>
-      [id, { ...value, reportsCursor: null, reportsRequestPending: false,
-        terminalCursor: null, terminalNeedsSnapshot: true }])) }));
   }
   function removePmWindowState(windowId) {
     model.update(state => {
@@ -108,21 +48,17 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  function subscribePmWindowView(select, render) { return model.subscribeView(select, render); }
-  return { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState, subscribePmWindowView, resetPmWindowSlices, preparePmReportsRequest };
+  return { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility, onRequestReports = () => {},
+export function createPmChat({ document, root, sessionId, onLogVisibility,
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
   let logs = false;
   let digest = '';
   let currentDigest;
-  let previousCurrent = Symbol();
-  let previousReports, previousKind;
-  let visibleReports = [];
   let latestState;
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
@@ -140,7 +76,13 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onReq
   toolbar.append(reportsButton, logButton);
   const body = element('div', 'pm-chat__body');
   const currentCard = element('section', 'pm-chat__current');
-  currentCard.setAttribute('aria-label', 'PM の現在');
+  currentCard.setAttribute('aria-label', 'PM status');
+  const currentDetails = element('details', '');
+  const currentSummary = element('summary', 'pm-chat__current-summary');
+  const currentContent = element('div', 'pm-chat__current-content');
+  currentDetails.append(currentSummary, currentContent);
+  currentCard.append(currentDetails);
+  const historyHeader = element('div', 'pm-chat__history-header');
   const filter = element('label', 'pm-chat__filter', 'Report kind');
   const kindSelect = element('select', '');
   kindSelect.setAttribute('aria-label', 'Report kind');
@@ -157,14 +99,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onReq
   const transcript = element('div', 'pm-chat__transcript');
   transcript.setAttribute('role', 'log');
   transcript.setAttribute('aria-label', 'PM reports');
-  const pages = element('div', 'pm-chat__toolbar');
-  const olderButton = element('button', '', 'Older reports');
-  olderButton.setAttribute('aria-label', 'Older PM reports');
-  const latestButton = element('button', '', 'Latest reports');
-  latestButton.setAttribute('aria-label', 'Latest PM reports');
-  olderButton.hidden = latestButton.hidden = true;
-  pages.append(olderButton, latestButton);
-  body.append(currentCard, filter, notice, transcript, pages);
+  historyHeader.append(element('h2', '', 'Reports'), filter);
+  body.append(currentCard, historyHeader, notice, transcript);
   root.append(toolbar, body);
 
   function showLogs(value) {
@@ -178,89 +114,95 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onReq
   const showReports = () => showLogs(false);
   const showLog = () => showLogs(true);
   const filterReports = () => update(latestState);
-  const olderReports = () => latestState?.reportsBefore && onRequestReports({ before: latestState.reportsBefore });
-  const latestReports = () => onRequestReports({ reset: true });
-  olderButton.addEventListener('click', olderReports);
-  latestButton.addEventListener('click', latestReports);
   function renderCurrent(current) {
-    if (previousCurrent === current) return;
-    previousCurrent = current;
     const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
     if (currentDigest === nextDigest) return;
     currentDigest = nextDigest;
     const authored = element('section', 'pm-chat__current-authored');
-    authored.setAttribute('aria-label', 'PM の記述');
-    authored.append(element('h3', '', 'PM の記述'));
+    authored.setAttribute('aria-label', 'PM notes');
+    authored.append(element('h3', '', 'PM notes'));
     const time = value => {
-      const node = element('time', '', value ? new Date(value).toLocaleString() : '不明');
+      const node = element('time', '', value ? new Date(value).toLocaleString() : 'Unknown');
+      node.title = node.textContent;
       if (value) node.setAttribute('datetime', value);
       return node;
     };
     const status = current?.status;
+    const working = status?.items.filter(item => item.kind !== 'waiting').length || 0;
+    const waiting = status?.items.filter(item => item.kind === 'waiting').length || 0;
+    const heading = element('span', 'pm-chat__current-heading');
+    heading.append(element('strong', '', 'PM status'), element('span', '', `${working} working · ${waiting} waiting`));
+    const next = element('span', 'pm-chat__current-next');
+    const trigger = element('span', '', status ? `Next: ${status.next_trigger}` : 'No current status reported yet.');
+    trigger.title = trigger.textContent;
+    next.append(trigger);
+    if (status) next.append(element('span', '', ` · User action: ${status.user_action ? 'Requested' : 'None'}`));
+    const meta = element('span', 'pm-chat__current-meta', 'Updated: ');
+    meta.append(time(status?.updated_at));
+    if (current?.stale_minutes != null) {
+      meta.append(element('span', 'pm-chat__current-stale', ` · PM has not updated for ${current.stale_minutes} minutes`));
+    }
+    currentSummary.replaceChildren(heading, next, meta);
     if (status) {
       const items = element('ul', '');
       for (const item of status.items) {
-        const row = element('li', '', `${item.kind === 'waiting' ? '待ち' : '作業'}: ${item.text} — 開始 `);
+        const row = element('li', '', `${item.kind === 'waiting' ? 'Waiting' : 'Working'}: ${item.text} — Started `);
         row.append(time(item.started_at));
         items.append(row);
       }
-      authored.append(items, element('p', '', `次に動く条件: ${status.next_trigger}`),
-        element('p', '', `ユーザーへの依頼: ${status.user_action || 'なし'}`));
-      const updated = element('p', 'pm-chat__current-meta', '更新: ');
+      authored.append(items, element('p', '', `Next: ${status.next_trigger}`),
+        element('p', '', `User action: ${status.user_action || 'None'}`));
+      const updated = element('p', 'pm-chat__current-meta', 'Updated: ');
       updated.append(time(status.updated_at));
       authored.append(updated);
       if (current.stale_minutes != null) {
-        const stale = element('p', 'pm-chat__current-stale', `PM の更新が ${current.stale_minutes} 分止まっています`);
+        const stale = element('p', 'pm-chat__current-stale', `PM has not updated for ${current.stale_minutes} minutes`);
         stale.setAttribute('role', 'status');
         authored.append(stale);
       }
-    } else authored.append(element('p', '', '現在状態はまだ報告されていません。'));
+    } else authored.append(element('p', '', 'No current status reported yet.'));
     const automatic = element('section', 'pm-chat__current-facts');
-    automatic.setAttribute('aria-label', '自動の事実');
-    automatic.append(element('h3', '', '自動の事実'));
+    automatic.setAttribute('aria-label', 'Live facts');
+    automatic.append(element('h3', '', 'Live facts'));
     const facts = current?.facts;
-    if (!facts) automatic.append(element('p', '', 'Monitor の事実を読み込み中…'));
+    if (!facts) automatic.append(element('p', '', 'Loading Monitor facts…'));
     else {
-      const issueLabel = issue => `${issue.issue_number ? `#${issue.issue_number}` : 'Issue 未割当'} ${issue.title || '題名不明'}`;
-      automatic.append(element('p', 'pm-chat__current-meta', `Monitor: ${facts.source === 'daemon' ? '接続中' : facts.source === 'degraded_cache' ? 'キャッシュ（Monitor 未接続）' : '取得不可'}`));
+      const issueLabel = issue => `${issue.issue_number ? `#${issue.issue_number}` : 'Unassigned issue'} ${issue.title || 'Unknown title'}`;
+      automatic.append(element('p', 'pm-chat__current-meta', `Monitor: ${facts.source === 'daemon' ? 'Connected' : facts.source === 'degraded_cache' ? 'Cached (Monitor disconnected)' : 'Unavailable'}`));
       if (facts.error) automatic.append(element('p', 'pm-chat__current-stale', facts.error));
       const windows = element('ul', '');
       for (const item of facts.active_windows || []) {
-        const row = element('li', '', `${issueLabel(item)} — 最終活動 `);
+        const row = element('li', '', `${issueLabel(item)} — Last activity `);
         row.append(time(item.last_activity_at));
         windows.append(row);
       }
-      automatic.append(element('p', '', `稼働中の窓: ${(facts.active_windows || []).length}${facts.inventory_incomplete ? '（観測は不完全）' : ''}`), windows,
-        element('p', '', `queue の先頭: ${facts.queue_head ? issueLabel(facts.queue_head) : facts.source === 'unavailable' ? '不明' : 'なし'}`),
-        element('p', '', `needs_human: ${facts.needs_human_count ?? '不明'}`),
-        element('p', '', `リリース: ${facts.release ? `#${facts.release.number} ${facts.release.title}` : facts.release_observed_at ? '進行中の PR なし' : '不明'}`),
-        element('p', '', `未適用の更新: ${facts.pending_update ? `v${facts.pending_update}` : facts.update_known ? 'なし' : '不明'}`));
+      automatic.append(element('p', '', `Active windows: ${(facts.active_windows || []).length}${facts.inventory_incomplete ? ' (incomplete observation)' : ''}`), windows,
+        element('p', '', `Queue head: ${facts.queue_head ? issueLabel(facts.queue_head) : facts.source === 'unavailable' ? 'Unknown' : 'None'}`),
+        element('p', '', `needs_human: ${facts.needs_human_count ?? 'Unknown'}`),
+        element('p', '', `Release: ${facts.release ? `#${facts.release.number} ${facts.release.title}` : facts.release_observed_at ? 'No active PR' : 'Unknown'}`),
+        element('p', '', `Pending update: ${facts.pending_update ? `v${facts.pending_update}` : facts.update_known ? 'None' : 'Unknown'}`));
       if (facts.release_observed_at) {
-        const observed = element('p', 'pm-chat__current-meta', 'リリース PR 観測: ');
+        const observed = element('p', 'pm-chat__current-meta', 'Release PR observed: ');
         observed.append(time(facts.release_observed_at));
         automatic.append(observed);
       }
     }
-    currentCard.replaceChildren(element('h2', '', 'PM の現在'), authored, automatic);
+    currentContent.replaceChildren(authored, automatic);
   }
   function update(state) {
     if (disposed || !state) return;
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
-    olderButton.hidden = !state.reportsBefore;
-    latestButton.hidden = !state.reportsPage;
     renderCurrent(state.current);
     const reports = state.reports;
-    const changed = reports !== previousReports || kindSelect.value !== previousKind;
-    if (changed) visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
-    const nextDigest = changed ? JSON.stringify([kindSelect.value, visibleReports]) : digest;
+    const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
+    const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
     if (digest !== nextDigest) {
-      const atBottom = transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop <= 32;
-      const previousScroll = transcript.scrollTop;
+      const atBottom = transcript.childElementCount > 0 && body.scrollHeight - body.clientHeight - body.scrollTop <= 32;
+      const previousScroll = body.scrollTop;
       const nodes = visibleReports.map(report => {
         const row = element('article', 'pm-chat__message');
-        row.dataset.reportId = report.id;
         const qa = report.kind === 'qa';
         const header = element('div', 'pm-chat__author');
         const time = element('time', '', new Date(report.created_at).toLocaleString());
@@ -294,11 +236,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onReq
         return row;
       });
       transcript.replaceChildren(...nodes);
-      transcript.scrollTop = atBottom ? transcript.scrollHeight : previousScroll;
+      body.scrollTop = atBottom ? body.scrollHeight : previousScroll;
       digest = nextDigest;
     }
-    previousReports = reports;
-    previousKind = kindSelect.value;
     notice.textContent = state.error || (!state.loaded ? 'Loading PM reports…'
       : !reports.length ? 'No PM reports yet. Use the execution log to interact with PM.'
         : visibleReports.length ? '' : `No ${kindLabels[kindSelect.value]} reports yet.`);
@@ -308,12 +248,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onReq
     if (disposed || session === nextSession) return;
     session = nextSession;
     transcript.replaceChildren();
-    transcript.scrollTop = 0;
+    body.scrollTop = 0;
     digest = '';
     currentDigest = undefined;
-    previousCurrent = Symbol();
-    previousReports = previousKind = undefined;
-    visibleReports = [];
     showLogs(false);
   }
   function dispose() {
@@ -321,8 +258,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onReq
     reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
     kindSelect.removeEventListener('change', filterReports);
-    olderButton.removeEventListener('click', olderReports);
-    latestButton.removeEventListener('click', latestReports);
     root.replaceChildren();
     root.classList.remove('pm-chat', 'pm-chat--logs');
   }

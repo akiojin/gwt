@@ -8,6 +8,89 @@ fn request(action: &str) -> FrontendEvent {
 }
 
 #[test]
+fn supported_agent_catalog_starts_metadata_concurrently_and_preserves_rows() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let bin = write_fixture_runners(temp.path(), &["npm"]);
+    // Codex cannot return metadata until Grok has started. The existing
+    // process deadline bounds a broken serial implementation; no speed assertion.
+    #[cfg(unix)]
+    fs::write(
+        bin.join("npm"),
+        r#"#!/bin/sh
+base=${0%/*}
+case "$2" in
+  @openai/codex)
+    while [ ! -f "$base/grok-started" ]; do /bin/sleep 0.1; done
+    printf '"3.0.0"\n' ;;
+  @xai-official/grok) : > "$base/grok-started"; printf 'fixture registry unavailable\n' >&2; exit 7 ;;
+  *) printf '"1.0.0"\n' ;;
+esac
+"#,
+    )
+    .unwrap();
+    #[cfg(windows)]
+    fs::write(
+        bin.join("npm.cmd"),
+        "@echo off\r\n\
+         if \"%~2\"==\"@openai/codex\" goto codex\r\n\
+         if \"%~2\"==\"@xai-official/grok\" goto grok\r\n\
+         echo \"1.0.0\"\r\nexit /b 0\r\n\
+         :codex\r\n\
+         if not exist \"%~dp0grok-started\" goto codex\r\n\
+         echo \"3.0.0\"\r\nexit /b 0\r\n\
+         :grok\r\ntype nul > \"%~dp0grok-started\"\r\necho fixture registry unavailable 1>&2\r\nexit /b 7\r\n",
+    )
+    .unwrap();
+    let config_path = temp.path().join("config.toml");
+    let mut settings = Settings::default();
+    settings.profiles.profiles[0]
+        .env_vars
+        .insert("PATH".into(), bin.to_string_lossy().into_owned());
+    settings.save(&config_path).unwrap();
+    let options = [("claude", "2.1.0"), ("codex", "2.0.0")]
+        .into_iter()
+        .map(|(id, version)| gwt::AgentOption {
+            id: id.into(),
+            name: id.into(),
+            available: true,
+            installed_version: Some(version.into()),
+            custom_agent: None,
+        })
+        .collect();
+    let cache = LaunchWizardMemoryCache::load_with_agent_options(temp.path(), options);
+    let BackendEvent::SupportedAgentList { agents, .. } =
+        super::super::agent_maintenance::supported_agent_catalog(&cache, &config_path, temp.path())
+    else {
+        panic!("expected supported agent catalog");
+    };
+    assert_eq!(
+        agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        gwt_agent::builtin_agent_descriptors()
+            .iter()
+            .map(|descriptor| descriptor.command)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(agents[0].available_version, None);
+    assert!(!agents[0].update_available);
+    assert!(agents[0]
+        .update_check_error
+        .as_deref()
+        .unwrap()
+        .contains("channel"));
+    assert_eq!(agents[1].available_version.as_deref(), Some("3.0.0"));
+    assert!(agents[1].update_available);
+    assert!(agents[2]
+        .update_check_error
+        .as_deref()
+        .unwrap()
+        .contains("fixture registry unavailable"));
+}
+
+#[test]
 fn maintenance_refuses_starting_agent_panes_without_scheduling_a_worker() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -278,7 +361,7 @@ fn finish_startup_worker(
 
 #[cfg(unix)]
 #[test]
-fn startup_updates_only_installed_npm_agents_and_refreshes_catalog_after_completion() {
+fn startup_updates_only_installed_supported_agents_and_refreshes_catalog_after_completion() {
     let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, events, tasks) = startup_fixture(temp.path(), Some("1.2.3"), "1.2.4", false);
@@ -310,6 +393,43 @@ fn startup_updates_only_installed_npm_agents_and_refreshes_catalog_after_complet
     assert_eq!(codex["up_to_date"], true);
     assert_eq!(codex["update_available"], false);
     assert_eq!(payload["auto_update"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_updates_antigravity_but_never_unverified_native_routes() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, events, tasks) = startup_fixture(temp.path(), None, "1.2.4", false);
+    let bin = temp.path().join("agent-bin");
+    for (name, script) in [
+        ("curl", "printf '{\"version\":\"1.2.0\"}'"),
+        ("agy", "if [ \"$1\" = update ]; then echo update >> \"$base/native-calls\"; : > \"$base/updated\"; elif [ -f \"$base/updated\" ]; then printf '1.2.0\\n'; else printf '1.0.0\\n'; fi"),
+        ("gh", "if [ \"$2\" = --version ]; then printf '1.0.0\\n'; else echo gh-mutation >> \"$base/native-calls\"; fi"),
+        ("claude", "if [ \"$1\" = --version ]; then printf '1.0.0\\n'; else echo claude-mutation >> \"$base/native-calls\"; fi"),
+        ("hermes", "if [ \"$1\" = --version ]; then printf '1.0.0\\n'; else echo hermes-mutation >> \"$base/native-calls\"; fi"),
+    ] {
+        let path = bin.join(name);
+        fs::write(&path, format!("#!/bin/sh\nbase=${{0%/*}}\n{script}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    runtime.start_agent_auto_update();
+    let outbound = finish_startup_worker(&mut runtime, &events, &tasks);
+    assert_eq!(
+        fs::read_to_string(bin.join("native-calls")).unwrap().trim(),
+        "update"
+    );
+    let results: Vec<_> = outbound
+        .iter()
+        .map(|event| serde_json::to_value(&event.event).unwrap())
+        .collect();
+    assert!(results.iter().any(|result| result["agent_id"] == "agy"
+        && result["success"] == true
+        && result["after_version"] == "1.2.0"));
+    assert!(!results.iter().any(|result| result["agent_id"] == "claude"
+        || result["agent_id"] == "hermes"
+        || result["agent_id"] == "gh"));
 }
 
 #[cfg(unix)]

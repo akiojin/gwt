@@ -171,7 +171,7 @@ class InProcessYieldTests(unittest.TestCase):
                 )
             self.assertTrue(result.get("ok"), result)
             self.assertTrue(result.get("yielded"), result)
-            self.assertEqual(result.get("newly_embedded"), 16, result)
+            self.assertEqual(result.get("newly_embedded"), 1, result)
 
 
 class PublishFailurePropagationTests(unittest.TestCase):

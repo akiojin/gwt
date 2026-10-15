@@ -81,15 +81,18 @@ fn public_file_search_result_shape_remains_exhaustive() {
         suggestions: Vec::new(),
         stale_scopes: Vec::new(),
         refresh_queued: false,
+        unavailable_scopes: Vec::new(),
     };
     let ProjectIndexSearchOutcome {
         results,
         suggestions,
         stale_scopes,
         refresh_queued,
+        unavailable_scopes,
     } = outcome;
     assert!(results.is_empty());
     assert!(suggestions.is_empty());
     assert!(stale_scopes.is_empty());
     assert!(!refresh_queued);
+    assert!(unavailable_scopes.is_empty());
 }

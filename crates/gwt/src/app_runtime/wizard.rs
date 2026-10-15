@@ -3132,7 +3132,7 @@ impl AppRuntime {
                             session_mode,
                             retryable,
                         );
-                    if committed && !retryable {
+                    if committed {
                         if let Some((window_id, identity, generation)) = fresh_execution {
                             let exact_window = self
                                 .window_lifecycle_generations
@@ -3823,12 +3823,29 @@ impl AppRuntime {
             .ok()
             .unwrap_or(false);
 
+        let materializer_id = self.issue_monitor_materializer_id.clone();
         let record_launch_tier = || -> Result<(), String> {
             if review_prompt.is_none() {
                 if let Some(tier) = tier {
-                    gwt::mutate_issue_monitor_prefs(
+                    gwt::try_mutate_issue_monitor_prefs(
                         &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
-                        |prefs| prefs.record_tier_launch(issue_number, tier),
+                        |prefs| {
+                            if let Some(delivery_id) = delivery_id.as_deref() {
+                                if !prefs.record_launch_delivery_tier(
+                                    issue_number,
+                                    delivery_id,
+                                    &materializer_id,
+                                    &proposed_window_id,
+                                    tier,
+                                ) {
+                                    return Err(std::io::Error::other(
+                                        "launch tier no longer matches the claimed delivery window",
+                                    ));
+                                }
+                            }
+                            prefs.record_tier_launch(issue_number, tier);
+                            Ok(())
+                        },
                     )
                     .map_err(|error| {
                         format!("Could not record Issue Monitor launch tier: {error}")
@@ -4030,6 +4047,7 @@ impl AppRuntime {
             LaunchWizardLaunchRequest::Agent(config) => Some(config.session_mode),
             LaunchWizardLaunchRequest::Shell(_) => None,
         };
+        record_launch_tier()?;
         let feedback = LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
@@ -4043,7 +4061,6 @@ impl AppRuntime {
             // owns the launch binding the implementation window holds.
             issue_monitor_review_dispatch: review_prompt.is_some(),
         };
-        record_launch_tier()?;
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => self
                 .spawn_agent_window_with_feedback_at_geometry(

@@ -1214,6 +1214,26 @@ fn verification_head(worktree: &Path, head: &str) -> String {
     format!("{anchor}\n")
 }
 
+/// Reuse the fingerprint's strict bookkeeping normalization for a later PR
+/// snapshot. Equivalent ancestors or sibling histories cannot advance a run.
+pub(crate) fn preserves_verified_head(worktree: &Path, verified: &str, head: &str) -> bool {
+    if head == verified {
+        return true;
+    }
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let ancestry = gwt_core::process::hidden_command("git")
+        .args(["merge-base", "--is-ancestor", verified, head])
+        .current_dir(&worktree)
+        .output();
+    ancestry.is_ok_and(|output| output.status.success())
+        && verification_head(&worktree, verified) == verification_head(&worktree, head)
+        // A source-identical merge can contain a product commit and its revert
+        // on another parent. Reuse the PR history proof without granting a
+        // base-sync exemption to completion or unavailable-remote diagnostics.
+        && super::pr::head_check::product_changes_since(&worktree, verified, head, verified)
+            .is_ok_and(|(commits, _)| commits.is_empty())
+}
+
 pub(crate) fn worktree_fingerprint_excluding(
     worktree: &Path,
     generated_outputs: &[String],

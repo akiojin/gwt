@@ -1,6 +1,106 @@
 use super::*;
 
 #[test]
+fn monitor_scan_recovery_failure_emits_one_attention_notice() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-a",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-a"),
+    );
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor.record_control_commit_error("Issue Monitor authority recovery is blocked: project-state/issue-monitor.shutdown-revoke is malformed");
+    let first = runtime.issue_monitor_daemon_status_events(&repo, Box::new(monitor.status_view()));
+    assert_eq!(
+        first
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. }))
+            .count(),
+        1
+    );
+    let repeated =
+        runtime.issue_monitor_daemon_status_events(&repo, Box::new(monitor.status_view()));
+    assert!(repeated
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::IssueMonitorToast { .. })));
+}
+
+#[test]
+fn git_health_notice_is_shared_by_pm_and_monitor_until_recovery() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let mut runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab-a",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-a"),
+    );
+    let diagnostic = "Git needs attention\nCommand: git rev-parse --git-common-dir\nGit stderr: fatal: broken metadata\nRepair the Git metadata, then retry.";
+    let continuation = || super::super::pm::PmWorktreeContinuation::FreshSpawn {
+        tab_id: "tab-a".into(),
+        project_root: repo.clone(),
+    };
+    let first = runtime.handle_pm_worktree_prepared(continuation(), Err(diagnostic.into()));
+    assert_eq!(
+        first
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. }))
+            .count(),
+        1
+    );
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor.record_scan_error(
+        "2026-10-14T00:00:00Z",
+        diagnostic.replace("rev-parse --git-common-dir", "remote get-url origin"),
+    );
+    let repeated =
+        runtime.issue_monitor_daemon_status_events(&repo, Box::new(monitor.status_view()));
+    assert!(repeated
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::IssueMonitorToast { .. })));
+    let repeated = runtime.handle_pm_worktree_prepared(continuation(), Err(diagnostic.into()));
+    assert!(repeated
+        .iter()
+        .all(|event| !matches!(event.event, BackendEvent::IssueMonitorToast { .. })));
+    let healthy = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    runtime.issue_monitor_daemon_status_events(&repo, Box::new(healthy.status_view()));
+    let unchanged = runtime.handle_pm_worktree_prepared(continuation(), Err(diagnostic.into()));
+    assert!(
+        unchanged
+            .iter()
+            .all(|event| !matches!(event.event, BackendEvent::IssueMonitorToast { .. })),
+        "an empty status is not evidence that Git recovered"
+    );
+    let mut validated = healthy.status_view();
+    validated.last_scan_at = Some((chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339());
+    runtime.issue_monitor_daemon_status_events(&repo, Box::new(validated));
+    let recurrent = runtime.handle_pm_worktree_prepared(continuation(), Err(diagnostic.into()));
+    assert_eq!(
+        recurrent
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn pm_wakes_exclude_terminal_and_superseded_escalations() {
     let _env_lock = env_test_lock()
         .lock()

@@ -40,22 +40,25 @@ test.describe("Issue Monitor candidate pool", () => {
         bounds: { x: 60, y: 50, width: 1040, height: 820 },
       });
       const windowId = await page.waitForFunction((before) => {
-        const node = [...document.querySelectorAll<HTMLElement>('.workspace-window[data-preset="issue"]')]
+        const node = [...document.querySelectorAll<HTMLElement>('.workspace-window[data-preset="settings"]')]
           .find(node => !before.includes(node.dataset.id));
         return node?.dataset.id;
       }, beforeIds).then(handle => handle.jsonValue());
       const surface = page.locator(`.workspace-window[data-id="${windowId}"]`);
       await expect(surface).toBeVisible();
       const settings = page.locator('.workspace-window[data-preset="settings"]');
-      const pool = settings.locator('[data-settings-panel="agents"]');
+      const pool = settings.locator('[data-settings-candidates]');
       const openCandidates = async () => {
-        // Use the same Settings navigation route as settings-issues-live.
-        // A persisted Settings window can overlap the Issue gear after reload.
+        // The legacy Agents route reveals Candidates in the same Issues options.
+        // It must focus the existing Settings window after reload.
         await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", {
           detail: { section: "agents" },
         })));
         await expect(pool).toBeVisible();
-        await expect(settings.locator('[data-settings-tab="agents"]')).toHaveAttribute("aria-selected", "true");
+        await expect(settings.locator(".settings-issues-options")).toHaveAttribute("open", "");
+        await expect(settings).toHaveCount(1);
+        await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
+        await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
       };
       const saveProfiles = async (action: () => Promise<unknown>, agentIds: string[]) => {
         const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);

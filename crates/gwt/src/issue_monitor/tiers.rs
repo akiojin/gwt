@@ -20,10 +20,20 @@ impl IssueMonitorTierRecord {
     }
 }
 
-/// Read-only tier facts for presentation, independent of live launch identity.
+/// Exact acknowledged launch evidence, not proof of current process liveness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorConfirmedLaunchTier {
+    pub tier: u8,
+    pub window_id: String,
+    pub delivery_id: String,
+}
+
+/// Read-only tier facts for presentation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorTierFacts {
     pub issue_number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_launch: Option<IssueMonitorConfirmedLaunchTier>,
     /// Max-merged history written before spawn, not the latest or running tier
     /// and not proof that an agent successfully started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,6 +65,7 @@ impl IssueMonitorState {
             .keys()
             .chain(self.tier_overrides.keys())
             .chain(self.autonomous_records.keys())
+            .chain(self.launch_confirmations.keys())
             .copied()
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -78,6 +89,7 @@ impl IssueMonitorState {
                 });
                 IssueMonitorTierFacts {
                     issue_number,
+                    confirmed_launch: self.confirmed_launch_tier(issue_number),
                     recorded_launch_tier: history.and_then(|record| record.launch_tier),
                     recorded_landing_tier: history.and_then(|record| record.landing_tier),
                     history_floor,
@@ -87,6 +99,31 @@ impl IssueMonitorState {
                 }
             })
             .collect()
+    }
+
+    fn confirmed_launch_tier(&self, issue_number: u64) -> Option<IssueMonitorConfirmedLaunchTier> {
+        if !self.active_launches.contains(&issue_number)
+            || self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+        {
+            return None;
+        }
+        let window_id = self.launched_windows.get(&issue_number)?;
+        let ack = self.launch_confirmations.get(&issue_number)?;
+        if ack.window_id != *window_id
+            || self.launch_bindings.get(window_id) != Some(&issue_number)
+            || ack.claim_id.is_none()
+            || ack.claim_id.as_ref() != self.launched_claims.get(&issue_number)
+        {
+            return None;
+        }
+        Some(IssueMonitorConfirmedLaunchTier {
+            tier: ack.tier?,
+            window_id: window_id.clone(),
+            delivery_id: ack.delivery_id.clone()?,
+        })
     }
 }
 
@@ -136,6 +173,29 @@ fn default_launch_tiers() -> Vec<Vec<IssueMonitorLaunchProfile>> {
 }
 
 impl IssueMonitorPrefs {
+    /// Bind selection to the claimed fresh launch before materialization.
+    pub fn record_launch_delivery_tier(
+        &mut self,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_id: &str,
+        window_id: &str,
+        tier: u8,
+    ) -> bool {
+        let Some(delivery) = self.pending_launch_deliveries.iter_mut().find(|delivery| {
+            delivery.issue_number == issue_number
+                && delivery.delivery_id == delivery_id
+                && delivery.materializer_id.as_deref() == Some(materializer_id)
+                && delivery.materializer_window_id.as_deref() == Some(window_id)
+                && delivery.materialized_window_id.is_none()
+                && delivery.workspace_durable_window_id.is_none()
+        }) else {
+            return false;
+        };
+        delivery.selected_tier = Some(tier);
+        true
+    }
+
     pub fn effective_launch_tiers(&self) -> Vec<Vec<IssueMonitorLaunchProfile>> {
         if !self.launch_auto {
             vec![self.launch_profile_pool()]

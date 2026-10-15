@@ -5159,6 +5159,11 @@ impl AppRuntime {
             success.initial_prompt_file,
             success.session_snapshot.as_ref(),
         );
+        if !self.pending_continue_work.contains_key(&window_id) {
+            if let Some(context) = feedback.as_ref() {
+                let _ = self.arm_issue_monitor_startup(&window_id, context);
+            }
+        }
         if let Some(operation_id) = self
             .pending_continue_work
             .get(&window_id)
@@ -5917,21 +5922,35 @@ impl AppRuntime {
     }
 
     pub(super) fn host_update_drain_launch_hold(&self) -> Result<Option<String>, String> {
+        let pending = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
+            !manifest.auto_apply_deferred
+                && gwt_core::update::pending_version_is_newer(
+                    &manifest.version,
+                    env!("CARGO_PKG_VERSION"),
+                )
+        });
+        let mut hold = None;
         for context in self.project_contexts() {
-            let prefs = gwt::load_issue_monitor_prefs(
+            let prefs = gwt::issue_monitor::load_issue_monitor_prefs_for_running_version(
                 &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
             )
             .map_err(|error| format!("Cannot check host update_drain admission: {error}"))?;
-            if let Some(drain) = prefs.update_drain {
-                return Ok(Some(format!(
-                    "Host update_drain for v{} in {} holds new agent launches; {}",
-                    drain.version,
-                    context.project_root.display(),
-                    gwt::UPDATE_DRAIN_RELEASE_OPERATION,
-                )));
+            if let Some(drain) = prefs.update_drain.filter(|drain| {
+                pending
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.version == drain.version)
+            }) {
+                hold.get_or_insert_with(|| {
+                    format!(
+                        "Host update_drain for v{} in {} holds new agent launches; release.update.defer {{\"version\":\"{}\"}} (host-wide)",
+                        drain.version,
+                        context.project_root.display(),
+                        drain.version,
+                    )
+                });
             }
         }
-        Ok(None)
+        Ok(hold)
     }
 
     fn spawn_agent_window_with_placement(

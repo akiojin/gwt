@@ -33,7 +33,6 @@ function fixture({ routeProjectKey = null } = {}) {
     projectPageMetadata: { resetConnection() {} },
     requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(),
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
-    resetPmWindowSlices: createPmWindowModel().resetPmWindowSlices,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
     opened, renderRouteNotFound() { context.notFoundRendered = true; },

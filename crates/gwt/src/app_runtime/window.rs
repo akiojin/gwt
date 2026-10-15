@@ -111,6 +111,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, runtime_hook_agent_failures_in_flight);
         $visit!($runtime, $id, pending_launch_completions);
         $visit!($runtime, $id, pending_launch_delivery_acks);
+        $visit!($runtime, $id, pending_monitor_startups);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
         $visit!($runtime, $id, pending_fresh_execution_finalizations);
@@ -155,7 +156,10 @@ impl AppRuntime {
                     .persisted()
                     .windows
                     .iter()
-                    .filter(|window| shares_work_surface_singleton(window.preset))
+                    .filter(|window| {
+                        shares_work_surface_singleton(window.preset)
+                            || window.preset == WindowPreset::Settings
+                    })
                     .max_by_key(|window| window.z_index)
                     .map(|window| window.id.clone());
                 if let Some(existing_id) = existing_id.as_deref() {
@@ -170,6 +174,7 @@ impl AppRuntime {
                 return self.activate_tab_for_window_events(tab_id);
             }
         }
+        let preset = preset.canonical_surface_preset();
         let window = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();

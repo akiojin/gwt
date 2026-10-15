@@ -20,15 +20,7 @@ test.describe('PM reports', () => {
       page.on('pageerror', error => errors.push(error.message));
       page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
-      await page.addInitScript(value => {
-        localStorage.setItem('gwt:ui:theme', value);
-        // This fixture explicitly loads Reports. Keep the periodic poll from
-        // racing the controlled multi-packet render assertion below.
-        window.setInterval = new Proxy(window.setInterval, { apply(target, receiver, args) {
-          if (typeof args[0] === 'function' && args[0].name === 'requestVisiblePmReports') return 0;
-          return Reflect.apply(target, receiver, args);
-        } });
-      }, theme);
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
       await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(BASE).origin });
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
@@ -60,8 +52,9 @@ test.describe('PM reports', () => {
         if ('ok' in output) expect(output.ok).toBe(true);
         return output;
       };
-      const currentCard = pane.getByRole('region', { name: 'PM の現在', exact: true });
+      const currentCard = pane.getByRole('region', { name: 'PM status', exact: true });
       await expect(currentCard).toBeVisible();
+      await currentCard.locator('summary').click();
       // Seed only this owned isolated fixture's history to observe the real
       // backend's default fifteen-minute threshold without a wall-clock wait.
       const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
@@ -72,12 +65,12 @@ test.describe('PM reports', () => {
       };
       writeFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-status.jsonl`, `${JSON.stringify(oldStatus)}\n`);
       await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
-      await expect(currentCard).toContainText('PM の更新が 16 分止まっています');
-      await expect(currentCard).toContainText('次に動く条件: v9.117.2 の公開');
-      await expect(currentCard).toContainText('ユーザーへの依頼: なし');
-      await expect(currentCard.getByRole('region', { name: '自動の事実' })).toContainText('Release v9.117.2');
-      await expect(currentCard.getByText('リリース: #5352 Release v9.117.2', { exact: true })).toBeInViewport();
-      await expect(currentCard).toContainText('稼働中の窓: 0');
+      await expect(currentCard).toContainText('PM has not updated for 16 minutes');
+      await expect(currentCard).toContainText('Next: v9.117.2 の公開');
+      await expect(currentCard).toContainText('User action: None');
+      await expect(currentCard.getByRole('region', { name: 'Live facts' })).toContainText('Release v9.117.2');
+      await expect(currentCard.getByText('Release: #5352 Release v9.117.2', { exact: true })).toBeInViewport();
+      await expect(currentCard).toContainText('Active windows: 0');
       const staleScreenshot = info.outputPath(`pm-current-stale-${info.project.name}.png`);
       await pane.screenshot({ path: staleScreenshot });
       await info.attach('PM current stale status', { path: staleScreenshot, contentType: 'image/png' });
@@ -91,7 +84,7 @@ test.describe('PM reports', () => {
       expect(statusReadback.current_status.items[0].text).toContain('公開結果を確認');
       await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
       await expect(currentCard).toContainText(`公開結果を確認 ${info.project.name}`);
-      await expect(currentCard).not.toContainText('更新が 16 分止まっています');
+      await expect(currentCard).not.toContainText('has not updated for 16 minutes');
       await expect(currentCard).not.toContainText('リリースの公開待ち');
       await expect(reports).not.toContainText('公開結果を確認');
       const saved = pmOperation('pm.report.post', { kind: 'progress', body });
@@ -158,83 +151,22 @@ test.describe('PM reports', () => {
       await kindFilter.selectOption('all');
 
       const terminal = await pane.locator('.terminal-root').elementHandle();
-      const readWire = (cursor: unknown = null, gap: any = null) => page.evaluate(({ id, cursor, gap }) => new Promise<any>(resolve => {
+      await page.evaluate(({ id, session }) => {
         const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
           candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
-        const original = socket.send;
-        let requestId: number;
-        socket.send = function (data: string) {
-          const request = JSON.parse(data);
-          if (request.kind === 'load_pm_reports' && request.id === id) requestId = request.request_id;
-          return original.call(this, data);
-        };
-        const listener = (message: MessageEvent) => {
-          const event = JSON.parse(message.data);
-          if (event.kind !== 'pm_reports' || event.id !== id || event.request_id !== requestId) return;
-          socket.removeEventListener('message', listener);
-          socket.send = original;
-          const observed = { slice: event.slice, request_id: event.request_id, mode: event.reports_mode,
-            count: event.reports.length, current: !!event.current,
-            typed: event.reports.every((report: any) => Array.isArray(report.content) && !('body_html' in report)) };
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve(observed)));
-        };
-        socket.addEventListener('message', listener);
-        if (gap) socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(gap) }));
-        else window.dispatchEvent(new CustomEvent('__gwt_test_send', { detail: { kind: 'load_pm_reports', id, cursor } }));
-      }), { id, cursor, gap });
-      const snapshot = await readWire();
-      expect(snapshot.mode).toBe('snapshot');
-      expect(snapshot.count).toBeGreaterThan(0);
-      expect(snapshot.count).toBeLessThanOrEqual(200);
-      expect(snapshot.typed).toBe(true);
-      expect(Number.isSafeInteger(snapshot.request_id)).toBe(true);
-      const cursor = { epoch: snapshot.slice.epoch, revision: snapshot.slice.revision };
-      const noop = await readWire(cursor);
-      expect(noop.mode).toBe('unchanged');
-      expect(noop.count).toBe(0);
-      expect(noop.current).toBe(true);
-      const recovery = await readWire(null, { kind: 'pm_reports', id, session_id: SESSION,
-        request_id: noop.request_id, reports_mode: 'delta', reports: [],
-        slice: { epoch: cursor.epoch, base_revision: cursor.revision + 1, revision: cursor.revision + 2 } });
-      expect(recovery.mode).toBe('snapshot');
-      expect(recovery.slice.revision).toBe(cursor.revision);
-      const batching = await page.evaluate(async ({ id, session }) => {
-        const pane = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
-        const views = [pane.querySelector('.pm-chat')!, pane.querySelector('.pm-conversation-log')!];
-        const versions = () => views.map(node => node.getAttribute('data-state-version'));
-        const before = versions();
-        const writes = [0, 0];
-        const observer = new MutationObserver(records => {
-          for (const record of records) writes[views.indexOf(record.target as Element)]++;
-        });
-        for (const node of views) observer.observe(node, { attributes: true, attributeFilter: ['data-state-version'] });
-        const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
-          candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
-        let revision = 0;
         for (const event of [
           { kind: 'terminal_snapshot', id, data_base64: btoa('RAW snapshot\r\n') },
-          { kind: 'terminal_output', id, data_base64: btoa('RAW one\r\n') },
-          { kind: 'terminal_output', id, data_base64: btoa('RAW two\r\n') },
-          { kind: 'terminal_output', id, data_base64: btoa('RAW three\r\n') },
+          { kind: 'terminal_output', id, data_base64: btoa('RAW appended\r\n') },
           { kind: 'pm_conversation', id, session_id: session, snapshot: { messages: [{ text: 'Native transcript must not appear' }] } },
           { kind: 'pm_reports', id, session_id: 'stale-session', reports: [] },
-        ]) socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ ...event,
-          ...(event.kind.startsWith('terminal_') ? { slice: { epoch: 'headed-fixture',
-            base_revision: revision, revision: ++revision } } : {}) }) }));
-        const immediate = versions();
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        observer.disconnect();
-        return { before, immediate, final: versions(), writes };
+        ]) socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
       }, { id, session: SESSION });
-      expect(batching.immediate).toEqual(batching.before);
-      expect(batching.writes).toEqual([1, 1]);
-      expect(batching.final[0]).toBe(batching.final[1]);
-      expect(Number(batching.final[0])).toBeGreaterThan(Number(batching.before[0]));
       await expect(reports).not.toContainText('RAW');
       await expect(reports).not.toContainText('Native transcript');
       await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
       await expect(kindFilter).not.toBeVisible();
-      await expect(pane.locator('.xterm')).toContainText(/RAW snapshot[\s\S]*RAW one[\s\S]*RAW two[\s\S]*RAW three/);
+      await expect(pane.locator('.xterm')).toContainText('RAW snapshot');
+      await expect(pane.locator('.xterm')).toContainText('RAW appended');
       expect(await pane.locator('.terminal-root').evaluate((node, original) => node === original, terminal)).toBe(true);
       await pane.getByRole('button', { name: 'Reports', exact: true }).click();
       await expect(report).toBeVisible();

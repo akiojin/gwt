@@ -180,7 +180,7 @@ test("Index result Open uses target numbers for Issue and SPEC hits", () => {
   assert.ok(
     indexSurfaceSource.includes("function openKnowledgeIndexResultTarget(preset, target)") &&
       indexSurfaceSource.includes("requestKnowledgeDetail(windowId, knowledgeKind, number)") &&
-      indexSurfaceSource.includes("pendingIndexOpenTargetsByPreset.set(preset"),
+      indexSurfaceSource.includes('pendingIndexOpenTargetsByPreset.set(knowledgeKind === "issue" ? "settings" : preset'),
     "Issue/SPEC result Open should select the indexed target number, including newly created windows",
   );
   assert.ok(

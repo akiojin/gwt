@@ -9,7 +9,7 @@ import { parse } from "acorn";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootPattern = /^(receive|apply.*ReceiveEvent|applyIssueMonitorStatus|applyIssueMonitorInbox|applyProviderUsageUi)$/;
@@ -19,7 +19,7 @@ const domCalls = new Set(["append", "appendChild", "prepend", "replaceChildren",
 const dataMethods = new Set(("get set has delete clear push pop shift unshift splice slice map filter find findIndex some every reduce sort concat join includes indexOf trim toLowerCase toUpperCase toString replace split match test startsWith endsWith substring at flat flatMap getAttribute querySelector querySelectorAll").split(" "));
 const callbacks = new Set(("forEach map filter find findIndex some every reduce sort flatMap then catch finally").split(" "));
 const schedules = new Set(["setTimeout", "setInterval", "queueMicrotask", "requestAnimationFrame"]);
-const builtins = new Set(["String", "Number", "Boolean", "parseInt", "parseFloat", "isNaN", "isFinite", "Set", "Map", "WeakSet", "WeakMap", "Error", "TypeError", "AggregateError", "Date", "URL", "RegExp", "TextEncoder"]);
+const builtins = new Set(["String", "Number", "Boolean", "parseInt", "parseFloat", "isNaN", "isFinite", "Set", "Map", "WeakSet", "WeakMap", "Error", "TypeError", "AggregateError", "Date", "URL", "RegExp"]);
 const pureNamespaces = /^(Math|Number|String|Array|JSON|Date|Intl|console|performance)\./;
 const pureObject = /^Object\.(keys|values|entries|fromEntries|freeze|is|hasOwn|create|getPrototypeOf)$/;
 const repoRoot = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
@@ -55,7 +55,7 @@ export function scanModule(source, file, { modules, rootName } = {}) {
     scopes.set(node, current);
     if (node.type === "ImportDeclaration") {
       for (const specifier of node.specifiers) if (specifier.type === "ImportSpecifier") current.bindings.set(specifier.local.name,
-        { imported: specifier.imported.name, module: join(dirname(file), node.source.value.replace(/^\//, "")) });
+        { imported: specifier.imported.name, module: posix.join(posix.dirname(file), node.source.value.replace(/^\//, "")) });
     }
     if (node.type === "VariableDeclarator" && node.id.type === "Identifier") {
       const fn = functionPattern.test(node.init?.type || "") ? node.init : null;
@@ -123,9 +123,6 @@ export function scanModule(source, file, { modules, rootName } = {}) {
         const binding = callee.type === "Identifier" ? resolve(node, callee.name) : {};
         const local = binding.fn;
         const model = callee.object?.type === "Identifier" && resolve(node, callee.object.name).model;
-        const encoding = method === "encode" && callee.object?.type === "NewExpression"
-          && callee.object.callee?.name === "TextEncoder";
-        const socketSend = ["socket.send", "hubSocket.send"].includes(spelling);
         if (domCalls.has(method) || /\.(style|classList)\./.test(spelling)) add("dom-call", node, path, context);
         else if (local) follow(local, path + ">" + names.get(local), context);
         else if (binding.handler) {
@@ -139,13 +136,12 @@ export function scanModule(source, file, { modules, rootName } = {}) {
               path: path + ">" + handler.name + ">" + finding.path });
           }
         }
-        else if (!(model && ["read", "update", "subscribe", "subscribeView", "dispose"].includes(method))
+        else if (!(model && ["read", "update", "subscribe", "dispose"].includes(method))
           && !dataMethods.has(method) && !callbacks.has(method) && method !== "addEventListener"
           && !pureNamespaces.test(spelling) && !pureObject.test(spelling)
           && !builtins.has(callee.name) && !schedules.has(callee.name)
-          && !encoding && !socketSend
           && !["clearTimeout", "clearInterval", "cancelAnimationFrame"].includes(callee.name)) add("unresolved-call", node, path, context);
-        const executeCallbacks = callbacks.has(method) || schedules.has(callee.name) || (model && ["update", "subscribe", "subscribeView"].includes(method));
+        const executeCallbacks = callbacks.has(method) || schedules.has(callee.name) || (model && ["update", "subscribe"].includes(method));
         for (const argument of node.arguments) {
           if (executeCallbacks) {
             const fn = functionPattern.test(argument.type) ? argument : argument.type === "Identifier" ? resolve(node, argument.name).fn : null;

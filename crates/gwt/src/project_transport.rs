@@ -293,7 +293,6 @@ pub enum TransportEvent {
 const LOSSY_HIGH_WATER: usize = 256;
 const DRAIN_LOW_WATER: usize = 32;
 const LOSSLESS_HARD_CAP: usize = 8192;
-const MAX_TERMINAL_SLICE_REVISION: u64 = 9_007_199_254_740_991;
 pub const AGENT_STALE_BINDING_CLOSE: ClientCloseFrame = ClientCloseFrame {
     code: 1008,
     reason: "execution binding is no longer current",
@@ -618,7 +617,6 @@ struct QueuedOutbound {
     coalesce_key: Option<String>,
     terminal_pane: Option<String>,
     stream_seq: Option<u64>,
-    terminal_slice: Option<(u64, u64)>,
 }
 
 #[derive(Default)]
@@ -629,9 +627,6 @@ struct ClientQueueState {
     /// `terminal_snapshot` was serialized at, per pane. A `terminal_output`
     /// at or below it is already part of that snapshot and must not follow it.
     snapshot_stream_seq: HashMap<String, u64>,
-    /// Connection-local pane revisions, independent of the PTY stream position.
-    /// Includes pressure-dropped output so the wire can expose delivery holes.
-    terminal_slice_revision: HashMap<String, u64>,
     /// Issue #4206: panes whose streamed output has a hole in it. A chunk the
     /// client never received carried the cursor moves the following chunks
     /// position themselves against, so the surviving suffix is unusable until
@@ -665,20 +660,10 @@ pub enum DrainStep {
 /// bounded mpsc channel whose overflow disconnected the client — under an
 /// agent-startup output flood that evicted the very client that initiated
 /// the launch and lost its lossless replies.
+#[derive(Default)]
 pub struct ClientQueue {
     state: Mutex<ClientQueueState>,
     notify: tokio::sync::Notify,
-    terminal_slice_epoch: Uuid,
-}
-
-impl Default for ClientQueue {
-    fn default() -> Self {
-        Self {
-            state: Mutex::default(),
-            notify: tokio::sync::Notify::default(),
-            terminal_slice_epoch: Uuid::new_v4(),
-        }
-    }
 }
 
 impl ClientQueue {
@@ -698,32 +683,6 @@ impl ClientQueue {
         if Self::withheld_from_torn_pane(&mut state, message) {
             return false;
         }
-        let terminal_slice = if let Some(pane) = &message.terminal_pane {
-            let base_revision = state
-                .terminal_slice_revision
-                .get(pane)
-                .copied()
-                .unwrap_or(0);
-            let Some(revision) = base_revision
-                .checked_add(1)
-                .filter(|revision| *revision <= MAX_TERMINAL_SLICE_REVISION)
-            else {
-                // The receiver uses JavaScript safe integers. Reconnecting
-                // establishes a fresh epoch rather than emitting an alias.
-                state.dead = true;
-                drop(state);
-                self.notify.notify_one();
-                return true;
-            };
-            if let Some(current) = state.terminal_slice_revision.get_mut(pane) {
-                *current = revision;
-            } else {
-                state.terminal_slice_revision.insert(pane.clone(), revision);
-            }
-            Some((base_revision, revision))
-        } else {
-            None
-        };
         // Snapshot-class kinds without a coalesce key (file trees, resume acks,
         // release notes) must not replace each other by kind alone — different
         // windows would clobber one another. They get lossless append semantics
@@ -740,11 +699,8 @@ impl ClientQueue {
                     .find(|entry| entry.kind == message.kind)
                 {
                     entry.payload = message.payload.clone();
-                    entry.terminal_slice = terminal_slice;
                 } else {
-                    state
-                        .entries
-                        .push_back(Self::queued(message, terminal_slice));
+                    state.entries.push_back(Self::queued(message));
                 }
             }
             QueueClass::SnapshotLatest => {
@@ -754,7 +710,6 @@ impl ClientQueue {
                     entry.kind == message.kind && entry.coalesce_key == message.coalesce_key
                 }) {
                     entry.payload = message.payload.clone();
-                    entry.terminal_slice = terminal_slice;
                     entry.stream_seq = message.stream_seq;
                 } else {
                     if state.entries.len() >= LOSSLESS_HARD_CAP {
@@ -763,9 +718,7 @@ impl ClientQueue {
                         self.notify.notify_one();
                         return true;
                     }
-                    state
-                        .entries
-                        .push_back(Self::queued(message, terminal_slice));
+                    state.entries.push_back(Self::queued(message));
                 }
             }
             QueueClass::Lossy => {
@@ -780,9 +733,7 @@ impl ClientQueue {
                     }
                     return false;
                 }
-                state
-                    .entries
-                    .push_back(Self::queued(message, terminal_slice));
+                state.entries.push_back(Self::queued(message));
             }
             QueueClass::Lossless => {
                 if state.entries.len() >= LOSSLESS_HARD_CAP {
@@ -791,9 +742,7 @@ impl ClientQueue {
                     self.notify.notify_one();
                     return true;
                 }
-                state
-                    .entries
-                    .push_back(Self::queued(message, terminal_slice));
+                state.entries.push_back(Self::queued(message));
             }
         }
         drop(state);
@@ -801,14 +750,13 @@ impl ClientQueue {
         false
     }
 
-    fn queued(message: &PreparedOutbound, terminal_slice: Option<(u64, u64)>) -> QueuedOutbound {
+    fn queued(message: &PreparedOutbound) -> QueuedOutbound {
         QueuedOutbound {
             payload: message.payload.clone(),
             kind: message.kind,
             coalesce_key: message.coalesce_key.clone(),
             terminal_pane: message.terminal_pane.clone(),
             stream_seq: message.stream_seq,
-            terminal_slice,
         }
     }
 
@@ -903,20 +851,8 @@ impl ClientQueue {
         // Materialization can encode a large patch or wait for another
         // client's shared encoding. Never hold the producer's queue mutex.
         drop(state);
-        let payload = if let Some((base_revision, revision)) = entry.terminal_slice {
-            let epoch = self.terminal_slice_epoch;
-            let prefix = entry
-                .payload
-                .strip_suffix('}')
-                .expect("backend event JSON object");
-            format!(
-                r#"{prefix},"slice":{{"epoch":"{epoch}","base_revision":{base_revision},"revision":{revision}}}}}"#
-            )
-        } else {
-            entry.payload.to_string()
-        };
         Some(DrainStep::Message {
-            payload,
+            payload: entry.payload.to_string(),
             repair_panes,
         })
     }
@@ -1467,6 +1403,28 @@ async fn hook_live_handler(
             .to_string_lossy()
             .into_owned(),
     );
+    let source_event = match event.source_event.as_deref() {
+        Some(
+            source @ ("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop"
+            | "SubagentStart" | "SubagentStop" | "Notification" | "PermissionRequest"),
+        ) => source,
+        None => "none",
+        _ => "other",
+    };
+    let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
+        event.occurred_at.as_str()
+    } else {
+        "invalid"
+    };
+    tracing::info!(
+        target: "gwt.hook.delivery",
+        stage = "receipt",
+        outcome = "authenticated",
+        gwt_session_id = principal.session_id(),
+        source_event,
+        occurred_at,
+        "runtime hook delivery"
+    );
     state.send(TransportEvent::RuntimeHook(event));
     StatusCode::NO_CONTENT
 }
@@ -2007,6 +1965,15 @@ impl AgentPaneSessionScope {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::ListWindows => Some(AgentFrontendRequest::ListWindows),
+            FrontendEvent::PaneName {
+                candidate,
+                request_id,
+            } if self.grant.principal().authorizes_producing_mutation() => {
+                Some(AgentFrontendRequest::Name {
+                    candidate,
+                    request_id,
+                })
+            }
             // Issue #3629 AC-9: closing a scoped peer pane is a window
             // lifecycle operation, not a producing Work mutation — the PM
             // holds only an observation grant and pane.close is its everyday
@@ -2096,6 +2063,7 @@ impl AgentPaneSessionScope {
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
             "issue_monitor_scan_request_result" => Some(payload),
+            "pane_name_result" => Some(payload),
             // Issue #3629 AC-12: the close reply is already client-scoped by
             // its dispatch target; passing it through lets the requester hear
             // the outcome even after the window left the projection.
@@ -2203,6 +2171,7 @@ impl ClientSessionScope {
 
     fn filter_inbound(&self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
         match self {
+            Self::Browser(_) if matches!(event, FrontendEvent::PaneName { .. }) => None,
             Self::Browser(_) => Some(ScopedFrontendRequest::Browser(event)),
             Self::Agent(scope) => {
                 if let FrontendEvent::PmPaneSendInput {
@@ -2243,6 +2212,23 @@ impl ClientSessionScope {
             Self::Agent(scope) => scope.filter_repair_panes(repair_panes),
         }
     }
+}
+
+fn decode_frontend_event(text: &str) -> Result<FrontendEvent, serde_json::Error> {
+    let event = serde_json::from_str(text)?;
+    if matches!(&event, FrontendEvent::PaneName { .. }) {
+        let raw: serde_json::Value = serde_json::from_str(text)?;
+        if raw.as_object().is_some_and(|fields| {
+            fields
+                .keys()
+                .any(|key| !["kind", "candidate", "request_id"].contains(&key.as_str()))
+        }) {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "pane_name accepts only candidate and request_id; target and authority claims are forbidden",
+            ));
+        }
+    }
+    Ok(event)
 }
 
 pub async fn client_session(socket: WebSocket, state: TransportState, scope: ClientScope) {
@@ -2434,7 +2420,7 @@ async fn client_session_with_scope(
                             .await;
                             break;
                         }
-                        match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
+                        match decode_frontend_event(text.as_ref()) {
                             Ok(event) => {
                                 match scope.filter_inbound(event) {
                                     Some(ScopedFrontendRequest::Browser(event)) => {
@@ -2875,6 +2861,7 @@ mod tests {
             error_origin: None,
         }
     }
+
     #[tokio::test]
     async fn authenticated_http_and_websocket_dispatch_without_gui() {
         let project = tempfile::tempdir().expect("project");
@@ -2898,6 +2885,13 @@ mod tests {
             }),
         );
         let app = agent_router(state, AccessLogSink::default());
+        let hook_log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(hook_log.reopen().unwrap())
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
@@ -2911,7 +2905,8 @@ mod tests {
             .bearer_auth(&grant.token)
             .json(&serde_json::json!({
                 "kind": "runtime_state", "gwt_session_id": "transport-session",
-                "occurred_at": "2026-09-28T00:00:00Z"
+                "source_event": "PostToolUse", "occurred_at": "2026-09-28T00:00:00Z",
+                "agent_session_id": "private-provider-id", "message": "private-hook-content"
             }))
             .send()
             .await
@@ -2923,6 +2918,30 @@ mod tests {
                 .unwrap(),
             Some(TransportEvent::RuntimeHook(_))
         ));
+        let text = std::fs::read_to_string(hook_log.path()).unwrap();
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let receipt = records
+            .iter()
+            .find(|record| record["target"] == "gwt.hook.delivery")
+            .expect("authenticated receipt must survive outside the access ring");
+        assert_eq!(receipt["level"], "INFO");
+        assert_eq!(receipt["fields"]["stage"], "receipt");
+        assert_eq!(receipt["fields"]["gwt_session_id"], "transport-session");
+        assert_eq!(receipt["fields"]["source_event"], "PostToolUse");
+        assert_eq!(receipt["fields"]["occurred_at"], "2026-09-28T00:00:00Z");
+        for private in [
+            grant.token.as_str(),
+            "private-provider-id",
+            "private-hook-content",
+        ] {
+            assert!(
+                !text.contains(private),
+                "receipt must contain correlation metadata only"
+            );
+        }
         let mut request = format!("ws://{addr}/internal/pane-ws")
             .into_client_request()
             .unwrap();
@@ -2947,6 +2966,72 @@ mod tests {
         socket.close(None).await.unwrap();
         server.abort();
     }
+    #[test]
+    fn pane_name_wire_refuses_target_and_authority_claims() {
+        let request = serde_json::json!({
+            "kind": "pane_name", "candidate": "Aster", "request_id": "request-1"
+        });
+        assert!(decode_frontend_event(&request.to_string()).is_ok());
+        for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
+            let mut foreign = request.clone();
+            foreign[forbidden] = serde_json::json!("foreign");
+            assert!(
+                decode_frontend_event(&foreign.to_string()).is_err(),
+                "accepted {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_name_requires_producing_agent_authority_and_refuses_browser_dispatch() {
+        let project = tempfile::tempdir().expect("project");
+        let request = || {
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "pane_name", "candidate": "Aster",
+                "request_id": "72fc3cd4-ad49-43e3-bf3d-d791357643a3"
+            }))
+            .expect("self-naming wire request")
+        };
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-name".to_string(),
+            repo_hash: "repo-name".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 3824,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-name".to_string(),
+                binding_id: "binding-name".to_string(),
+                ledger_head_hash: "head-name".to_string(),
+            },
+            capability_generation: 1,
+        };
+        let bound =
+            AgentSessionPrincipal::for_test_bound(project.path(), "session-name", binding.clone())
+                .unwrap();
+        let inspection = AgentSessionPrincipal::for_test(project.path(), "session-name").unwrap();
+        let prepared =
+            AgentSessionPrincipal::for_test_prepared(project.path(), "session-name", binding)
+                .unwrap();
+        for principal in [inspection, prepared] {
+            let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+                "observation-capability".to_string(),
+                principal,
+            ));
+            assert!(scope.filter_inbound(request()).is_none());
+        }
+        let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+            "producing-capability".to_string(),
+            bound,
+        ));
+        let name_request = scope
+            .filter_inbound(request())
+            .expect("producing self-name request");
+        assert!(name_request.mutates_host_state());
+        assert!(name_request.requires_producing_authority());
+        let browser = ClientSessionScope::Browser(ClientScope::Hub);
+        assert!(browser.filter_inbound(request()).is_none());
+    }
+
     #[test]
     fn connected_agent_scope_refreshes_same_bearer_after_prepared_promotion() {
         let project = tempfile::tempdir().expect("project tempdir");
@@ -4194,88 +4279,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn client_queue_terminal_slice_versions_are_pane_local_and_connection_scoped() {
-        let queue = ClientQueue::default();
-        for round in 0..2 {
-            for pane in 0..5 {
-                let prepared = terminal_output_at(
-                    &format!("pane-{pane}"),
-                    &format!("raw-{round}-{pane}"),
-                    100 + round * 5 + pane,
-                );
-                let shared = prepared.payload.serialized().clone();
-                queue.enqueue(&prepared);
-                let state = queue.state.lock().unwrap();
-                assert!(
-                    Arc::ptr_eq(state.entries.back().unwrap().payload.serialized(), &shared),
-                    "terminal enqueue must retain the shared payload until sender drain"
-                );
-            }
-        }
-        queue.enqueue(&prepare_outbound(&lossless_error("unchanged")));
-
-        let (payloads, _) = drain_all(&queue);
-        assert_eq!(payloads.len(), 11);
-        let values: Vec<serde_json::Value> = payloads
-            .iter()
-            .map(|payload| serde_json::from_str(payload).expect("outbound json"))
-            .collect();
-        let epoch = values[0]["slice"]["epoch"]
-            .as_str()
-            .expect("connection epoch");
-        assert!(!Uuid::parse_str(epoch).expect("opaque UUID epoch").is_nil());
-        for (index, value) in values[..10].iter().enumerate() {
-            let round = index / 5;
-            let pane = index % 5;
-            assert_eq!(value["id"], format!("pane-{pane}"));
-            assert_eq!(value["data_base64"], format!("raw-{round}-{pane}"));
-            assert_eq!(
-                value["slice"],
-                serde_json::json!({
-                    "epoch": epoch,
-                    "base_revision": round,
-                    "revision": round + 1
-                }),
-                "interleaved panes advance only their own revision"
-            );
-        }
-        assert!(values[10].get("slice").is_none());
-
-        let reconnect = ClientQueue::default();
-        reconnect.enqueue(&terminal_output_at("pane-0", "reconnected", 999));
-        let (payloads, _) = drain_all(&reconnect);
-        let value: serde_json::Value = serde_json::from_str(&payloads[0]).expect("reconnect json");
-        assert_ne!(value["slice"]["epoch"], epoch);
-        assert_eq!(value["slice"]["base_revision"], 0);
-        assert_eq!(value["slice"]["revision"], 1);
-    }
-
-    #[test]
-    fn client_queue_terminal_slice_keeps_latest_coalesced_snapshot_version() {
-        let queue = ClientQueue::default();
-        let pane = "pane-a";
-        queue.enqueue(&terminal_snapshot_at(pane, "old", 10));
-        queue.enqueue(&terminal_output_at(pane, "contained", 11));
-        queue.enqueue(&terminal_snapshot_at(pane, "latest", 11));
-        queue.enqueue(&terminal_output_at(pane, "superseded", 11));
-        queue.enqueue(&terminal_output_at(pane, "suffix", 12));
-
-        let (payloads, _) = drain_all(&queue);
-        let values: Vec<serde_json::Value> = payloads
-            .iter()
-            .map(|payload| serde_json::from_str(payload).expect("outbound json"))
-            .collect();
-        assert_eq!(values.len(), 2);
-        assert_eq!(values[0]["data_base64"], "latest");
-        assert_eq!(values[0]["slice"]["base_revision"], 2);
-        assert_eq!(values[0]["slice"]["revision"], 3);
-        assert_eq!(values[1]["data_base64"], "suffix");
-        assert_eq!(values[1]["slice"]["base_revision"], 3);
-        assert_eq!(values[1]["slice"]["revision"], 4);
-        assert_eq!(values[0]["slice"]["epoch"], values[1]["slice"]["epoch"]);
-    }
-
     fn drained_terminal_events(queue: &ClientQueue) -> Vec<String> {
         let (payloads, _) = drain_all(queue);
         payloads
@@ -4384,30 +4387,14 @@ mod tests {
         queue.enqueue(&terminal_snapshot_at(torn, "repair", 3));
         queue.enqueue(&terminal_output_at(torn, "rebaselined", 4));
 
-        let (payloads, _) = drain_all(&queue);
-        let values: Vec<serde_json::Value> = payloads
-            .iter()
-            .map(|payload| serde_json::from_str(payload).expect("outbound json"))
-            .collect();
         assert_eq!(
-            values
-                .iter()
-                .map(|value| format!(
-                    "{}:{}",
-                    value["kind"].as_str().expect("terminal kind"),
-                    value["data_base64"].as_str().expect("raw data")
-                ))
-                .collect::<Vec<_>>(),
+            drained_terminal_events(&queue),
             vec![
                 "terminal_snapshot:repair".to_string(),
                 "terminal_output:rebaselined".to_string(),
             ],
             "the repair snapshot re-baselines the screen and the stream resumes"
         );
-        assert_eq!(values[0]["slice"]["base_revision"], 1, "drop is counted");
-        assert_eq!(values[0]["slice"]["revision"], 2, "withheld is excluded");
-        assert_eq!(values[1]["slice"]["base_revision"], 2);
-        assert_eq!(values[1]["slice"]["revision"], 3);
     }
 
     // Issue #4206 AC-1: withholding must not strand a pane. While torn, the

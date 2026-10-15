@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1371,10 +1371,11 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "chrono",
  "dunce",
+ "filetime",
  "fs2",
  "gwt-config",
  "gwt-core",
@@ -1399,7 +1400,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "reqwest",
  "serde",
@@ -1409,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1418,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "dirs 7.0.0",
  "libc",
@@ -1434,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1474,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1488,7 +1489,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -1502,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "chrono",
  "fs2",
@@ -1520,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1540,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1557,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.119.0"
+version = "9.121.1"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -3370,9 +3371,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",

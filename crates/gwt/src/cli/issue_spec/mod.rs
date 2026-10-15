@@ -387,7 +387,7 @@ pub(super) fn run<E: CliEnv>(
                     .cloned()
                     .unwrap_or_default();
                 out.push_str(&format!(
-                    "#{} [{state_marker}] [{phase_label}] {}\n",
+                    "Issue #{} [{state_marker}] [{phase_label}] {}\n",
                     spec.number.0, spec.title
                 ));
             }
@@ -451,7 +451,7 @@ pub(super) fn run<E: CliEnv>(
             } else {
                 for number in numbers {
                     ops.read_section(IssueNumber(number), &SectionName("spec".to_string()))?;
-                    out.push_str(&format!("pulled #{number}\n"));
+                    out.push_str(&format!("pulled Issue #{number}\n"));
                 }
             }
             0
@@ -467,11 +467,11 @@ pub(super) fn run<E: CliEnv>(
             let repaired = ops.repair_sections(IssueNumber(number))?;
             if repaired.is_empty() {
                 out.push_str(&format!(
-                    "refreshed cache for #{number}; no artifact needed repair\n"
+                    "refreshed cache for Issue #{number}; no artifact needed repair\n"
                 ));
             } else {
                 out.push_str(&format!(
-                    "repaired {} artifact(s) for #{number}: {}\n",
+                    "repaired {} artifact(s) for Issue #{number}: {}\n",
                     repaired.len(),
                     repaired.join(", ")
                 ));
@@ -555,7 +555,7 @@ fn audit_spec_tasks<E: CliEnv>(
                 continue;
             }
             Err(err) => {
-                unreadable.push(format!("#{}: {err}", spec.number.0));
+                unreadable.push(format!("Issue #{}: {err}", spec.number.0));
                 continue;
             }
         };
@@ -569,7 +569,7 @@ fn audit_spec_tasks<E: CliEnv>(
             gwt_github::client::IssueState::Closed => "CLOSED",
         };
         out.push_str(&format!(
-            "#{} [{state_marker}] completed={} open={} untracked={} {}\n",
+            "Issue #{} [{state_marker}] completed={} open={} untracked={} {}\n",
             spec.number.0, progress.completed, progress.open, progress.untracked, spec.title
         ));
     }
@@ -630,7 +630,7 @@ fn run_spec_lint<E: CliEnv>(
     let index_diagnostics = ops.diagnose(IssueNumber(number))?;
     if !index_diagnostics.is_empty() {
         out.push_str(&format!(
-            "lint #{number}: index health check failed\n{index_diagnostics}\n"
+            "lint Issue #{number}: index health check failed\n{index_diagnostics}\n"
         ));
         return Ok(1);
     }
@@ -692,7 +692,7 @@ fn run_spec_lint<E: CliEnv>(
     );
 
     out.push_str(&format!(
-        "lint #{number}: {} section(s) scanned, {} finding(s), {} critical{}\n",
+        "lint Issue #{number}: {} section(s) scanned, {} finding(s), {} critical{}\n",
         report.sections_scanned.len(),
         report.findings.len(),
         report.critical_count(),
@@ -757,7 +757,7 @@ fn run_spec_inspection_complete<E: CliEnv>(
         .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err.to_string())))?
     else {
         out.push_str(&format!(
-            "no Intake Inspection Snapshot for #{number}; run issue.spec.lint first\n"
+            "no Intake Inspection Snapshot for Issue #{number}; run issue.spec.lint first\n"
         ));
         return Ok(1);
     };
@@ -783,7 +783,7 @@ fn run_spec_inspection_complete<E: CliEnv>(
         Ok(()) => ReadbackSource::GitHubEntity,
         Err(err) => {
             out.push_str(&format!(
-                "warning: could not reach the GitHub entity for #{number} ({err}); evidence falls back to the local cache\n"
+                "warning: could not reach the GitHub entity for Issue #{number} ({err}); evidence falls back to the local cache\n"
             ));
             ReadbackSource::LocalCache
         }
@@ -821,14 +821,14 @@ fn run_spec_inspection_complete<E: CliEnv>(
     match validate_completion_evidence(&snapshot, &ledger, &evidence) {
         Ok(()) => {
             out.push_str(&format!(
-                "completion evidence for #{number}: PASS ({} section(s) confirmed against the GitHub entity)\n",
+                "completion evidence for Issue #{number}: PASS ({} section(s) confirmed against the GitHub entity)\n",
                 snapshot.section_hashes.len()
             ));
             Ok(0)
         }
         Err(errors) => {
             out.push_str(&format!(
-                "completion evidence for #{number}: BLOCKED ({} problem(s))\n",
+                "completion evidence for Issue #{number}: BLOCKED ({} problem(s))\n",
                 errors.len()
             ));
             for error in &errors {

@@ -3153,34 +3153,10 @@ fn with_pm_worktree_refresh_lock<T>(
     project_dir: &Path,
     operation: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
-    with_pm_worktree_refresh_lock_policy(project_dir, false, operation)
-}
-
-/// Only acquisition contention, never an error from the protected operation.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub(crate) struct PmRefreshDeferred(String);
-
-fn with_pm_worktree_refresh_lock_policy<T>(
-    project_dir: &Path,
-    nonblocking: bool,
-    operation: impl FnOnce() -> io::Result<T>,
-) -> io::Result<T> {
     let project_state = project_dir.join("project-state");
     ensure_real_pm_scratch_directory(&project_state, "project-state directory")?;
     let path = project_state.join("pm-refresh.lock");
-    let lock = if nonblocking {
-        gwt_core::operation_deadline::NamedFileLock::try_acquire(&path, "pm.refresh.prompt")
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::WouldBlock {
-                    io::Error::new(error.kind(), PmRefreshDeferred(error.to_string()))
-                } else {
-                    error
-                }
-            })?
-    } else {
-        gwt_core::operation_deadline::NamedFileLock::acquire(&path, "pm.refresh")?
-    };
+    let lock = gwt_core::operation_deadline::NamedFileLock::acquire(&path, "pm.refresh")?;
     let result = operation();
     let unlock = lock.unlock();
     match (result, unlock) {
@@ -3271,29 +3247,6 @@ fn parse_pm_worktree_control_path(path: &Path, prefix: Option<&str>) -> io::Resu
     })
 }
 
-fn git_common_dir(git_root: &Path) -> io::Result<PathBuf> {
-    let output =
-        gwt_core::process::run_git_logged(&["rev-parse", "--git-common-dir"], Some(git_root))?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "resolve PM Git common directory: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    if common.as_os_str().is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "resolve PM Git common directory: Git returned an empty path",
-        ));
-    }
-    Ok(if common.is_absolute() {
-        common
-    } else {
-        git_root.join(common)
-    })
-}
-
 fn git_repository_is_bare(git_root: &Path) -> io::Result<bool> {
     let output =
         gwt_core::process::run_git_logged(&["rev-parse", "--is-bare-repository"], Some(git_root))?;
@@ -3333,8 +3286,15 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
     let dot_git = worktree.join(".git");
     let admin_dir = parse_pm_worktree_control_path(&dot_git, Some("gitdir: "))?;
     require_real_pm_scratch_directory(&admin_dir, "PM linked-worktree admin directory")?;
-    let common_dir = git_common_dir(git_root)?;
+    let common_dir = gwt_core::repo_hash::repository_common_dir(git_root).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PM Git common directory is unavailable",
+        )
+    })?;
+    require_real_pm_scratch_directory(&common_dir, "PM Git common directory")?;
     let worktrees_dir = common_dir.join("worktrees");
+    require_real_pm_scratch_directory(&worktrees_dir, "PM linked-worktree registrations")?;
     let canonical_admin = dunce::canonicalize(&admin_dir)?;
     let canonical_worktrees = dunce::canonicalize(&worktrees_dir)?;
     if canonical_admin.parent() != Some(canonical_worktrees.as_path()) {
@@ -3356,19 +3316,31 @@ fn validate_linked_pm_worktree_marker(git_root: &Path, worktree: &Path) -> io::R
             ),
         ));
     }
-    let registered = gwt_git::WorktreeManager::new(git_root)
-        .list()
-        .map_err(|error| io::Error::other(error.to_string()))?
-        .into_iter()
-        .filter(|entry| same_canonical_path(&entry.path, worktree))
-        .count();
-    if registered != 1 {
+    // The reciprocal gitdir pair identifies this one registration. Verify its
+    // remaining control files directly rather than enumerating every worktree.
+    let admin_common = parse_pm_worktree_control_path(&admin_dir.join("commondir"), None)?;
+    if dunce::canonicalize(admin_common)? != dunce::canonicalize(common_dir)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "PM worktree must have exactly one Git registration, found {registered}: {}",
-                worktree.display()
+                "PM linked-worktree commondir does not authorize {}",
+                worktree.display(),
             ),
+        ));
+    }
+    let head_path = admin_dir.join("HEAD");
+    require_regular_pm_worktree_control_file(&head_path, "PM linked-worktree HEAD")?;
+    let head = fs::read_to_string(&head_path)?;
+    let head = head.trim();
+    let symbolic = head.strip_prefix("ref: ").is_some_and(|reference| {
+        reference.starts_with("refs/") && !reference.bytes().any(|byte| byte.is_ascii_whitespace())
+    });
+    let detached =
+        matches!(head.len(), 40 | 64) && head.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !symbolic && !detached {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid PM linked-worktree HEAD: {}", head_path.display()),
         ));
     }
     Ok(())
@@ -4174,7 +4146,7 @@ fn persist_untrusted_inspection_failure_if_safe(project_dir: &Path, error: &io::
 pub fn refresh_pm_worktree_for_repo_path(repo_path: &Path) -> io::Result<PmWorktreeRefreshOutcome> {
     let project_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path);
     let worktree = project_dir.join("pm/worktree");
-    let git_root = match gwt_git::worktree::main_worktree_root(repo_path) {
+    let git_root = match gwt_git::repository::git_health::validate_project_git(repo_path) {
         Ok(git_root) => git_root,
         Err(error) => {
             let error = io::Error::other(error.to_string());
@@ -4309,21 +4281,6 @@ where
 pub fn refresh_pm_worktree_at_safe_boundary(
     worktree: &Path,
 ) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
-    refresh_pm_worktree_at_safe_boundary_with_policy(worktree, false)
-}
-
-/// The prompt may defer freshness work when another refresh already owns it.
-/// Ownership validation and failures after acquisition are unchanged.
-pub(crate) fn try_refresh_pm_worktree_at_safe_boundary(
-    worktree: &Path,
-) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
-    refresh_pm_worktree_at_safe_boundary_with_policy(worktree, true)
-}
-
-fn refresh_pm_worktree_at_safe_boundary_with_policy(
-    worktree: &Path,
-    nonblocking: bool,
-) -> io::Result<Option<PmWorktreeRefreshOutcome>> {
     if !is_pm_worktree(worktree) {
         return Ok(None);
     }
@@ -4338,7 +4295,7 @@ fn refresh_pm_worktree_at_safe_boundary_with_policy(
     };
     require_real_pm_scratch_directory(project_dir, "project directory")?;
     require_real_pm_scratch_directory(worktree, "PM worktree")?;
-    with_pm_worktree_refresh_lock_policy(project_dir, nonblocking, || {
+    with_pm_worktree_refresh_lock(project_dir, || {
         let git_root = match gwt_git::worktree::main_worktree_root(worktree) {
             Ok(git_root) => git_root,
             Err(error) => {
@@ -4753,18 +4710,38 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
             .create_new(true)
             .write(true)
             .open(&scratch_path)?;
-        scratch.write_all(content)?;
-        scratch.sync_all()?;
+        timed_pm_prefs_stage("pm_prefs.sync", || {
+            scratch.write_all(content)?;
+            scratch.sync_all()
+        })?;
         // Deadline-aware transactions must not become visible after their
         // acceptance boundary; recheck immediately before the canonical
         // rename (same convention as the Issue Monitor prefs writer).
-        gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
-        fs::rename(&scratch_path, path)?;
-        sync_parent_directory(path)
+        timed_pm_prefs_stage("pm_prefs.rename", || {
+            gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
+            fs::rename(&scratch_path, path)?;
+            sync_parent_directory(path)
+        })
     })();
     if result.is_err() {
         let _ = fs::remove_file(&scratch_path);
     }
+    result
+}
+
+fn timed_pm_prefs_stage<T>(
+    stage: &'static str,
+    action: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let started = std::time::Instant::now();
+    let remaining_budget_ms = gwt_core::operation_deadline::current()
+        .map(|deadline| deadline.saturating_duration_since(started).as_millis() as u64);
+    let result = action();
+    tracing::info!(
+        target: "gwt.pm.refresh", stage,
+        duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+        ?remaining_budget_ms, success = result.is_ok(), "PM refresh stage"
+    );
     result
 }
 
@@ -5679,6 +5656,92 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         output
+    }
+
+    #[test]
+    fn linked_pm_registration_validation_only_reads_the_target_admin_files() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let repo = temp.path().join("repo");
+        let worktree = temp.path().join("pm-worktree");
+        fs::create_dir(&repo).expect("repo directory");
+        run_pm_scratch_git(&repo, &["init"]);
+        run_pm_scratch_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=PM Test",
+                "-c",
+                "user.email=pm@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        );
+        run_pm_scratch_git(
+            &repo,
+            &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+        );
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        validate_linked_pm_worktree_marker(&repo, &worktree).expect("valid registration");
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count(),
+            before,
+            "registration validation must not spawn Git or enumerate other worktrees"
+        );
+
+        let admin = parse_pm_worktree_control_path(&worktree.join(".git"), Some("gitdir: "))
+            .expect("admin marker");
+        let head = fs::read(admin.join("HEAD")).expect("registered HEAD");
+        for index in 0..788 {
+            let unrelated = repo.join(format!(".git/worktrees/unrelated-{index}"));
+            fs::create_dir(&unrelated).expect("unrelated admin directory");
+            fs::write(unrelated.join("HEAD"), &head).expect("unrelated HEAD");
+            fs::write(unrelated.join("commondir"), "../..\n").expect("unrelated commondir");
+            fs::write(
+                unrelated.join("gitdir"),
+                format!(
+                    "{}/.git\n",
+                    temp.path().join(format!("missing-{index}")).display()
+                ),
+            )
+            .expect("unrelated stale registration");
+        }
+        fs::write(
+            repo.join(".git/worktrees/unrelated-787/HEAD"),
+            "invalid HEAD\n",
+        )
+        .expect("one malformed unrelated registration");
+        {
+            let expired = gwt_core::operation_deadline::now();
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(expired);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expired);
+            validate_linked_pm_worktree_marker(&repo, &worktree).expect(
+                "unrelated registrations and an expired Git budget cannot affect the target",
+            );
+        }
+        assert_eq!(gwt_core::process::thread_git_spawn_count(), before);
+
+        fs::write(admin.join("commondir"), temp.path().to_str().unwrap())
+            .expect("replace common directory");
+        validate_linked_pm_worktree_marker(&repo, &worktree)
+            .expect_err("a reciprocal registration must still belong to the expected common dir");
+        fs::write(admin.join("commondir"), "../..\n").expect("restore common directory");
+        fs::write(admin.join("HEAD"), "invalid HEAD\n").expect("corrupt HEAD");
+        validate_linked_pm_worktree_marker(&repo, &worktree)
+            .expect_err("malformed registration HEAD must fail closed");
+        #[cfg(unix)]
+        {
+            let external = temp.path().join("external-commondir");
+            fs::write(&external, "../..\n").expect("external control file");
+            fs::remove_file(admin.join("commondir")).expect("remove common directory marker");
+            std::os::unix::fs::symlink(&external, admin.join("commondir"))
+                .expect("indirect common directory marker");
+            let error = validate_linked_pm_worktree_marker(&repo, &worktree)
+                .expect_err("symlinked registration controls must fail closed");
+            assert!(error.to_string().contains("regular file"), "{error}");
+        }
     }
 
     fn commit_tracked_pm_scratch(worktree: &Path, relative: &str, contents: &[u8]) {

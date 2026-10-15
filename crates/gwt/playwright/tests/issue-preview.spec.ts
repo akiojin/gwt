@@ -129,12 +129,13 @@ test.describe("Issue preview placement", () => {
     await openIssueOutput(page);
     await page.getByRole("button", { name: "Split view", exact: true }).click();
     await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
-    const selectedTab = page.getByRole("tab", { name: "Issue #3672 agent", exact: true });
+    const selectedTab = page.getByRole("tab", { name: "Birch — Issue #3672 agent", exact: true });
     await selectedTab.click();
     await page.evaluate(() => window.__patchWindow("tab-issue::agent-preview", {
       id: "tab-issue::new-agent", session_id: "new-session", title: "New preview agent",
+      agent_name: "Dune", purpose_title: "New preview agent",
     }));
-    await expect(page.getByRole("tab", { name: "New preview agent", exact: true })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Dune — New preview agent", exact: true })).toBeVisible();
     await page.evaluate(() => window.__emitAgentOutput("NEW AGENT LIVE PREVIEW", "tab-issue::new-agent"));
     await expect(page.locator(".issue-preview .terminal-text-preview")).toContainText("NEW AGENT LIVE PREVIEW");
     await expect(selectedTab).toHaveAttribute("aria-selected", "true");
@@ -156,7 +157,7 @@ test.describe("Issue preview placement", () => {
     await page.goto(liveUrl || APP_URL);
     await openIssueOutput(page);
 
-    await expect(page.locator(".workspace-window.surface-knowledge")).toBeVisible();
+    await expect(page.locator(".workspace-window[data-preset='settings'] .surface-knowledge")).toBeVisible();
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
 
@@ -175,7 +176,7 @@ test.describe("Issue preview placement", () => {
     const preview = page.locator(".surface-knowledge .issue-preview");
     await expect(preview).toHaveCount(1);
     await expect(preview).toHaveAttribute("data-window-id", "tab-issue::agent-preview");
-    await expect(preview.locator(".issue-preview-title")).toHaveText("Issue #3671 agent");
+    await expect(preview.locator(".issue-preview-title")).toHaveText("Aster — Issue #3671 agent");
 
     const terminal = preview.locator(".issue-preview-terminal .terminal-root");
     await expect(terminal).toBeVisible();
@@ -406,8 +407,8 @@ test.describe("Issue preview placement", () => {
     await menu.locator("summary").click();
     await expect(menu).toHaveAttribute("open", "");
     // Issue #4886: a background workspace refresh must not close the menu.
-    await page.evaluate(() => window.__patchWindow("tab-issue::agent-preview", { title: "Background refresh" }));
-    await expect(page.locator(".issue-preview-title")).toHaveText("Background refresh");
+    await page.evaluate(() => window.__patchWindow("tab-issue::agent-preview", { dynamic_title: "Background refresh" }));
+    await expect(page.locator(".issue-preview-title")).toHaveText("Aster — Background refresh");
     await expect(menu).toHaveAttribute("open", "");
     await expect(menu.locator('[data-action="continue-work"]')).toBeVisible();
     await expect(menu.locator('[data-action="continue-work"]')).toBeEnabled();
@@ -557,7 +558,7 @@ test.describe("Issue preview placement", () => {
     const first = page.locator(
       ".surface-knowledge [data-issue-number='3671'] .issue-agent-status",
     );
-    await expect(first.locator(".issue-agent-status-title")).toHaveText("Issue #3671 agent");
+    await expect(first.locator(".issue-agent-status-title")).toHaveText("Aster — Issue #3671 agent");
     await expect(first.locator(".issue-card-output-text")).toHaveText("Waiting for output");
     await expect(first.locator(".issue-agent-status-elapsed")).toHaveText("<1m");
     await expect(page.locator(".surface-knowledge .knowledge-list")).not.toContainText(
@@ -855,8 +856,8 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
 
       const issueWindow = {
         id: "tab-issue::issue-1",
-        title: "Issue",
-        preset: "issue",
+        title: "Settings",
+        preset: "settings",
         geometry: { x: 40, y: 60, width: 1400, height: issueHeight },
         z_index: 1,
         status: "running",
@@ -873,13 +874,14 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
       const agentWindow = (id, issueNumber, title) => ({
         id,
         session_id: `${id}-session`,
+        agent_name: { 3671: "Aster", 3672: "Birch", 3673: "Cedar" }[issueNumber],
         title,
         preset: "agent",
         geometry: { x: 120, y: 120, width: 1280, height: 800 },
         z_index: 2,
         status,
         persist: true,
-        purpose_title: null,
+        purpose_title: title,
         dynamic_title: null,
         dynamic_title_detail: null,
         agent_id: "codex",

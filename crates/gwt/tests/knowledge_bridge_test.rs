@@ -1,7 +1,8 @@
 use std::{collections::HashMap, fs};
 
-use gwt::{load_knowledge_bridge, KnowledgeKind};
+use gwt::{load_knowledge_bridge, load_knowledge_bridge_detail, KnowledgeKind};
 use gwt_core::process::hidden_command;
+use gwt_core::test_support::ScopedGwtHome;
 use gwt_core::{paths::gwt_cache_dir, repo_hash::detect_repo_hash};
 use gwt_github::{
     Cache, CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
@@ -34,6 +35,7 @@ fn sample_issue(
 #[test]
 fn load_knowledge_bridge_returns_unified_work_items_and_counts_linked_branches() {
     let dir = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(dir.path());
     let repo_path = dir.path().join("repo");
     fs::create_dir_all(&repo_path).expect("create repo");
     init_repo(&repo_path);
@@ -89,9 +91,11 @@ fn load_knowledge_bridge_returns_unified_work_items_and_counts_linked_branches()
         "Issue view must include gwt-spec tagged entries in the unified Work Item list"
     );
     assert_eq!(loaded.selected_number, Some(42));
-    assert_eq!(loaded.detail.launch_issue_number, Some(42));
-    assert!(loaded
-        .detail
+    assert!(loaded.detail.is_none());
+    let detail =
+        load_knowledge_bridge_detail(&repo_path, KnowledgeKind::Issue, 42).expect("issue detail");
+    assert_eq!(detail.launch_issue_number, Some(42));
+    assert!(detail
         .sections
         .iter()
         .any(|section| section.title == "Linked branches"
@@ -101,6 +105,7 @@ fn load_knowledge_bridge_returns_unified_work_items_and_counts_linked_branches()
 #[test]
 fn load_knowledge_bridge_filters_specs_and_exposes_cached_sections() {
     let dir = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(dir.path());
     let repo_path = dir.path().join("repo");
     fs::create_dir_all(&repo_path).expect("create repo");
     init_repo(&repo_path);
@@ -145,15 +150,17 @@ fn load_knowledge_bridge_filters_specs_and_exposes_cached_sections() {
         !loaded.entries[0].meta.contains("phase/draft"),
         "raw phase label should not be primary list metadata"
     );
+    assert!(loaded.detail.is_none());
+    let detail =
+        load_knowledge_bridge_detail(&repo_path, KnowledgeKind::Spec, 2017).expect("spec detail");
     assert!(
-        loaded
-            .detail
+        detail
             .sections
             .iter()
             .any(|section| section.title == "spec"
                 && section.body.contains("Cache-backed issue view")),
         "sections: {:?}",
-        loaded.detail.sections
+        detail.sections
     );
 }
 
@@ -175,6 +182,8 @@ fn load_knowledge_bridge_returns_disabled_pr_surface_until_cache_support_exists(
         .is_some_and(|message| message.contains("cache-backed PR list support")));
     assert!(loaded
         .detail
+        .as_ref()
+        .expect("disabled PR detail")
         .sections
         .iter()
         .any(|section| section.body.contains("cache-backed PR list support")));
@@ -183,6 +192,7 @@ fn load_knowledge_bridge_returns_disabled_pr_surface_until_cache_support_exists(
 #[test]
 fn load_knowledge_bridge_includes_open_and_closed_issues_for_kanban() {
     let dir = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(dir.path());
     let repo_path = dir.path().join("repo");
     fs::create_dir_all(&repo_path).expect("create repo");
     init_repo(&repo_path);
@@ -220,7 +230,8 @@ fn load_knowledge_bridge_includes_open_and_closed_issues_for_kanban() {
         vec![42, 43],
     );
     assert!(view.entries.iter().any(|entry| entry.state == "closed"));
-    assert_eq!(view.detail.number, Some(42));
+    assert_eq!(view.selected_number, Some(42));
+    assert!(view.detail.is_none());
 }
 
 fn init_repo(repo_path: &std::path::Path) {

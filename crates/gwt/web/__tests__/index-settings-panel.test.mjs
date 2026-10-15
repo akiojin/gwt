@@ -167,6 +167,7 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
     "memory",
     "discussions",
     "board",
+    "works",
     "files",
     "files-docs",
   ]);
@@ -196,14 +197,14 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
   assert.match(boardCell.textContent, /21 docs/);
 
   // files row has one cell per worktree, in worktree-hash sort order.
-  const filesCells = scopeRows[5].querySelectorAll(".settings-index-cell");
+  const filesCells = scopeRows[6].querySelectorAll(".settings-index-cell");
   assert.equal(filesCells.length, 2);
   assert.equal(filesCells[0].dataset.worktreeHash, "wtAhash");
   assert.equal(filesCells[1].dataset.worktreeHash, "wtBhash");
   assert.ok(filesCells[1].classList.contains("unhealthy"));
 
   // files-docs only seeded wtAhash — wtB renders an empty placeholder.
-  const docsCells = scopeRows[6].querySelectorAll(".settings-index-cell");
+  const docsCells = scopeRows[7].querySelectorAll(".settings-index-cell");
   assert.equal(docsCells.length, 2);
   assert.ok(docsCells[1].classList.contains("settings-index-cell-empty"));
 });

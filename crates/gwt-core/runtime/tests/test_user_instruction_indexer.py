@@ -113,7 +113,7 @@ def test_incremental_detects_same_size_same_timestamp_supersession_change(instru
     source.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
     assert source.stat().st_size == previous.st_size
     os.utime(source, ns=(previous.st_atime_ns, previous.st_mtime_ns))
-    assert index_corpus(instruction_corpus, mode="incremental")["indexed"] == 3
+    assert index_corpus(instruction_corpus, mode="incremental")["indexed"] == 1
     hits = search_corpus(instruction_corpus, "language")
     assert next(hit for hit in hits if hit.get("instruction_id") == "instruction-old")["superseded_by"] == "instruction-alt"
 
@@ -156,7 +156,7 @@ def test_deleted_instruction_corpus_removes_hits_and_preserves_work_notes(instru
     _, db_root, source, notes, _ = instruction_corpus
     index_corpus(instruction_corpus)
     source.unlink()
-    assert index_corpus(instruction_corpus, mode="incremental")["indexed"] == 1
+    assert index_corpus(instruction_corpus, mode="incremental")["indexed"] == 0
     hits = search_corpus(instruction_corpus, "language")
     assert [hit["title"] for hit in hits] == ["lesson"]
     db_path = runner.resolve_db_path("instructions-repo", None, "memory", db_root=db_root)

@@ -256,7 +256,6 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         status: Box::new(IssueMonitorStatusView {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
-            auto_apply_updates: false,
             enabled: true,
             state: "scanning".to_string(),
             queue_len: 2,
@@ -311,7 +310,8 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
     status["tier_facts"] = serde_json::json!([{
         "issue_number": 42, "recorded_launch_tier": 0, "recorded_landing_tier": 0,
         "history_floor": 0, "minimum_tier_override": 0,
-        "agent_failures": 1, "next_minimum_tier": 1
+        "agent_failures": 1, "next_minimum_tier": 1,
+        "confirmed_launch": {"tier": 0, "window_id": "tab-1::agent-42", "delivery_id": "launch:effect-42"}
     }]);
     let decoded: IssueMonitorStatusView = serde_json::from_value(status.clone()).unwrap();
     assert_eq!(

@@ -318,6 +318,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       const renderedRuntimeStatusKeys = new Map();
       const renderedAgentKanbanBodyKeys = new Map();
       const renderedIssuePreviewBodyKeys = new Map();
+      const settingsNavigationModel = createUiStateStore({});
       const renderedIssueWindowHeaderKeys = new Map();
       // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
       // /file-tree-surface.js (exported and destructured below so the
@@ -641,6 +642,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           appendRenderKeyPart(parts, windowData?.purpose_title || "");
           appendRenderKeyPart(parts, "agent_id");
           appendRenderKeyPart(parts, windowData?.agent_id || "");
+          appendRenderKeyPart(parts, "agent_name");
+          appendRenderKeyPart(parts, windowData?.agent_name || "");
           appendRenderKeyPart(parts, "session_id");
           appendRenderKeyPart(parts, windowData?.session_id || "");
           appendRenderKeyPart(parts, "is_pm");
@@ -717,6 +720,8 @@ import { createUiStateStore } from "/ui-state-store.js";
         appendRenderKeyPart(parts, windowData.purpose_title || "");
         appendRenderKeyPart(parts, "agent_id");
         appendRenderKeyPart(parts, windowData.agent_id || "");
+        appendRenderKeyPart(parts, "agent_name");
+        appendRenderKeyPart(parts, windowData.agent_name || "");
         appendRenderKeyPart(parts, "agent_color");
         appendRenderKeyPart(parts, windowData.agent_color || "");
         appendRenderKeyPart(parts, "worktree_form");
@@ -774,6 +779,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           appendRenderKeyPart(parts, tab.purpose_title || "");
           appendRenderKeyPart(parts, "agent_id");
           appendRenderKeyPart(parts, tab.agent_id || "");
+          appendRenderKeyPart(parts, "agent_name");
+          appendRenderKeyPart(parts, tab.agent_name || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, tab.agent_color || "");
           appendRenderKeyPart(parts, "worktree_form");
@@ -979,6 +986,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (preset === "work" || preset === "workspace") {
           return "knowledge";
         }
+        if (preset === "settings") return "settings";
         if (preset === "console") {
           return "console";
         }
@@ -986,7 +994,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function knowledgeKindForPreset(preset) {
-        if (["issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
+        if (["settings", "issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
           return "issue";
         }
         if (preset === "pr") {
@@ -996,9 +1004,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function send(message) {
-        if (message.kind === "load_pm_reports" && message.request_id == null) {
-          return requestPmReports(message.id, { reset: !message.cursor, before: message.before || null });
-        }
         if (isHubNavigationMessage(message.kind)) {
           if (hubSocket?.readyState === WebSocket.OPEN) {
             hubSocket.send(JSON.stringify(message));
@@ -1378,7 +1383,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         });
         projectPageMetadata.resetConnection();
         setConnectionState(true);
-        resetPmWindowSlices();
         send({ kind: "frontend_ready" });
         recoveryCenterController?.reconnect();
         for (let index = 0; index < pendingMessages.length;) {
@@ -1394,7 +1398,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         syncRunningBranchCleanups();
-        requestVisiblePmReports(true);
+        requestVisiblePmReports();
         requestSupportedAgentRefresh();
       }
 
@@ -1858,6 +1862,11 @@ import { createUiStateStore } from "/ui-state-store.js";
           return focus && focus !== PM_WINDOW_TITLE
             ? `${PM_WINDOW_TITLE} — ${focus}`
             : PM_WINDOW_TITLE;
+        }
+        if (isAgentWindowPreset(windowData?.preset)) {
+          const name = String(windowData?.agent_name || "").trim() || "Naming…";
+          const purpose = String(windowData?.dynamic_title || windowData?.purpose_title || "").trim();
+          return purpose ? `${name} — ${purpose}` : name;
         }
         for (const value of candidates) {
           const title = String(value || "").trim();
@@ -2479,7 +2488,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // model). Also applies local focus + z-order highlight (focus_window
       // stays for highlight; maximize_window is gone).
       function frameWindow(windowId, { animate = true, notifyFocus = true } = {}) {
-        const windowData = workspaceWindowById(windowId);
+        const windowData = windowWithSettingsSection(workspaceWindowById(windowId));
         if (!windowData) {
           return;
         }
@@ -2743,10 +2752,8 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function cycleFocus(direction) {
-        // SPEC-3263 FR-014..FR-019 / Issue #3551: cycle the Canvas Agent
-        // projection in runtime-priority order. Hidden tab members remain
-        // candidates and are activated before the existing local camera frame
-        // path notifies the backend of focus for z-order/highlight.
+        // SPEC #4777 T-10: cycle the existing Agents tabs in runtime-priority
+        // order without changing canvas geometry or saved window groups.
         const windows = activeWorkspace().windows || [];
         const nextWindowId = selectNextAgentFocusWindowId(
           windows,
@@ -2757,15 +2764,12 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (!nextWindowId) {
           return;
         }
-        const nextWindow = windows.find(
-          (windowData) => windowData.id === nextWindowId,
-        );
-        if (nextWindow?.tab_group_id && !nextWindow.tab_group_active) {
-          pendingFrameWindowId = nextWindowId;
-          send({ kind: "activate_window_tab", id: nextWindowId });
-          return;
-        }
-        frameWindow(nextWindowId);
+        splitSurfaces?.focusSurface("agents");
+        openSurface("agents");
+        if (!agentsSurface.openTab(nextWindowId)) return;
+        pendingFrameWindowId = null;
+        focusWindowRemotely(nextWindowId);
+        terminalMap.get(nextWindowId)?.terminal.focus();
       }
 
       const closeProjectController = createCloseProjectController({
@@ -3968,6 +3972,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         syncSurfaceRail();
       }
 
+      function windowWithSettingsSection(data) {
+        return data?.preset === "settings"
+          ? { ...data, settingsSection: settingsNavigationModel.read()[data.id] } : data;
+      }
+
       // The selected pane or Agents host takes precedence over canvas focus.
       function syncSurfaceRail() {
         if (splitSurfaces?.isOpen()) {
@@ -3978,11 +3987,18 @@ import { createUiStateStore } from "/ui-state-store.js";
           applySurfaceSelection(document, "agents");
           return;
         }
-        const focused = focusedId
+        const focusedWindow = focusedId
           ? (activeWorkspace().windows || []).find((windowData) => windowData.id === focusedId)
           : null;
+        const focused = windowWithSettingsSection(focusedWindow);
         applySurfaceSelection(document, surfaceForWindow(focused));
       }
+
+      document.addEventListener("settings:section-changed", event => {
+        const { windowId, section } = event.detail || {};
+        if (windowId) settingsNavigationModel.update(state => ({ ...state, [windowId]: section }));
+        syncSurfaceRail();
+      });
 
       function numericZIndex(value) {
         const numeric = Number.parseInt(value || "0", 10);
@@ -4848,6 +4864,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
         scheduleKnowledgeRelatedWorkRefresh,
+        resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
@@ -4857,10 +4874,12 @@ import { createUiStateStore } from "/ui-state-store.js";
         closeKanbanDrawer,
         mountKnowledgeWindow,
         applyKnowledgeReceiveEvent,
+        applyKnowledgeCacheRevision,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
+        refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
         sendKnowledgeSemanticSearchNow,
@@ -4868,10 +4887,15 @@ import { createUiStateStore } from "/ui-state-store.js";
         createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
+        isKnowledgeWindowVisible: (id) => !document.hidden &&
+          !workspaceWindowById(id)?.minimized &&
+          (!workspaceWindowById(id)?.tab_group_id || workspaceWindowById(id)?.tab_group_active) &&
+          elementHasLayoutBox(windowMap.get(id)?.querySelector(".surface-knowledge") || windowMap.get(id)),
         getWorkspaceWindows: () =>
           allProjectWindowIds()
             .map((windowId) => workspaceWindowById(windowId))
             .filter(Boolean),
+        windowCatalogModel,
         pendingIndexOpenTargetsByPreset,
         knowledgeKindForPreset,
         focusWindowLocally,
@@ -4884,6 +4908,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // runtime read-only, so the live output streams but no input path exists.
         createTerminalRuntime: (id, terminalRoot, options) =>
           createTerminalRuntime(id, terminalRoot, { ...options, readOnly: Boolean(agentsHost) || options?.readOnly }),
+        isAgentsSurfaceMounted: () => Boolean(agentsHost),
         windowDisplayTitle,
         windowRoleBadgeLabel,
         // SPEC-3671 FR-010: Windowize is the same Canvas handoff the Agent Kanban
@@ -4925,6 +4950,8 @@ import { createUiStateStore } from "/ui-state-store.js";
         window.__operatorShell?.applyIssueMonitorStatus?.(status));
       issueMonitorModel.subscribe(model => model.status, status =>
         updateCtaController.handleIssueMonitorStatus(status));
+      windowCatalogModel.subscribe(model => model.catalog, () =>
+        requestAnimationFrame(refreshVisibleKnowledgeWindows));
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
       // state maps, Work-id tracking for the Board Work filter, board chat
@@ -5101,7 +5128,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           });
         }
         if (isStrongContinueWorkSuccess(exact)) {
-          scheduleKnowledgeRelatedWorkRefresh();
+          scheduleKnowledgeRelatedWorkRefresh(true);
         }
       }
 
@@ -5391,7 +5418,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
             return;
           }
-          pendingIndexOpenTargetsByPreset.set(preset, { knowledgeKind, number: issueNumber });
+          pendingIndexOpenTargetsByPreset.set("settings", { knowledgeKind, number: issueNumber });
         }
       }
 
@@ -5443,7 +5470,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       const pmChatViews = new Map();
-      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState, subscribePmWindowView, resetPmWindowSlices, preparePmReportsRequest } = createPmWindowModel();
+      const { bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       const renderedTerminalPackets = new Map();
       subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
         if (!state) return;
@@ -5453,6 +5480,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           else frontendUnits.terminalHost.writeOutput(state.windowId, packet.dataBase64);
           renderedTerminalPackets.set(state.windowId, packet);
         }
+        const view = pmChatViews.get(state.windowId);
+        if (view) view.logHost.dataset.stateVersion = String(state.revision);
       });
 
       function disposePmChat(windowId) {
@@ -5497,10 +5526,9 @@ import { createUiStateStore } from "/ui-state-store.js";
         view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
-          onRequestReports: options => requestPmReports(windowData.id, options),
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
-            if (!visible) requestVisiblePmReports(true);
+            if (!visible) requestVisiblePmReports();
             if (visible) requestAnimationFrame(() => {
               scheduleTerminalFit(windowData.id, false);
               activateTerminalOnReveal(windowData.id);
@@ -5509,34 +5537,19 @@ import { createUiStateStore } from "/ui-state-store.js";
         });
         pmChatViews.set(windowData.id, view);
         bindPmWindowState(windowData.id, windowData.session_id);
-        view.unsubscribe = subscribePmWindowView(state => state.windows[windowData.id], state => {
+        view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
           view.controller.update(state);
           if (state) view.logHost.dataset.stateVersion = String(state.revision);
         });
         requestVisiblePmReports();
       }
 
-      function requestPmReports(windowId, { reset = false, before = null } = {}) {
-        if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
-        const request = preparePmReportsRequest(windowId, { reset, before });
-        if (!request) return "unavailable";
-        socket.send(JSON.stringify({ kind: "load_pm_reports", ...request }));
-        return "sent";
-      }
-
-      function requestTerminalSnapshots() {
-        if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
-        socket.send(JSON.stringify({ kind: "frontend_ready" }));
-      }
-
-      function requestVisiblePmReports(reset = false) {
+      function requestVisiblePmReports() {
         if (document.hidden || !socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return;
         for (const windowData of activeWorkspace()?.windows || []) {
           const view = pmChatViews.get(windowData.id);
           if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
-            if (reset || !readPmWindowState().windows[windowData.id]?.reportsPage) {
-              requestPmReports(windowData.id, { reset });
-            }
+            send({ kind: "load_pm_reports", id: windowData.id });
           }
         }
       }
@@ -5555,6 +5568,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           "surface-board",
           "surface-logs",
           "surface-knowledge",
+          "surface-settings",
           "surface-index",
           "surface-work",
           "surface-profile",
@@ -5766,6 +5780,10 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderUsagePanel,
         indexStatusByProjectRoot,
         pmSettingsPanel,
+        mountIssues: (data, host) => {
+          mountKnowledgeWindow(data, host);
+          send({ kind: "request_remote_start_work_branches", id: data.id });
+        },
       });
 
       function ensureWindow(windowData) {
@@ -6020,7 +6038,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
-        if (surface === "knowledge") {
+        if (surface === "knowledge" || surface === "settings") {
           const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
           if (renderedIssuePreviewBodyKeys.get(windowData.id) !== nextIssuePreviewBodyKey) {
             renderedIssuePreviewBodyKeys.set(windowData.id, nextIssuePreviewBodyKey);
@@ -6189,6 +6207,11 @@ import { createUiStateStore } from "/ui-state-store.js";
                     renderedRuntimeStatusKeys.delete(windowId);
                     renderedAgentKanbanBodyKeys.delete(windowId);
                     renderedIssuePreviewBodyKeys.delete(windowId);
+                    settingsNavigationModel.update(state => {
+                      const next = { ...state };
+                      delete next[windowId];
+                      return next;
+                    });
                     renderedIssueWindowHeaderKeys.delete(windowId);
                     pendingOutputMap.delete(windowId);
                     pendingSnapshotMap.delete(windowId);
@@ -6259,6 +6282,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // Subscribers may mount runtimes: publish only after removal, creation
         // and focus have settled, never with the previous membership.
         publishWindowCatalog();
+        resumeKnowledgeEventRefresh();
         return result;
       }
 
@@ -6531,7 +6555,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
           case "pm_reports": {
-            if (applyPmWindowReceiveEvent(event) === "reports") requestPmReports(event.id, { reset: true });
+            applyPmWindowReceiveEvent(event);
             break;
           }
           case "pm_status":
@@ -6579,8 +6603,10 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "terminal_output":
+            applyPmWindowReceiveEvent(event);
+            break;
           case "terminal_snapshot":
-            if (applyPmWindowReceiveEvent(event) === "terminal") requestTerminalSnapshots();
+            applyPmWindowReceiveEvent(event);
             break;
           case "terminal_status":
             frontendUnits.terminalHost.applyStatus(
@@ -6707,6 +6733,9 @@ import { createUiStateStore } from "/ui-state-store.js";
           }
           // SPEC-3064 Phase 3 (E6d): knowledge bridge state and rendering
           // live in the knowledge kanban surface.
+          case "knowledge_revision":
+            applyKnowledgeCacheRevision(event);
+            break;
           case "knowledge_entries":
           case "knowledge_search_results":
           case "knowledge_detail":
@@ -6789,7 +6818,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                   dismissible: true,
                   timeoutMs: 0,
                 });
-                scheduleKnowledgeRelatedWorkRefresh();
+                scheduleKnowledgeRelatedWorkRefresh(true);
               }
             }
             break;
@@ -6798,7 +6827,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "workspace_resume_agent_started":
             workspaceResumePicker.handleStarted(event);
             launchPending.settleAck(event);
-            scheduleKnowledgeRelatedWorkRefresh();
+            scheduleKnowledgeRelatedWorkRefresh(true);
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
@@ -6951,8 +6980,10 @@ import { createUiStateStore } from "/ui-state-store.js";
             };
             renderSystemPanelInAllSettingsWindows();
             break;
-          case "system_settings":
+          case "update_settings":
             applyGlobalUpdateSettings(event);
+            break;
+          case "system_settings":
             // SPEC-1933 US-4: backend echoed the on-disk language value.
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
             if (
@@ -6982,7 +7013,6 @@ import { createUiStateStore } from "/ui-state-store.js";
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings_updated":
-            applyGlobalUpdateSettings(event);
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
             if (
               systemSettingsInteractionGuard.defer({
@@ -7006,6 +7036,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             renderSystemPanelInAllSettingsWindows();
             break;
           case "system_settings_error":
+            applyGlobalUpdateSettings(event);
             // Issue #2698 PR 4 — defer when user is mid-dropdown.
             if (
               systemSettingsInteractionGuard.defer({
@@ -7720,6 +7751,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       agentsSurface = createAgentsSurface({
         document,
         windowCatalogModel,
+        windowDisplayTitle,
         getWindows: catalog => catalogActiveWindows(catalog).map(data => ({
           ...data, status: catalog.runtimeStates[data.id] ?? data.status,
         })),
@@ -7761,7 +7793,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         onAgentsHost: setAgentsHost,
         restoreVisibility: (id, element) => { element.hidden = !visibleWindowData(workspaceWindowById(id)); },
         openSurface: (surface) => {
-          const preset = surface === "issues" ? "issue" : surface;
+          const preset = surface === "issues" ? "settings" : surface;
           send({ kind: "create_window", preset, bounds: visibleBounds() });
         },
         onChange: () => syncSurfaceRail(),
@@ -7771,7 +7803,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       });
       document.getElementById("split-view-button").addEventListener("click", () => {
         if (splitSurfaces.isOpen()) splitSurfaces.close();
-        else splitSurfaces.open(agentsHost ? "agents" : surfaceForWindow(workspaceWindowById(focusedId)));
+        else splitSurfaces.open(agentsHost ? "agents" : surfaceForWindow(windowWithSettingsSection(workspaceWindowById(focusedId))));
       });
       window.addEventListener("resize", () => {
         if (!splitSurfaces.isOpen() && !agentsHost) return;
@@ -7881,8 +7913,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         rearmVisibleTerminalViewportRefreshes();
-        requestVisiblePmReports(true);
-        requestTerminalSnapshots();
+        resumeKnowledgeEventRefresh();
+        refreshVisibleKnowledgeWindows();
       });
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {
@@ -7938,6 +7970,10 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function focusOrSpawnPreset(preset) {
         preset = normalizeSurfacePreset(preset);
+        if (preset === "issue") {
+          document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
+          return (activeWorkspace().windows || []).find(w => w.preset === "settings")?.id || null;
+        }
         const allWindows = activeWorkspace().windows || [];
         const existing = isSingletonSurfacePreset(preset)
           ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset)

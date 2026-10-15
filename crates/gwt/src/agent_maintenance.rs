@@ -41,13 +41,17 @@ pub fn latest_version(
 ) -> Result<Option<String>, String> {
     let descriptor = gwt_agent::builtin_agent_descriptor_for_command(agent_id)
         .ok_or_else(|| "Choose an agent from the supported catalog".to_string())?;
-    if descriptor.distribution.npm_package().is_none() {
-        return Ok(None);
-    }
     let environment =
         LaunchEnvironment::from_active_profile(config_path, gwt_agent::LaunchRuntimeTarget::Host)?
             .into_parts();
     latest_with_environment(descriptor, &environment, cwd)
+        .map_err(|error| redact_output(&error, &environment.0))
+}
+
+/// Only routes whose metadata describes the updater's distribution/channel.
+pub fn supports_updates(descriptor: &BuiltinAgentDescriptor) -> bool {
+    descriptor.id == AgentId::Antigravity
+        || (descriptor.id != AgentId::ClaudeCode && descriptor.distribution.npm_package().is_some())
 }
 
 /// Execute only catalog-owned commands. The runtime owns admission against live agents.
@@ -128,8 +132,8 @@ pub fn run_maintenance(
                     ));
                 }
                 checked_target = Some(latest_semver);
-                if descriptor.id == AgentId::ClaudeCode {
-                    ("claude".into(), vec!["update".into()])
+                if descriptor.id == AgentId::Antigravity {
+                    ("agy".into(), vec!["update".into()])
                 } else {
                     let package = descriptor
                         .distribution
@@ -276,6 +280,42 @@ fn latest_with_environment(
     environment: &(HashMap<String, String>, Vec<String>),
     cwd: &Path,
 ) -> Result<Option<String>, String> {
+    // npm metadata cannot prove the native updater's effective channel, which
+    // may include managed/project settings. Never mutate or select a channel.
+    if descriptor.id == AgentId::ClaudeCode {
+        return Err("Claude Code's effective native release channel cannot be verified. Run `claude update` manually; installation remains available.".into());
+    }
+    if descriptor.id == AgentId::Hermes {
+        return Err("Hermes's installed update channel and commit cannot be matched to release metadata. Run `hermes update` manually.".into());
+    }
+    if descriptor.id == AgentId::Copilot {
+        return Err("GitHub Copilot distribution cannot be verified: gh copilot may be a built-in CLI or an extension from another repository/host. Update the installed distribution manually.".into());
+    }
+    if descriptor.id == AgentId::Antigravity {
+        let platform = antigravity_platform().ok_or_else(||
+            "Antigravity update metadata is unavailable for this platform. Run `agy update` manually.".to_string())?;
+        let url = format!("https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{platform}.json");
+        let args = [
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "10",
+            &url,
+        ]
+        .map(str::to_string);
+        let output = execute("curl", &args, environment, cwd, METADATA_TIMEOUT)?;
+        let metadata = native_metadata(&output)?;
+        return metadata_version(metadata.get("version").and_then(serde_json::Value::as_str))
+            .map(Some);
+    }
     let Some(package) = descriptor.distribution.npm_package() else {
         return Ok(None);
     };
@@ -306,6 +346,43 @@ fn latest_with_environment(
         "Latest-version metadata was not a semantic version; update was not started".to_string()
     })?;
     Ok(Some(version.to_string()))
+}
+
+fn antigravity_platform() -> Option<String> {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        "windows" => "windows",
+        _ => return None,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        _ => return None,
+    };
+    let suffix = if cfg!(all(target_os = "linux", target_env = "musl")) {
+        "_musl"
+    } else {
+        ""
+    };
+    Some(format!("{os}_{arch}{suffix}"))
+}
+
+fn native_metadata(output: &SpawnOutput) -> Result<serde_json::Value, String> {
+    if !output.success() {
+        return Err(format!("Cannot check the latest version: {}. Check network access and provider authentication, then retry.", process_failure(output)));
+    }
+    serde_json::from_str(output.stdout.trim())
+        .map_err(|_| "Latest-version metadata was invalid; update was not started. Retry when the official provider is available.".into())
+}
+
+fn metadata_version(value: Option<&str>) -> Result<String, String> {
+    value
+        .and_then(|value| semver::Version::parse(value.strip_prefix('v').unwrap_or(value)).ok())
+        .map(|version| version.to_string())
+        .ok_or_else(|| {
+            "Latest-version metadata was not a semantic version; update was not started.".into()
+        })
 }
 
 fn execute(
@@ -464,6 +541,13 @@ mod tests {
         fn calls(&self) -> String {
             std::fs::read_to_string(self.root.path().join("calls")).unwrap_or_default()
         }
+
+        fn program(&self, name: &str, script: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.root.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -531,10 +615,131 @@ mod tests {
             fixture.calls().trim(),
             "view @openai/codex version --json --fetch-timeout=5000 --fetch-retries=0"
         );
-        assert_eq!(
-            latest_version("hermes", &fixture.config, fixture.root.path()).unwrap(),
-            None
+        assert!(
+            latest_version("hermes", &fixture.config, fixture.root.path())
+                .unwrap_err()
+                .contains("channel")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_metadata_uses_official_platform_manifest() {
+        let fixture = Fixture::new("exit 99", None);
+        fixture.program(
+            "curl",
+            "printf '%s\\n' \"$*\" >> calls\nprintf '{\"version\":\"1.3.5\"}\\n'",
+        );
+        assert_eq!(
+            latest_version("agy", &fixture.config, fixture.root.path())
+                .unwrap()
+                .as_deref(),
+            Some("1.3.5")
+        );
+        let calls = fixture.calls();
+        assert!(
+            calls.contains("/manifests/darwin_arm64.json")
+                || calls.contains("/manifests/darwin_amd64.json")
+                || calls.contains("/manifests/linux_"),
+            "{calls}"
+        );
+        assert!(calls.contains("--max-time 10"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_metadata_failure_or_invalid_target_refuses_before_update() {
+        for (agent, program, body) in [
+            ("agy", "curl", "printf 'offline\\n' >&2; exit 7"),
+            ("agy", "curl", "printf '{\"version\":\"unknown\"}'"),
+        ] {
+            let fixture = Fixture::new("exit 99", None);
+            let script = format!("printf '%s\\n' \"$*\" >> calls\nif [ \"$1\" = --version ]; then printf '1.0.0\\n'; else {body}; fi");
+            fixture.program(agent, "printf '%s\\n' \"$*\" >> calls\nprintf '1.0.0\\n'");
+            fixture.program(program, &script);
+            let result = run_maintenance(
+                agent,
+                MaintenanceAction::Update,
+                &fixture.config,
+                fixture.root.path(),
+            );
+            assert!(!result.success, "{agent}: {}", result.message);
+            assert!(
+                !fixture
+                    .calls()
+                    .lines()
+                    .any(|line| line == "update" || line.starts_with("extension")),
+                "{}",
+                fixture.calls()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_updates_apply_to_the_checked_distribution_and_refresh_version() {
+        let fixture = Fixture::new("exit 99", None);
+        fixture.program("curl", "printf '{\"version\":\"1.2.0\"}\\n'");
+        fixture.program("agy", "printf '%s\\n' \"$*\" >> calls\nif [ \"$1\" = update ]; then : > updated; elif [ -f updated ]; then printf '1.2.0\\n'; else printf '1.0.0\\n'; fi");
+        let result = run_maintenance(
+            "agy",
+            MaintenanceAction::Update,
+            &fixture.config,
+            fixture.root.path(),
+        );
+        assert!(result.success, "{}", result.message);
+        assert_eq!(result.before_version.as_deref(), Some("1.0.0"));
+        assert_eq!(result.after_version.as_deref(), Some("1.2.0"));
+        assert!(fixture.calls().lines().any(|line| line == "update"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unverified_native_routes_refuse_metadata_and_mutation() {
+        for (agent, channel) in [
+            ("claude", "stable"),
+            ("claude", "latest"),
+            ("hermes", "stable"),
+            ("gh", "enterprise.example.invalid"),
+        ] {
+            let fixture = Fixture::new("printf 'npm mutation\\n' >> calls", None);
+            fixture.program(agent, "if [ \"$1\" = --version ] || [ \"$2\" = --version ]; then printf '1.0.0\\n'; else printf 'native mutation\\n' >> calls; fi");
+            let config_dir = fixture.root.path().join("native-config");
+            std::fs::create_dir(&config_dir).unwrap();
+            std::fs::write(
+                config_dir.join("settings.json"),
+                format!("{{\"autoUpdatesChannel\":\"{channel}\"}}"),
+            )
+            .unwrap();
+            let mut settings = gwt_config::Settings::load_from_path(&fixture.config).unwrap();
+            settings.profiles.profiles[0].env_vars.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                config_dir.to_string_lossy().into_owned(),
+            );
+            settings.profiles.profiles[0]
+                .env_vars
+                .insert("GH_HOST".into(), channel.into());
+            settings.save(&fixture.config).unwrap();
+            let reason = if agent == "gh" {
+                "distribution"
+            } else {
+                "channel"
+            };
+            assert!(latest_version(agent, &fixture.config, fixture.root.path())
+                .unwrap_err()
+                .contains(reason));
+            for _ in 0..2 {
+                let result = run_maintenance(
+                    agent,
+                    MaintenanceAction::Update,
+                    &fixture.config,
+                    fixture.root.path(),
+                );
+                assert!(!result.success, "{agent}/{channel}: {}", result.message);
+                assert!(result.message.contains(reason), "{}", result.message);
+            }
+            assert!(fixture.calls().is_empty(), "{}", fixture.calls());
+        }
     }
 
     #[cfg(unix)]

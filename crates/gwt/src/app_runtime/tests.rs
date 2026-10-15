@@ -807,6 +807,7 @@ fn sample_window(
         dynamic_title: None,
         dynamic_title_detail: None,
         agent_id: None,
+        agent_name: None,
         agent_color: None,
         worktree_form: gwt::WindowWorktreeForm::Unknown,
         tab_group_id: None,
@@ -1379,6 +1380,7 @@ fn sample_runtime_with_events(
     let (project_tab_incarnations, next_project_incarnation) =
         initial_project_tab_incarnations(&tabs);
     let mut runtime = AppRuntime {
+        _runtime_namespace_gc: None,
         tabs,
         active_tab_id: active_tab_id.map(str::to_owned),
         project_states: super::initial_project_states(&project_tab_incarnations),
@@ -1418,6 +1420,7 @@ fn sample_runtime_with_events(
         startup_worktree_inventories: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         pending_launch_delivery_acks: HashMap::new(),
+        pending_monitor_startups: HashMap::new(),
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
@@ -1471,6 +1474,9 @@ fn sample_runtime_with_events(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         )),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+        work_events_ingest_queue: Arc::new(
+            crate::work_events_ingest::WorkEventsIngestQueue::default(),
+        ),
         last_work_pr_titles_scan: std::cell::RefCell::new(HashMap::new()),
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
@@ -1850,8 +1856,7 @@ fn wait_for_recorded_event_with_timeout(
 
 /// Issue #3297: `load_knowledge_bridge_events` replies off the GUI event
 /// loop through the stub proxy. Wait for the dispatched knowledge view for
-/// `window_id` and return that dispatch's outbound events so tests can keep
-/// asserting on the entries/detail pair.
+/// `window_id` and return that dispatch's outbound list events.
 fn wait_for_knowledge_view_dispatch(
     events: &Arc<Mutex<Vec<UserEvent>>>,
     window_id: &str,
@@ -1880,6 +1885,44 @@ fn wait_for_knowledge_view_dispatch(
     }
     let snapshot = events.lock().expect("event log").clone();
     panic!("timed out waiting for knowledge view dispatch for {window_id}: {snapshot:?}");
+}
+
+fn select_issue_detail_for_test(
+    runtime: &AppRuntime,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+    window_id: &str,
+    number: u64,
+) -> gwt::KnowledgeDetailView {
+    let immediate = runtime.select_knowledge_bridge_entry_events(
+        "client-1",
+        window_id,
+        gwt::KnowledgeKind::Issue,
+        Some(101),
+        number,
+    );
+    assert!(immediate.is_empty());
+    let find_detail = |events: &[UserEvent]| {
+        events.iter().find_map(|event| {
+            let UserEvent::Dispatch(dispatched) = recorded_project_payload(event) else {
+                return None;
+            };
+            dispatched
+                .iter()
+                .find_map(|outbound| match &outbound.event {
+                    BackendEvent::KnowledgeDetail {
+                        id,
+                        request_id: Some(101),
+                        detail,
+                        ..
+                    } if id == window_id && detail.number == Some(number) => Some(detail.clone()),
+                    _ => None,
+                })
+        })
+    };
+    wait_for_recorded_event("selected Issue detail", events, |events| {
+        find_detail(events).is_some()
+    });
+    find_detail(&events.lock().expect("event log")).expect("selected Issue detail")
 }
 
 fn dispatch_launch_materialization_request(
@@ -2759,7 +2802,8 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         &gwt::IssueMonitorPrefs {
             enabled: true,
             max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto,
-            max_active_agents: 9,
+            // A saved accepted zero holds admission until a fresh positive sample.
+            max_active_agents: 0,
             ..Default::default()
         },
     )
@@ -7670,6 +7714,7 @@ fn workspace_test_agent_with_conversation(
         session_id: session_id.to_string(),
         window_id: None,
         agent_id: "codex".to_string(),
+        agent_name: None,
         display_name: "Codex".to_string(),
         affiliation_status: "assigned".to_string(),
         workspace_id: None,

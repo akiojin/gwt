@@ -1,19 +1,6 @@
 // Shared pull-render contract. Models contain data; views subscribe to selectors.
-// Model notifications stay synchronous; DOM views may coalesce at a frame.
+// Notifications are synchronous so hidden windows never depend on a focus/rAF.
 const owned = new WeakSet();
-
-function scheduleViewFrame(callback) {
-  let active = true, frame;
-  const cancel = () => {
-    active = false;
-    clearTimeout(timer);
-    if (frame !== undefined) globalThis.cancelAnimationFrame?.(frame);
-  };
-  const flush = () => { if (active) { cancel(); callback(); } };
-  const timer = setTimeout(flush, 100);
-  if (globalThis.requestAnimationFrame) frame = requestAnimationFrame(flush);
-  return cancel;
-}
 
 function snapshot(value) {
   if (value === null || typeof value !== 'object') {
@@ -26,45 +13,19 @@ function snapshot(value) {
   if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
     throw new TypeError('UI state must contain plain objects and arrays');
   }
-  let copy;
-  if (Array.isArray(value)) copy = value.map(snapshot);
-  else {
-    copy = {};
-    for (const key of Object.keys(value)) {
-      const child = snapshot(value[key]);
-      if (key === '__proto__') Object.defineProperty(copy, key, { value: child, enumerable: true });
-      else copy[key] = child;
-    }
-  }
+  const copy = Array.isArray(value) ? value.map(snapshot)
+    : Object.fromEntries(Object.entries(value).map(([key, child]) => [key, snapshot(child)]));
   owned.add(copy);
   return Object.freeze(copy);
 }
 
-export function createUiStateStore(initialState, { scheduleView = scheduleViewFrame } = {}) {
+export function createUiStateStore(initialState) {
   let current = snapshot(initialState);
   let disposed = false;
   let notifying = false;
   let dirty = false;
   const views = new Set();
   const read = () => current;
-
-  function queueView(view) {
-    const pending = { cancel: null };
-    view.pending = pending;
-    try {
-      pending.cancel = scheduleView(() => {
-        if (disposed || !views.has(view) || view.pending !== pending) return;
-        view.pending = null;
-        const selected = view.select(read());
-        if (Object.is(selected, view.selected)) return;
-        view.render(selected);
-        view.selected = selected;
-      });
-    } catch (error) {
-      if (view.pending === pending) view.pending = null;
-      throw error;
-    }
-  }
 
   function update(reduce) {
     if (disposed) throw new Error('UI state store is disposed');
@@ -83,12 +44,8 @@ export function createUiStateStore(initialState, { scheduleView = scheduleViewFr
           try {
             const selected = view.select(read());
             if (Object.is(selected, view.selected)) continue;
-            if (view.batched) {
-              if (!view.pending) queueView(view);
-            } else {
-              view.render(selected);
-              view.selected = selected;
-            }
+            view.render(selected);
+            view.selected = selected;
           } catch (error) { errors.push(error); }
         }
       }
@@ -96,24 +53,14 @@ export function createUiStateStore(initialState, { scheduleView = scheduleViewFr
     if (errors.length) throw new AggregateError(errors, errors[0].message);
   }
 
-  function removeView(view) {
-    view.pending?.cancel?.();
-    view.pending = null;
-    return views.delete(view);
-  }
-
-  function subscribe(select, render, batched = false) {
+  function subscribe(select, render) {
     if (disposed) throw new Error('UI state store is disposed');
-    const view = { select, render, selected: select(read()), batched, pending: null };
+    const view = { select, render, selected: select(read()) };
     views.add(view);
-    try { render(view.selected); } catch (error) { removeView(view); throw error; }
-    return () => removeView(view);
+    try { render(view.selected); } catch (error) { views.delete(view); throw error; }
+    return () => views.delete(view);
   }
 
-  function subscribeView(select, render) { return subscribe(select, render, true); }
-  function dispose() {
-    disposed = true;
-    for (const view of [...views]) removeView(view);
-  }
-  return { read, update, subscribe, subscribeView, dispose };
+  function dispose() { disposed = true; views.clear(); }
+  return { read, update, subscribe, dispose };
 }

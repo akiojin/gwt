@@ -40,11 +40,8 @@ test("model updates, subscriptions, and uncalled local handlers are legal", () =
       function onClick() { element.textContent = "clicked"; }
       element.addEventListener("click", onClick);
       model.update(state => ({ ...state, value: event.value }));
-      socket.send(JSON.stringify({ bytes: new TextEncoder().encode(event.value).length }));
     }`, "fixture.js");
   assert.deepEqual(findings, []);
-  assert.ok(scanModule('function receive(event) { unknown.encode(event.value); }', 'fixture.js')
-    .some(finding => finding.kind === 'unresolved-call'));
 });
 
 test("factory return aliases resolve model handlers without trusting controller.update", () => {
@@ -78,15 +75,12 @@ test("synchronous and scheduled callbacks retain the receiver boundary", () => {
 });
 
 test("subscribing inside a receiver includes the immediately rendered view", () => {
-  for (const method of ['subscribe', 'subscribeView']) {
-    const findings = scanModule(`import { createUiStateStore } from "./ui-state-store.js";
+  const findings = scanModule(`import { createUiStateStore } from "./ui-state-store.js";
     const model = createUiStateStore({ value: "" });
     function receive(event) {
-      model.${method}(state => state.value, value => { element.textContent = value; });
+      model.subscribe(state => state.value, value => { element.textContent = value; });
     }`, "fixture.js");
-    assert.equal(findings.filter(finding => finding.kind === "dom-write").length, 1, method);
-    assert.equal(findings.filter(finding => finding.kind === 'unresolved-call').length, 0, method);
-  }
+  assert.equal(findings.filter(finding => finding.kind === "dom-write").length, 1);
 });
 
 test("recursive helpers terminate even when nested switches change case context", () => {
@@ -137,9 +131,9 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   const file = 'crates/gwt/web/app.js';
   const modules = new Map([['crates/gwt/web/pm-chat.js', readFileSync(new URL('../pm-chat.js', import.meta.url), 'utf8')]]);
   const migrated = findings => findings.filter(finding => finding.root === 'receive'
-    && /^\/(pm_reports|terminal_output(?:\|terminal_snapshot)?|terminal_snapshot)$/.test(finding.context));
+    && /^\/(pm_reports|terminal_output|terminal_snapshot)$/.test(finding.context));
   assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
-  const bypass = app.replaceAll('applyPmWindowReceiveEvent(event)', '(element.textContent = event.kind, applyPmWindowReceiveEvent(event))');
+  const bypass = app.replace('applyPmWindowReceiveEvent(event);', 'applyPmWindowReceiveEvent(event); element.textContent = event.kind;');
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
 });
 

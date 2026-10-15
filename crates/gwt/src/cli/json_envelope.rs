@@ -159,6 +159,13 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "exit_code": code,
                 "output": output,
             });
+            if code == 0 {
+                match operation.as_str() {
+                    "issue.view" | "issue.monitor.status" => payload["kind"] = "issue".into(),
+                    "pr.view" | "pr.list" => payload["kind"] = "pull_request".into(),
+                    _ => {}
+                }
+            }
             if let Some(data) = pr_checks_data {
                 payload["data"] = data;
             }
@@ -650,6 +657,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 verdict_raw: required_string(params, "verdict_raw")?,
             })
         }
+        "update.settings.status" => CliCommand::Update(super::UpdateCommand::SettingsStatus {
+            project_root: optional_path(params, "project_root")?,
+        }),
         "issue.monitor.status" => CliCommand::Issue(IssueCommand::MonitorStatus {
             project_root: optional_path(params, "project_root")?,
         }),
@@ -700,6 +710,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
             // An unexplained release of a recorded failure is not auditable.
             reason: required_string(params, "reason")?,
+            force: optional_bool(params, "force")?.unwrap_or(false),
         }),
         "issue.monitor.quota_hold.list" | "issue.monitor.quota-hold.list" => {
             CliCommand::Issue(IssueCommand::MonitorQuotaHoldList {
@@ -800,6 +811,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
         }),
         "issue.monitor.config.set" | "issue.monitor.config-set" => {
+            if lookup(params, "auto_apply_updates").is_some() {
+                return Err(CliParseError::InvalidJson(
+                    "unknown parameter auto_apply_updates; configure automatic updates in Settings > System"
+                        .to_string(),
+                ));
+            }
             let allowed_labels = match lookup(params, "allowed_labels") {
                 None | Some(Value::Null) => None,
                 Some(value) => Some(
@@ -823,7 +840,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 )),
             };
             let auto_close_merged_issues = optional_bool(params, "auto_close_merged_issues")?;
-            let auto_apply_updates = optional_bool(params, "auto_apply_updates")?;
             // Issue #3923 AC-5: the PM's CLI route off a held provider.
             let launch_agent = optional_string(params, "launch_agent")?;
             // Issue #4037 AC-5: the non-destructive update drain.
@@ -834,12 +850,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 && max_active.is_none()
                 && !max_active_auto
                 && auto_close_merged_issues.is_none()
-                && auto_apply_updates.is_none()
                 && launch_agent.is_none()
                 && update_drain.is_none()
             {
                 return Err(CliParseError::MissingFlag(
-                    "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain",
+                    "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain",
                 ));
             }
             // The handler owns the GUI-only ON policy so dispatch can return
@@ -858,7 +873,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 max_active,
                 max_active_auto,
                 auto_close_merged_issues,
-                auto_apply_updates,
                 launch_agent,
                 update_drain,
             })
@@ -1484,6 +1498,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "pane.list" => CliCommand::Pane(PaneCommand::List),
+        "pane.name" => {
+            reject_unknown_params(params, &["candidate"], "pane.name")?;
+            CliCommand::Pane(PaneCommand::Name {
+                candidate: required_string(params, "candidate")?,
+            })
+        }
         "pane.read" => CliCommand::Pane(PaneCommand::Read {
             id: required_string(params, "id")?,
             lines: optional_usize(params, "lines")?.unwrap_or(200),
@@ -2648,6 +2668,35 @@ mod tests {
             "params": params,
         })
         .to_string()
+    }
+
+    #[test]
+    fn issue_4323_view_envelopes_identify_the_resource_kind() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(repo.path().to_path_buf());
+        env.client.seed(gwt_github::client::IssueSnapshot {
+            number: gwt_github::client::IssueNumber(42),
+            title: "typed resource".into(),
+            body: "".into(),
+            labels: vec![],
+            state: gwt_github::client::IssueState::Open,
+            updated_at: gwt_github::client::UpdatedAt::new("2026-10-15T00:00:00Z"),
+            comments: vec![],
+        });
+        env.seed_pr(7, gwt_git::pr_status::parse_pr_status_json(
+            r#"{"number":7,"title":"typed resource","url":"https://github.com/octo/gwt/pull/7","state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#
+        ).unwrap());
+        for (operation, number, kind, header) in [
+            ("issue.view", 42, "issue", "Issue #42"),
+            ("pr.view", 7, "pull_request", "PR #7"),
+        ] {
+            env.stdin = envelope(operation, json!({"number":number}));
+            env.stdout.clear();
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
+            let response: Value = serde_json::from_slice(&env.stdout).unwrap();
+            assert_eq!(response["kind"], kind);
+            assert!(response["output"].as_str().unwrap().starts_with(header));
+        }
     }
 
     #[test]
@@ -4553,7 +4602,6 @@ mod tests {
                 max_active: Some(7),
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
@@ -4568,7 +4616,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
@@ -4586,31 +4633,67 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: Some(false),
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             }),
             "Issue #3917 AC-5: the auto-close override is settable on its own"
         );
+    }
+
+    #[test]
+    fn issue_monitor_config_set_rejects_auto_apply_updates() {
+        for operation in ["issue.monitor.config.set", "issue.monitor.config-set"] {
+            for enabled in [true, false] {
+                for params in [
+                    json!({"auto_apply_updates": enabled}),
+                    json!({"auto_apply_updates": enabled, "enabled": false}),
+                ] {
+                    let error = err(operation, params).to_string();
+                    assert!(
+                        error.contains("unknown parameter auto_apply_updates"),
+                        "{error}"
+                    );
+                    assert!(error.contains("Settings > System"), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn update_settings_status_is_read_only_and_does_not_write_config() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = envelope("update.settings.status", json!({"project_root": repo}));
+
         assert_eq!(
-            ok(
-                "issue.monitor.config.set",
-                json!({"auto_apply_updates": true})
-            ),
-            CliCommand::Issue(IssueCommand::MonitorConfigSet {
-                allowed_labels: None,
-                project_root: None,
-                enabled: None,
-                autonomous_mode: None,
-                max_active: None,
-                max_active_auto: false,
-                auto_close_merged_issues: None,
-                auto_apply_updates: Some(true),
-                launch_agent: None,
-                update_drain: None,
-            }),
-            "Issue #3906 AC-1: the auto-apply override is settable on its own"
+            super::dispatch(&mut env, "gwtd"),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
         );
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        let status: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            status,
+            json!({
+                "auto_apply_updates": null,
+                "auto_apply_updates_effective": false,
+                "update_drain": null,
+            })
+        );
+        assert!(!gwt_core::paths::gwt_config_path().exists());
+        assert!(
+            crate::cli::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "update.settings.status"
+            )
+        );
+        assert!(matches!(
+            err("update.settings.set", json!({"auto_apply_updates": false})),
+            CliParseError::UnknownSubcommand(_)
+        ));
     }
 
     #[test]
@@ -4651,7 +4734,6 @@ mod tests {
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(true)),
-                auto_apply_updates: None,
             })
         );
         assert_eq!(
@@ -4666,7 +4748,6 @@ mod tests {
                 auto_close_merged_issues: None,
                 launch_agent: None,
                 update_drain: Some(crate::IssueMonitorUpdateDrainControl::Toggle(false)),
-                auto_apply_updates: None,
             })
         );
         assert!(matches!(
@@ -4690,7 +4771,6 @@ mod tests {
                 max_active: None,
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: Some("claude".to_string()),
                 update_drain: None,
             })
@@ -4698,7 +4778,7 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.config.set", json!({})),
             CliParseError::MissingFlag(
-                "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|auto_apply_updates|launch_agent|update_drain"
+                "allowed_labels|enabled|autonomous_mode|max_active|auto_close_merged_issues|launch_agent|update_drain"
             )
         ));
     }
@@ -5023,6 +5103,7 @@ mod tests {
                 project_root: None,
                 number: 3624,
                 reason: "manual recovery after the launch-fence outage".to_string(),
+                force: false,
             })
         );
         assert!(matches!(
@@ -5032,6 +5113,13 @@ mod tests {
         assert!(matches!(
             err("issue.monitor.requeue", json!({"reason": "x"})),
             CliParseError::MissingFlag("number")
+        ));
+        assert!(matches!(
+            ok(
+                "issue.monitor.requeue",
+                json!({"number": 42, "reason": "explicit recovery", "force": true})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorRequeue { force: true, .. })
         ));
     }
 
@@ -5175,7 +5263,6 @@ mod tests {
                 max_active: Some(3),
                 max_active_auto: false,
                 auto_close_merged_issues: None,
-                auto_apply_updates: None,
                 launch_agent: None,
                 update_drain: None,
             })
@@ -7535,6 +7622,110 @@ mod tests {
             err("workflow.bypass", json!({"mode": "Release"})),
             CliParseError::InvalidValue { flag: "mode", .. }
         ));
+    }
+
+    #[test]
+    fn pane_name_parses_only_an_ai_candidate() {
+        let command = ok("pane.name", json!({"candidate": "Aster"}));
+        assert!(matches!(command,
+            CliCommand::Pane(PaneCommand::Name { candidate }) if candidate == "Aster"
+        ));
+        assert!(matches!(
+            err("pane.name", json!({})),
+            CliParseError::MissingFlag("candidate")
+        ));
+        for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
+            let mut params = json!({"candidate": "Aster"});
+            params[forbidden] = json!("foreign");
+            assert!(
+                matches!(err("pane.name", params), CliParseError::InvalidJson(_)),
+                "pane.name must not accept caller-supplied {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_name_waits_for_its_exact_assigned_result_without_a_target_claim() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let command = ok("pane.name", json!({"candidate": "Aster"}));
+        let CliCommand::Pane(command) = command else {
+            panic!("self-naming must be a pane operation");
+        };
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let runtime_path =
+            gwt_core::paths::gwt_sessions_dir().join("runtime/123/name-session.json");
+        std::fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_path, "{}").unwrap();
+        let _runtime_path = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            &runtime_path,
+        );
+        let _token = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "name-capability",
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let (stream, _) =
+                    tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, listener.accept())
+                        .await
+                        .expect("pane.name mock connection")
+                        .unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    panic!("name request must be JSON")
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(request["kind"], "pane_name");
+                assert_eq!(request["candidate"], "Aster");
+                assert_eq!(request.as_object().unwrap().len(), 3);
+                let request_id = request["request_id"].as_str().unwrap();
+                assert!(uuid::Uuid::parse_str(request_id).is_ok());
+                for (correlation, name) in [("foreign-request", "Wrong"), (request_id, "Aster2")] {
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "kind": "pane_name_result", "request_id": correlation,
+                                "ok": true, "agent_name": name, "error": null,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            });
+        });
+        let _ws_url = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let project = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(project.path().to_path_buf());
+        let mut output = String::new();
+        let result = crate::cli::pane::run(&mut env, command, &mut output);
+        assert!(
+            result.is_ok(),
+            "pane.name CLI failed before its result: {result:?}"
+        );
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(output.trim(), "Aster2");
     }
 
     #[test]
