@@ -137,6 +137,31 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
 });
 
+test("Profile receivers resolve only shared model updates", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const appFile = 'crates/gwt/web/app.js';
+  const profileFile = 'crates/gwt/web/profile-window-surface.js';
+  const profile = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([[profileFile, profile]]);
+  const profileReceivers = findings => findings.filter(finding => finding.root === 'receive'
+    && /^\/profile_(snapshot|error)(\/|$)/.test(finding.context));
+  const moduleFindings = scanModule(profile, profileFile, { rootName: 'applyProfileReceiveEvent' });
+  assert.equal(moduleFindings.length, 0, 'Profile module receiver must contain no DOM or unresolved calls');
+  assert.deepEqual(profileReceivers(scanModule(app, appFile, { modules })), []);
+
+  const directRender = profile.replace('function applyProfileReceiveEvent(event) {',
+    'function applyProfileReceiveEvent(event) { renderProfile(event.id);');
+  assert.notEqual(directRender, profile, 'the direct-render mutation must target the real receiver');
+  assert.ok(scanModule(directRender, profileFile, { rootName: 'applyProfileReceiveEvent' })
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(profileReceivers(scanModule(app, appFile, { modules: new Map([[profileFile, directRender]]) }))
+    .some(finding => finding.kind.startsWith('dom-')), 'factory tracing must detect the old rendering path');
+  const bypass = app.replace('applyProfileReceiveEvent(event);',
+    'applyProfileReceiveEvent(event); element.textContent = event.kind;');
+  assert.ok(profileReceivers(scanModule(bypass, appFile, { modules }))
+    .some(finding => finding.kind === 'dom-write'));
+});
+
 test("Window List receiver updates the catalog model and rejects direct rendering bypass", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const file = 'crates/gwt/web/app.js';

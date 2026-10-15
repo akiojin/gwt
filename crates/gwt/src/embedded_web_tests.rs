@@ -3355,12 +3355,10 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
             r#"case\s*"terminal_output":\s*applyPmWindowReceiveEvent\(event\);\s*break;\s*case\s*"terminal_snapshot":\s*applyPmWindowReceiveEvent\(event\);\s*break;"#,
         )
         .expect("valid regex");
-    // SPEC-3064 Phase 3 (E6e): the profile_snapshot body lives in the
-    // profile window surface applier; the app.js case arm delegates.
-    let profile_event = regex::Regex::new(
-            r#"function applyProfileReceiveEvent\(event\)\s*\{[\s\S]*?case\s*"profile_snapshot":\s*\{\s*const state = ensureProfileState\(event\.id\);[\s\S]*?renderProfile\(event\.id\);\s*break;\s*\}"#,
-        )
-        .expect("valid regex");
+    // Keep the embedded model/subscription wiring smoke here; the frontend
+    // pull-render contract enforces the semantic receiver DOM boundary.
+    let profile_model =
+        regex::Regex::new(r#"const profileModel\s*=\s*createUiStateStore\("#).expect("valid regex");
     let profile_event_delegate = regex::Regex::new(
         r#"case\s*"profile_snapshot":[\s\S]{0,300}?applyProfileReceiveEvent\(event\);\s*break;"#,
     )
@@ -3413,8 +3411,11 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected shared window subscriptions to retain the named terminal host delivery contract",
     );
     assert!(
-        profile_event.is_match(html) && profile_event_delegate.is_match(html),
-        "expected profile snapshot events to flow through the dedicated profile surface unit",
+        profile_model.is_match(html)
+            && html.contains("profileModel.update(")
+            && html.contains("profileModel.subscribe(")
+            && profile_event_delegate.is_match(html),
+        "expected profile snapshot events to flow through shared model subscriptions in the dedicated surface",
     );
     assert!(
         wizard_event.is_match(html) && wizard_event_delegate.is_match(html),
