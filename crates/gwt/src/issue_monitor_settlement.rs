@@ -61,6 +61,8 @@ pub struct MergedIssueSettlementOutcome {
     pub closed: bool,
     /// The Issue was already closed when the attempt read it back.
     pub already_closed: bool,
+    /// A proposed close was downgraded after reading the current checklist.
+    pub unmet_acceptance: Option<Vec<String>>,
 }
 
 /// The idempotency marker for one delivery.
@@ -92,15 +94,11 @@ pub fn render_settlement_comment(
     body.push_str(&settlement_marker(pr_number, merge_sha));
     body.push_str("\n\n");
     match action {
-        MergedIssueSettlementAction::Close { delegated } => {
+        MergedIssueSettlementAction::Close { .. } => {
             body.push_str(&format!(
                 "PR #{pr_number}（merge commit `{sha}`）が develop に merge されたため、gwt Issue Monitor が Issue #{issue_number} を close します。\n"
             ));
-            if *delegated {
-                body.push_str("\n残 AC は別 Issue に委譲済みの記録を確認しました。\n");
-            } else {
-                body.push_str("\n受け入れ基準はすべて `[x]` です。\n");
-            }
+            body.push_str("\n受け入れ基準はすべて `[x]` です。\n");
         }
         MergedIssueSettlementAction::AwaitClose { unmet } => {
             body.push_str(&format!(
@@ -120,7 +118,7 @@ pub fn render_settlement_comment(
                 body.push_str(&format!("\n未達 AC: {}\n", unmet.join(", ")));
             }
             body.push_str(
-                "\n残 AC を別 Issue に委譲する場合は、PR 本文または Issue コメントに「残 AC は別 Issue に委譲」と記録してください。\n",
+                "\n証跡を確認して Issue の受け入れ基準を更新するか、残りの作業の扱いを人間または PM が判断してください。委譲の記述だけでは close しません。\n",
             );
         }
     }
@@ -277,8 +275,40 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
             commented: false,
             closed: false,
             already_closed: true,
+            unmet_acceptance: None,
         });
     }
+    // Issue #5126: journaled Close effects may predate an Issue edit or an
+    // upgrade. Recheck the live checklist even if a prior marker already landed.
+    let source = if snapshot
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+    {
+        let comments = snapshot
+            .comments
+            .iter()
+            .map(|comment| gwt_github::Comment {
+                id: comment.id.0,
+                body: comment.body.clone(),
+            })
+            .collect::<Vec<_>>();
+        gwt_github::SpecBody::parse(&snapshot.body, &comments)
+            .map(|spec| crate::issue_monitor_worker::acceptance_source_text(&snapshot.body, &spec))
+            .unwrap_or_else(|_| snapshot.body.clone())
+    } else {
+        snapshot.body.clone()
+    };
+    let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(&source);
+    let unmet_acceptance = (wants_close && !criteria.all_checked()).then_some(criteria.unchecked);
+    let effective_action =
+        unmet_acceptance
+            .as_ref()
+            .map(|unmet| MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: unmet.clone(),
+            });
+    let action = effective_action.as_ref().unwrap_or(action);
+    let wants_close = matches!(action, MergedIssueSettlementAction::Close { .. });
     let marker = settlement_marker(pr_number, merge_sha);
     let already_commented = settlement_already_commented(
         snapshot
@@ -308,13 +338,17 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
             }
         }
     }
-    let commented = if already_commented {
+    let comment = render_settlement_comment(issue_number, pr_number, merge_sha, action);
+    let commented = if already_commented
+        && (unmet_acceptance.is_none()
+            || snapshot
+                .comments
+                .iter()
+                .any(|existing| existing.body == comment))
+    {
         false
     } else {
-        client.create_comment_mutation(
-            number,
-            &render_settlement_comment(issue_number, pr_number, merge_sha, action),
-        )?;
+        client.create_comment_mutation(number, &comment)?;
         true
     };
     let closed = if wants_close {
@@ -329,6 +363,7 @@ pub fn settle_merged_issue<C: IssueClient + OwnerRepositoryClient>(
         commented,
         closed,
         already_closed: false,
+        unmet_acceptance,
     })
 }
 
@@ -410,6 +445,20 @@ mod tests {
         let client = FakeIssueClient::new();
         let repo = delivery_repo();
         seed_open_issue(&client, 42, vec![]);
+        // The same acceptance source as the scan, including comment-resident SPECs.
+        let FetchResult::Updated(mut snapshot) = client.fetch(IssueNumber(42), None).unwrap()
+        else {
+            panic!("snapshot")
+        };
+        snapshot.labels = vec!["gwt-spec".to_string()];
+        snapshot.body =
+            "<!-- gwt-spec id=42 version=1 -->\n<!-- sections:\nspec=comment:1\n-->".to_string();
+        snapshot.comments.push(CommentSnapshot {
+            id: CommentId(1),
+            body: "<!-- artifact:spec BEGIN -->\n## Acceptance Criteria\n- [x] AC-1: done\n<!-- artifact:spec END -->".to_string(),
+            updated_at: UpdatedAt::new("2026-09-01T00:00:00Z"),
+        });
+        client.seed(snapshot);
         let outcome = settle_merged_issue(
             &client,
             &repository(),
@@ -425,12 +474,13 @@ mod tests {
             MergedIssueSettlementOutcome {
                 commented: true,
                 closed: true,
-                already_closed: false
+                already_closed: false,
+                unmet_acceptance: None,
             }
         );
         let comments = client.comments(IssueNumber(42));
-        assert_eq!(comments.len(), 1);
-        let body = &comments[0].body;
+        assert_eq!(comments.len(), 2);
+        let body = &comments[1].body;
         assert!(
             body.contains(&settlement_marker(7, Some("abc123"))),
             "{body}"
@@ -467,6 +517,36 @@ mod tests {
     }
 
     #[test]
+    fn close_rechecks_unchecked_acceptance_even_with_a_previous_marker() {
+        let client = FakeIssueClient::new();
+        let repo = delivery_repo();
+        let marker = settlement_marker(7, Some("abc123"));
+        seed_open_issue(&client, 42, vec![&marker]);
+        let FetchResult::Updated(mut snapshot) = client.fetch(IssueNumber(42), None).unwrap()
+        else {
+            panic!("snapshot")
+        };
+        snapshot.body = "## Acceptance Criteria\n- [ ] AC-1: remaining\n".to_string();
+        client.seed(snapshot);
+        let outcome = settle_merged_issue(
+            &client,
+            &repository(),
+            repo.path(),
+            42,
+            7,
+            Some("abc123"),
+            &MergedIssueSettlementAction::Close { delegated: true },
+        )
+        .expect("unchecked acceptance is handed off");
+        assert!(!outcome.closed);
+        assert_eq!(outcome.unmet_acceptance, Some(vec!["AC-1".to_string()]));
+        assert_eq!(client.owner_mutation_count(), 0);
+        assert!(client.comments(IssueNumber(42)).iter().any(|comment| {
+            comment.body.contains("needs_human") && comment.body.contains("AC-1")
+        }));
+    }
+
+    #[test]
     fn unmet_and_await_settlements_only_comment() {
         let client = FakeIssueClient::new();
         let repo = delivery_repo();
@@ -489,7 +569,8 @@ mod tests {
             MergedIssueSettlementOutcome {
                 commented: true,
                 closed: false,
-                already_closed: false
+                already_closed: false,
+                unmet_acceptance: None,
             }
         );
         let body = &client.comments(IssueNumber(42))[0].body;
@@ -546,7 +627,8 @@ mod tests {
             MergedIssueSettlementOutcome {
                 commented: false,
                 closed: false,
-                already_closed: true
+                already_closed: true,
+                unmet_acceptance: None,
             }
         );
         assert!(client.comments(IssueNumber(42)).is_empty());
