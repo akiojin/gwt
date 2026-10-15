@@ -2277,7 +2277,7 @@ impl Default for IssueMonitorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            poll_interval_secs: 300,
+            poll_interval_secs: 30,
             claim_heartbeat_secs: 300,
             claim_ttl_secs: 1800,
             max_active: 1,

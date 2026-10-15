@@ -655,9 +655,9 @@ const UPDATE_CONTROL_CLIENT_ID: &str = "update-control";
 /// Issue #3633: how often the GUI re-checks that a runtime daemon is serving
 /// each enabled project, and therefore the worst-case gap after one dies.
 ///
-/// Deliberately independent of `IssueMonitorConfig::poll_interval_secs` (300s
-/// by default, and user-tunable). Inheriting the scan cadence would mean a
-/// crashed daemon leaves `scan_now` and `daemon.subscribe` unavailable for
+/// Deliberately independent of the user-tunable
+/// `IssueMonitorConfig::poll_interval_secs`. Inheriting a long scan cadence
+/// would mean a crashed daemon leaves `scan_now` and `daemon.subscribe` unavailable for
 /// minutes, which is the state Issue #3633 was filed about.
 const RUNTIME_DAEMON_ENSURE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -2678,10 +2678,11 @@ mod tests {
             source.contains("app.ensure_runtime_daemons_for_enabled_projects()"),
             "the ensure tick must reach the supervisor"
         );
+        // Fast scan polling may match or beat supervision. Daemon recovery
+        // keeps its own bound regardless of the scan configuration.
         assert!(
-            crate::RUNTIME_DAEMON_ENSURE_INTERVAL
-                < Duration::from_secs(gwt::IssueMonitorConfig::default().poll_interval_secs),
-            "a crashed daemon must not stay dead for a whole scan interval"
+            crate::RUNTIME_DAEMON_ENSURE_INTERVAL <= Duration::from_secs(30),
+            "daemon supervision must run at least every thirty seconds"
         );
     }
 

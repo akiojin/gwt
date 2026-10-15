@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 53s
+     Running unittests src\lib.rs (target\debug\deps\gwt-410590df128c6cd2.exe)
+
+running 6 tests
+test cli::daemon::server::issue_monitor_admission::tests::issue_5557_admission_commits_before_a_blocked_full_scan_finishes ... {"before_claims":0,"dispatch_before_release":true,"dispatch_ms":90,"durable_deliveries":1,"maintenance_pending":true,"scenario":"blocked-maintenance-dispatch"}
+ok
+test cli::daemon::server::issue_monitor_admission::tests::issue_5557_admission_defers_a_changed_candidate_to_the_full_scan ... ok
+test cli::daemon::server::issue_monitor_admission::tests::issue_5557_failed_scan_retries_before_the_long_poll ... {"configured_poll_seconds":300,"retry_ms":5121,"scan_calls":2,"scenario":"failed-scan-retry"}
+ok
+test cli::daemon::server::issue_monitor_admission::tests::issue_5557_scan_cadence_and_deadline_stay_within_one_minute ... ok
+test issue_monitor_worker::tests::issue_5557_failed_stages_record_timing_without_losing_the_error ...  INFO gwt.issue_monitor.scan: Issue Monitor readback stage stage="open-pr-readback" duration_ms=0.0538 success=false
+ INFO gwt.issue_monitor.scan: Issue Monitor scan stage stage="maintenance" duration_ms=0.2621 remaining_budget_ms=None
+ INFO gwt.issue_monitor.scan: Issue Monitor scan stage stage="proposal-return" duration_ms=0.0049 remaining_budget_ms=None
+ INFO gwt.issue_monitor.scan: Issue Monitor scan stage stage="total" duration_ms=0.3149 remaining_budget_ms=None
+ok
+test issue_monitor_worker::tests::issue_5557_readbacks_preserve_the_launch_reserve_across_one_candidate ... {"scenario":"readback-reserve","before_readback_budget_seconds":11,"after_readback_budget_seconds":1,"launch_reserve_seconds":10,"proposal_return_valid":true}
+ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 4291 filtered out; finished in 7.13s

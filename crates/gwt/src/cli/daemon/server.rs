@@ -56,11 +56,14 @@ use super::transport::{
     bind_is_served, cleanup_stale_bind, prepare_bind_parent, IpcListener, IpcReadHalf, IpcStream,
 };
 
+#[path = "issue_monitor_admission.rs"]
+mod issue_monitor_admission;
+
 const ACCEPT_BACKOFF_MS: u64 = 50;
 const ISSUE_MONITOR_SCAN_TIMEOUT: Duration = Duration::from_secs(60);
-/// Issue #3933 AC-3: the ceiling on a candidate-proportional scan budget, so a
-/// pathological in-flight count cannot let one scan run unbounded.
-const ISSUE_MONITOR_SCAN_BUDGET_CEILING: Duration = Duration::from_secs(300);
+const ISSUE_MONITOR_SCAN_BUDGET_CEILING: Duration = Duration::from_secs(60);
+const ISSUE_MONITOR_SCAN_RETRY_DELAY: Duration = Duration::from_secs(5);
+const ISSUE_MONITOR_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 /// The prefs read-lock-modify-write budget (Issue #4033, SPEC #4740).
 const ISSUE_MONITOR_PREFS_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
     gwt_core::deadline_budget::DeadlineBudget::new(
@@ -457,13 +460,8 @@ async fn run_bound_server(
     // The worker owns authority revocation, durable compensations, and child
     // reaping. Do not let the server return (and drop the Tokio runtime) before
     // that shutdown protocol has had its bounded opportunity to complete.
-    // Issue #3933 (review follow-up): the grace must cover the largest scan
-    // deadline the worker can actually install, not the base timeout. A scan is
-    // sized by its readback fan-out (`issue_monitor_scan_budget`) and the
-    // shutdown path waits on that same deadline, so deriving the grace from
-    // `operation_timeout` alone would abort the worker mid-shutdown — and a
-    // started `spawn_blocking` scan cannot be cancelled, leaving authority
-    // settlement and child reaping unfinished.
+    // Cover both bounded observation lanes through their captured deadlines;
+    // started blocking work cannot be cancelled by dropping its async handle.
     let worker_grace = operation_timeout
         .max(ISSUE_MONITOR_SCAN_BUDGET_CEILING)
         .saturating_add(issue_monitor_prefs_timeout())
@@ -593,6 +591,14 @@ fn spawn_issue_monitor_worker_with_config(
 
 #[derive(Clone, Default)]
 struct IssueMonitorWorkerTestHooks {
+    #[cfg(test)]
+    scan_override: Option<Arc<IssueMonitorScanOverride>>,
+    #[cfg(test)]
+    admission_override: Option<Arc<IssueMonitorScanOverride>>,
+    #[cfg(test)]
+    effect_override: Option<Arc<IssueMonitorEffectOverride>>,
+    #[cfg(test)]
+    hold_effects: bool,
     #[cfg(all(test, unix))]
     scan_concurrency_probe: Option<Arc<IssueMonitorScanConcurrencyProbe>>,
     #[cfg(all(test, unix))]
@@ -602,6 +608,18 @@ struct IssueMonitorWorkerTestHooks {
     #[cfg(all(test, unix))]
     startup_retry_started: Option<Arc<tokio::sync::Notify>>,
 }
+
+#[cfg(test)]
+type IssueMonitorScanOverride = dyn Fn(
+        crate::IssueMonitorState,
+    )
+        -> Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>
+    + Send
+    + Sync;
+
+#[cfg(test)]
+type IssueMonitorEffectOverride =
+    dyn Fn(&crate::PendingIssueMonitorEffect, &str) -> IssueMonitorEffectOutcome + Send + Sync;
 
 #[cfg(all(test, unix))]
 #[derive(Default)]
@@ -897,8 +915,10 @@ fn spawn_issue_monitor_worker_with_lease(
             hub.close_issue_monitor_controls();
             return;
         };
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(monitor.config.poll_interval_secs));
+        let mut interval = tokio::time::interval(Duration::from_secs(
+            monitor.config.poll_interval_secs.clamp(1, 30),
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut claim_heartbeat_interval =
             tokio::time::interval(Duration::from_secs(monitor.claim_heartbeat_interval_secs()));
         claim_heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -906,6 +926,9 @@ fn spawn_issue_monitor_worker_with_lease(
         let mut revision = 0_u64;
         let mut scan_requested = false;
         let mut in_flight_scan: Option<InFlightIssueMonitorScan> = None;
+        let mut scan_retry_at: Option<Instant> = None;
+        let mut admission_requested = false;
+        let mut in_flight_admission: Option<InFlightIssueMonitorScan> = None;
         let mut effect_execution_requested = !monitor.pending_effects().is_empty();
         let mut in_flight_effect: Option<InFlightIssueMonitorEffect> = None;
         let mut effect_permit = IssueMonitorEffectPermit::new();
@@ -927,6 +950,10 @@ fn spawn_issue_monitor_worker_with_lease(
                 .as_ref()
                 .filter(|scan| !scan.watchdog_fired)
                 .map(|scan| scan.deadline);
+            let admission_watchdog_deadline = in_flight_admission
+                .as_ref()
+                .filter(|admission| !admission.watchdog_fired)
+                .map(|admission| admission.deadline);
             let effect_watchdog_deadline = in_flight_effect
                 .as_ref()
                 .filter(|effect| !effect.watchdog_fired)
@@ -969,6 +996,13 @@ fn spawn_issue_monitor_worker_with_lease(
                         )
                         .await;
                     }
+                    if let Some(mut admission) = in_flight_admission.take() {
+                        admission.handle.abort();
+                        let _ = tokio::time::timeout_at(
+                            tokio::time::Instant::from_std(admission.deadline),
+                            &mut admission.handle,
+                        ).await;
+                    }
                     if let Some(mut effect) = in_flight_effect.take() {
                         // Abort cancels a queued blocking task. Once started it
                         // cannot be cancelled, so wait only through the absolute
@@ -1008,6 +1042,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 continue;
                             };
                             if let Some(control) = decode_issue_monitor_control_in_repo(payload, Some(&scope.project_root)) {
+                                let immediate_admission = matches!(&control, IssueMonitorControl::ScanNow);
                                 let review_deferred = matches!(&control, IssueMonitorControl::ReviewDispatchDeferred(_));
                                 let Some(next_revision) = revision.checked_add(1) else {
                                     tracing::error!("issue monitor revision exhausted; stopping worker");
@@ -1056,6 +1091,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 // request itself, so it runs after the barrier
                                 // drains.
                                 scan_requested |= should_scan;
+                                admission_requested |= should_scan && immediate_admission;
                             } else {
                                 completion.reject(IssueMonitorControlQueueError::Rejected);
                             }
@@ -1093,6 +1129,7 @@ fn spawn_issue_monitor_worker_with_lease(
                     };
                     revision = next_revision;
                     let review_deferred = matches!(&accepted.control, IssueMonitorControl::ReviewDispatchDeferred(_));
+                    let immediate_admission = matches!(&accepted.control, IssueMonitorControl::ScanNow);
                     match try_apply_accepted_issue_monitor_control_with_disk_migration(
                         &prefs_path,
                         &mut monitor,
@@ -1103,6 +1140,7 @@ fn spawn_issue_monitor_worker_with_lease(
                             authority_changed,
                         } => {
                             scan_requested |= should_scan;
+                            admission_requested |= should_scan && immediate_admission;
                             let (drained, completion, authorizing) = pending_authority_controls
                                 .as_mut()
                                 .expect("authority barrier exists during retry")
@@ -1177,6 +1215,56 @@ fn spawn_issue_monitor_worker_with_lease(
                         publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                     }
                 }
+                _ = wait_for_issue_monitor_deadline(scan_retry_at) => {
+                    scan_retry_at = None;
+                    scan_requested = true;
+                }
+                _ = wait_for_issue_monitor_deadline(admission_watchdog_deadline) => {
+                    if let Some(admission) = in_flight_admission.as_mut() {
+                        admission.watchdog_fired = true;
+                        admission.handle.abort();
+                        tracing::warn!("immediate Issue Monitor admission reached its deadline");
+                    }
+                }
+                (captured_revision, captured_authority_epoch, captured_deadline, admission_result) = wait_for_issue_monitor_scan(&mut in_flight_admission) => {
+                    in_flight_admission = None;
+                    match admission_result {
+                        Ok(Ok(proposal)) => {
+                            if accept_completed_issue_monitor_scan(
+                                &prefs_path,
+                                &mut monitor,
+                                proposal,
+                                captured_revision,
+                                revision,
+                                captured_authority_epoch,
+                                captured_deadline,
+                            ) {
+                                // Fence the full scan's older clone before it
+                                // can replace the newly committed admission.
+                                let Some(next_revision) = revision.checked_add(1) else {
+                                    tracing::error!("issue monitor revision exhausted; stopping worker");
+                                    break;
+                                };
+                                revision = next_revision;
+                                effect_execution_requested = !monitor.pending_effects().is_empty();
+                                publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                            } else if captured_revision != revision {
+                                // A concurrent control or full-scan commit won.
+                                // Re-observe the current frontier, never replay
+                                // the stale proposal over that newer state.
+                                admission_requested = true;
+                            }
+                        }
+                        Ok(Err(failure)) => {
+                            tracing::warn!(error = %failure, "immediate Issue Monitor admission failed");
+                            scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "immediate Issue Monitor admission worker failed");
+                            scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
+                        }
+                    }
+                }
                 _ = wait_for_issue_monitor_deadline(scan_watchdog_deadline) => {
                     if expire_issue_monitor_scan_at_watchdog(
                         &mut in_flight_scan,
@@ -1194,6 +1282,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         // started spawn_blocking work is not abortable and must
                         // remain the sole lane owner until it really joins.
                         scan_requested = true;
+                        scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
                     }
                 }
                 (captured_revision, captured_authority_epoch, captured_deadline, scan_result) = wait_for_issue_monitor_scan(&mut in_flight_scan) => {
@@ -1213,6 +1302,11 @@ fn spawn_issue_monitor_worker_with_lease(
                                 captured_authority_epoch,
                                 captured_deadline,
                             ) {
+                                let Some(next_revision) = revision.checked_add(1) else {
+                                    tracing::error!("issue monitor revision exhausted; stopping worker");
+                                    break;
+                                };
+                                revision = next_revision;
                                 publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                                 effect_execution_requested =
                                     !monitor.pending_effects().is_empty();
@@ -1232,6 +1326,7 @@ fn spawn_issue_monitor_worker_with_lease(
                                 persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
                                 publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                                 scan_requested = true;
+                                scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
                             } else {
                                 // A direct prefs writer (for example launch-
                                 // profile save or a daemon-unavailable GUI
@@ -1262,6 +1357,7 @@ fn spawn_issue_monitor_worker_with_lease(
                             revision = next_revision;
                             persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
                             publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                            scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
                         }
                         Err(error) => {
                             monitor = scan_join_failure_fallback(
@@ -1277,6 +1373,7 @@ fn spawn_issue_monitor_worker_with_lease(
                             revision = next_revision;
                             persist_daemon_issue_monitor_state(&prefs_path, &mut monitor);
                             publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
+                            scan_retry_at = Some(Instant::now() + ISSUE_MONITOR_SCAN_RETRY_DELAY);
                         }
                     }
                 }
@@ -1451,7 +1548,32 @@ fn spawn_issue_monitor_worker_with_lease(
                 &mut deferred_restart_reviews,
             );
 
+            if admission_requested
+                && in_flight_admission.is_none()
+                && !pending_authority_controls
+                    .as_ref()
+                    .is_some_and(PendingIssueMonitorAuthorityControls::front_is_authorizing)
+            {
+                admission_requested = false;
+                let deadline =
+                    Instant::now() + operation_timeout.min(ISSUE_MONITOR_ADMISSION_TIMEOUT);
+                in_flight_admission = Some(InFlightIssueMonitorScan {
+                    revision,
+                    authority_epoch: monitor.effect_authority_epoch(),
+                    handle: issue_monitor_admission::spawn(
+                        scope.clone(),
+                        monitor.clone(),
+                        issue_monitor_gui_connected(&hub),
+                        deadline,
+                        test_hooks.clone(),
+                    ),
+                    deadline,
+                    watchdog_fired: false,
+                });
+            }
+
             if scan_requested
+                && scan_retry_at.is_none()
                 && in_flight_scan.is_none()
                 && !pending_authority_controls
                     .as_ref()
@@ -1475,7 +1597,10 @@ fn spawn_issue_monitor_worker_with_lease(
                 });
             }
 
-            if effect_execution_requested && in_flight_effect.is_none() {
+            let execute_effects = effect_execution_requested;
+            #[cfg(test)]
+            let execute_effects = execute_effects && !test_hooks.hold_effects;
+            if execute_effects && in_flight_effect.is_none() {
                 effect_execution_requested = false;
                 let current_permit = effect_permit.capture();
                 let selection_now =
@@ -1543,6 +1668,8 @@ fn spawn_issue_monitor_worker_with_lease(
                         authority_current,
                         current_permit,
                         deadline,
+                        #[cfg(test)]
+                        test_hooks.effect_override.clone(),
                     ));
                 }
             }
@@ -4034,18 +4161,10 @@ fn spawn_issue_monitor_scan(
     )
 }
 
-/// Issue #3933 AC-3: size the scan budget to the readback fan-out it has to
-/// perform. A fixed window is a per-scan budget that every candidate branch has
-/// to share, so the same 60s that is generous for one in-flight issue starves
-/// the tail once several are in flight. The per-candidate allowance matches the
-/// budget each readback is actually given.
-fn issue_monitor_scan_budget(monitor: &crate::IssueMonitorState, base: Duration) -> Duration {
-    let candidates = u32::try_from(monitor.autonomous_in_flight_issues().len()).unwrap_or(u32::MAX);
-    base.saturating_add(
-        crate::issue_monitor_worker::issue_monitor_readback_budget()
-            .saturating_mul(candidates.min(u32::MAX / 2)),
-    )
-    .min(ISSUE_MONITOR_SCAN_BUDGET_CEILING)
+/// More in-flight candidates must not lengthen the shared scan deadline.
+/// Maintenance degrades within its budget and leaves admission time reserved.
+fn issue_monitor_scan_budget(_monitor: &crate::IssueMonitorState, base: Duration) -> Duration {
+    base.min(ISSUE_MONITOR_SCAN_BUDGET_CEILING)
 }
 
 fn spawn_issue_monitor_scan_with_deadline(
@@ -4058,6 +4177,10 @@ fn spawn_issue_monitor_scan_with_deadline(
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
     tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(scan) = &test_hooks.scan_override {
+            return scan(monitor);
+        }
         #[cfg(all(test, unix))]
         let _scan_concurrency_guard = test_hooks
             .scan_concurrency_probe
@@ -4551,6 +4674,7 @@ fn spawn_issue_monitor_effect(
     authority_current: bool,
     permit: IssueMonitorEffectPermitToken,
     deadline: Instant,
+    #[cfg(test)] effect_override: Option<Arc<IssueMonitorEffectOverride>>,
 ) -> InFlightIssueMonitorEffect {
     let receipt = effect.clone();
     let handle = tokio::task::spawn_blocking(move || {
@@ -4566,13 +4690,24 @@ fn spawn_issue_monitor_effect(
             }
         }
         let execution_now = chrono::Utc::now();
-        let outcome = if issue_monitor_effect_permitted(&effect, &permit) {
+        let execute = || {
             execute_issue_monitor_effect(
                 &scope,
                 &effect,
                 authority_current,
                 &execution_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             )
+        };
+        #[cfg(test)]
+        let execute = || match &effect_override {
+            Some(override_effect) => override_effect(
+                &effect,
+                &execution_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ),
+            None => execute(),
+        };
+        let outcome = if issue_monitor_effect_permitted(&effect, &permit) {
+            execute()
         } else {
             IssueMonitorEffectOutcome::VolatileDenied
         };
@@ -5378,6 +5513,10 @@ fn scan_issue_monitor_once_blocking(
 ) -> Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure> {
     use crate::issue_monitor_worker::IssueMonitorScanStage;
 
+    let span =
+        tracing::info_span!("issue_monitor_scan", project_root = %scope.project_root.display());
+    let _span = span.enter();
+    let mut timing = crate::issue_monitor_worker::IssueMonitorScanTiming::start("prefs-load");
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     // Issue #3222: refresh the GUI-owned prefs fields (launch profile / tuning)
     // from disk. They have no control frame — the GUI writes them straight to
@@ -5389,11 +5528,14 @@ fn scan_issue_monitor_once_blocking(
     ) {
         monitor.rebase_daemon_driver_prefs(&disk);
     }
+    timing.next("capacity-refresh");
     monitor.refresh_agent_capacity(&scope.project_root);
+    timing.next("remote-resolution");
     let (owner, repo) = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::RemoteResolution,
         || crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root),
     )?;
+    timing.next("candidate-load");
     let mut loaded = crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::CandidateLoad,
         || {
@@ -5426,6 +5568,7 @@ fn scan_issue_monitor_once_blocking(
             detail: error.to_string(),
         });
     }
+    timing.next("candidate-reconciliation");
     let monitor_owner = crate::process::current_claim_owner();
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
         &mut monitor,
@@ -5519,6 +5662,7 @@ fn scan_issue_monitor_once_blocking(
     // still reaches its inbox, status, and launch stages. Issue #3917's
     // merged-issue settlement then runs on an empty delivery set: nothing was
     // read, so nothing is proposed until the window ends.
+    timing.next("merge-reconciliation");
     let merge_reconciliation = match crate::issue_monitor_worker::run_scan_stage(
         IssueMonitorScanStage::MergeReconciliation,
         || {
@@ -5546,6 +5690,7 @@ fn scan_issue_monitor_once_blocking(
     // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
     // the SPEC #3165 human-gated flow unchanged).
+    timing.next("autonomous-eligibility");
     if loaded.authorizes_remote_effects() {
         degradations.extend(
             crate::issue_monitor_worker::try_apply_autonomous_eligibility(
@@ -5562,6 +5707,7 @@ fn scan_issue_monitor_once_blocking(
     // its slot on this scan instead of waiting out `stuck_timeout_secs`, and
     // answered handoffs are un-parked in the same pass so the resumed launch
     // can be claimed immediately.
+    timing.next("handoff-reconciliation");
     let parked = monitor.apply_pending_autonomous_handoffs(&now);
     if !parked.is_empty() {
         tracing::info!(
@@ -5578,6 +5724,7 @@ fn scan_issue_monitor_once_blocking(
     }
     // Recover stuck launches and classify idle windows before admission,
     // sharing the live worktree observations across both decisions (#4862).
+    timing.next("window-reconciliation");
     crate::issue_monitor_worker::reconcile_issue_monitor_windows(
         &mut monitor,
         &scope.project_root,
@@ -5605,6 +5752,7 @@ fn scan_issue_monitor_once_blocking(
     // SPEC #3200 Option A: advance in-flight autonomous issues through the loop
     // (PR detect → review → gate → merge → watch). No-op unless autonomous mode
     // is on; default OFF keeps the SPEC #3165 flow unchanged.
+    timing.next("autonomous-progress");
     if loaded.authorizes_remote_effects() {
         degradations.extend(
             crate::issue_monitor_worker::try_advance_autonomous_in_flight(
@@ -5619,6 +5767,7 @@ fn scan_issue_monitor_once_blocking(
         // Issue #3970 AC-1: a confirmed delivery retires its work branch. The
         // prune is self-reporting and never fails the scan — an unreadable or
         // rate-limited remote just leaves the branches for the next delivery.
+        timing.next("branch-prune");
         let prune = crate::issue_monitor_worker::prune_delivered_work_branches(
             &scope.project_root,
             gwt_git::pr_status::SETTLEMENT_BASE_BRANCH,
@@ -5631,6 +5780,7 @@ fn scan_issue_monitor_once_blocking(
         // branch merged. Runs after the autonomous advance so a SHA-mismatch
         // escalation wins over a close, and only proposes: the durable
         // executor owns the GitHub mutation.
+        timing.next("issue-settlement");
         let proposed = crate::issue_monitor_worker::propose_merged_issue_settlements(
             &mut monitor,
             &merge_reconciliation.deliveries,
@@ -5642,6 +5792,7 @@ fn scan_issue_monitor_once_blocking(
             );
         }
     }
+    timing.next("claim-preparation");
     if (loaded.authorizes_remote_effects() || candidates_are_from_previous_result)
         && monitor.config.enabled
         && gui_connected
@@ -5739,6 +5890,7 @@ fn scan_issue_monitor_once_blocking(
     {
         monitor.record_scan_error(&now, summary);
     }
+    timing.next("proposal-return");
     crate::issue_monitor_worker::ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn)?;
     Ok(monitor)
 }
@@ -17579,6 +17731,7 @@ exit 1
                 true,
                 super::IssueMonitorEffectPermitToken::always_open(),
                 Instant::now() + Duration::from_secs(1),
+                None,
             );
 
             queued.handle.abort();
@@ -17775,6 +17928,7 @@ exit 1
                 true,
                 permit.capture(),
                 Instant::now() + Duration::from_secs(2),
+                None,
             );
 
             permit.deny();
