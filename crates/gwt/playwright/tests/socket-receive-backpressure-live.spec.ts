@@ -1,4 +1,4 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type CDPSession, type Page, type TestInfo } from "@playwright/test";
 import type { WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
 import { execFileSync } from "node:child_process";
@@ -114,7 +114,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
       while (Date.now() - backgroundStarted < durationMs) {
         await new Promise(resolve => setTimeout(resolve, Math.min(30_000,
           durationMs - (Date.now() - backgroundStarted))));
-        const background = await page.evaluate(() => ({
+        const background = await measuredEvaluate(cdp, () => ({
           visibility: document.visibilityState,
           metrics: (window as any).__socketLoadCaptureMetrics(),
         }));
@@ -157,23 +157,37 @@ test.describe("background receive backpressure (Issue #5531)", () => {
       const recoveryTask = (async () => {
         await cdp.send("Browser.setWindowBounds", { windowId: measuredWindow.windowId, bounds: { windowState: "normal" } });
         recoveryStage = "bring_to_front";
-        await page.bringToFront();
+        await cdp.send("Page.bringToFront");
         recoveryStage = "visible";
-        await page.waitForFunction(() => document.visibilityState === "visible", undefined, { timeout: RECOVERY_TIMEOUT_MS });
+        await measuredWait(cdp, () => document.visibilityState === "visible");
         recoveryStage = "snapshots";
-        await page.waitForFunction(({ ids, revision }) => ids.every(id =>
+        await measuredWait(cdp, ({ ids, revision }) => ids.every(id =>
           (window as any).__gwtTerminalTestApi.bufferText(id).includes(`GWT_SNAPSHOT_5531_${revision}_${id}`)),
-        { ids: paneIds, revision: fixture.revision() }, { timeout: RECOVERY_TIMEOUT_MS });
+        { ids: paneIds, revision: fixture.revision() });
         const snapshotDuration = Date.now() - restoreStarted;
         // Echo after snapshots so replacement cannot erase a successful echo.
         recoveryStage = "input_focus";
-        await page.locator(`.workspace-window[data-id="${paneIds[0]}"] .xterm-helper-textarea`).focus({ timeout: RECOVERY_TIMEOUT_MS });
+        await measuredEvaluate(cdp, id => {
+          const textarea = document.querySelector<HTMLTextAreaElement>(`.workspace-window[data-id="${id}"] .xterm-helper-textarea`);
+          if (!textarea) throw new Error("terminal input is missing");
+          textarea.focus();
+          if (document.activeElement !== textarea) throw new Error("terminal input did not focus");
+        }, paneIds[0]);
         recoveryStage = "input_type";
-        await page.keyboard.type(input);
+        // Pipeline ordered protocol messages rather than charging 26 controller
+        // round trips to the renderer's input latency.
+        await Promise.all([...input].flatMap(key => {
+          const code = key === "_" ? "Minus" : /\d/.test(key) ? `Digit${key}` : `Key${key}`;
+          const windowsVirtualKeyCode = key === "_" ? 189 : key.charCodeAt(0);
+          return [
+            cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode, text: key, unmodifiedText: key }),
+            cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode }),
+          ];
+        }));
         recoveryStage = "input_echo";
-        await page.waitForFunction(({ id, value }) =>
+        await measuredWait(cdp, ({ id, value }) =>
           (window as any).__gwtTerminalTestApi.bufferText(id).includes(value),
-        { id: paneIds[0], value: input }, { timeout: RECOVERY_TIMEOUT_MS });
+        { id: paneIds[0], value: input });
         const inputDuration = Date.now() - restoreStarted;
         recoveryStage = "foreground_metrics";
         return { snapshotMs: snapshotDuration, inputMs: inputDuration };
@@ -182,7 +196,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
       // can answer measurements. Collect both task windows independently.
       const metricsOperation = (async () => {
         await new Promise(resolve => setTimeout(resolve, Math.max(0, 4200 - (Date.now() - restoreStarted))));
-        const captured = await page.evaluate(() => (window as any).__socketLoadCaptureMetrics());
+        const captured = await measuredEvaluate(cdp, () => (window as any).__socketLoadCaptureMetrics());
         const maximum = (from: number, to: number) => Math.max(0, ...captured.long_tasks
           .filter((entry: { start_ms: number; duration_ms: number }) =>
             entry.start_ms + entry.duration_ms >= restorePerformanceStart + from
@@ -272,6 +286,26 @@ test.describe("background receive backpressure (Issue #5531)", () => {
 });
 
 function snapshotText(revision: number, id: string) { return `GWT_SNAPSHOT_5531_${revision}_${id}`; }
+
+// Keep tracing enabled without its before/after DOM snapshots running inside
+// the timed interval. CDP sends are traced but do not trigger those snapshots.
+// Input still uses Chromium's trusted keyboard path and the real backend echo.
+async function measuredEvaluate<T, A = undefined>(cdp: CDPSession, callback: (argument: A) => T, argument?: A): Promise<Awaited<T>> {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(${callback.toString()})(${JSON.stringify(argument) ?? "undefined"})`,
+    awaitPromise: true, returnByValue: true,
+  });
+  if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
+  return result.result.value;
+}
+
+async function measuredWait<A = undefined>(cdp: CDPSession, predicate: (argument: A) => boolean, argument?: A) {
+  const deadline = Date.now() + RECOVERY_TIMEOUT_MS;
+  while (!await measuredEvaluate(cdp, predicate, argument)) {
+    if (Date.now() >= deadline) throw new MeasurementTimeout("measured browser condition timed out");
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
 
 class MeasurementTimeout extends Error {}
 

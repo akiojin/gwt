@@ -108,7 +108,24 @@ LF-normalized SHA-256 digests of the ten frontend files and both test inputs.
 They are preserved outside Playwright's output directory during startup.
 These measurements preceded the final source commit: `head_sha` records the
 parent commit, while the file digests identify the measured working tree and
-are checked against the delivered files.
+are checked against the delivered production files. The original measurement
+harness from commit `859a5219facc82866232ec3472f977e967218fda` is archived
+verbatim in `measured-harness.spec.ts.txt`. The validator checks its digest
+against the original manifests, so verification also works after a squash
+merge in a fresh clone. The unchanged launch wrapper is checked directly.
+
+Two subsequent canonical short runs failed the input deadline with tracing
+enabled (dark: 2,811ms and 2,025ms; light passed). In the first trace,
+Playwright DOM snapshot collection took 7,557.9ms and 3,514ms, matching the
+recorded 7,558ms and 3,514ms long tasks. The current harness therefore uses
+CDP evaluation and trusted key events during background sampling and the
+timed foreground interval. These CDP calls remain in the trace without
+triggering before/after DOM snapshots. The physical foreground origin,
+eight-snapshot check, backend input echo, independent long-task collection,
+two-second deadline and 200ms settled limit are unchanged. Ordinary
+Playwright assertions and the recovered screenshot remain outside that
+interval. Production files and the four original long-run records are
+unchanged; the final canonical smoke verifies the refined harness separately.
 
 `node docs/perf/issue-5531/verify.mjs` checks all four 30-minute runs, their
 source identity and the acceptance thresholds. It also requires increasing
