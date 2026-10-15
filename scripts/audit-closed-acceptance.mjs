@@ -71,12 +71,15 @@ function acceptanceSource(issue, read) {
     (typeof label === "string" ? label : label.name)?.toLowerCase() === "gwt-spec");
   if (!isSpec) return body;
   const index = body.match(/<!--\s*sections:\s*([\s\S]*?)-->/)?.[1];
-  const route = index?.match(/^\s*spec\s*=\s*(.*?)\s*$/m)?.[1];
-  if (!route || route === "body") return body;
+  const route = index?.match(/^[ \t]*spec[ \t]*=(.*)$/m)?.[1].trim();
+  if (route === undefined || route === "body") return body;
   const chunks = route.split(",").map((entry) => {
     const id = entry.trim().match(/^comment:(\d+)$/)?.[1];
     if (!id) throw new Error(`Issue #${issue.number}: invalid SPEC comment route`);
     const comment = read(`issues/comments/${id}`);
+    if (!issue.url || comment.issue_url !== issue.url) {
+      throw new Error(`Issue #${issue.number}: SPEC comment belongs to another Issue (comment:${id})`);
+    }
     const section = comment.body?.match(/<!--\s*artifact:spec\s+BEGIN(?:\s+part=(\d+)\/(\d+))?\s*-->([\s\S]*?)<!--\s*artifact:spec\s+END(?:\s+part=(\d+)\/(\d+))?\s*-->/);
     if (!section) throw new Error(`Issue #${issue.number}: missing SPEC section in comment:${id}`);
     if (section[1] !== section[4] || section[2] !== section[5]) {
