@@ -156,6 +156,58 @@ test.describe('PM reports', () => {
     });
   });
 
+  test('automatic prompts add no Q&A rows while actions and human answers remain visible', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      const reports = pane.getByRole('log', { name: 'PM reports' });
+      await expect(reports.getByRole('heading', { name: 'Persisted before restart', exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      const id = await pane.getAttribute('data-id');
+      expect(id).toBeTruthy();
+      const originalRows = await reports.locator('article').count();
+      const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME, USERPROFILE: HOME };
+      for (const key of Object.keys(childEnv)) {
+        if (key.startsWith('GWT_SESSION_') || key.startsWith('GWT_HOOK_FORWARD_') || key === 'GWT_PANE_WS_URL') delete childEnv[key];
+      }
+      const post = (params: Record<string, unknown>) => spawnSync(`${ROOT}/target/debug/gwtd`, [], {
+        cwd: ROOT, env: childEnv, encoding: 'utf8', timeout: 30_000,
+        input: JSON.stringify({ schema_version: 1, operation: 'pm.report.post', params }),
+      });
+      const refused = post({ kind: 'qa', question: '$gwt-pm', body: 'No change from the automatic prompt' });
+      expect(refused.error).toBeUndefined();
+      expect(refused.status).toBe(1);
+      expect(refused.stdout + refused.stderr).toContain('Automatic PM prompts');
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await expect(reports.locator('article')).toHaveCount(originalRows);
+      await expect(reports.getByText('No change from the automatic prompt')).toHaveCount(0);
+
+      const action = `Issue #5541 action delivered ${info.project.name}`;
+      const progress = post({ kind: 'progress', body: action });
+      expect(progress.status, progress.stderr).toBe(0);
+      const question = '[gwt] Scheduled supervision tick について説明して';
+      const answer = `Human answer preserved ${info.project.name}`;
+      const human = post({ kind: 'qa', question, body: answer });
+      expect(human.status, human.stderr).toBe(0);
+      await sendLiveGwtEvent(page, { kind: 'load_pm_reports', id });
+      await expect(reports.locator('article').filter({ hasText: action })).toHaveCount(1);
+      await expect(reports.locator('article').filter({ hasText: answer })).toHaveCount(1);
+      await expect(reports.getByText(question, { exact: true })).toBeVisible();
+      await page.reload();
+      await expect(reports.locator('article')).toHaveCount(originalRows + 2);
+      await expect(reports.getByText('No change from the automatic prompt')).toHaveCount(0);
+      const screenshot = info.outputPath(`automatic-prompt-reports-${info.project.name}.png`);
+      await pane.screenshot({ path: screenshot });
+      await info.attach('Automatic prompt reporting', { path: screenshot, contentType: 'image/png' });
+      expect(errors).toEqual([]);
+    });
+  });
+
   test('durable Markdown and Q&A reports, kind filter, copy, reload and unchanged execution log', async ({ page, context }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];

@@ -149,7 +149,7 @@ Hard limits, no exceptions:
 - Keep every user-facing message short enough to take in at a glance:
   lead with the outcome, then at most a few bullets, one line each.
 - Report only milestones, decisions taken, failures, and the questions
-  above. An unchanged cycle produces no message or a single line.
+  above. An unchanged cycle produces no message.
 - Name work by Issue number and title, never by pane or window ID. Omit
   internal identifiers, raw diagnostics, and process narration unless
   the user asks for them.
@@ -157,6 +157,14 @@ Hard limits, no exceptions:
   surface with `pm.report.post` (`kind`: `progress` / `decision` /
   `blocker`, `body` in the user's language), in addition to the
   conversation. Keep the body to the same at-a-glance format.
+- Automatic prompts never require a Q&A report. This includes scheduled
+  supervision ticks, Monitor change notifications, escalation-decorated
+  wakes, task completion notifications, and `$gwt-pm` skill startup.
+  Report only actions taken, decisions made, or requests for the user
+  with `kind: "progress"`, `"decision"`, or `"blocker"`; describe the
+  outcome, not the automatic instruction or its acknowledgement.
+  If nothing changed, post nothing to Reports. Never pass an automatic
+  prompt as a Q&A `question` or `instruction.original`; the post is refused.
 - After answering a user's question or instruction, post exactly one Q&A
   report in the same turn with `pm.report.post`, `kind: "qa"`, required
   `question`, and `body`. Summarize the question or instruction in `question`;
@@ -3371,6 +3379,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             );
         }
         for phrase in [
+            "Automatic prompts never require a Q&A report",
+            "task completion notifications",
+            "Report only actions taken, decisions made, or requests for the user",
+            "If nothing changed, post nothing to Reports",
             "After answering a user's question or instruction, post exactly one Q&A report in the same turn",
             "`kind: \"qa\"`",
             "required `question`",

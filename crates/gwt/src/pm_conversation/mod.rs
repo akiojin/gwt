@@ -551,6 +551,22 @@ pub(crate) fn internal_prompt(text: &str) -> bool {
         PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_STEERING_WAKE_CLAUSE,
     };
     let text = text.trim();
+    // Provider task completion is delivered as a user-role message, but is
+    // not a human question. Match the complete reserved envelope so a human
+    // asking about a notification before or after it still requires Q&A.
+    if text
+        .strip_prefix("<task-notification>")
+        .and_then(|body| body.strip_suffix("</task-notification>"))
+        .is_some_and(|body| {
+            !body.contains("<task-notification>")
+                && !body.contains("</task-notification>")
+                && ["task-id", "status", "summary"].iter().all(|tag| {
+                    body.contains(&format!("<{tag}>")) && body.contains(&format!("</{tag}>"))
+                })
+        })
+    {
+        return true;
+    }
     if text == "$gwt-pm" || crate::pm_registry::parse_protected_pm_delivery_prompt(text).is_some() {
         return true;
     }
@@ -562,8 +578,14 @@ pub(crate) fn internal_prompt(text: &str) -> bool {
     // Delivery appends these blockers after the canonical wake. Idle deliveries
     // may cut the tail at the PTY byte cap, so the whole decoration is optional.
     let text = text
-        .rsplit_once(PM_ESCALATION_PROMPT_PREFIX)
-        .filter(|(base, tail)| {
+        .match_indices(PM_ESCALATION_PROMPT_PREFIX)
+        .map(|(offset, _)| {
+            (
+                &text[..offset],
+                &text[offset + PM_ESCALATION_PROMPT_PREFIX.len()..],
+            )
+        })
+        .find(|(base, tail)| {
             (base.ends_with(&suffix) || base.ends_with(IDLE_SUFFIX))
                 && !tail.contains(['\r', '\n'])
                 && tail
