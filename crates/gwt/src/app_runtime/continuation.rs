@@ -7287,7 +7287,7 @@ impl AppRuntime {
                             detail,
                             context.issue_monitor_delivery_id.as_deref(),
                             context.issue_monitor_session_mode.unwrap_or(gwt_agent::SessionMode::Normal),
-                            false,
+                            gwt_agent::is_transient_launch_failure(detail),
                         );
                         if committed {
                             self.launch_wizard_cache

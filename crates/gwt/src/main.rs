@@ -1932,6 +1932,10 @@ enum UserEvent {
         window_id: String,
         watch: ContinueWorkReadinessWatch,
     },
+    IssueMonitorStartupTimeout {
+        window_id: String,
+        generation: u64,
+    },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
     /// drag/drop natively via the HTML5 API. The variant stays around
@@ -4661,6 +4665,7 @@ mod tests {
 
             pending_launch_feedback_contexts: HashMap::new(),
             pending_launch_delivery_acks: HashMap::new(),
+            pending_monitor_startups: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: std::collections::HashSet::new(),
@@ -11333,6 +11338,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::ContinueWorkReadyTimeout { window_id, watch }) => {
                 clients.dispatch(app.handle_continue_work_ready_timeout(&window_id, &watch));
+            }
+            Event::UserEvent(UserEvent::IssueMonitorStartupTimeout { window_id, generation }) => {
+                clients.dispatch(app.handle_issue_monitor_startup_timeout(&window_id, generation));
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the

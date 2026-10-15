@@ -433,7 +433,12 @@ impl AppRuntime {
         );
     }
 
-    fn log_window_launch_error(&self, stage: &'static str, window_id: &str, error: &str) {
+    pub(super) fn log_window_launch_error(
+        &self,
+        stage: &'static str,
+        window_id: &str,
+        error: &str,
+    ) {
         let (tab_id, raw_window_id) = self
             .window_lookup
             .get(window_id)

@@ -315,6 +315,29 @@ test("pending SessionStart diagnosis clears when late readiness arrives", async 
   await expect(column(page,"active").locator('[data-issue-number="5"]')).toBeVisible();
 });
 
+test("Issue #5415 failed initial startup requeues once and releases its Active slot", async ({ page }) => {
+  // Runtime/Rust tests prove the timeout and exact authority cleanup. This
+  // protocol projection proves the resulting Monitor recovery is visible.
+  const diagnosis = "Issue Monitor startup timed out after 180s: initial prompt was not submitted; last output: Could not read Windows sandbox configuration and requirements from the app server.; gwt retries this launch automatically without spending an attempt";
+  await confirm(page, [3, 4], { enabled: true, state: "active", active_count: 1 });
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "launched" }]));
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1/1");
+  await confirm(page, [5, 3, 4], { state: "active", active_count: 0, last_error: null });
+  await page.evaluate(diagnosis => (window as any).__queueInbox([
+    { issue: { number: 5 }, state: "queued", error_message: diagnosis },
+  ]), diagnosis);
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 0/1");
+  await expect(column(page, "queued").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toHaveCount(0);
+  await expect(row(page, 5)).toHaveCount(1);
+  await page.evaluate(message => (window as any).__queueEvent({
+    kind: "issue_monitor_toast", level: "error", issue_number: 5, message,
+  }), diagnosis);
+  await page.locator("#op-notifications-button").click();
+  await expect(page.locator("#notification-center")).toContainText(diagnosis);
+});
+
 test("Issue #5287 inbox-first restart, GUI error, load failure and renderer recovery", async ({ page }) => {
   const assertInbox = async () => {
     await expect(column(page, "backlog").locator(".knowledge-row")).toHaveCount(2);
@@ -824,6 +847,7 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       static CONNECTING=0; static OPEN=1; static CLOSING=2; static CLOSED=3;
       readyState=0;
       constructor(public readonly url:string) { super();
+        fixture.__queueEvent=(event:any)=>this.emit(event);
         fixture.__queueEntries=(revision:string, patch?:{number:number,title:string})=>{
           const entry=entries.find(entry=>entry.number===patch?.number);
           if (entry && patch) entry.title=patch.title;

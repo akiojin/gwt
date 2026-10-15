@@ -1420,6 +1420,7 @@ fn sample_runtime_with_events(
         startup_worktree_inventories: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         pending_launch_delivery_acks: HashMap::new(),
+        pending_monitor_startups: HashMap::new(),
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),

@@ -420,6 +420,14 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
     if gwt_agent::is_codex_shared_state_lock_failure(tail) {
         return Some(gwt_agent::codex_shared_state_lock_detail());
     }
+    let sandbox_error =
+        "Could not read Windows sandbox configuration and requirements from the app server.";
+    if tail.contains(sandbox_error) {
+        return Some(format!(
+            "Agent startup failed: {sandbox_error}; {}",
+            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+        ));
+    }
     // Issue #4445: an npm shim whose target executable was renamed away by the
     // provider's auto-update reports a localized shell message and a bare exit
     // status. The path it could not find is the whole diagnosis, and it is at
@@ -1927,6 +1935,7 @@ impl AppRuntime {
         let Some(window_id) = window_id else {
             return events;
         };
+        self.observe_issue_monitor_startup_activity(&window_id, &event);
         let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&window_id);
         let effective_before = self.window_status(&window_id);
         let approval_wait_cleared = self.window_approval_waiting.contains_key(&window_id);
@@ -2452,6 +2461,15 @@ mod tests {
             gwt_agent::is_transient_launch_failure(&detail),
             "the Issue Monitor must requeue this without spending an attempt: {detail}"
         );
+    }
+
+    #[test]
+    fn issue_5415_codex_sandbox_startup_error_retries_without_spending_an_attempt() {
+        let error =
+            "Could not read Windows sandbox configuration and requirements from the app server.";
+        let detail = super::compose_agent_error_detail(None, Some(error)).unwrap();
+        assert!(detail.contains(error), "keep the provider's diagnostic");
+        assert!(gwt_agent::is_transient_launch_failure(&detail));
     }
 
     #[test]
