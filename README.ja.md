@@ -1379,6 +1379,21 @@ nextest は各テストを別プロセスで実行し、120秒でタイムアウ
 
 ### CI スループットの計測
 
+ローカル Git 履歴なしで、直近 50 件の completed workflow run（失敗・取消も含む）の
+queue 待ちと依存スケジューリングを分けて計測できます。
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --queue --save target/ci-queue.json
+python scripts/ci_throughput.py --input target/ci-queue.json
+```
+
+`--before` は run 作成時刻の上限（その時刻も含む）を固定し、`--workflow test.yml` は
+対象 workflow を絞ります。run 開始待ち、job 開始待ち、run 開始から job 作成までの時間（依存・
+スケジューリング）を分け、各 run の最長 job も示します。job 開始待ちには concurrency
+group 待ちも含まれ、API の時刻だけでは runner 容量不足と断定できません。skip・取消 job と
+再実行で再利用された時刻は job 待ち時間の分布から除外します。再実行の run 開始待ちは、
+作成時刻が元の attempt に属するため取得不能として扱います。
+
 Python 3.11 以上、認証済みの `gh`、対象 PR のマージ履歴を含むローカル Git
 履歴を用意し、develop の直近 25 マージを収集して入力データを保存します。
 
