@@ -4315,9 +4315,9 @@ mod tests {
             "hook events require project routing in the runtime"
         );
         let main = include_str!("main.rs")
-            .split("fn main() ->")
-            .nth(1)
-            .unwrap();
+            .rsplit_once("fn main() ->")
+            .expect("the final main signature follows test fixture strings")
+            .1;
         for (arm, policy) in [
             (
                 "ActiveWorkProjectionPrepared(prepared)",
@@ -4355,7 +4355,11 @@ mod tests {
             .skip(1)
             .map(|tail| tail.split('{').next().unwrap())
             .collect();
-        assert_eq!(direct_globals, ["UpdateProgress", "UpdateReady",]);
+        // Explicit CLI apply uses the same host-wide update state as the GUI.
+        assert_eq!(
+            direct_globals,
+            ["UpdateProgress", "UpdateReady", "UpdateAutoApply"]
+        );
         let health = include_str!("runtime_health_poller.rs")
             .split("#[cfg(test)]")
             .next()
