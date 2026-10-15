@@ -1,6 +1,6 @@
 # Issue #5489: 実 fleet の census baseline
 
-この資料は実稼働 GUI と実 Session/runtime ファイルの読み取り記録である。GUI・agent の再起動、設定変更、プロセス停止は行っていない。census 単体は約 81% 減ったが、実 fleet を読む隔離 Monitor worker 全体は約 35% 減で、半減には届かなかった。配布版 GUI の修正後 counter と隔離 worker の値を区別する。
+この資料は実稼働 GUI と実 Session/runtime ファイルの読み取り記録である。GUI・agent の再起動、設定変更、プロセス停止は行っていない。依存統合前（commit `a96ce624e`）では census 単体が約 81% 減ったが、実 fleet を読む隔離 Monitor worker 全体は約 35% 減で、半減には届かなかった。Issue #5498 / Issue #5499 統合後の隔離 worker は CPU 中央値で 89.83%、平均使用コアで 67.14% 減となり、この比較条件で半減を確認した。配布版 GUI の修正後 counter と隔離 worker の値を区別する。
 
 ## 対象
 
@@ -14,7 +14,7 @@
 
 旧 census source は commit `7e594c0cbca0f84d888f685002b822424ae36859` の `crates/gwt/src/session_inventory.rs`。保存した `target/issue-5489-baseline/session_inventory.rs` の Git blob は `d780e7819a4e23464e6b9b467e2d5816fff27f91` で、調査時の `origin/develop` の同ファイルとも一致した。これは source の比較基準であり、配布版 GUI の build commit を意味しない。
 
-最新の 3 probe は、CI の Clippy 指摘に対する `&matches → matches` の修正後 source で再取得した。census 比較の開始は `2026-10-15T08:13:44.115Z`、対象 `session_inventory.rs` の SHA-256 は `82e11229432f8dddabcf19c7da7fccbf173dd0d46e22849ae7bbd3edaa69fc26`。この再取得時は gwt の観測 sessions が 11 件だった。下記の本番 GUI baseline と既存 Issue #5385 probe は以前の時刻の一次記録として維持し、今回の改善率には使用しない。
+依存統合前の 3 probe は、CI の Clippy 指摘に対する `&matches → matches` の修正後 source で取得した。census 比較の開始は `2026-10-15T08:13:44.115Z`、対象 `session_inventory.rs` の SHA-256 は `82e11229432f8dddabcf19c7da7fccbf173dd0d46e22849ae7bbd3edaa69fc26`。この再取得時は gwt の観測 sessions が 11 件だった。下記の本番 GUI baseline と既存 Issue #5385 probe は以前の時刻の一次記録として維持し、この改善率には使用しない。
 
 ## 本番 process/thread counter
 
@@ -98,12 +98,53 @@ pwsh -NoProfile -File docs/perf/issue-5489/run-probe.ps1 -Worker -OutputName wor
 
 tick CPU 中央値は `34.73%` 減、平均使用コアは `22.04%` 減。この実測では **worker 全体の CPU 半減は未達**。census 以外の publish/counts/prefs 等も実 worker に含まれ、それらの内訳をこの run だけで特定したとは主張しない。Issue #5499 の prefs 経路調査・修正と組み合わせた再観測へ、この一次記録を引き継ぐ。
 
+## Issue #5498 / Issue #5499 統合後の再測定
+
+統合対象は `origin/develop` の `4cb8fe4a0`。Issue #5498 / PR #5511 の decoded sidecar cache と Issue #5499 / PR #5508 の prefs / publish 最適化を含む。既存の 80.58% / 34.73% は依存統合前の一次記録としてそのまま保持し、新しい結果は `integrated-*` の raw・context・prefs manifest へ分ける。
+
+旧 census / Monitor の baseline module は以前と同じものを使い、after module は統合後 source を使う。両 mode が共有する外部 helper は、統合後に build した同じ gwt library から link する。したがってこの比較は統合後の依存を共通前提にした旧 module と統合後 module の比較であり、Issue #5489 単独の改善率や、旧 run と新 run を横断した改善率とは扱わない。sidecar cache の warm 状態も 3 pair に含まれる。
+
+commit `598b8f0ff5c1222d2c26f684269ce828f5218c2d` の統合済み library `libgwt-61842958423a5674.rlib` を使い、process 内だけ `RUSTUP_TOOLCHAIN=1.99.0` を設定して 3 probe を順に実行した。library の SHA-256 は `10aef7cbb35194f996f997dbb14b1e8e3344c5bbc1c23ea6df81cafb4306f6c4`。各 context に source commit、依存 base commit、census / Monitor / shared prefs source hash と library digest を保存した。旧 raw と manifest は変更していない。
+
+```powershell
+$env:RUSTUP_TOOLCHAIN = '1.99.0'
+pwsh -NoProfile -File docs/perf/issue-5489/run-probe.ps1 -GwtLibraryName libgwt-61842958423a5674.rlib -DependencyRef 4cb8fe4a0 -OutputName integrated-comparison.jsonl
+pwsh -NoProfile -File docs/perf/issue-5489/run-probe.ps1 -GwtLibraryName libgwt-61842958423a5674.rlib -DependencyRef 4cb8fe4a0 -Instrument -OutputName integrated-breakdown.jsonl
+pwsh -NoProfile -File docs/perf/issue-5489/run-probe.ps1 -GwtLibraryName libgwt-61842958423a5674.rlib -DependencyRef 4cb8fe4a0 -Worker -OutputName integrated-worker-comparison.jsonl -PrefsManifestName integrated-worker-prefs-manifest.json
+```
+
+実 5 root は上記と同じ `E:/gwt` / `E:/160-Idina` / `E:/KeibaSuite` / `E:/unity-cli` / `E:/llmlb`。今回は各 census pair で sessions / uncertainties が一致し、gwt `12 / 5`、その他各 `1 / 5` だった。依存統合前の gwt sessions 11 件という条件差は保持する。
+
+[integrated-comparison.jsonl](integrated-comparison.jsonl) の CPU 中央値は `3.265625 → 0.546875 秒/tick`（`83.25%` 減）。after の初回 cold 値は `1.015625 秒`、後続の warm 値は `0.531250 / 0.546875 秒` で、cold 観測も削除していない。
+
+[integrated-breakdown.jsonl](integrated-breakdown.jsonl) の内訳は次のとおり。CPU 欄は instrumentation 付き 3 回の中央値で、改善率の判定には使わない。
+
+| census 内の処理 | before 呼出し数/tick | after 呼出し数/tick | before CPU 秒 | after CPU 秒 |
+| --- | ---: | ---: | ---: | ---: |
+| runtime sidecar decode | 17,455 | cold 3,486 / warm 1, 3 | 1.906250 | 0.000000 |
+| Session ledger load | 1,775（1,761〜1,807） | 347（346〜353） | 0.484375 | 0.125000 |
+| OS 全 process snapshot (`All`) | 10 | 1 | 0.234375 | 0.015625 |
+| 個別 PID refresh (`Some`) | 4 | 1 | 0.093750 | 0.062500 |
+
+warm 時の decode CPU のゼロは OS CPU counter の分解能による値であり、処理時間が厳密にゼロという意味ではない。decoder cache に再利用されても、liveness を見る OS snapshot は各 tick で新しく取る。
+
+[integrated-worker-comparison.jsonl](integrated-worker-comparison.jsonl) は、[新しい manifest](integrated-worker-prefs-manifest.json) の同一 5 prefs を before / after の fresh HOME に複製した結果である。登録 PTY と stop / park group は各 0、実 sessions は読み取りのみ。前後とも named worker `gwt-monitor-runtime` の同一 thread から 3 tick を採取した。
+
+| 条件 | thread CPU 秒/tick 3 点 | 中央値 | 合計 CPU 秒 / 合計経過秒 |
+| --- | --- | ---: | ---: |
+| before（PID 7360 / TID 43384） | 8.593750 / 8.453125 / 8.437500 | 8.453125 | 0.366187 コア |
+| after（PID 27268 / TID 45844） | 1.640625 / 0.859375 / 0.812500 | 0.859375 | 0.120336 コア |
+
+統合後 worker の CPU 中央値は `89.83%` 減、平均使用コアは `67.14%` 減で、**この実 fleet を読む隔離 worker の前後比較では半減を確認した**。最初の after tick の warm-up コスト `1.640625 CPU 秒` も 3 点に含む。これは Issue #5498 / Issue #5499 を含む統合条件での結果であり、Issue #5489 単独の成果へ帰属させない。配布版 GUI 自体の差替え・修正後 60 分観測は行っていない。
+
+`node docs/perf/issue-5489/verify.mjs` は旧証跡を `git show a96ce624e` の source hash と照合し、新証跡を現在の source hash と照合する。統合後には同一 library digest、依存 commit の祖先関係、前後の 5 prefs hash、census / worker CPU 中央値と worker 平均コアの半減も検査する。
+
 ## 比較の限界と引継ぎ
 
 - Issue #5385 の元資料は `E:/gwt/work/issue-5385/docs/perf/issue-5385/{context.json,threads.json,census-probe.rs,census-probe.txt,collect.ps1,samples.jsonl,report.md}` にある。他 worktree のファイルは変更していない。
 - Issue #5385 の初回 thread 観測は Monitor `8.0625 CPU 秒 / 15.1019369 秒 = 約 0.534 コア`。当時の runtime は 678 namespaces / 4,036 files、実装 agent 8 窓だった。現在は namespace 数・窓数とも増えており、異なる時刻の絶対値を直接改善率にしない。
 - source の改善率は同じ profile・同じ binary・同じ実 root で交互採取する。各 root の sessions / uncertainties も保存し、fleet の変動を確認する。
-- library census 単体の CPU 半減は、本番 `gwt-monitor-runtime` thread の修正後 counter を直接測った証拠ではない。実 fleet を読む隔離 worker の測定は上記のとおり半減未達だった。Issue #5489 AC-3 の worker 全体半減と Issue #5385 の 7〜8 窓 / 60 分は、それぞれ対象版・対象条件での追加観測と区別して扱う。
+- library census 単体の CPU 半減は、本番 `gwt-monitor-runtime` thread の修正後 counter を直接測った証拠ではない。隔離 worker は依存統合前に半減未達、統合後の同一 fixture 比較で半減を確認した。配布版 GUI の修正後 counter と Issue #5385 の 7〜8 窓 / 60 分は別の観測対象として扱う。
 
 User Verification Result: n/a (autonomous)
 

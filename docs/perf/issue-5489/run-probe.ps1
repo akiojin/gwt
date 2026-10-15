@@ -3,7 +3,9 @@ param(
     [switch]$Instrument,
     [switch]$Worker,
     [string]$OutputName = 'comparison.jsonl',
-    [string]$GwtLibraryName = 'libgwt-2d0217b5aa2a4e4e.rlib'
+    [string]$GwtLibraryName = 'libgwt-2d0217b5aa2a4e4e.rlib',
+    [string]$PrefsManifestName = 'worker-prefs-manifest.json',
+    [string]$DependencyRef = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -14,6 +16,9 @@ $baseline = Join-Path $repo 'target/issue-5489-baseline/session_inventory.rs'
 $current = Join-Path $repo 'crates/gwt/src/session_inventory.rs'
 $output = Join-Path $PSScriptRoot $OutputName
 if (Test-Path -LiteralPath $output) { throw 'Refusing to overwrite a comparison.' }
+if ($Worker -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot $PrefsManifestName))) {
+    throw 'Refusing to overwrite a prefs manifest.'
+}
 if (-not (Test-Path -LiteralPath $baseline)) { throw 'Saved baseline module is required.' }
 New-Item -ItemType Directory -Path $scratch -Force | Out-Null
 foreach ($entry in @(@($baseline, 'before.rs'), @($current, 'after.rs'))) {
@@ -90,17 +95,29 @@ $context = [ordered]@{
     roots = $roots
     instrumentation_note = 'Instrumented CPU includes GetProcessTimes overhead per load; use an uninstrumented comparison for the improvement ratio.'
     gwt_library = $gwtLibrary.FullName
+    gwt_library_sha256 = (Get-FileHash -LiteralPath $gwtLibrary.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    source_commit = (& git -C $repo rev-parse HEAD).Trim()
+    shared_issue_monitor_sha256 = (Get-FileHash -LiteralPath (Join-Path $repo 'crates/gwt/src/issue_monitor.rs') -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+if ($DependencyRef) {
+    $dependencyCommit = (& git -C $repo rev-parse "$DependencyRef^{commit}").Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Dependency commit is unavailable.' }
+    & git -C $repo merge-base --is-ancestor $dependencyCommit HEAD
+    if ($LASTEXITCODE -ne 0) { throw 'Dependency commit is not integrated into HEAD.' }
+    $context['dependency_base_commit'] = $dependencyCommit
+    $context['dependencies'] = @('Issue #5498 / PR #5511', 'Issue #5499 / PR #5508')
 }
 if ($Worker) {
     $context['monitor_baseline_sha256'] = (Get-FileHash -LiteralPath (Join-Path $repo 'target/issue-5489-baseline/monitor_duplicate_runtime.rs') -Algorithm SHA256).Hash.ToLowerInvariant()
     $context['monitor_current_sha256'] = (Get-FileHash -LiteralPath (Join-Path $repo 'crates/gwt/src/monitor_duplicate_runtime.rs') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $context['prefs_manifest'] = $PrefsManifestName
 }
 [IO.File]::WriteAllText("$output.context.json", ($context | ConvertTo-Json -Depth 4) + "`n")
 if ($Worker) {
     $fixture = Join-Path $scratch ("prefs-" + [Guid]::NewGuid().ToString('N'))
     & $exe prepare $fixture @roots
     if ($LASTEXITCODE -ne 0) { throw 'Prefs fixture preparation failed.' }
-    [IO.File]::Copy((Join-Path $fixture 'manifest.json'), (Join-Path $PSScriptRoot 'worker-prefs-manifest.json'), $false)
+    [IO.File]::Copy((Join-Path $fixture 'manifest.json'), (Join-Path $PSScriptRoot $PrefsManifestName), $false)
     foreach ($mode in @('before', 'after')) {
         & $exe $mode $fixture $sessions @roots | Tee-Object -FilePath $output -Append
         if ($LASTEXITCODE -ne 0) { throw "Worker probe failed: $mode" }
