@@ -3410,7 +3410,7 @@ def _materialize_file_artifact_pair(
     """Build one Base or Overlay artifact pair.
 
     Returns `(computed, cache_hits, yielded)`. A background build checkpoints
-    every `FILE_INDEX_V2_VECTOR_BATCH` documents and hands the host-wide heavy
+    after each document and hands the host-wide heavy
     lease back when a higher-priority claimant queues behind it (FR-418). The
     repo-scoped Embedding CAS is the checkpoint: every vector computed before
     the yield is already durable, so the follow-up run resolves it as a cache
@@ -3452,8 +3452,12 @@ def _materialize_file_artifact_pair(
                 opened[bucket] = _make_file_index_v2_collection(
                     store, collection_name
                 )
-            for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
-                stop = min(start + FILE_INDEX_V2_VECTOR_BATCH, len(records))
+            # Issue #5431: a 16-document encode took 17.6 seconds on CPU,
+            # longer than a search can wait. Check priority after each
+            # non-interruptible encode; keep batching for foreground work.
+            checkpoint_batch = 1 if qos == "background" else FILE_INDEX_V2_VECTOR_BATCH
+            for start in range(0, len(records), checkpoint_batch):
+                stop = min(start + checkpoint_batch, len(records))
                 batch_records = records[start:stop]
                 batch_identities = identities[start:stop]
                 batch_started = time.monotonic()
@@ -3467,7 +3471,7 @@ def _materialize_file_artifact_pair(
                         heavy_target,
                         progress_offset + stop,
                         progress_total if progress_total is not None else len(records),
-                        FILE_INDEX_V2_VECTOR_BATCH,
+                        len(batch_records),
                         int((time.monotonic() - batch_started) * 1000),
                     )
                 manifest_entries.extend(
@@ -4945,7 +4949,7 @@ def action_index_files_v2(
     Full mode builds into a resumable staging store and only replaces the
     active store after the staging build finished (Phase 70 FR-389/FR-390):
     the previous index keeps serving reads during the build, and a
-    background build yields at 16-document checkpoints when a
+    background build yields after the current document when a
     higher-priority claimant is pending on the heavy lease.
     """
     if file_index_protocol == "v2":
@@ -5176,8 +5180,9 @@ def _index_files_full_with_staging(
                     pending_paths.append(fpath)
 
             heavy_target = _heavy_target_stem(repo_hash, scope, worktree_hash)
-            for start in range(0, len(pending_paths), EMBED_CHECKPOINT_BATCH):
-                batch_paths = pending_paths[start : start + EMBED_CHECKPOINT_BATCH]
+            checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
+            for start in range(0, len(pending_paths), checkpoint_batch):
+                batch_paths = pending_paths[start : start + checkpoint_batch]
                 batch_started = time.monotonic()
                 newly_embedded += embed_documents_for_paths(batch_paths, root, collection)
                 done = len(staged_ids) + newly_embedded
@@ -5185,7 +5190,7 @@ def _index_files_full_with_staging(
                     heavy_target,
                     done,
                     total,
-                    EMBED_CHECKPOINT_BATCH,
+                    len(batch_paths),
                     int((time.monotonic() - batch_started) * 1000),
                 )
                 _write_continuation(
@@ -7620,8 +7625,8 @@ def action_index_issues_v2(
 ) -> dict:
     """Index GitHub Issues using the v2 layout. Respects TTL on demand.
 
-    Issue #4086 AC-2: the build embeds in `EMBED_CHECKPOINT_BATCH` batches.
-    A background build yields at the batch boundary while a higher-priority
+    Issue #4086 AC-2 / Issue #5431: background builds checkpoint after each
+    document and yield while a higher-priority
     claimant (a verification reservation) is pending on the heavy lease and
     leaves a resumable staging continuation; the next run resumes without
     re-embedding staged issues. Progress is published for AC-4.
@@ -7737,10 +7742,11 @@ def action_index_issues_v2(
                 pending: List[Dict[str, Any]] = [
                     issue for issue in issues if str(issue.get("number", 0)) not in staged_ids
                 ]
-                for start in range(0, len(pending), EMBED_CHECKPOINT_BATCH):
+                checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
+                for start in range(0, len(pending), checkpoint_batch):
                     if (db_path / "cancel-requested").exists():
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-                    batch_issues = pending[start : start + EMBED_CHECKPOINT_BATCH]
+                    batch_issues = pending[start : start + checkpoint_batch]
                     batch_started = time.monotonic()
                     ids: List[str] = []
                     documents: List[str] = []
@@ -7776,7 +7782,7 @@ def action_index_issues_v2(
                         heavy_target,
                         done,
                         total,
-                        EMBED_CHECKPOINT_BATCH,
+                        len(batch_issues),
                         int((time.monotonic() - batch_started) * 1000),
                     )
                     emit_progress(
