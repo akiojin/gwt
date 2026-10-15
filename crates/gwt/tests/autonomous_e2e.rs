@@ -562,6 +562,7 @@ mod idle_windows {
             review_dispatch,
             hold_reason: None,
             last_output_at: None,
+            session_id: None,
         }
     }
 

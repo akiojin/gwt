@@ -9375,6 +9375,7 @@ impl AppRuntime {
                                 last_output_at: self.window_last_output_at.get(&window_id).map(
                                     |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                                 ),
+                                session_id: window.session_id.clone(),
                                 issue_number,
                                 status: window.status,
                                 window_id,

@@ -20,6 +20,9 @@ use crate::cli::hook::{
     HookError, RawHookEvent,
 };
 
+mod hook_delivery;
+pub use hook_delivery::{hook_live_delivery_health, HookLiveDeliveryHealth};
+
 /// Per-attempt budget of a hook-live POST. Tests that assert delivery pin it
 /// (SPEC #4740): hook-live is fail-open, so an attempt that outlives the
 /// budget on a loaded host drops the event silently.
@@ -1551,7 +1554,13 @@ fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {
     let Some(target) = HookForwardTarget::from_env() else {
         return Ok(());
     };
-    emit_live_event_with_policy(event, &target, HookLiveRetryPolicy::production())
+    let send = |event: &RuntimeHookEvent| {
+        emit_live_event_with_policy(event, &target, HookLiveRetryPolicy::production())
+    };
+    match std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV) {
+        Some(path) => hook_delivery::deliver(&PathBuf::from(path), event, send),
+        None => send(event),
+    }
 }
 
 fn is_readiness_delivery(event: &RuntimeHookEvent) -> bool {
@@ -1612,6 +1621,7 @@ fn emit_live_event_with_policy(
         Instant::now,
         std::thread::sleep,
     )
+    .map_err(|error| format!("{error}; endpoint={}", target.url))
 }
 
 fn run_hook_live_retry(
@@ -1622,18 +1632,27 @@ fn run_hook_live_retry(
     mut now: impl FnMut() -> Instant,
     mut wait: impl FnMut(Duration),
 ) -> Result<(), String> {
+    let started = now();
+    let diagnostic = |message: String, attempts: usize, at: Instant| {
+        format!(
+            "{message}; attempts={attempts} elapsed_ms={} attempt_budget_ms={} overall_budget_ms={}",
+            at.saturating_duration_since(started).as_millis(),
+            policy.per_attempt_timeout.as_millis(),
+            deadline.saturating_duration_since(started).as_millis(),
+        )
+    };
     let readiness_delivery = is_readiness_delivery(event);
     let mut attempts = 0usize;
     loop {
         let Some(remaining) = deadline.checked_duration_since(now()) else {
-            return Err(format!(
+            return Err(diagnostic(format!(
                 "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts"
-            ));
+            ), attempts, now()));
         };
         if remaining.is_zero() {
-            return Err(format!(
+            return Err(diagnostic(format!(
                 "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts"
-            ));
+            ), attempts, now()));
         }
         attempts += 1;
         let attempt_timeout = policy.per_attempt_timeout.min(remaining);
@@ -1643,14 +1662,14 @@ fn run_hook_live_retry(
         };
 
         if !readiness_delivery || !failure.is_retryable() {
-            return Err(failure.diagnostic());
+            return Err(diagnostic(failure.diagnostic(), attempts, now()));
         }
         let remaining = deadline.checked_duration_since(now()).unwrap_or_default();
         if remaining <= policy.retry_delay {
-            return Err(format!(
+            return Err(diagnostic(format!(
                 "hook live readiness delivery exhausted its bounded deadline after {attempts} attempts: {}",
                 failure.diagnostic()
-            ));
+            ), attempts, now()));
         }
         wait(policy.retry_delay);
     }
@@ -2165,7 +2184,12 @@ mod tests {
             clock.get().duration_since(started),
             policy.per_attempt_timeout
         );
-        assert_eq!(error, HookLiveAttemptFailure::Timeout.diagnostic());
+        assert!(
+            error.contains(&HookLiveAttemptFailure::Timeout.diagnostic()),
+            "{error}"
+        );
+        assert!(error.contains("elapsed_ms=40"), "{error}");
+        assert!(error.contains("attempt_budget_ms=40"), "{error}");
     }
 
     #[test]
@@ -2198,7 +2222,7 @@ mod tests {
         ]);
         let event = hook_live_test_event("SessionStart", Some("private-readiness-nonce"));
 
-        emit_live_event_with_policy(
+        let error = emit_live_event_with_policy(
             &event,
             &server.target("private-forward-token"),
             hook_live_status_retry_policy(),
@@ -2206,6 +2230,12 @@ mod tests {
         .expect_err("permanent client error must fail immediately");
 
         assert_eq!(server.attempts(), 1);
+        assert!(
+            error.contains(&format!("endpoint={}", server.forward_url)),
+            "{error}"
+        );
+        assert!(!error.contains("private-forward-token"), "{error}");
+        assert!(!error.contains("private-readiness-nonce"), "{error}");
     }
 
     #[test]

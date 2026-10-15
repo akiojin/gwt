@@ -710,6 +710,7 @@ mod window_snapshot_publish_tests {
                 review_dispatch: false,
                 hold_reason: None,
                 last_output_at: None,
+                session_id: None,
             }],
         };
 

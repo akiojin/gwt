@@ -2692,6 +2692,9 @@ pub struct IssueMonitorWindowObservation {
     /// the Monitor reads as "unknown", never as "silent".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<String>,
+    /// Issue #4905: lets the daemon read delivery health while the GUI stalls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Issue #4084: the complete set of agent windows on one project tab at
@@ -4532,6 +4535,9 @@ pub struct IssueMonitorInboxSummary {
     /// window; `missing` and `terminal` are the slot-leak shapes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_consistency: Option<IssueMonitorRuntimeConsistency>,
+    /// Issue #4905: failures of hook live delivery, joined with the bound pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_live_delivery: Option<crate::daemon_runtime::HookLiveDeliveryHealth>,
 }
 
 /// Issue #3712 AC-5: the per-row join computed while projecting the status.
@@ -12895,6 +12901,8 @@ impl IssueMonitorState {
                         pane_state: runtime.pane_state,
                         pane_hold_reason: runtime.hold_reason.clone(),
                         runtime_consistency: runtime.consistency,
+                        hook_live_delivery: self
+                            .hook_live_delivery_health_for_issue(item.issue.number),
                     }
                 })
                 .collect(),
@@ -20298,7 +20306,11 @@ impl IssueMonitorState {
             .windows
             .iter()
             .find(|observed| issue_monitor_window_ids_match(window_id, &observed.window_id))
-        {
+            .filter(|observed| {
+                observed
+                    .issue_number
+                    .is_none_or(|owner| owner == issue_number)
+            }) {
             None => IssueMonitorRowRuntime {
                 pane_state: None,
                 consistency: Some(IssueMonitorRuntimeConsistency::Missing),
@@ -20319,6 +20331,30 @@ impl IssueMonitorState {
                 }),
             },
         }
+    }
+
+    /// Health is read live even when the last canvas is too old to judge liveness.
+    fn hook_live_delivery_health_for_issue(
+        &self,
+        issue_number: u64,
+    ) -> Option<crate::daemon_runtime::HookLiveDeliveryHealth> {
+        let (host_pid, _) = self.window_snapshot_host?;
+        let window_id = self.launched_windows.get(&issue_number)?;
+        let snapshot = self.window_snapshot.as_ref()?;
+        if !self.window_observation_covers_launch(issue_number, window_id, &snapshot.observed_at) {
+            return None;
+        }
+        let observation = snapshot.windows.iter().find(|window| {
+            issue_monitor_window_ids_match(window_id, &window.window_id)
+                && window.issue_number == Some(issue_number)
+        })?;
+        let session_id = observation.session_id.as_deref()?;
+        gwt_agent::validate_session_id_path_component(session_id).ok()?;
+        crate::daemon_runtime::hook_live_delivery_health(&gwt_agent::runtime_state_path_for_pid(
+            &gwt_core::paths::gwt_sessions_dir(),
+            host_pid,
+            session_id,
+        ))
     }
 
     fn review_verdict_published(&self, issue_number: u64) -> bool {
@@ -22491,6 +22527,7 @@ mod tests {
                     pane_hold_reason: None,
                     pane_state: None,
                     runtime_consistency: None,
+                    hook_live_delivery: None,
                 }],
                 inbox_coverage: Some(IssueMonitorInboxCoverage {
                     github_target_count: 0,
@@ -23410,6 +23447,7 @@ mod tests {
             review_dispatch: false,
             hold_reason: None,
             last_output_at: None,
+            session_id: None,
         }
     }
 
@@ -33513,6 +33551,7 @@ mod tests {
                     review_dispatch: false,
                     hold_reason: None,
                     last_output_at: None,
+                    session_id: None,
                 }],
             });
             scan_queued_candidates(&mut monitor, &[issue(42)], now);
@@ -33561,6 +33600,7 @@ mod tests {
                 review_dispatch: false,
                 hold_reason: None,
                 last_output_at: None,
+                session_id: None,
             })
             .collect(),
         });
@@ -37041,6 +37081,7 @@ mod tests {
                 review_dispatch: false,
                 hold_reason: hold_reason.map(str::to_string),
                 last_output_at: last_output_at.map(str::to_string),
+                session_id: None,
             }],
         }
     }
@@ -41227,6 +41268,7 @@ mod tests {
             review_dispatch,
             hold_reason: None,
             last_output_at: None,
+            session_id: None,
         }
     }
 
@@ -41492,6 +41534,81 @@ mod tests {
         assert_eq!(json["runtime_consistency"], serde_json::json!("terminal"));
     }
 
+    #[test]
+    fn issue_4905_status_reports_repeated_hook_delivery_failures_for_bound_pane() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::agent-41")]);
+        let mut observation =
+            idle_observation("tab-1::agent-41", Some(41), WindowState::Running, false);
+        observation.session_id = Some("session-41".into());
+        monitor.record_window_snapshot_from_host(
+            idle_snapshot(IDLE_NOW, vec![observation]),
+            123,
+            1,
+            BTreeSet::new(),
+        );
+        let path = gwt_core::paths::gwt_sessions_dir().join("hook-live/123/session-41.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for failures in [3, 4, 0] {
+            let health = serde_json::json!({
+                "consecutive_failures": failures,
+                "last_failure_at": IDLE_NOW,
+                "last_error": "scripted timeout",
+                "last_success_at": null,
+                "pending_runtime_state": failures > 0
+            });
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "health": health, "pending": null
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            // The GUI and its canvas stay frozen while the daemon reads changing health.
+            let row = monitor
+                .agent_status_at("2026-09-07T05:00:00Z")
+                .inbox
+                .remove(0);
+            assert_eq!(
+                row.runtime_consistency,
+                Some(IssueMonitorRuntimeConsistency::Unavailable)
+            );
+            assert_eq!(
+                serde_json::to_value(&row).unwrap()["hook_live_delivery"],
+                health
+            );
+        }
+        monitor.window_snapshot_host = None;
+        assert!(monitor.agent_status_at(IDLE_NOW).inbox[0]
+            .hook_live_delivery
+            .is_none());
+    }
+
+    #[test]
+    fn issue_4905_rebound_pane_is_missing_for_its_previous_issue() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::agent-shared")]);
+        monitor.record_window_snapshot(idle_snapshot(
+            IDLE_NOW,
+            vec![idle_observation(
+                "tab-1::agent-shared",
+                Some(42),
+                WindowState::Running,
+                false,
+            )],
+        ));
+        let row = monitor.agent_status_at(IDLE_NOW).inbox.remove(0);
+        assert_eq!(
+            row.runtime_consistency,
+            Some(IssueMonitorRuntimeConsistency::Missing)
+        );
+        assert_eq!(
+            row.pane_state, None,
+            "the successor's state belongs to its new owner"
+        );
+    }
+
     /// Issue #4584 AC-2/AC-3: `waiting` alone only says the pane needs
     /// something. The row has to say *what*, or the reader is back to opening
     /// panes one by one — the twenty-minute cost this Issue reports.
@@ -41515,6 +41632,7 @@ mod tests {
                             .to_string(),
                     ),
                     last_output_at: None,
+                    session_id: None,
                 },
                 idle_observation("tab-1::healthy-42", Some(42), WindowState::Running, false),
             ],

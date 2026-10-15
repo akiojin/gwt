@@ -201,6 +201,29 @@ fn runtime_state_owner_forwards_live_event_to_loopback_target() {
     assert_eq!(payload["agent_session_id"], "agent-session-1");
     assert_eq!(payload["branch"], "feature/runtime-daemon");
     assert_eq!(payload["status"], "Running");
+
+    // Issue #4905: losing runtime-state must not lose the transition when
+    // the next successful handler is Forward (which has no status itself).
+    env.set("GWT_HOOK_FORWARD_URL", "unsupported://local");
+    handle_runtime_state("Stop", &input).unwrap();
+    let health = gwt::daemon_runtime::hook_live_delivery_health(&runtime_path).unwrap();
+    assert_eq!(health.consecutive_failures, 1);
+    assert!(health.pending_runtime_state);
+
+    env.set("GWT_HOOK_FORWARD_URL", server.url.clone());
+    handle_forward(&input).unwrap();
+    let (_, recovered) = server.recv();
+    assert_eq!(recovered["kind"], "runtime_state");
+    assert_eq!(recovered["source_event"], "Stop");
+    let recovered: gwt::RuntimeHookEvent = serde_json::from_value(recovered).unwrap();
+    assert_eq!(
+        gwt::window_state::runtime_hook_window_state(&recovered),
+        Some(gwt::WindowState::Idle)
+    );
+    assert_eq!(server.recv().1["kind"], "forward");
+    let health = gwt::daemon_runtime::hook_live_delivery_health(&runtime_path).unwrap();
+    assert_eq!(health.consecutive_failures, 0);
+    assert!(!health.pending_runtime_state);
 }
 
 #[test]

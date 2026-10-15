@@ -3270,6 +3270,27 @@ fn issue_monitor_window_observation_carries_the_last_pane_output_time() {
     assert!(last_output_at >= before, "{last_output_at} < {before}");
 }
 
+#[test]
+fn issue_4905_window_observation_carries_session_identity_for_hook_delivery() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("codex-1", Some("session-41".into())));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let snapshot = runtime
+        .issue_monitor_window_snapshot_for_tab("tab-1", "2026-10-15T00:00:01Z")
+        .unwrap();
+    let observed = serde_json::to_value(&snapshot.windows[0]).unwrap();
+    assert_eq!(observed["session_id"], "session-41");
+}
+
 /// SPEC-3431 FR-067: an agent that exits cleanly also frees its slot.
 ///
 /// FR-030 closed this leak on the `Error` side, but `exit 0` maps to
