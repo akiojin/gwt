@@ -99,12 +99,11 @@ Search route responsiveness acceptance. Eight concurrent semantic searches must 
     $warmArguments = @($runner, '--action', 'search-multi', '--repo-hash', $repoHash,
         '--project-root', $checkout, '--scopes', 'memory', '--query', 'Search route responsiveness acceptance',
         '--n-results', '50', '--match-mode', 'semantic', '--file-index-protocol', 'v2', '--no-auto-build', '--qos', 'interactive')
-    if ($Label -eq 'after') {
-        # Match Rust's native worker key so prewarming does not create a second model.
-        $identity = ConvertTo-Json -InputObject @($runner, $python, '0', 'interactive') -Compress
-        $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identity))).ToLowerInvariant()
-        $warmArguments += @('--worker-dir', (Join-Path $runtime "search-workers/$digest"))
-    }
+    # Match Rust's native worker key so prewarming does not create a second model.
+    # Older baseline runners accept this flag and keep their existing default key.
+    $identity = ConvertTo-Json -InputObject @($runner, $python, '0', 'interactive') -Compress
+    $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identity))).ToLowerInvariant()
+    $warmArguments += @('--worker-dir', (Join-Path $runtime "search-workers/$digest"))
     Write-Output 'Preparing the real resident model before the warmed GUI measurements.'
     $warmOutput = & $python @warmArguments
     $warmExit = $LASTEXITCODE
@@ -136,6 +135,8 @@ Search route responsiveness acceptance. Eight concurrent semantic searches must 
         binaries=@((Get-DigestRecord $gwtBinary), (Get-DigestRecord $gwtdBinary));
         sources=@((Get-DigestRecord "$checkout/crates/gwt/src/index_search.rs"),
             (Get-DigestRecord "$checkout/crates/gwt-core/runtime/chroma_index_runner.py"));
+        harness=@((Get-DigestRecord "$checkout/crates/gwt/playwright/tests/search-route-live.spec.ts"),
+            (Get-DigestRecord $PSCommandPath));
         runtime_runner=(Get-DigestRecord $runner)} |
         ConvertTo-Json -Depth 12 | Set-Content "$artifacts/checkout-evidence.json" -Encoding utf8NoBOM
     $testVariables = @{GWT_PLAYWRIGHT_BASE_URL=$baseUrl;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;

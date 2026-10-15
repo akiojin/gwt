@@ -9626,7 +9626,8 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
         "fake_embedding": os.environ.get("GWT_INDEX_FAKE_EMBEDDING", ""),
         "qos": qos,
     })
-    worker_dir = _gwt_home() / "runtime" / "search-workers" / identity
+    worker_dir = (Path(args.worker_dir) if getattr(args, "worker_dir", None) else
+                  _gwt_home() / "runtime" / "search-workers" / identity)
     endpoint_path = worker_dir / "endpoint.json"
 
     def connect():

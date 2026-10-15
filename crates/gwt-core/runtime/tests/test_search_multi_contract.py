@@ -1202,11 +1202,13 @@ class SearchWorkerTests(unittest.TestCase):
                                   encoding="utf-8")
                 invoke("--action", "index-memory")
                 warm_seconds = []
+                warm_timings_ms = []
                 for query in ("beta update", "published memory", "persistent model"):
                     started = time.monotonic()
                     second = invoke("--action", "search-multi", "--scopes", "memory",
                                     "--query", query)
                     warm_seconds.append(time.monotonic() - started)
+                    warm_timings_ms.append(second.get("timings_ms"))
                     self.assertEqual(second["worker_pid"], worker_pid)
                     self.assertEqual(second["model_load_ms"], 0)
                     self.assertIn("beta update", json.dumps(second))
@@ -1216,6 +1218,8 @@ class SearchWorkerTests(unittest.TestCase):
                                       "cold_seconds": cold_seconds,
                                       "cold_model_load_ms": first["model_load_ms"],
                                       "warm_seconds": warm_seconds,
+                                      "cold_timings_ms": first.get("timings_ms"),
+                                      "warm_timings_ms": warm_timings_ms,
                                       "warm_model_load_ms": second["model_load_ms"]}), flush=True)
                     self.assertGreater(first["model_load_ms"], 0)
                     self.assertLessEqual(max(warm_seconds), 2.0)
