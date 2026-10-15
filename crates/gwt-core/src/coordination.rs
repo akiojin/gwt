@@ -1100,10 +1100,21 @@ pub struct PromptBoardRead {
     /// An append was still in flight. Keep both prompt cursors so its row is
     /// retried even when its timestamp predates this successful partial read.
     pub retry_from_previous_cursor: bool,
+    /// Local append position; remote providers retain timestamp-based reads.
+    pub next_cursor: Option<PromptBoardCursor>,
+}
+
+/// The end of a complete row in the append-only, fixed-width segment order.
+/// An observed empty log has no segment, unlike an uninitialized sidecar cursor.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptBoardCursor {
+    pub segment: Option<String>,
+    pub offset: u64,
 }
 
 pub struct PromptBoardReadRequest<'a> {
     pub diff_since: DateTime<Utc>,
+    pub cursor: Option<&'a PromptBoardCursor>,
     pub scope: &'a BoardAudienceScope,
     pub status_author: &'a str,
     pub status_kind: &'a BoardEntryKind,
@@ -1171,6 +1182,7 @@ impl PromptBoardRead {
                 .collect(),
             latest_own_status_at,
             retry_from_previous_cursor: false,
+            next_cursor: None,
         }
     }
 }
@@ -3506,6 +3518,8 @@ pub struct RemindersState {
     #[serde(default)]
     pub last_injected_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub board_log_cursor: Option<PromptBoardCursor>,
+    #[serde(default)]
     pub last_own_status_checked_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_own_status_at: Option<DateTime<Utc>>,
@@ -3810,7 +3824,10 @@ fn load_prompt_reminder_tail(
                     .to_string(),
             ));
         }
-        return Ok(PromptBoardRead::default());
+        return Ok(PromptBoardRead {
+            next_cursor: Some(PromptBoardCursor::default()),
+            ..PromptBoardRead::default()
+        });
     }
     // Discover actual files, including a rollover committed before the
     // manifest update. Only filenames are visited; historical rows are not.
@@ -3822,22 +3839,41 @@ fn load_prompt_reminder_tail(
     let latest_segment = paths.last().cloned();
     let mut history = Vec::new();
     let mut retry = false;
+    let mut next_cursor = None;
     #[cfg(test)]
     PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
         counters.borrow_mut().history_materializations += 1;
     });
     for path in paths.into_iter().rev() {
-        let (entries, partial) = load_prompt_segment_tail(
+        let tail = load_prompt_segment_tail(
             &path,
             PROMPT_BOARD_ENTRY_LIMIT.saturating_sub(history.len()),
         )?;
-        history.extend(entries);
-        retry |= partial;
+        let segment = path.file_name().unwrap().to_string_lossy().into_owned();
+        next_cursor.get_or_insert_with(|| PromptBoardCursor {
+            segment: Some(segment.clone()),
+            offset: tail.complete_offset,
+        });
+        history.extend(tail.entries.into_iter().map(|(entry, offset)| {
+            // Timestamps are fixed before a writer reaches the append. Once
+            // initialized, only the durable log position determines newness.
+            let is_new = request
+                .cursor
+                .map_or(entry.updated_at > request.diff_since, |cursor| {
+                    cursor.segment.as_deref().is_none_or(|previous| {
+                        segment.as_str() > previous
+                            || (segment == previous
+                                && (offset > cursor.offset || cursor.offset > tail.complete_offset))
+                    })
+                });
+            (entry, is_new)
+        }));
+        retry |= tail.retry;
         if history.len() >= PROMPT_BOARD_ENTRY_LIMIT {
             break;
         }
     }
-    history.sort_by_key(|entry| entry.created_at);
+    history.sort_by_key(|(entry, _)| entry.created_at);
     crate::operation_deadline::ensure_remaining("Board prompt rollover check")?;
     let latest_after_read = std::fs::read_dir(&segments_dir)?
         .map(|entry| entry.map(|entry| entry.path()))
@@ -3846,19 +3882,36 @@ fn load_prompt_reminder_tail(
         .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .max();
     retry |= latest_after_read != latest_segment;
-    let mut read = PromptBoardRead::from_scoped_history(
-        history,
-        request.diff_since,
-        request.scope,
-        request.status_author,
-        request.status_kind,
-        request.status_since,
-    );
-    read.retry_from_previous_cursor = retry;
-    Ok(read)
+    let latest_own_status_at = history
+        .iter()
+        .filter(|(entry, _)| {
+            entry.author == request.status_author && entry.kind == *request.status_kind
+        })
+        .map(|(entry, _)| entry.updated_at)
+        .max();
+    Ok(PromptBoardRead {
+        recent_entries: history
+            .into_iter()
+            .filter(|(entry, is_new)| {
+                *is_new && board_entry_visible_for_scope(entry, request.scope)
+            })
+            .map(|(entry, _)| entry)
+            .collect(),
+        has_recent_own_status: latest_own_status_at
+            .is_some_and(|updated_at| updated_at > request.status_since),
+        latest_own_status_at,
+        retry_from_previous_cursor: retry,
+        next_cursor: Some(next_cursor.unwrap_or_default()),
+    })
 }
 
-fn load_prompt_segment_tail(path: &Path, limit: usize) -> Result<(Vec<BoardEntry>, bool)> {
+struct PromptBoardSegmentTail {
+    entries: Vec<(BoardEntry, u64)>,
+    complete_offset: u64,
+    retry: bool,
+}
+
+fn load_prompt_segment_tail(path: &Path, limit: usize) -> Result<PromptBoardSegmentTail> {
     const CHUNK_BYTES: usize = 64 * 1024;
     let mut file = File::open(path)?;
     let original_len = file.metadata()?.len();
@@ -3892,10 +3945,18 @@ fn load_prompt_segment_tail(path: &Path, limit: usize) -> Result<(Vec<BoardEntry
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(start, |i| i + 1);
+    let complete_offset = position + end as u64;
+    let mut row_end = complete_offset;
     let mut entries = Vec::new();
-    for line in bytes[start..end]
-        .rsplit(|byte| *byte == b'\n')
-        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+    for (line, offset) in bytes[start..end]
+        .split_inclusive(|byte| *byte == b'\n')
+        .rev()
+        .map(|line| {
+            let offset = row_end;
+            row_end -= line.len() as u64;
+            (line, offset)
+        })
+        .filter(|(line, _)| !line.iter().all(u8::is_ascii_whitespace))
         .take(limit)
     {
         crate::operation_deadline::ensure_remaining("Board prompt tail decode")?;
@@ -3906,10 +3967,14 @@ fn load_prompt_segment_tail(path: &Path, limit: usize) -> Result<(Vec<BoardEntry
             counters.borrow_mut().event_decodes += 1;
         });
         let CoordinationEvent::MessageAppended { entry } = event;
-        entries.push(entry);
+        entries.push((entry, offset));
     }
     crate::operation_deadline::ensure_remaining("Board prompt tail decode")?;
-    Ok((entries, partial || file.metadata()?.len() != original_len))
+    Ok(PromptBoardSegmentTail {
+        entries,
+        complete_offset,
+        retry: partial || file.metadata()?.len() != original_len,
+    })
 }
 
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
@@ -7167,6 +7232,7 @@ mod tests {
                 None,
                 PromptBoardReadRequest {
                     diff_since: base,
+                    cursor: None,
                     scope: &BoardAudienceScope::All,
                     status_author: "Codex",
                     status_kind: &BoardEntryKind::Status,
@@ -7178,11 +7244,22 @@ mod tests {
         assert_eq!(partial.recent_entries.len(), 2);
         assert_eq!(partial.recent_entries.last().unwrap().id, "entry-2");
         assert!(partial.retry_from_previous_cursor);
+        assert_eq!(
+            partial.next_cursor,
+            Some(PromptBoardCursor {
+                segment: Some(segment_file_name(2)),
+                offset: file.metadata().unwrap().len() - split as u64,
+            })
+        );
         file.write_all(&pending[split..]).unwrap();
         file.flush().unwrap();
         let complete = load().unwrap();
         assert_eq!(complete.recent_entries.len(), 3);
         assert!(!complete.retry_from_previous_cursor);
+        assert_eq!(
+            complete.next_cursor.as_ref().unwrap().offset,
+            file.metadata().unwrap().len()
+        );
         assert_eq!(
             complete.latest_own_status_at,
             Some(base + chrono::Duration::seconds(3))
@@ -7225,6 +7302,7 @@ mod tests {
                 None,
                 PromptBoardReadRequest {
                     diff_since: base,
+                    cursor: None,
                     scope: &BoardAudienceScope::All,
                     status_author: "Codex",
                     status_kind: &BoardEntryKind::Status,
