@@ -54,6 +54,10 @@ $childEnvironment.GH_PROMPT_DISABLED = '1'
 $childEnvironment.GWT_PROJECT_ROOT = $repoRoot
 $childEnvironment.GWT_HOOK_BIN = $hookBin
 $childEnvironment.GWT_DISABLE_BACKGROUND_INDEX = '1'
+# Existing CI mode suppresses unrelated release discovery. This fixture owns a
+# same-version staged payload and exercises explicit HTTP apply/helper restart;
+# a newly published GitHub release must not supersede that controlled payload.
+$childEnvironment.CI = 'true'
 $urlFile = Join-Path $checkHome 'url.txt'
 $childEnvironment.GWT_BROWSER_URL_FILE = $urlFile
 $providerLog = Join-Path $checkHome 'shell-processes.jsonl'
@@ -204,6 +208,7 @@ try {
   [IO.File]::WriteAllText("$checkHome/fixture.json", (@{home=$checkHome;checkout=$repoRoot;pid=$ownedProcess.Id;smoke_pid=$smokePid;
     url=$url;preferences=$preferences;gwt=$residentExecutable;gwtd=(Join-Path $installRoot 'gwtd.exe');
     source_gwt=$checkoutGwt;source_gwtd=$checkoutGwtd;source_sha256=$installHashes;install_root=$installRoot;
+    release_discovery='Disabled by existing CI mode; explicit HTTP apply and helper remain real.';
     artifact_boundary='Byte-identical private install; the live canonical verifier is outside the update target.'} | ConvertTo-Json -Depth 5))
 
   $version = [IO.File]::ReadAllText((Join-Path $repoRoot 'scripts/playwright-version.txt')).Trim()

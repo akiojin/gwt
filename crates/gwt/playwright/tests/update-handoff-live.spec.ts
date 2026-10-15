@@ -31,6 +31,13 @@ async function resident() {
   expect(files, "one isolated resident lock").toHaveLength(1);
   return json(join(directory, files[0]));
 }
+async function listedWindowIds(page: Page): Promise<string[]> {
+  const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+  await sendLiveGwtEvent(page, { kind: "list_windows" });
+  return page.waitForFunction(after => (window as any).__gwtPlaywrightMessages.find(
+    (entry: any) => entry.sequence > after && entry.payload.kind === "window_list")?.payload.windows.map(
+    (pane: any) => pane.id), cursor, { timeout: 30_000 }).then(handle => handle.jsonValue());
+}
 
 async function createShell(page: Page, index: number): Promise<string> {
   const before = await page.locator(".workspace-window").evaluateAll(nodes =>
@@ -102,10 +109,14 @@ test.describe("Issue #5510 resident Windows update handoff", () => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     // A previous theme may have restored interrupted shells; own this fresh
     // fixture's windows and start precisely eight running PTYs for this apply.
-    for (const id of await page.locator(".workspace-window").evaluateAll(nodes =>
-      nodes.map(node => (node as HTMLElement).dataset.id))) {
+    // Wait for a fresh backend reply and its DOM projection before using an
+    // empty canvas as evidence: initial hydration can arrive after page load.
+    const existingIds = await listedWindowIds(page);
+    await expect(page.locator(".workspace-window")).toHaveCount(existingIds.length);
+    for (const id of existingIds) {
       await sendLiveGwtEvent(page, { kind: "close_window", id });
     }
+    await expect.poll(() => listedWindowIds(page), { timeout: 30_000 }).toEqual([]);
     await expect(page.locator(".workspace-window")).toHaveCount(0);
     const receiptsBefore = (await readFile(join(HOME, "shell-processes.jsonl"), "utf8")).split("\n").filter(Boolean).length;
     const windows: string[] = [];
@@ -187,6 +198,7 @@ test.describe("Issue #5510 resident Windows update handoff", () => {
       old_pid: old.pid, new_pid: next!.pid, new_url: next!.url, real_ptys: receipts.length,
       private_install_gui_pids: guiPids,
       apply_result: applied, errors, payload: "same-checkout portable binary", restart_args_modified: false,
+      release_discovery: fixture.release_discovery,
       install_root: fixture.install_root, source_sha256: fixture.source_sha256, artifact_boundary: fixture.artifact_boundary }));
   });
 });
