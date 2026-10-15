@@ -170,7 +170,7 @@ pub fn collect_index_resources() -> IndexResourceDiagnostics {
             broker_root,
             gwt_core::index::broker::DEFAULT_REFRESH_QUIET_PERIOD,
         )
-        .and_then(|broker| broker.inspect())
+        .and_then(|broker| broker.scan())
         {
             diagnostics.broker_targets = snapshot.target_count();
             diagnostics.broker_queue_depth = snapshot.queue_depth();

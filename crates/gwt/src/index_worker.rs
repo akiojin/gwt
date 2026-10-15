@@ -2285,11 +2285,22 @@ fn unix_millis_now() -> u64 {
 /// Canonical repo base intent for startup admission (Flow A). The desired
 /// snapshot pins the locally available canonical root tree without a fetch;
 /// the epoch is wall-clock so a newer startup supersedes an older one.
-fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> RefreshIntent {
+fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> Option<RefreshIntent> {
     let desired_epoch = unix_millis_now();
     let desired_snapshot = match gwt_git::refs::resolve_canonical_root_tree(repo_root) {
+        // Git hashes the empty tree identically for every repository using
+        // the same object format (SHA-1 or SHA-256).
+        Ok(Some(tree))
+            if matches!(
+                tree.root_tree_oid.as_str(),
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+                    | "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"
+            ) =>
+        {
+            return None
+        }
         Ok(Some(tree)) => format!("tree:{}", tree.root_tree_oid),
-        Ok(None) => "tree:unborn".to_string(),
+        Ok(None) => return None,
         Err(error) => {
             tracing::warn!(
                 target: "gwt::index",
@@ -2300,7 +2311,7 @@ fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> Refres
             format!("epoch:{desired_epoch}")
         }
     };
-    RefreshIntent {
+    Some(RefreshIntent {
         protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
         target: RefreshTarget::base(repo_hash.as_str(), REFRESH_FILE_SCOPES),
         desired_epoch,
@@ -2308,7 +2319,7 @@ fn startup_base_refresh_intent(repo_root: &Path, repo_hash: &RepoHash) -> Refres
         priority: JobPriority::Background,
         reason: RefreshReason::Startup,
         resource_class: RefreshResourceClass::Embedding,
-    }
+    })
 }
 
 /// Injectable startup admission (SPEC #1939 FR-416). Registers the project
@@ -2342,7 +2353,9 @@ pub fn bootstrap_project_index_for_path_with_broker<S: RunnerSpawner + ?Sized>(
         return Ok(());
     };
     register_refresh_project(repo_hash.as_str(), &refresh_project_root, index_root);
-    let intent = startup_base_refresh_intent(&repo_root, &repo_hash);
+    let Some(intent) = startup_base_refresh_intent(&repo_root, &repo_hash) else {
+        return submit_repo_source_refreshes(broker, &refresh_project_root, &repo_hash);
+    };
     let existing = broker.inspect().map_err(|error| error.to_string())?;
     let snapshot = match existing.target(&intent.target) {
         Some(old) if old.desired_snapshot() == intent.desired_snapshot => old.clone(),
@@ -4146,6 +4159,56 @@ detached
     }
 
     #[test]
+    fn bootstrap_empty_trees_skip_files_but_register_shared_scopes() {
+        let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo_with_origin(&repo);
+        for committed in [false, true] {
+            if committed {
+                run_git_at(
+                    &repo,
+                    &[
+                        "-c",
+                        "user.name=Test",
+                        "-c",
+                        "user.email=test@example.com",
+                        "commit",
+                        "--allow-empty",
+                        "-m",
+                        "empty",
+                    ],
+                );
+            }
+            let broker = RefreshBroker::open(
+                temp.path().join(format!("broker-{committed}")),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+            bootstrap_project_index_for_path_with_broker(
+                &repo,
+                &temp.path().join("index"),
+                &broker,
+                &PanicRunnerSpawner,
+            )
+            .unwrap();
+            let snapshot = broker.inspect().unwrap();
+            assert_eq!(
+                snapshot.target_count(),
+                6,
+                "only repo-shared scopes for empty tree"
+            );
+            assert!(snapshot
+                .targets()
+                .iter()
+                .all(|target| !target.target().scopes().contains(&RefreshScope::Files)));
+        }
+    }
+
+    #[test]
     fn bootstrap_with_broker_registers_all_scope_targets_without_touching_index_root() {
         let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
             .lock()
@@ -4154,6 +4217,20 @@ detached
         let repo = temp.path().join("repo");
         std::fs::create_dir(&repo).expect("create repo");
         init_git_repo_with_origin(&repo);
+        std::fs::write(repo.join("source.rs"), "fn main() {}\n").unwrap();
+        run_git_at(&repo, &["add", "source.rs"]);
+        run_git_at(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "nonempty tree",
+            ],
+        );
         let index_root = temp.path().join("index");
         let broker = RefreshBroker::open(temp.path().join("broker"), Duration::from_secs(30))
             .expect("open refresh broker");
