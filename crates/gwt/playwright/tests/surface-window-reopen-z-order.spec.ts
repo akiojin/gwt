@@ -161,6 +161,7 @@ const PRESETS = ["logs", "board", "issue", "index", "settings", "profile"];
 test("Issue #4174: six supported surfaces retain keyboard navigation without retired GUI windows", async ({ page }, info) => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is required for the live backend");
   await withLiveGwtBackendLock(BASE, info, async () => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => {
