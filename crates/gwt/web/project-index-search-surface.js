@@ -538,12 +538,14 @@ export function createProjectIndexSearchSurface({
           detail.appendChild(makeEl("div", { className: "index-detail-meta", text: evidence }));
         }
         detail.appendChild(makeEl("p", { className: "index-detail-preview", text: selected.preview || "No preview available" }));
-        detail.appendChild(makeEl("button", {
-          className: "wizard-button primary",
-          attrs: { type: "button" },
-          dataset: { action: "open-index-result" },
-          text: "Open",
-        }));
+        if (selected.target?.kind !== "file") {
+          detail.appendChild(makeEl("button", {
+            className: "wizard-button primary",
+            attrs: { type: "button" },
+            dataset: { action: "open-index-result" },
+            text: "Open",
+          }));
+        }
       }
 
       function makeIndexSearchLoadingState(label = "Searching semantic index") {
@@ -622,9 +624,6 @@ export function createProjectIndexSearchSurface({
             return;
           case "report":
             openReports();
-            return;
-          case "file":
-            focusOrSpawnPreset("file_tree");
             return;
           case "memory":
           case "discussion":

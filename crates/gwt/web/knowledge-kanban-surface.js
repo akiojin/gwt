@@ -1,5 +1,5 @@
 import { createUiStateStore } from "./ui-state-store.js";
-// SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item / PR Kanban)
+// SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
 // bridge state map (cache-backed entries, semantic search coalescing,
 // detail correlation, auto-refresh timer, kanban hide-done preference),
@@ -19,7 +19,7 @@ import { createUiStateStore } from "./ui-state-store.js";
 //   app.js (the markdown body renderer is shared with the Board surface).
 // - windowMap / workspaceWindowById / getWorkspaceWindows: workspace window lookups.
 // - pendingIndexOpenTargetsByPreset: index-open handoff targets by preset.
-// - knowledgeKindForPreset(preset): issue/pr kind mapping.
+// - knowledgeKindForPreset(preset): Issue/SPEC kind mapping.
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn used by drawer actions.
 // - openIssueLaunchWizard(windowId, issueNumber): launch wizard entry.
@@ -1125,17 +1125,15 @@ export function createKnowledgeKanbanSurface({
       let nextKnowledgeSearchRequestId = 1;
       let relatedWorkRefreshTimer = null;
       // Issue #5395: display/activity updates do not invalidate Issue correlation.
-      function workAssociationKey(projection, kind) {
+      function workAssociationKey(projection) {
         return JSON.stringify((projection?.active_works || [])
-          .filter(work => kind === "pr" ? work.pr_number != null : work.linked_issue_numbers?.length)
+          .filter(work => work.linked_issue_numbers?.length)
           .map(work => [
             work.id, normalizeWorkBranch(work.branch),
-            kind === "pr" ? work.pr_number ?? null
-              : [...new Set(work.linked_issue_numbers || [])].sort((a, b) => a - b),
+            [...new Set(work.linked_issue_numbers || [])].sort((a, b) => a - b),
           ]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
       }
-      let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.(), "issue");
-      let prWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.(), "pr");
+      let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.());
       const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, status: {
         enabled: false,
         state: "disabled",
@@ -2077,12 +2075,6 @@ export function createKnowledgeKanbanSurface({
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
-        if (normalizeKnowledgeKind(state.kind) === "pr") {
-          // PR selection still completes through the legacy full-view path.
-          // A newer PR load supersedes that selection owner just as it did
-          // before Issue/SPEC detail requests gained independent ownership.
-          state.detailRequestId = 0;
-        }
         state.ownedLoadRequestIds.add(requestId);
         while (state.ownedLoadRequestIds.size > 4) {
           state.ownedLoadRequestIds.delete(
@@ -2115,15 +2107,12 @@ export function createKnowledgeKanbanSurface({
 
       function refreshKnowledgeWorkSnapshot(forceReload) {
         const projection = getActiveWorkProjection?.();
-        const issueKey = workAssociationKey(projection, "issue");
-        const prKey = workAssociationKey(projection, "pr");
+        const issueKey = workAssociationKey(projection);
         for (const state of knowledgeBridgeStateMap.values()) {
-          state.eventRefreshDirty ||= forceReload || (normalizeKnowledgeKind(state.kind) === "pr"
-            ? prKey !== prWorkAssociationKey : issueKey !== issueWorkAssociationKey);
+          state.eventRefreshDirty ||= forceReload || issueKey !== issueWorkAssociationKey;
           state.workSnapshotDirty = true;
         }
         issueWorkAssociationKey = issueKey;
-        prWorkAssociationKey = prKey;
         scheduleKnowledgeEventRefresh();
       }
 
@@ -2234,15 +2223,6 @@ export function createKnowledgeKanbanSurface({
       }
 
       function knowledgeDetailRequestMatches(state, event) {
-        if (normalizeKnowledgeKind(state.kind) === "pr") {
-          if (!event.request_id) {
-            return event.detail?.number === state.selectedNumber;
-          }
-          return (
-            event.request_id === state.loadRequestId ||
-            event.request_id === state.detailRequestId
-          );
-        }
         if (!event.request_id) {
           // ID-less compatibility is restricted to generation zero. Once a
           // user has selected anything explicitly, identity cannot be proven
@@ -2280,7 +2260,6 @@ export function createKnowledgeKanbanSurface({
 
       function isSilentSemanticKind(kind) {
         // Both Issue and SPEC presets normalize to the backend `issue` kind.
-        // PR intentionally retains its pre-SPEC-3170 behavior.
         return normalizeKnowledgeKind(kind) === "issue";
       }
 
@@ -2627,36 +2606,33 @@ export function createKnowledgeKanbanSurface({
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         const previousNumber = state.selectedNumber;
         const openingPreview = explicit && state.kind === "issue" && state.previewHidden;
-        const prBaseline = normalizeKnowledgeKind(state.kind) === "pr";
         if (explicit) {
           state.selectedNumber = number;
           if (state.kind === "issue") state.previewHidden = false;
-          if (!prBaseline) {
-            // Issue/SPEC selection is a local transition before any I/O.
-            state.selectionGeneration = (state.selectionGeneration || 0) + 1;
-            state.error = "";
-            const findRow = (rows) =>
-              Array.isArray(rows)
-                ? rows.find((entry) => entry && entry.number === number)
-                : null;
-            const row = findRow(state.entries) || findRow(state.baseEntries) ||
-              (state.kind === "issue" ? issueDetailEntry(state, number) : null);
-            const authoritative = state.detail && state.detail.number === number;
-            if (!authoritative) {
-              state.detail = row
-                ? {
-                    number: row.number,
-                    title: row.title || "",
-                    subtitle: `#${row.number}`,
-                    state: row.state || "",
-                    phase: row.phase ?? null,
-                    labels: Array.isArray(row.labels) ? row.labels.slice() : [],
-                    sections: [],
-                    launch_issue_number: row.number,
-                    related_works: [],
-                  }
-                : null;
-            }
+          // Issue/SPEC selection is a local transition before any I/O.
+          state.selectionGeneration = (state.selectionGeneration || 0) + 1;
+          state.error = "";
+          const findRow = (rows) =>
+            Array.isArray(rows)
+              ? rows.find((entry) => entry && entry.number === number)
+              : null;
+          const row = findRow(state.entries) || findRow(state.baseEntries) ||
+            (state.kind === "issue" ? issueDetailEntry(state, number) : null);
+          const authoritative = state.detail && state.detail.number === number;
+          if (!authoritative) {
+            state.detail = row
+              ? {
+                  number: row.number,
+                  title: row.title || "",
+                  subtitle: `#${row.number}`,
+                  state: row.state || "",
+                  phase: row.phase ?? null,
+                  labels: Array.isArray(row.labels) ? row.labels.slice() : [],
+                  sections: [],
+                  launch_issue_number: row.number,
+                  related_works: [],
+                }
+              : null;
           }
         } else if (number !== state.selectedNumber) {
           return false;
@@ -2664,14 +2640,10 @@ export function createKnowledgeKanbanSurface({
         state.detailLoading = true;
         const requestId = nextKnowledgeLoadRequestId++;
         state.detailRequestId = requestId;
-        if (!prBaseline) {
-          state.detailRequestSelectionGeneration = state.selectionGeneration;
-          state.detailRequestNumber = number;
-        }
+        state.detailRequestSelectionGeneration = state.selectionGeneration;
+        state.detailRequestNumber = number;
         const effectiveKind = knowledgeKind || state.kind;
-        if (prBaseline) {
-          renderKnowledgeBridge(windowId);
-        } else if (explicit) {
+        if (explicit) {
           renderKnowledgeSelection(windowId, state, previousNumber, { focusPreview: openingPreview });
         } else {
           renderKnowledgeDetailOnly(windowId, state);
@@ -2720,8 +2692,6 @@ export function createKnowledgeKanbanSurface({
             return "Cached work items";
           case "spec":
             return "Cached work items";
-          case "pr":
-            return "PR bridge";
           default:
             return "Knowledge Bridge";
         }
@@ -2733,8 +2703,6 @@ export function createKnowledgeKanbanSurface({
             return "Semantic search work items";
           case "spec":
             return "Semantic search work items";
-          case "pr":
-            return "Search unavailable";
           default:
             return "Search";
         }
@@ -5003,6 +4971,7 @@ export function createKnowledgeKanbanSurface({
       // app.js mountWindowBody (surface === "knowledge" branch).
       function mountKnowledgeWindow(windowData, body) {
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
+          if (knowledgeKind !== "issue" && knowledgeKind !== "spec") return;
           // SPEC-2017 — Knowledge Bridge surface is a 6-column Kanban Board:
           // Backlog / Draft / Planning / Implementation / Review / Done.
           // The columns are hard-coded so the source carries every
@@ -5301,16 +5270,7 @@ export function createKnowledgeKanbanSurface({
             ) {
               break;
             }
-            const prSelectionCompletion = Boolean(
-              normalizeKnowledgeKind(state.kind) === "pr" &&
-              event.request_id &&
-              event.request_id === state.detailRequestId,
-            );
-            if (
-              event.request_id &&
-              !state.ownedLoadRequestIds.has(event.request_id) &&
-              !prSelectionCompletion
-            ) {
+            if (event.request_id && !state.ownedLoadRequestIds.has(event.request_id)) {
               break;
             }
             // Issue #3297: a response that lost the race against the 5s
@@ -5320,8 +5280,7 @@ export function createKnowledgeKanbanSurface({
             if (
               event.request_id &&
               event.request_id !== state.loadRequestId &&
-              !knowledgeEntriesAreEmpty(state) &&
-              !prSelectionCompletion
+              !knowledgeEntriesAreEmpty(state)
             ) {
               break;
             }
@@ -5441,14 +5400,7 @@ export function createKnowledgeKanbanSurface({
             } else if (isSilentSemanticKind(activeIntent.kind)) {
               invalidateKnowledgeSemanticRetry(state);
             }
-            if (normalizeKnowledgeKind(state.kind) === "pr" && selectionIsCurrent && state.selectedNumber) {
-              dispatchKnowledgeDetailRequest(
-                event.id,
-                activeIntent.kind,
-                state.selectedNumber,
-                { explicit: false },
-              );
-            } else if (selectionIsCurrent && state.selectionGeneration === 0) {
+            if (selectionIsCurrent && state.selectionGeneration === 0) {
               state.detail = null;
             }
             renderKnowledgeBridge(event.id);
@@ -5475,11 +5427,7 @@ export function createKnowledgeKanbanSurface({
               finishKnowledgeLoad(state, event.id, event.knowledge_kind);
             }
             state.detailLoading = false;
-            if (normalizeKnowledgeKind(state.kind) === "pr") {
-              renderKnowledgeBridge(event.id);
-            } else {
-              renderKnowledgeSelection(event.id, state, previousNumber);
-            }
+            renderKnowledgeSelection(event.id, state, previousNumber);
             // SPEC-2017 US-9 — refresh the Drawer body when the detail
             // is for the entry the Drawer is currently showing. This
             // also handles the swap-on-different-card case (T-034):
@@ -5598,14 +5546,10 @@ export function createKnowledgeKanbanSurface({
               break;
             }
             const matchesLoadRequest = event.request_id === state.loadRequestId;
-            const prSelectionError =
-              normalizeKnowledgeKind(state.kind) === "pr" &&
-              event.request_id === state.detailRequestId;
             const matchesDetailRequest =
               event.request_id === state.detailRequestId &&
-              (prSelectionError ||
-                (state.detailRequestSelectionGeneration === state.selectionGeneration &&
-                  state.detailRequestNumber === state.selectedNumber));
+              state.detailRequestSelectionGeneration === state.selectionGeneration &&
+              state.detailRequestNumber === state.selectedNumber;
             const matchesInitialIdless =
               !event.request_id && state.selectionGeneration === 0;
             if (!matchesLoadRequest && !matchesDetailRequest && !matchesInitialIdless) {
@@ -5628,7 +5572,7 @@ export function createKnowledgeKanbanSurface({
             }
             state.searching = false;
             state.detailLoading = false;
-            if (matchesLoadRequest || prSelectionError) {
+            if (matchesLoadRequest) {
               renderKnowledgeBridge(event.id);
             } else {
               renderKnowledgeStatusOnly(event.id, state);

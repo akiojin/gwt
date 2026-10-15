@@ -132,7 +132,7 @@ test("Issue/SPEC semantic search uses an OPEN-only direct WebSocket send", () =>
   assert.match(
     knowledgeSurfaceSource,
     /!issueSurface && state\.searching/,
-    "only PR may expose the legacy semantic searching status",
+    "Issue semantic searching status stays silent",
   );
 });
 
@@ -430,7 +430,7 @@ test("Kanban drawer uses the same display labels as the detail pane", () => {
   );
 });
 
-test("Kanban card click scopes targeted selection to Issue/SPEC and preserves PR full render", () => {
+test("Kanban card click uses targeted Issue/SPEC selection", () => {
   assert.match(
     appSource,
     /knowledge-detail-pane/,
@@ -448,8 +448,8 @@ test("Kanban card click scopes targeted selection to Issue/SPEC and preserves PR
   );
   assert.match(
     appSource,
-    /const prBaseline = normalizeKnowledgeKind\(state\.kind\) === "pr";[\s\S]{0,2200}?if \(prBaseline\) \{\s*renderKnowledgeBridge\(windowId\);\s*\} else if \(explicit\) \{\s*renderKnowledgeSelection/,
-    "expected PR selection to retain its baseline full render while Issue/SPEC use the targeted renderer",
+    /if \(explicit\) \{\s*renderKnowledgeSelection/,
+    "explicit selection uses the targeted renderer",
   );
   assert.doesNotMatch(
     appSource,
