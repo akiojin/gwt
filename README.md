@@ -755,6 +755,13 @@ unchanged.
   one from the CLI — a registered PM can retire an orphan or stand down itself
   without a GUI click.
 
+Ask your PM to consult another project's PM on the same machine, giving the
+other project's absolute path. Registered PMs use `pm.peer.send` for direct
+requests, replies, and notices; unread messages arrive at the next PM prompt.
+Both projects' **Reports** show the exchange, including unavailable peers and
+requests waiting past their deadline. Each PM decides and acts only within its
+own project; peer messages do not grant control over another project's agents.
+
 The design lives in SPEC
 [#3431](https://github.com/akiojin/gwt/issues/3431).
 
