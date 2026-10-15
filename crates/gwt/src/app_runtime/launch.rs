@@ -5159,6 +5159,11 @@ impl AppRuntime {
             success.initial_prompt_file,
             success.session_snapshot.as_ref(),
         );
+        if !self.pending_continue_work.contains_key(&window_id) {
+            if let Some(context) = feedback.as_ref() {
+                let _ = self.arm_issue_monitor_startup(&window_id, context);
+            }
+        }
         if let Some(operation_id) = self
             .pending_continue_work
             .get(&window_id)

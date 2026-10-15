@@ -9,13 +9,22 @@ from __future__ import annotations
 
 import datetime
 import json
+import multiprocessing
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import chroma_index_runner as runner
+
+
+def _hold_issue_build(db: str, fingerprint: str, started):
+    with runner.acquire_lock(Path(db) / "build", exclusive=True):
+        runner._issue_build_failure(Path(db), fingerprint, "full", "BUILD_INCOMPLETE", 0, 1)
+        started.set()
+        time.sleep(60)  # Parent kills this owned process after observing readiness.
 
 
 class IssueTtlTests(unittest.TestCase):
@@ -360,7 +369,79 @@ class IssueTtlTests(unittest.TestCase):
                     self.assertEqual(runner.action_index_issues_v2(**args)["error_code"], "REPAIR_STOPPED")
                 create.assert_not_called()
 
-    def test_interrupted_build_leaves_marker_and_stops_same_source(self):
+    def test_building_serves_previous_generation(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            self._write_cached_issue(cache, 1, "Published", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            self._write_cached_issue(cache, 1, "Pending", "body changed", [])
+            create = runner._make_chroma_collection_repairing
+
+            def inspect_active_build(*create_args, **kwargs):
+                health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
+                self.assertEqual(health["reason"], "building", health)
+                result = runner.action_search_multi_v2(
+                    **args, worktree_hash=None, query="Published", n_results=5, scopes=["issues"])
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["scopes"]["issues"]["state"], "stale", result)
+                self.assertEqual(result["issueResults"][0]["title"], "Published")
+                direct = runner.action_search_v2(
+                    **args, action="search-issues", worktree_hash=None,
+                    query="Published", n_results=5, no_auto_build=True)
+                self.assertTrue(direct["ok"], direct)
+                self.assertEqual(direct["issueResults"][0]["title"], "Published")
+                return create(*create_args, **kwargs)
+
+            with mock.patch.object(runner, "_make_chroma_collection_repairing", side_effect=inspect_active_build):
+                self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+
+    def test_build_started_after_recovery_probe_is_building(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            self._write_cached_issue(root / ".gwt/cache/issues/abc1234567890def", 1, "Published", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = root / "index/abc1234567890def/issues"
+            fingerprint = runner._read_issue_meta(db)["source_cache_fingerprint"]
+
+            def start_after_probe(_db):
+                runner._issue_build_failure(db, fingerprint, "full", "BUILD_INCOMPLETE", 0, 1)
+                return False
+
+            with mock.patch.object(runner, "_recover_issue_build", side_effect=start_after_probe):
+                health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
+            self.assertEqual(health["reason"], "building", health)
+            self.assertTrue(health["healthy"], health)
+
+    def test_status_recovers_sentinel_after_builder_process_dies(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            self._write_cached_issue(root / ".gwt/cache/issues/abc1234567890def", 1, "Published", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = root / "index/abc1234567890def/issues"
+            fingerprint = runner._read_issue_meta(db)["source_cache_fingerprint"]
+            ctx = multiprocessing.get_context("spawn")
+            started = ctx.Event()
+            process = ctx.Process(target=_hold_issue_build, args=(str(db), fingerprint, started))
+            process.start()
+            try:
+                self.assertTrue(started.wait(30), "builder did not acquire its lock")
+                self.assertEqual(runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])["reason"], "building")
+                process.terminate()
+                process.join(30)
+                self.assertFalse(process.is_alive())
+                health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
+                self.assertTrue(health["healthy"], health)
+                self.assertFalse((db / "repair.json").exists())
+            finally:
+                if process.is_alive():
+                    process.terminate()
+                process.join(30)
+
+    def test_interrupted_build_leaves_marker_and_next_build_recovers(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
             root = Path(tmp)
             self._write_cached_issue(root / ".gwt/cache/issues/abc1234567890def", 1, "First", "body", [])
@@ -371,10 +452,7 @@ class IssueTtlTests(unittest.TestCase):
             db = root / "index/abc1234567890def/issues"
             marker = runner._read_issue_repair(db)
             self.assertEqual(marker.get("last_error"), "BUILD_INCOMPLETE")
-            with mock.patch.object(runner, "_make_chroma_collection_repairing") as create:
-                self.assertEqual(runner.action_index_issues_v2(**args)["error_code"], "REPAIR_STOPPED")
-            create.assert_not_called()
-            self.assertTrue(runner.action_index_issues_v2(**args, repair=True)["ok"])
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
             self.assertFalse((db / "repair.json").exists())
 
     def test_incremental_reuses_unchanged_and_removes_deleted(self):

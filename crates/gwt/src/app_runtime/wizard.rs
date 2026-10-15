@@ -3132,7 +3132,7 @@ impl AppRuntime {
                             session_mode,
                             retryable,
                         );
-                    if committed && !retryable {
+                    if committed {
                         if let Some((window_id, identity, generation)) = fresh_execution {
                             let exact_window = self
                                 .window_lifecycle_generations

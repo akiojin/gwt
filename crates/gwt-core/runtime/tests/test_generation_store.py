@@ -1588,6 +1588,10 @@ class Phase71WorktreeViewPublicationTests(unittest.TestCase):
         self.assertTrue(result.get("ok"), result)
         self.assertIs(result.get("superseded"), True, result)
         self.assertIs(result.get("published"), False, result)
+        status = runner._explicit_file_index_v2_status(
+            REPO_HASH, WORKTREE_HASH, self.db_root
+        )
+        self.assertIn("build_progress", status["files"])
         self.assertEqual(self._head_path().read_bytes(), old_head)
         self.assertGreater(
             len(set((self._worktree_root() / "overlays").iterdir())),

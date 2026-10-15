@@ -15,14 +15,17 @@ import json
 import math
 import os
 import re
+import secrets
+import socket
 import stat
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
 
 def emit(payload: dict) -> None:
@@ -1621,7 +1624,7 @@ def file_embedding_cas_key(
 
 
 @contextlib.contextmanager
-def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
+def acquire_lock(db_path: Path, exclusive: bool = True, blocking: bool = True) -> Iterator[None]:
     """Cross-process file lock around a DB directory.
 
     Uses portalocker when available; falls back to fcntl on POSIX and
@@ -1635,8 +1638,14 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
         import portalocker  # type: ignore
 
         flag = portalocker.LOCK_EX if exclusive else portalocker.LOCK_SH
-        lock = portalocker.Lock(str(lock_path), mode="a+", flags=flag)
-        fh = lock.acquire()
+        if not blocking:
+            flag |= portalocker.LOCK_NB
+        lock = portalocker.Lock(str(lock_path), mode="a+", flags=flag,
+                                timeout=None if blocking else 0)
+        try:
+            fh = lock.acquire()
+        except portalocker.exceptions.LockException as error:
+            raise BlockingIOError(str(error)) from error
         try:
             yield
         finally:
@@ -1658,7 +1667,8 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
 
         fh = open(lock_path, "a+b")
         try:
-            mode = msvcrt.LK_LOCK  # always blocking; Windows lacks shared locks here
+            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+            fh.seek(0)
             msvcrt.locking(fh.fileno(), mode, 1)
             try:
                 yield
@@ -1676,7 +1686,8 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
 
     fh = open(lock_path, "a+b")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(fh, flags if blocking else flags | fcntl.LOCK_NB)
         try:
             yield
         finally:
@@ -3406,11 +3417,12 @@ def _materialize_file_artifact_pair(
     heavy_target: Optional[str] = None,
     progress_offset: int = 0,
     progress_total: Optional[int] = None,
+    on_checkpoint: Optional[Callable[[int], None]] = None,
 ) -> tuple[int, int, bool]:
     """Build one Base or Overlay artifact pair.
 
     Returns `(computed, cache_hits, yielded)`. A background build checkpoints
-    every `FILE_INDEX_V2_VECTOR_BATCH` documents and hands the host-wide heavy
+    after each document and hands the host-wide heavy
     lease back when a higher-priority claimant queues behind it (FR-418). The
     repo-scoped Embedding CAS is the checkpoint: every vector computed before
     the yield is already durable, so the follow-up run resolves it as a cache
@@ -3420,6 +3432,8 @@ def _materialize_file_artifact_pair(
     if _artifact_pair_metadata_is_verified(
         artifact_dir, records, descriptor_identity
     ):
+        if on_checkpoint is not None:
+            on_checkpoint(len(records))
         return 0, len(records), False
     artifact_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_dir = artifact_dir.parent / ".locks" / artifact_dir.name
@@ -3427,6 +3441,8 @@ def _materialize_file_artifact_pair(
         if _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
+            if on_checkpoint is not None:
+                on_checkpoint(len(records))
             return 0, len(records), False
         if not (len(records) == len(identities) == len(manifest_plans)):
             raise ValueError("file-index-v2 artifact plan length mismatch")
@@ -3452,8 +3468,12 @@ def _materialize_file_artifact_pair(
                 opened[bucket] = _make_file_index_v2_collection(
                     store, collection_name
                 )
-            for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
-                stop = min(start + FILE_INDEX_V2_VECTOR_BATCH, len(records))
+            # Issue #5431: a 16-document encode took 17.6 seconds on CPU,
+            # longer than a search can wait. Check priority after each
+            # non-interruptible encode; keep batching for foreground work.
+            checkpoint_batch = 1 if qos == "background" else FILE_INDEX_V2_VECTOR_BATCH
+            for start in range(0, len(records), checkpoint_batch):
+                stop = min(start + checkpoint_batch, len(records))
                 batch_records = records[start:stop]
                 batch_identities = identities[start:stop]
                 batch_started = time.monotonic()
@@ -3462,12 +3482,14 @@ def _materialize_file_artifact_pair(
                 )
                 computed += batch_computed
                 hits += batch_hits
+                if on_checkpoint is not None:
+                    on_checkpoint(stop)
                 if heavy_target is not None:
                     _write_heavy_progress(
                         heavy_target,
                         progress_offset + stop,
                         progress_total if progress_total is not None else len(records),
-                        FILE_INDEX_V2_VECTOR_BATCH,
+                        len(batch_records),
                         int((time.monotonic() - batch_started) * 1000),
                     )
                 manifest_entries.extend(
@@ -4686,6 +4708,23 @@ def _file_index_v2_yielded_result(
     }
 
 
+def _read_file_index_v2_build_progress(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        progress = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(progress, dict)
+        or progress.get("schema_version") != 1
+        or type(progress.get("done")) is not int
+        or type(progress.get("total")) is not int
+        or not 0 <= progress["done"] <= progress["total"]
+        or progress.get("phase") not in ("base", "overlay")
+    ):
+        return None
+    return progress
+
+
 def _action_index_files_protocol_v2(
     project_root: str,
     repo_hash: str,
@@ -4822,6 +4861,34 @@ def _action_index_files_protocol_v2_pinned(
         "build_state": "verified",
     }
     requested = len(base_records) + len(overlay_records)
+    progress_path = (
+        v2_root / "worktrees" / _safe_artifact_id(worktree_hash) / "build-progress.json"
+    )
+    progress = {
+        "schema_version": 1,
+        "base_generation_id": base_generation_id,
+        "overlay_generation_id": overlay_generation_id,
+        "done": 0,
+        "total": requested,
+        "phase": "base" if base_records else "overlay",
+        "resumable": True,
+    }
+    previous_progress = _read_file_index_v2_build_progress(progress_path)
+    if previous_progress is not None and all(
+        previous_progress.get(key) == progress[key]
+        for key in ("base_generation_id", "overlay_generation_id", "total")
+    ):
+        progress.update(previous_progress)
+
+    def checkpoint(done: int, phase: str) -> None:
+        # Cached batches are replayed into staging on resume. Do not make
+        # their already durable CAS progress appear to go backwards.
+        if done >= progress["done"]:
+            progress.update(done=done, phase=phase)
+        progress["updated_at"] = _file_index_timestamp()
+        _write_json_atomic(progress_path, progress)
+
+    checkpoint(0, progress["phase"])
     heavy_target = _heavy_target_stem(repo_hash, scope, worktree_hash)
     base_computed, base_hits, base_yielded = _materialize_file_artifact_pair(
         base_dir,
@@ -4835,6 +4902,7 @@ def _action_index_files_protocol_v2_pinned(
         heavy_target=heavy_target,
         progress_offset=0,
         progress_total=requested,
+        on_checkpoint=lambda done: checkpoint(done, "base"),
     )
     if base_yielded:
         return _file_index_v2_yielded_result(
@@ -4868,6 +4936,7 @@ def _action_index_files_protocol_v2_pinned(
         heavy_target=heavy_target,
         progress_offset=len(base_records),
         progress_total=requested,
+        on_checkpoint=lambda done: checkpoint(len(base_records) + done, "overlay"),
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
@@ -4925,6 +4994,9 @@ def _action_index_files_protocol_v2_pinned(
     }
     if not publication.get("ok"):
         return {**result, **publication, "ok": False}
+    if publication.get("published") or publication.get("already_active"):
+        with contextlib.suppress(OSError):
+            progress_path.unlink()
     result.update(publication)
     return result
 
@@ -4945,7 +5017,7 @@ def action_index_files_v2(
     Full mode builds into a resumable staging store and only replaces the
     active store after the staging build finished (Phase 70 FR-389/FR-390):
     the previous index keeps serving reads during the build, and a
-    background build yields at 16-document checkpoints when a
+    background build yields after the current document when a
     higher-priority claimant is pending on the heavy lease.
     """
     if file_index_protocol == "v2":
@@ -5176,8 +5248,9 @@ def _index_files_full_with_staging(
                     pending_paths.append(fpath)
 
             heavy_target = _heavy_target_stem(repo_hash, scope, worktree_hash)
-            for start in range(0, len(pending_paths), EMBED_CHECKPOINT_BATCH):
-                batch_paths = pending_paths[start : start + EMBED_CHECKPOINT_BATCH]
+            checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
+            for start in range(0, len(pending_paths), checkpoint_batch):
+                batch_paths = pending_paths[start : start + checkpoint_batch]
                 batch_started = time.monotonic()
                 newly_embedded += embed_documents_for_paths(batch_paths, root, collection)
                 done = len(staged_ids) + newly_embedded
@@ -5185,7 +5258,7 @@ def _index_files_full_with_staging(
                     heavy_target,
                     done,
                     total,
-                    EMBED_CHECKPOINT_BATCH,
+                    len(batch_paths),
                     int((time.monotonic() - batch_started) * 1000),
                 )
                 _write_continuation(
@@ -7502,6 +7575,21 @@ def _issue_build_failure(db_path: Path, fingerprint: str, mode: str,
             "repair": payload, "mode": mode}
 
 
+def _recover_issue_build(db_path: Path) -> bool:
+    """Recover an orphan sentinel under the build lock; return whether it is live."""
+    if _read_issue_repair(db_path).get("last_error") != "BUILD_INCOMPLETE":
+        return False
+    try:
+        with acquire_lock(db_path / "build", blocking=False):
+            # Re-read after locking: never erase a newer build's real failure.
+            if _read_issue_repair(db_path).get("last_error") == "BUILD_INCOMPLETE":
+                (db_path / "repair.json").unlink(missing_ok=True)
+        return False
+    except OSError:
+        # Contention or an unreadable lock cannot prove the builder died.
+        return True
+
+
 def _issue_status_v2(
     repo_hash: str,
     db_root: Optional[Path] = None,
@@ -7597,10 +7685,15 @@ def _issue_status_v2(
             ttl_secs = meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT) * 60
             status["ttl_remaining_seconds"] = max(0, int(ttl_secs - age))
     status["mode"] = meta.get("mode", "full")
+    if check_repair:
+        _recover_issue_build(db_path)
     repair_state = _read_issue_repair(db_path)
     if repair_state:
         status["repair"] = repair_state
-        if check_repair and repair_state.get("fingerprint") == source.get("fingerprint") and repair_state.get("failures", 0):
+        # A builder can create its sentinel after the recovery probe.
+        if check_repair and repair_state.get("last_error") == "BUILD_INCOMPLETE":
+            status.update(reason="building", building=True)
+        elif check_repair and repair_state.get("fingerprint") == source.get("fingerprint") and repair_state.get("failures", 0):
             status.update(reason="repair_stopped", healthy=False, repair_required=True, source_drift=False)
             status["mode"] = repair_state.get("mode", status["mode"])
     if (db_path / "cancel-requested").exists():
@@ -7618,10 +7711,30 @@ def action_index_issues_v2(
     mode: str = "full",
     repair: bool = False,
 ) -> dict:
+    db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
+    # Separate from the publication lock so readers keep using the active
+    # generation while staging is built. OS ownership ends even on process kill.
+    with acquire_lock(db_path / "build"):
+        if _read_issue_repair(db_path).get("last_error") == "BUILD_INCOMPLETE":
+            (db_path / "repair.json").unlink(missing_ok=True)
+        return _index_issues_v2_locked(repo_hash, project_root, db_root, respect_ttl,
+                                       ttl_minutes, qos, mode, repair)
+
+
+def _index_issues_v2_locked(
+    repo_hash: str,
+    project_root: str,
+    db_root: Optional[Path] = None,
+    respect_ttl: bool = False,
+    ttl_minutes: int = ISSUE_TTL_MINUTES_DEFAULT,
+    qos: str = "interactive",
+    mode: str = "full",
+    repair: bool = False,
+) -> dict:
     """Index GitHub Issues using the v2 layout. Respects TTL on demand.
 
-    Issue #4086 AC-2: the build embeds in `EMBED_CHECKPOINT_BATCH` batches.
-    A background build yields at the batch boundary while a higher-priority
+    Issue #4086 AC-2 / Issue #5431: background builds checkpoint after each
+    document and yield while a higher-priority
     claimant (a verification reservation) is pending on the heavy lease and
     leaves a resumable staging continuation; the next run resumes without
     re-embedding staged issues. Progress is published for AC-4.
@@ -7640,34 +7753,18 @@ def action_index_issues_v2(
               "cache_refresh_at": _issue_cache_refresh_meta(repo_hash).get("last_full_refresh")}
     fingerprint = source["fingerprint"]
     previous_failure = _read_issue_repair(db_path)
-    expected_interrupt = previous_failure.get("expected_budget_interruption", {})
-    known_budget_interrupt = (
-        previous_failure.get("last_error") == "BUILD_INCOMPLETE"
-        and previous_failure.get("fingerprint") == fingerprint
-        and isinstance(expected_interrupt, dict)
-        and expected_interrupt.get("fingerprint") == fingerprint
-        and bool(previous_failure.get("refresh_run_id"))
-        and expected_interrupt.get("run_id") == previous_failure.get("refresh_run_id")
-    )
-    if known_budget_interrupt:
-        # Consume this one known interruption without a repair-free interval.
-        # A crash in the health probe belongs to the new run and must stop.
-        _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(issues))
-    if (not known_budget_interrupt and previous_failure.get("fingerprint") == fingerprint
+    if (previous_failure.get("fingerprint") == fingerprint
             and previous_failure.get("failures", 0)):
         return {"ok": False, "scope": "issues", "error_code": "REPAIR_STOPPED",
                 "error": "issues rebuild stopped after failure for the same source; use explicit repair",
                 "repair": previous_failure, "mode": previous_failure.get("mode", mode)}
-    health = _issue_status_v2(repo_hash, db_root=db_root, source=source,
-                              check_repair=not known_budget_interrupt)
+    health = _issue_status_v2(repo_hash, db_root=db_root, source=source)
     if respect_ttl and not repair and health.get("healthy"):
         meta = _read_issue_meta(db_path) or {}
         last = _parse_iso(meta.get("last_full_refresh", ""))
         if last is not None:
             age = (_now_utc() - last).total_seconds()
             if age < ttl_minutes * 60:
-                if known_budget_interrupt:
-                    (db_path / "repair.json").unlink(missing_ok=True)
                 return {"ok": True, "skipped": True, "scope": "issues",
                         "mode": meta.get("mode", "full"),
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age)}
@@ -7686,8 +7783,8 @@ def action_index_issues_v2(
     new_entries = [{"path": str(issue["number"]),
                     "content_hash": _issue_source_fingerprint([issue])} for issue in issues]
 
-    # Persist before touching staging so process death cannot restart the
-    # same source indefinitely. Normal yield and verified success clear it.
+    # Persist before staging. The held build lock distinguishes a live build
+    # from an orphan left by process death. Normal yield/success clear it.
     _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(issues))
 
     emit_progress(
@@ -7737,10 +7834,11 @@ def action_index_issues_v2(
                 pending: List[Dict[str, Any]] = [
                     issue for issue in issues if str(issue.get("number", 0)) not in staged_ids
                 ]
-                for start in range(0, len(pending), EMBED_CHECKPOINT_BATCH):
+                checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
+                for start in range(0, len(pending), checkpoint_batch):
                     if (db_path / "cancel-requested").exists():
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-                    batch_issues = pending[start : start + EMBED_CHECKPOINT_BATCH]
+                    batch_issues = pending[start : start + checkpoint_batch]
                     batch_started = time.monotonic()
                     ids: List[str] = []
                     documents: List[str] = []
@@ -7776,7 +7874,7 @@ def action_index_issues_v2(
                         heavy_target,
                         done,
                         total,
-                        EMBED_CHECKPOINT_BATCH,
+                        len(batch_issues),
                         int((time.monotonic() - batch_started) * 1000),
                     )
                     emit_progress(
@@ -8299,6 +8397,10 @@ def action_search_v2(
         health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
     needs_build = not health["exists"] or health.get("repair_required", False)
+    if scope == "issues" and health.get("building") and (
+        health.get("healthy") or health.get("source_drift")
+    ):
+        needs_build = False
     needs_spec_refresh = scope == "specs" and health.get("healthy", False) and not no_auto_build
 
     if needs_build or needs_spec_refresh:
@@ -8436,6 +8538,8 @@ def _classify_scope_for_search(
         health = _issue_status_v2(repo_hash, db_root=db_root)
         if not health.get("exists"):
             return "missing", health
+        if health.get("building") and (health.get("healthy") or health.get("source_drift")):
+            return "stale", health
         if health.get("healthy"):
             if health.get("ttl_remaining_seconds") == 0:
                 return "stale", health
@@ -9123,6 +9227,7 @@ def _action_search_multi_v2_pinned(
     whole batch or silently returning empty results (FR-387 / FR-388). The
     Rust caller owns repair scheduling and the stale refresh queue.
     """
+    model_load_started = _MODEL_LOAD_MS
     valid_scopes = {
         "issues",
         "specs",
@@ -9166,6 +9271,7 @@ def _action_search_multi_v2_pinned(
                 )
                 if state in ("missing", "corrupt"):
                     unresolved.append(scope)
+                    legacy_file_selections[scope] = {"state": state, **health}
                     continue
                 legacy_file_selections[scope] = {
                     "state": "stale",
@@ -9173,7 +9279,7 @@ def _action_search_multi_v2_pinned(
                     "fallback_source": "legacy",
                     "health": health,
                 }
-            if unresolved:
+            if unresolved and all(scope in unresolved for scope in scopes):
                 return {
                     "ok": False,
                     "error_code": "INDEX_NOT_READY",
@@ -9299,7 +9405,7 @@ def _action_search_multi_v2_pinned(
                 payload[key] = value
     payload["scopes"] = scope_states
     payload["scope_results"] = scope_results
-    payload["model_load_ms"] = _MODEL_LOAD_MS
+    payload["model_load_ms"] = _MODEL_LOAD_MS - model_load_started
     if stale_scopes:
         payload["stale_scopes"] = stale_scopes
     return payload
@@ -9396,6 +9502,10 @@ def _explicit_file_index_v2_status_pinned(
         repair_corruption=False,
     )
     view = selection["view"]
+    progress = _read_file_index_v2_build_progress(
+        resolve_file_index_v2_root(repo_hash, db_root)
+        / "worktrees" / _safe_artifact_id(worktree_hash) / "build-progress.json"
+    )
     if view is not None:
         result: Dict[str, Dict[str, Any]] = {}
         for scope in ("files", "files-docs"):
@@ -9411,6 +9521,8 @@ def _explicit_file_index_v2_status_pinned(
             }
             if selection.get("fallback_source"):
                 status["fallback_source"] = selection["fallback_source"]
+            if progress is not None:
+                status["build_progress"] = progress
             result[scope] = status
         return result
 
@@ -9435,6 +9547,10 @@ def _explicit_file_index_v2_status_pinned(
                 "reason": selection["reason"],
             }
         result[scope] = legacy
+        if progress is not None:
+            result[scope]["build_progress"] = progress
+            if selection["reason"] == "view_head_missing":
+                result[scope]["reason"] = "build_incomplete"
     return result
 
 
@@ -9500,6 +9616,167 @@ def action_status_v2(
 # =====================================================================
 
 
+def _read_search_worker_message(connection: socket.socket) -> Dict[str, Any]:
+    """Read one bounded ASCII/UTF-8 JSON line from the local transport."""
+    frame = bytearray()
+    while len(frame) <= 16 * 1024 * 1024:
+        chunk = connection.recv(65536)
+        if not chunk:
+            raise ConnectionError("search worker connection closed")
+        frame.extend(chunk)
+        if len(frame) > 16 * 1024 * 1024:
+            break
+        if b"\n" in frame:
+            line, _, remainder = frame.partition(b"\n")
+            if remainder:
+                raise ValueError("unexpected data after search worker request")
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise ValueError("search worker message must be an object")
+            return payload
+    raise ValueError("search worker message is too large")
+
+
+def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
+    """Reuse one model process while Rust retains its normal search lease."""
+    qos = args.qos or "interactive"
+    identity = _sha256_json({
+        "script": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "python": str(Path(sys.executable).resolve()),
+        "prefix": str(Path(sys.prefix).resolve()),
+        "fake_embedding": os.environ.get("GWT_INDEX_FAKE_EMBEDDING", ""),
+        "qos": qos,
+    })
+    worker_dir = _gwt_home() / "runtime" / "search-workers" / identity
+    endpoint_path = worker_dir / "endpoint.json"
+
+    def connect():
+        endpoint = json.loads(endpoint_path.read_text(encoding="utf-8"))
+        port, token = endpoint["port"], endpoint["token"]
+        if not isinstance(port, int) or not isinstance(token, str):
+            raise ValueError("invalid search worker endpoint")
+        connection = socket.create_connection(("127.0.0.1", port), timeout=1)
+        connection.settimeout(None)  # Rust owns the request deadline.
+        return connection, token
+
+    # Only startup is locked: the existing host-wide heavy lease serializes
+    # searches. Never replay a request after sending it to a worker.
+    with acquire_lock(worker_dir):
+        try:
+            connection, token = connect()
+        except (OSError, ValueError, KeyError, TypeError):
+            process = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()),
+                 "--action", "serve-search-worker", "--worker-dir", str(worker_dir),
+                 "--qos", qos],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    connection, token = connect()
+                    break
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        if process.poll() is None:
+                            process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        raise RuntimeError("search worker failed to start") from error
+                    time.sleep(0.1)
+
+    with connection:
+        request = {"token": token, "args": vars(args)}
+        connection.sendall(json.dumps(request, ensure_ascii=True).encode("ascii") + b"\n")
+        return _read_search_worker_message(connection)
+
+
+def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
+    """Serve search-multi only; release model memory after idle expiry."""
+    worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    worker_dir.chmod(0o700)
+    endpoint_path = worker_dir / "endpoint.json"
+    token = secrets.token_hex(32)
+    pid = os.getpid()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        server.settimeout(idle_timeout)
+        _write_json_atomic(endpoint_path, {
+            "pid": pid, "port": server.getsockname()[1], "token": token,
+        })
+        endpoint_path.chmod(0o600)
+        try:
+            while True:
+                try:
+                    connection, _ = server.accept()
+                except socket.timeout:
+                    return 0
+                with connection:
+                    completed = threading.Event()
+                    try:
+                        connection.settimeout(10)
+                        request = _read_search_worker_message(connection)
+                        supplied_token = request.get("token")
+                        arguments = request.get("args")
+                        if (
+                            not isinstance(supplied_token, str)
+                            or not secrets.compare_digest(supplied_token, token)
+                            or not isinstance(arguments, dict)
+                            or arguments.get("action") != "search-multi"
+                            or not arguments.get("repo_hash")
+                            or not arguments.get("query")
+                        ):
+                            raise ValueError("invalid search worker request")
+                        connection.settimeout(None)
+
+                        def cancel_on_disconnect(connection=connection, completed=completed):
+                            try:
+                                connection.recv(1)
+                            except OSError:
+                                pass
+                            if not completed.is_set():
+                                # A killed/timed-out Rust caller has dropped its
+                                # heavy lease. No embedding may outlive it.
+                                os._exit(1)
+
+                        threading.Thread(target=cancel_on_disconnect, daemon=True).start()
+                        payload = action_search_multi_v2(
+                            repo_hash=arguments["repo_hash"],
+                            worktree_hash=arguments.get("worktree_hash") or None,
+                            project_root=arguments.get("project_root") or None,
+                            query=arguments["query"],
+                            n_results=arguments.get("n_results", 10),
+                            scopes=[scope.strip() for scope in arguments.get("scopes", "").split(",") if scope.strip()],
+                            match_mode=arguments.get("match_mode", "semantic"),
+                            db_root=Path(arguments["db_root"]) if arguments.get("db_root") else None,
+                            file_index_protocol=arguments.get("file_index_protocol", "legacy"),
+                        )
+                    except ValueError as error:
+                        payload = {"ok": False, "error_code": "BAD_ARGS", "error": str(error)}
+                    except Exception as error:
+                        payload = {"ok": False, "error_code": "RUNTIME_ERROR", "error": str(error)}
+                    finally:
+                        completed.set()
+                    payload["worker_pid"] = pid
+                    try:
+                        connection.sendall(json.dumps(payload, ensure_ascii=True).encode("ascii") + b"\n")
+                    except OSError:
+                        pass
+        finally:
+            # A stale worker must never erase a replacement worker's endpoint.
+            with contextlib.suppress(OSError, ValueError):
+                if json.loads(endpoint_path.read_text(encoding="utf-8")).get("pid") == pid:
+                    endpoint_path.unlink()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="gwt ChromaDB index helper")
     parser.add_argument(
@@ -9527,9 +9804,11 @@ def parse_args() -> argparse.Namespace:
             "index-works",
             "search-works",
             "search-multi",
+            "serve-search-worker",
         ],
     )
     parser.add_argument("--project-root", default="")
+    parser.add_argument("--worker-dir", default="")
     parser.add_argument("--db-path", default="")
     parser.add_argument("--query", default="")
     parser.add_argument("--n-results", type=int, default=10)
@@ -9765,6 +10044,11 @@ def main() -> int:
         # action can trigger the lazy model import.
         configure_qos_threads(args.qos or default_qos_for_action(action))
 
+        if action == "serve-search-worker":
+            if not args.worker_dir:
+                raise ValueError("--worker-dir is required")
+            return _serve_search_worker(Path(args.worker_dir))
+
         # Issue #2933: when the caller omitted --repo-hash (e.g. an agent pane
         # whose launch env did not export GWT_REPO_HASH / GWT_WORKTREE_HASH)
         # but did pass --project-root, derive the hashes here so the v2 search
@@ -9778,6 +10062,22 @@ def main() -> int:
 
         # Phase 8: when --repo-hash is supplied, dispatch the v2 action layer.
         if args.repo_hash:
+            if action == "search-multi":
+                if not args.query:
+                    emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
+                    return 2
+                try:
+                    payload = _search_worker_request(args)
+                except (OSError, ValueError, RuntimeError):
+                    payload = {
+                        "ok": False,
+                        "error_code": "SEARCH_UNAVAILABLE",
+                        "retryable": True,
+                        "reason": "search worker transport failed",
+                        "retry_after_ms": 250,
+                    }
+                emit(payload)
+                return 0 if payload.get("ok") else 1
             return _dispatch_v2(action, args)
 
         if action == "probe":

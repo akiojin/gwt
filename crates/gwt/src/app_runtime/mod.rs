@@ -1768,6 +1768,8 @@ pub struct AppRuntime {
     pub(crate) pending_launch_feedback_contexts: HashMap<String, LaunchFeedbackContext>,
     pub(crate) pending_launch_delivery_acks:
         HashMap<String, issue_monitor_delivery_ack::PendingLaunchDeliveryAck>,
+    pub(crate) pending_monitor_startups:
+        HashMap<String, issue_monitor_delivery_ack::MonitorStartupWatch>,
     pub(crate) pending_launch_completions: HashMap<String, launch::PendingLaunchCompletion>,
     /// SPEC #3200 FR-052: daemon launch requests are at-least-once deliveries.
     /// Remember materialization and terminal ACK state by delivery id so a
@@ -2341,14 +2343,13 @@ fn load_mutate_and_persist_issue_monitor_state<T: Default>(
     (monitor, result.unwrap_or_default())
 }
 
-/// Rebase the GUI observer on the latest committed prefs, apply `mutation`,
-/// and durably commit the result under the GUI-local budget.
+/// Prepare a GUI proposal without the writer lock, then commit only if its
+/// complete source snapshot is still current, under the GUI-local budget.
 ///
 /// Issue #4045: a failed commit — whether the budget expired while waiting
-/// for the lock (the closure never ran) or during the durable rename (the
-/// closure already ran) — restores `monitor` from canonical disk state and
-/// returns the error. The caller never keeps a mutation disk never saw, and
-/// decides whether to retry (scans simply pick it up on the next tick).
+/// for the lock or during the durable rename — restores `monitor` from
+/// canonical disk state and returns the error. The caller never keeps a
+/// mutation disk never saw.
 fn rebase_mutate_and_persist_issue_monitor_state<T>(
     prefs_path: &Path,
     monitor: &mut gwt::IssueMonitorState,
@@ -2357,21 +2358,35 @@ fn rebase_mutate_and_persist_issue_monitor_state<T>(
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         std::time::Instant::now() + local_issue_monitor_prefs_timeout(),
     );
-    let mut mutation = Some(mutation);
-    let mut result = None;
     let recovery_baseline = monitor.prefs();
-    let transaction =
-        gwt::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
-            monitor.rebase_gui_observer_prefs(disk);
-            let apply = mutation
-                .take()
-                .expect("issue monitor prefs mutation runs once");
-            result = Some(apply(monitor));
-            *disk = monitor.prefs();
-        });
+    let transaction = (|| {
+        let observed = match gwt::load_issue_monitor_prefs(prefs_path) {
+            Ok(prefs) => prefs,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                gwt::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |_| {})?
+                    .0
+            }
+            Err(error) => return Err(error),
+        };
+        monitor.rebase_gui_observer_prefs(&observed);
+        // Scan callbacks read usage rollouts, Git and owner ledgers. They are
+        // proposals: no writer lock may span those reads. Compare the complete
+        // source snapshot at commit so a concurrent control is never lost.
+        let result = mutation(monitor);
+        let proposed = monitor.prefs();
+        gwt::try_mutate_issue_monitor_prefs(prefs_path, |disk| {
+            if *disk != observed {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Issue Monitor GUI proposal snapshot changed before commit",
+                ));
+            }
+            *disk = proposed;
+            Ok(result)
+        })
+    })();
     match transaction {
-        Ok(_) => result
-            .ok_or_else(|| std::io::Error::other("issue monitor GUI prefs mutation did not run")),
+        Ok((_, result)) => Ok(result),
         Err(error) => {
             let prefs = gwt::load_issue_monitor_prefs(prefs_path)
                 .unwrap_or_else(|_| recovery_baseline.clone());
@@ -2411,6 +2426,86 @@ fn try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence<T>(
             *monitor =
                 gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
             Err(error)
+        }
+    }
+}
+
+/// Only scan preparation may perform slow observations. Keep claim-attempt and
+/// result transitions on the atomic helper above; a scan can retry its proposal.
+fn prepare_and_persist_issue_monitor_scan_without_authority_fence<T>(
+    prefs_path: &Path,
+    monitor: &mut gwt::IssueMonitorState,
+    mut mutation: impl FnMut(&mut gwt::IssueMonitorState) -> T,
+) -> std::io::Result<T> {
+    let _deadline = gwt_core::operation_deadline::current().is_none().then(|| {
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + local_issue_monitor_prefs_timeout(),
+        )
+    });
+    let recovery_baseline = monitor.prefs();
+    // Each attempt keeps the original canvas/read observations, never the
+    // mutations of a rejected proposal or a prefs-only reconstruction.
+    let preparation_baseline = monitor.clone();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let transaction = (|| {
+            // The commit repeats this authority check under the writer lock.
+            // This first check avoids preparing work for an existing daemon.
+            if !matches!(
+                gwt::load_issue_monitor_authority_fence(prefs_path)?,
+                gwt::IssueMonitorAuthorityFenceState::Missing
+            ) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Issue Monitor daemon authority fence appeared before local fallback commit",
+                ));
+            }
+            let observed = gwt::load_issue_monitor_prefs(prefs_path)?;
+            *monitor = preparation_baseline.clone();
+            monitor.rebase_gui_observer_prefs(&observed);
+            let result = mutation(monitor);
+            let proposed = monitor.prefs();
+            // A long scan's budget does not grant a long writer-lock wait.
+            let _commit_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                gwt_core::operation_deadline::now() + std::time::Duration::from_secs(1),
+            );
+            gwt::try_mutate_issue_monitor_prefs_without_authority_fence(prefs_path, |disk| {
+                if *disk != observed {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "Issue Monitor GUI proposal snapshot changed before commit",
+                    ));
+                }
+                *disk = proposed;
+                Ok(result)
+            })
+        })();
+        match transaction {
+            Ok((_prefs, result)) => return Ok(result),
+            Err(error) => {
+                let prefs = gwt::load_issue_monitor_prefs(prefs_path)
+                    .unwrap_or_else(|_| recovery_baseline.clone());
+                *monitor =
+                    gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+                let retryable = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                );
+                if attempts >= 3
+                    || !retryable
+                    || !matches!(
+                        gwt::load_issue_monitor_authority_fence(prefs_path),
+                        Ok(gwt::IssueMonitorAuthorityFenceState::Missing)
+                    )
+                    || gwt_core::operation_deadline::ensure_remaining(
+                        "Issue Monitor scan commit retry",
+                    )
+                    .is_err()
+                {
+                    return Err(error);
+                }
+            }
         }
     }
 }
@@ -3939,70 +4034,83 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     };
     #[cfg(test)]
     run_scheduled_scan_after_lease_before_commit_test_hook();
-    let commit = try_rebase_mutate_and_persist_issue_monitor_state_without_authority_fence(
-        &prefs_path,
-        &mut monitor,
-        |latest| {
-            latest.refresh_agent_capacity(project_root);
-            latest.expire_stale_unbound_launches(now);
-            // Issue #3883 AC-2/AC-3: restore tracking for agent windows that
-            // are still on the canvas, inside the transaction that persists
-            // this scan. Same store, same generation as the restart restore
-            // this closure just rebased on — a separate transaction was the
-            // hole: it wrote durable state ahead of the authority probe and
-            // the `enabled` gate above, so a live daemon or a disabled monitor
-            // got a fork instead of a deferral.
-            //
-            // Ordered before the candidate pass below on purpose:
-            // `record_candidate` reads `launched_windows`, so a re-adopted
-            // Issue is recorded as Launched and never re-enters the queue.
-            if let (Some(project_tab_id), Some(live_window_ids)) =
-                (expected_project_tab_id, live_window_ids)
-            {
-                let reconciliation =
-                    latest.reconcile_launch_bindings(project_tab_id, live_window_ids, now);
-                if !reconciliation.readopted.is_empty() {
-                    tracing::warn!(
-                        issues = ?reconciliation.readopted,
-                        "issue monitor recovered launches whose agent windows were still running"
-                    );
-                }
+    let prepare = |latest: &mut gwt::IssueMonitorState| {
+        latest.refresh_agent_capacity(project_root);
+        latest.expire_stale_unbound_launches(now);
+        // Issue #3883 AC-2/AC-3: restore tracking for agent windows that
+        // are still on the canvas, inside the transaction that persists
+        // this scan. Same store, same generation as the restart restore
+        // this closure just rebased on — a separate transaction was the
+        // hole: it wrote durable state ahead of the authority probe and
+        // the `enabled` gate above, so a live daemon or a disabled monitor
+        // got a fork instead of a deferral.
+        //
+        // Ordered before the candidate pass below on purpose:
+        // `record_candidate` reads `launched_windows`, so a re-adopted
+        // Issue is recorded as Launched and never re-enters the queue.
+        if let (Some(project_tab_id), Some(live_window_ids)) =
+            (expected_project_tab_id, live_window_ids)
+        {
+            let reconciliation =
+                latest.reconcile_launch_bindings(project_tab_id, live_window_ids, now);
+            if !reconciliation.readopted.is_empty() {
+                tracing::warn!(
+                    issues = ?reconciliation.readopted,
+                    "issue monitor recovered launches whose agent windows were still running"
+                );
             }
-            if let Some(loaded) = &loaded_for_commit {
-                gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
+        }
+        if let Some(loaded) = &loaded_for_commit {
+            gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
+                latest,
+                loaded,
+                project_root,
+                expected_project_tab_id,
+                now,
+            );
+            if latest.config.enabled {
+                latest.set_gui_connected(true);
+            }
+            if let Some((monitor_owner, observations)) = &local_claim_proposal {
+                prepare_local_issue_monitor_claim_proposals(
                     latest,
                     loaded,
-                    project_root,
-                    expected_project_tab_id,
+                    monitor_owner,
                     now,
+                    observations,
                 );
-                if latest.config.enabled {
-                    latest.set_gui_connected(true);
-                }
-                if let Some((monitor_owner, observations)) = &local_claim_proposal {
-                    prepare_local_issue_monitor_claim_proposals(
-                        latest,
-                        loaded,
-                        monitor_owner,
-                        now,
-                        observations,
-                    );
-                }
             }
-            // Issue #4084 AC-2/AC-3/AC-4: release the idle windows inside the
-            // same transaction that persists this scan, after re-adoption has
-            // restored every binding a live window still owns.
-            if window_snapshot.is_some() {
-                latest.reconcile_idle_windows(&idle_settlements, now);
-            }
-            record_issue_monitor_scan_failures(latest, now, merge_reconciliation_error, Vec::new());
-            if let Some(error) = completion_probe_error {
-                latest.record_scan_error(now, error);
-            }
-        },
+        }
+        // Issue #4084 AC-2/AC-3/AC-4: release the idle windows inside the
+        // same transaction that persists this scan, after re-adoption has
+        // restored every binding a live window still owns.
+        if window_snapshot.is_some() {
+            latest.reconcile_idle_windows(&idle_settlements, now);
+        }
+        record_issue_monitor_scan_failures(
+            latest,
+            now,
+            merge_reconciliation_error.clone(),
+            Vec::new(),
+        );
+        if let Some(error) = &completion_probe_error {
+            latest.record_scan_error(now, error);
+        }
+    };
+    // The helper retries short contention and stale snapshots using these
+    // observations, without another GitHub enumeration or scheduled tick.
+    let commit = prepare_and_persist_issue_monitor_scan_without_authority_fence(
+        &prefs_path,
+        &mut monitor,
+        prepare,
     );
     if let Err(error) = commit {
-        if error.kind() == std::io::ErrorKind::WouldBlock {
+        if error.kind() == std::io::ErrorKind::WouldBlock
+            && !matches!(
+                gwt::load_issue_monitor_authority_fence(&prefs_path),
+                Ok(gwt::IssueMonitorAuthorityFenceState::Missing)
+            )
+        {
             return Ok(ScheduledIssueMonitorScanOutcome::DeferredToLiveDaemon);
         }
         return Err(format!(
@@ -4470,6 +4578,7 @@ impl AppRuntime {
             pending_update_resume_notice: None,
             pending_launch_feedback_contexts: HashMap::new(),
             pending_launch_delivery_acks: HashMap::new(),
+            pending_monitor_startups: HashMap::new(),
             pending_launch_completions: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_launch_preparations: HashSet::new(),
@@ -5873,15 +5982,11 @@ impl AppRuntime {
             message.to_string()
         };
         if let Some(delivery_id) = delivery_id {
-            let fresh_execution = (!retryable)
-                .then(|| {
-                    self.failed_fresh_execution_monitor_candidate(
-                        project_root,
-                        issue_number,
-                        delivery_id,
-                    )
-                })
-                .flatten();
+            let fresh_execution = self.failed_fresh_execution_monitor_candidate(
+                project_root,
+                issue_number,
+                delivery_id,
+            );
             self.issue_monitor_launch_deliveries.insert(
                 delivery_id.to_string(),
                 IssueMonitorLaunchDeliveryState::LaunchFailed {
@@ -5942,9 +6047,7 @@ impl AppRuntime {
         delivery_id: &str,
     ) -> Option<(String, Box<gwt_agent::SessionExecutionIdentity>, u64)> {
         if let Some(IssueMonitorLaunchDeliveryState::LaunchFailed {
-            retryable: false,
-            fresh_execution,
-            ..
+            fresh_execution, ..
         }) = self.issue_monitor_launch_deliveries.get(delivery_id)
         {
             return fresh_execution.clone();
@@ -6181,7 +6284,7 @@ impl AppRuntime {
             retryable,
             monitor,
             committed,
-            retain_delivery: retain_delivery || (!retryable && error.is_some()),
+            retain_delivery: retain_delivery || error.is_some(),
             error,
             status: None,
             defer_wake: false,
@@ -6304,7 +6407,7 @@ impl AppRuntime {
         } else if let Some(delivery_id) = delivery_id {
             if !retain_delivery {
                 self.issue_monitor_launch_deliveries.remove(delivery_id);
-            } else if !retryable {
+            } else {
                 let fresh_execution = self.failed_fresh_execution_monitor_candidate(
                     project_root,
                     issue_number,
@@ -6315,7 +6418,7 @@ impl AppRuntime {
                     IssueMonitorLaunchDeliveryState::LaunchFailed {
                         message: message.to_string(),
                         session_mode: gwt_agent::SessionMode::Normal,
-                        retryable: false,
+                        retryable,
                         fresh_execution,
                     },
                 );
@@ -6373,10 +6476,16 @@ impl AppRuntime {
         };
         !prefs.pending_launch_deliveries.iter().any(|delivery| {
             delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
-        }) && prefs
+        }) && (prefs
             .failed_issues
             .iter()
             .any(|failed| failed.issue_number == issue_number && failed.message == message)
+            || prefs.autonomous_records.iter().any(|record| {
+                record.issue_number == issue_number
+                    && record.retry_not_before.is_some()
+                    && record.phase == gwt::AutonomousPhase::Idle
+                    && record.last_failure_message.as_deref() == Some(message)
+            }))
     }
 
     #[cfg(test)]
@@ -14268,6 +14377,7 @@ impl AppRuntime {
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.forget_pm_agent_idle_window(window_id);
         self.invalidate_launch_delivery_ack(window_id);
+        self.pending_monitor_startups.remove(window_id);
         self.pending_launch_completions.remove(window_id);
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);

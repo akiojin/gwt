@@ -601,8 +601,15 @@ mod tests {
                 "files": {
                     "healthy": false,
                     "repair_required": true,
-                    "reason": "manifest_missing",
-                    "document_count": 3
+                    "reason": "build_incomplete",
+                    "document_count": 0,
+                    "build_progress": {
+                        "done": 16,
+                        "total": 64,
+                        "phase": "base",
+                        "updated_at": "2026-10-15T00:00:00Z",
+                        "resumable": true
+                    }
                 }
             }
         });
@@ -610,7 +617,8 @@ mod tests {
         render_index_status(&mut out, &report, &payload);
         assert!(out.contains("runtime: ready asset=cccccccccccccccc smoke=passed"));
         assert!(out
-            .contains("files: unhealthy reason=manifest_missing documents=3 repair_required=true"));
+            .contains("files: unhealthy reason=build_incomplete documents=0 repair_required=true"));
+        assert!(out.contains("files: build phase=base done=16 total=64 resumable=true"));
     }
 
     #[test]

@@ -8,11 +8,12 @@ const titleBody = appSource.match(/function windowDisplayTitle\(windowData\)\s*\
 const titleFromApp = new Function("windowData", "isAgentWindowPreset", "PM_WINDOW_TITLE", titleBody);
 const windowDisplayTitle = data => titleFromApp(data, preset => ["agent", "claude", "codex"].includes(preset), "Project Manager");
 
-async function fixture({ isMounted = () => true } = {}) {
+async function fixture({ isMounted = () => true, storage } = {}) {
   const { createUiStateStore } = await import("../ui-state-store.js");
   const model = createUiStateStore({ catalog: { windows: [], version: 0 } });
   const { createAgentsSurface } = await import("../agents-surface.js");
   const { document, window } = parseHTML("<main></main>");
+  Object.defineProperty(window, "localStorage", { configurable: true, get: () => storage });
   const mounted = [], focused = [], layouts = [];
   const previews = new Set();
   const surface = createAgentsSurface({ document, windowCatalogModel: model, windowDisplayTitle,
@@ -99,6 +100,38 @@ test("Agents includes off-canvas agents, excludes PM and clamps the column spin 
   assert.equal(document.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(4, minmax(0, 1fr))");
   setWindows(agents.slice(0, 1));
   assert.equal(document.querySelectorAll(".agent-tile").length, 1);
+});
+
+test("Agents restores Columns when recreated and normalizes saved values", async () => {
+  const saved = new Map();
+  const storage = { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) };
+  const first = await fixture({ storage });
+  const columns = first.surface.element.querySelector("input");
+  assert.equal(columns.value, "2", "missing preference keeps the existing default");
+  columns.value = "3";
+  columns.dispatchEvent(new first.window.Event("input"));
+  first.surface.dispose();
+  const restored = await fixture({ storage });
+  assert.equal(restored.surface.element.querySelector("input").value, "3");
+  assert.equal(restored.surface.element.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(3, minmax(0, 1fr))");
+  restored.surface.dispose();
+  for (const [value, expected] of [["0", "1"], ["9", "4"], ["invalid", "1"]]) {
+    saved.set("gwt:ui:agent-columns", value);
+    const current = await fixture({ storage });
+    assert.equal(current.surface.element.querySelector("input").value, expected);
+    current.surface.dispose();
+  }
+});
+
+test("Agents keeps Columns usable when browser storage is unavailable", async () => {
+  const storage = { getItem() { throw new Error("unavailable"); }, setItem() { throw new Error("unavailable"); } };
+  const { surface, window } = await fixture({ storage });
+  const columns = surface.element.querySelector("input");
+  assert.equal(columns.value, "2");
+  columns.value = "3";
+  columns.dispatchEvent(new window.Event("input"));
+  assert.equal(surface.element.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(3, minmax(0, 1fr))");
+  surface.dispose();
 });
 
 test("a second pane shares the agent selection as a readonly preview and cleans up subscriptions", async () => {
