@@ -96,7 +96,7 @@ fn cancel_preserves_hold_even_when_the_caller_is_autonomous() {
         &mut backend,
         |prompt| {
             assert!(prompt.contains("tab-1::agent-2"));
-            assert!(prompt.contains("無料"));
+            assert!(prompt.contains("free"));
             assert!(prompt.contains("/proven/codex-home"));
             assert!(prompt.contains("PROFILE"));
             assert!(prompt.contains(CLAUDE_NOTICE));

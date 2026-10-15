@@ -846,7 +846,7 @@ fn red_83_dispatch_spec_list_filters_phase() {
     );
     assert_eq!(code, 0);
     let out = String::from_utf8(env.stdout.clone()).unwrap();
-    assert!(out.contains("#2"));
+    assert!(out.starts_with("Issue #2"), "{out}");
     assert!(out.contains("impl two"));
     assert!(!out.contains("draft one"));
     assert!(!out.contains("done three"));
@@ -1376,6 +1376,7 @@ fn red_102_dispatch_issue_linked_prs_is_cache_first() {
         "warm cache path must not re-fetch linked PRs"
     );
     let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.starts_with("PR #10"), "{out}");
     assert!(out.contains("Cached linked PR"));
     assert!(!out.contains("Fresh linked PR"));
 }

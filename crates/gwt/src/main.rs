@@ -3225,7 +3225,6 @@ mod tests {
             allowed_labels: Vec::new(),
             label_excluded_count: 0,
             label_excluded_issues: Vec::new(),
-            auto_apply_updates: false,
             enabled: true,
             state: "idle".to_string(),
             queue_len: 1,
@@ -3809,6 +3808,7 @@ mod tests {
             dynamic_title: None,
             dynamic_title_detail: None,
             agent_id: None,
+            agent_name: None,
             agent_color: None,
             worktree_form: gwt::WindowWorktreeForm::Unknown,
             tab_group_id: None,
@@ -5057,11 +5057,15 @@ mod tests {
             &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
             &gwt::IssueMonitorPrefs {
                 autonomous_mode: true,
-                auto_apply_updates: Some(true),
                 ..Default::default()
             },
         )
         .unwrap();
+        let legacy_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&legacy_path).unwrap()).unwrap();
+        legacy["auto_apply_updates"] = serde_json::json!(true);
+        fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let config = gwt_core::paths::gwt_config_path();
         fs::create_dir_all(config.parent().unwrap()).unwrap();
         fs::write(config, "auto_apply_updates = false\n").unwrap();
@@ -5166,7 +5170,6 @@ mod tests {
                 &prefs_path,
                 &gwt::IssueMonitorPrefs {
                     autonomous_mode,
-                    auto_apply_updates,
                     ..Default::default()
                 },
             )
@@ -5767,7 +5770,7 @@ mod tests {
             3
         );
 
-        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
         let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
         let file_tree_raw_id = runtime
             .window_lookup
@@ -5933,12 +5936,9 @@ mod tests {
 
         for preset in [
             WindowPreset::FileTree,
-            WindowPreset::Branches,
             WindowPreset::Settings,
             WindowPreset::Profile,
             WindowPreset::Logs,
-            WindowPreset::Issue,
-            WindowPreset::Spec,
             WindowPreset::Pr,
         ] {
             assert_eq!(
@@ -5965,11 +5965,11 @@ mod tests {
             assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
 
-        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
         let branches_raw_id = runtime
             .window_lookup
             .get(&branches_id)
-            .expect("Branches lookup")
+            .expect("Settings lookup")
             .raw_id
             .clone();
         let before_z = runtime
@@ -5977,14 +5977,14 @@ mod tests {
             .expect("tab")
             .workspace
             .window(&branches_raw_id)
-            .expect("Branches window")
+            .expect("Settings window")
             .z_index;
         assert_eq!(
             runtime
                 .create_window_events(&runtime.test_context(), WindowPreset::Work, bounds.clone())
                 .len(),
             1,
-            "Work must focus the existing legacy Branches singleton",
+            "Work must focus the existing Settings surface",
         );
         let reused_work = runtime
             .tab("tab-1")

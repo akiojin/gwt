@@ -152,6 +152,9 @@ pub struct PersistedWindowState {
     /// window では launch wizard 起動時に設定される。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Assigned memorable identity, independent of provider and Work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     /// Wire-only color hint sent to the WebView. 送信直前に backend が
     /// `agent_id` フィールド (または `preset` のフォールバック) から計算する。
     /// disk には書かない (`skip_deserializing` + skip_serializing_if で
@@ -362,6 +365,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title: None,
                 dynamic_title_detail: None,
                 agent_id: None,
+                agent_name: None,
                 agent_color: None,
                 worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
@@ -390,6 +394,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title: None,
                 dynamic_title_detail: None,
                 agent_id: None,
+                agent_name: None,
                 agent_color: None,
                 worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
@@ -429,6 +434,15 @@ fn normalize_loaded_workspace_state(state: &mut PersistedWindowCanvasState) {
     state
         .windows
         .retain(|window| !window.preset.is_removed_legacy());
+    for window in &mut state.windows {
+        let canonical = window.preset.canonical_surface_preset();
+        if window.preset != canonical {
+            // Keep the window identity: IssuePreview placements reference it,
+            // and distinct Settings views remain valid for split panes.
+            window.preset = canonical;
+            window.title = canonical.title().to_string();
+        }
+    }
     let next_z_index = state
         .windows
         .iter()
@@ -917,6 +931,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -927,9 +942,9 @@ mod tests {
                     is_pm: false,
                 },
                 PersistedWindowState {
-                    id: "branches-1".to_string(),
-                    title: "Branches".to_string(),
-                    preset: WindowPreset::Branches,
+                    id: "settings-1".to_string(),
+                    title: "Settings".to_string(),
+                    preset: WindowPreset::Settings,
                     geometry: WindowGeometry {
                         x: 36.0,
                         y: 48.0,
@@ -945,6 +960,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -1262,6 +1278,64 @@ mod tests {
     }
 
     #[test]
+    fn load_workspace_state_migrates_issue_hosts_to_settings_preserving_preview_links() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let template = default_workspace_state().windows.remove(0);
+        let mut state = empty_workspace_state();
+        for preset in [
+            WindowPreset::Settings,
+            WindowPreset::Issue,
+            WindowPreset::IssueMonitor,
+            WindowPreset::Spec,
+            WindowPreset::Work,
+            WindowPreset::Branches,
+        ] {
+            let mut host = template.clone();
+            host.id = preset.id_prefix().to_string();
+            host.title = preset.title().to_string();
+            host.preset = preset;
+            state.windows.push(host);
+        }
+        let mut agent = template;
+        agent.id = "agent-1".to_string();
+        agent.preset = WindowPreset::Agent;
+        agent.placement = WindowPlacement::IssuePreview {
+            issue_window_id: "issue".to_string(),
+            issue_number: 5321,
+        };
+        state.windows.push(agent);
+        save_workspace_state(&path, &state).expect("save legacy workspace");
+
+        let loaded = load_workspace_state(&path).expect("restore legacy workspace");
+        assert_eq!(
+            loaded.windows.len(),
+            7,
+            "distinct Settings views are preserved"
+        );
+        for (index, id) in [
+            "settings",
+            "issue",
+            "issue-monitor",
+            "spec",
+            "work",
+            "branches",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(loaded.windows[index].id, id);
+            assert_eq!(loaded.windows[index].preset, WindowPreset::Settings);
+            assert_eq!(loaded.windows[index].title, "Settings");
+            assert_eq!(
+                loaded.windows[index].geometry,
+                state.windows[index].geometry
+            );
+        }
+        assert_eq!(loaded.windows[6].placement, state.windows[6].placement);
+    }
+
+    #[test]
     fn persisted_window_state_round_trips_agent_kanban_placement() {
         let mut window = default_workspace_state().windows.remove(0);
         window.preset = WindowPreset::Agent;
@@ -1466,6 +1540,7 @@ mod tests {
                 dynamic_title: None,
                 dynamic_title_detail: None,
                 agent_id: Some("claude".into()),
+                agent_name: None,
                 agent_color: None,
                 worktree_form: WindowWorktreeForm::Unknown,
                 tab_group_id: None,
@@ -1568,6 +1643,7 @@ mod tests {
             dynamic_title: None,
             dynamic_title_detail: None,
             agent_id: Some("claude".into()),
+            agent_name: None,
             agent_color: Some(AgentColor::Yellow),
             worktree_form: WindowWorktreeForm::Unknown,
             tab_group_id: None,
@@ -1644,6 +1720,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -1672,6 +1749,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -1890,6 +1968,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -1918,6 +1997,7 @@ mod tests {
                     dynamic_title: None,
                     dynamic_title_detail: None,
                     agent_id: None,
+                    agent_name: None,
                     agent_color: None,
                     worktree_form: WindowWorktreeForm::Unknown,
                     tab_group_id: None,
@@ -2010,5 +2090,28 @@ mod tests {
                 "legacy {legacy} should map to Starting",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_name_tests {
+    use super::*;
+
+    #[test]
+    fn agent_name_survives_persistence_roundtrip_and_legacy_state() {
+        let legacy = serde_json::to_value(default_workspace_state()).unwrap();
+        let legacy_state: PersistedWindowCanvasState =
+            serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(
+            legacy_state.windows.len(),
+            legacy["windows"].as_array().unwrap().len()
+        );
+        let mut named = legacy;
+        named["windows"][0]["agent_name"] = "Falcon".into();
+        let state: PersistedWindowCanvasState = serde_json::from_value(named).unwrap();
+        assert_eq!(
+            serde_json::to_value(&state).unwrap()["windows"][0]["agent_name"],
+            "Falcon"
+        );
     }
 }

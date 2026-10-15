@@ -1056,6 +1056,61 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
 }
 
 #[test]
+fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    for preset in [
+        WindowPreset::Issue,
+        WindowPreset::IssueMonitor,
+        WindowPreset::Spec,
+        WindowPreset::Work,
+        WindowPreset::Branches,
+    ] {
+        let events = runtime.create_window_events(&runtime.test_context(), preset, canvas_bounds());
+        assert!(!events.is_empty());
+        for window in &runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+        {
+            assert_eq!(window.preset, WindowPreset::Settings);
+            assert_eq!(window.title, "Settings");
+        }
+    }
+    let before = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .len();
+    for _ in 0..2 {
+        runtime.create_window_events(
+            &runtime.test_context(),
+            WindowPreset::Settings,
+            canvas_bounds(),
+        );
+    }
+    assert_eq!(
+        runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .len(),
+        before + 2,
+        "split views may create distinct Settings windows"
+    );
+}
+
+#[test]
 fn app_runtime_work_singleton_reuses_create_before_hydration() {
     let _env_lock = env_test_lock()
         .lock()
@@ -1095,7 +1150,7 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         "repeated Work create must reuse the window"
     );
     assert_eq!(windows[0].id, first.id);
-    assert_eq!(windows[0].preset, WindowPreset::Work);
+    assert_eq!(windows[0].preset, WindowPreset::Settings);
     assert!(
         windows[0].z_index > first.z_index,
         "reuse must raise the existing Work window"

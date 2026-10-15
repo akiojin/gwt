@@ -257,6 +257,7 @@ async fn run_async(
             let windows = request_window_list(ws_url, project_root).await?;
             Ok(render_pane_list(&windows))
         }
+        PaneCommand::Name { candidate } => name_pane(ws_url, &candidate).await,
         PaneCommand::Read { id, lines } => {
             read_pane_snapshot(ws_url, project_root, &id, lines).await
         }
@@ -275,6 +276,37 @@ async fn run_async(
             text,
         } => send_pm_pane_input(ws_url, explicit_project_root.as_deref(), &id, &text).await,
     }
+}
+
+async fn name_pane(ws_url: &str, candidate: &str) -> Result<String, String> {
+    tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
+        let mut socket = connect_pane_websocket(ws_url).await?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        send_frontend_event(&mut socket, json!({
+            "kind": "pane_name", "candidate": candidate, "request_id": request_id,
+        })).await?;
+        loop {
+            let value = next_backend_json_unbounded(&mut socket).await?;
+            if value.get("kind").and_then(Value::as_str) != Some("pane_name_result")
+                || value.get("request_id").and_then(Value::as_str) != Some(request_id.as_str())
+            {
+                continue;
+            }
+            let ok = value.get("ok").and_then(Value::as_bool)
+                .ok_or_else(|| "pane_name_result missing ok".to_string())?;
+            if !ok {
+                let error = value.get("error").and_then(Value::as_str)
+                    .unwrap_or("backend returned no rejection reason");
+                return Err(format!("pane.name refused: {error}"));
+            }
+            let assigned_name = value.get("agent_name").and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| "pane_name_result missing the assigned agent_name".to_string())?;
+            return Ok(format!("{assigned_name}\n"));
+        }
+    }).await.map_err(|_| {
+        "pane.name timed out waiting for its assigned name; run execution.status to check current producing authority, then retry pane.name (assignment is idempotent)".to_string()
+    })?
 }
 
 /// SPEC-3431 FR-111 (T-206): PM-privileged delivery into another agent pane
@@ -913,7 +945,7 @@ fn pane_socket_closed_error(frame: Option<&CloseFrame>) -> String {
     match frame {
         Some(frame) if frame.reason == "execution binding is no longer current" => format!(
             "pane operation was refused by the gwt instance: {} — this session's execution \
-             is settled, so pane mutation (close/send) is refused while pane observation \
+             is settled, so pane mutation (close/send/name) is refused while pane observation \
              (list/read) remains available",
             frame.reason
         ),
@@ -1649,6 +1681,22 @@ fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir
     let panes = windows.iter().filter(|window| is_agent_pane(window));
     let mut out = String::new();
     for window in panes {
+        let current_title = window
+            .dynamic_title
+            .as_deref()
+            .or(window.purpose_title.as_deref())
+            .unwrap_or(&window.title);
+        let assigned_name = window.agent_name.as_deref().filter(|_| !window.is_pm);
+        let title = assigned_name.map_or_else(
+            || current_title.to_string(),
+            |name| {
+                if current_title.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name} — {current_title}")
+                }
+            },
+        );
         out.push_str(&format!(
             "{}\t{}\t{}\t{}",
             window.id,
@@ -1657,11 +1705,7 @@ fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir
                 .agent_id
                 .as_deref()
                 .unwrap_or_else(|| preset_label(window.preset)),
-            window
-                .dynamic_title
-                .as_deref()
-                .or(window.purpose_title.as_deref())
-                .unwrap_or(&window.title)
+            title
         ));
         if let Some(session) = window.session_id.as_deref().and_then(|id| {
             gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml")))
@@ -1683,6 +1727,9 @@ fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir
             ));
         } else {
             out.push_str("\torigin=unknown");
+        }
+        if let Some(name) = assigned_name {
+            out.push_str(&format!("\tagent_name={name}"));
         }
         out.push_str(if window.is_pm {
             "\trole=pm\n"
@@ -1821,6 +1868,7 @@ mod tests {
             placement: WindowPlacement::Canvas,
             persist: true,
             agent_id: agent_id.map(str::to_string),
+            agent_name: None,
             agent_color: None,
             worktree_form: WindowWorktreeForm::Unknown,
             tab_group_id: None,
@@ -2415,6 +2463,25 @@ mod tests {
         assert!(error.contains("/internal/pane-ws"), "{error}");
         assert!(pane_websocket_request("ws://127.0.0.1:46234/ws?token=forbidden").is_err());
         assert!(pane_websocket_request("ws://127.0.0.1:46234/internal/hook-live").is_err());
+    }
+
+    #[test]
+    fn pane_name_list_exposes_assigned_name_before_current_purpose() {
+        let mut pane = window("tab::agent", WindowPreset::Codex, Some("codex"));
+        pane.purpose_title = Some("Resolve queue delay".to_string());
+        pane.dynamic_title = Some("Investigating lease contention".to_string());
+        let mut raw = serde_json::to_value(pane).unwrap();
+        raw["agent_name"] = json!("Aster");
+        let pane: PersistedWindowState = serde_json::from_value(raw).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = render_pane_list_with_sessions(&[pane], temp.path());
+        assert!(
+            output.starts_with(
+                "tab::agent\trunning\tcodex\tAster — Investigating lease contention\t"
+            ),
+            "{output}"
+        );
+        assert!(output.contains("\tagent_name=Aster\t"), "{output}");
     }
 
     #[test]

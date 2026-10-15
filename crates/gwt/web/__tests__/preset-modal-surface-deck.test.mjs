@@ -74,20 +74,20 @@ test("Surface Deck — categories own the expected preset members", () => {
   assert.deepEqual(presetsIn("config").sort(), ["profile", "settings"]);
 });
 
-test("Surface Deck — Issue remains the canonical entry and SPEC is not separate", () => {
+test("Surface Deck — Issues opens Settings and SPEC is not separate", () => {
   const issue = modal.querySelector(
     '.preset-section[data-category="knowledge"] .preset-button[data-preset="issue"]',
   );
   assert.ok(issue, "expected the unified knowledge card to use the issue preset");
   assert.equal(
     issue.querySelector("strong")?.textContent.trim(),
-    "Issue",
-    "the canonical card must keep the Issue label",
+    "Issues",
+    "the canonical card names the Settings Issues section",
   );
   assert.match(
     issue.querySelector(".preset-button__text span")?.textContent ?? "",
-    /Issue/i,
-    "the canonical card description must describe the Issue surface",
+    /Settings.*Issues/i,
+    "the card opens the Issues section of Settings",
   );
   assert.equal(
     modal.querySelector('.preset-button[data-preset="spec"]'),
@@ -97,7 +97,7 @@ test("Surface Deck — Issue remains the canonical entry and SPEC is not separat
   const knowledgeText = modal
     .querySelector('.preset-section[data-category="knowledge"]')
     .textContent.replace(/\s+/g, " ");
-  assert.match(knowledgeText, /\bISSUE\b/i, "knowledge deck must keep Issue");
+  assert.match(knowledgeText, /\bISSUES\b/i, "knowledge deck names Issues");
   assert.doesNotMatch(knowledgeText, /\bSPEC\b/i, "knowledge deck must not show SPEC");
 });
 

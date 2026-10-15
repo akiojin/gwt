@@ -11,6 +11,7 @@ pub enum WindowPreset {
     Agent,
     AgentKanban,
     FileTree,
+    /// Legacy Issue-family alias restored into Settings Issues.
     Branches,
     Settings,
     /// Legacy-only value accepted so old workspace files containing
@@ -19,11 +20,15 @@ pub enum WindowPreset {
     Memo,
     Profile,
     Logs,
+    /// Legacy-only value accepted so persisted Issue windows restore into
+    /// Settings Issues. It is not exposed in [`Self::ALL`].
     Issue,
     /// Legacy-only value accepted so persisted Issue Monitor windows restore
-    /// into the canonical Issue surface. It is not exposed in [`Self::ALL`].
+    /// into Settings Issues. It is not exposed in [`Self::ALL`].
     IssueMonitor,
+    /// Legacy Issue-family alias restored into Settings Issues.
     Spec,
+    /// Legacy Issue-family alias, including the old `workspace` spelling.
     #[serde(alias = "workspace")]
     Work,
     Index,
@@ -75,19 +80,15 @@ impl WindowSurface {
 }
 
 impl WindowPreset {
-    pub const ALL: [WindowPreset; 16] = [
+    pub const ALL: [WindowPreset; 12] = [
         WindowPreset::Shell,
         WindowPreset::Claude,
         WindowPreset::Codex,
         WindowPreset::AgentKanban,
         WindowPreset::FileTree,
-        WindowPreset::Branches,
         WindowPreset::Settings,
         WindowPreset::Profile,
         WindowPreset::Logs,
-        WindowPreset::Issue,
-        WindowPreset::Spec,
-        WindowPreset::Work,
         WindowPreset::Index,
         WindowPreset::Board,
         WindowPreset::Pr,
@@ -191,11 +192,20 @@ impl WindowPreset {
         matches!(self.surface(), WindowSurface::Terminal)
     }
 
-    /// SPEC-3671: the Issue window is the surface that mirrors auto-launched
-    /// agents in its preview pane. `Spec` and `Pr` share the Knowledge surface
-    /// but are different faces, so they never host a preview.
+    /// Retired Issue-family entrypoints share the Settings Issues surface.
+    pub fn canonical_surface_preset(self) -> Self {
+        match self {
+            Self::Issue | Self::IssueMonitor | Self::Spec | Self::Work | Self::Branches => {
+                Self::Settings
+            }
+            preset => preset,
+        }
+    }
+
+    /// Settings Issues mirrors auto-launched agents in its preview pane.
+    /// Legacy Issue hosts remain readable until workspace load migrates them.
     pub fn hosts_issue_preview(self) -> bool {
-        matches!(self, Self::Issue | Self::IssueMonitor)
+        matches!(self, Self::Settings | Self::Issue | Self::IssueMonitor)
     }
 
     pub fn is_agent_terminal(self) -> bool {
@@ -509,7 +519,12 @@ mod tests {
 
     #[test]
     fn preset_metadata_exposes_titles_prefixes_and_defaults() {
-        assert_eq!(WindowPreset::ALL.len(), 16);
+        assert_eq!(WindowPreset::ALL.len(), 12);
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::Spec));
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::Work));
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::Branches));
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::Issue));
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::IssueMonitor));
         // SPEC-3671 FR-014 / FR-015: each face is identifiable from its title.
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");

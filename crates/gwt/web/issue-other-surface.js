@@ -839,10 +839,11 @@ export function createIssueOtherSurface({
         createNode(
           "div",
           "workspace-overview-agent-name",
-          agent.display_name || agent.agent_id || "Agent",
+          agent.agent_name || "Naming…",
         ),
       );
       const meta = createNode("div", "workspace-overview-agent-meta");
+      appendMetaText(meta, agent.display_name || agent.agent_id);
       appendMetaText(meta, "No Workspace selected");
       appendMetaText(meta, agentStatusLabel?.(agent.status_category));
       appendMetaText(meta, agent.branch);

@@ -32,7 +32,7 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
 
     assert_eq!(windows.len(), 1, "Branches and Work must share identity");
     assert_eq!(windows[0].id, legacy.id);
-    assert_eq!(windows[0].preset, WindowPreset::Branches);
+    assert_eq!(windows[0].preset, WindowPreset::Settings);
     assert!(windows[0].z_index > legacy.z_index);
     assert!(events
         .iter()
