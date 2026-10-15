@@ -15,6 +15,11 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
   const grid = element.querySelector(".agents-grid");
   const tablist = element.querySelector(".agents-tabs");
   const columns = element.querySelector("input");
+  const columnsKey = "gwt:ui:agent-columns";
+  try {
+    const saved = document.defaultView.localStorage?.getItem(columnsKey);
+    if (saved !== null && saved !== undefined) columns.value = saved;
+  } catch { /* Keep the default when browser storage is unavailable. */ }
   const tiles = new Map();
   const tabs = new Map();
   const previews = new Map();
@@ -162,12 +167,17 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
   }
   addTab(null, "All agents");
   function setColumns() {
-    const count = Math.max(1, Math.min(4, Number.parseInt(columns.value, 10) || 1));
+    const value = Number(columns.value);
+    const count = Math.max(1, Math.min(4, Number.isFinite(value) ? Math.trunc(value) : 1));
     columns.value = String(count);
     updateSelection();
     onLayout();
   }
-  columns.addEventListener("input", setColumns);
+  columns.addEventListener("input", () => {
+    setColumns();
+    try { document.defaultView.localStorage?.setItem(columnsKey, columns.value); }
+    catch { /* The in-memory preference remains usable without storage. */ }
+  });
   setColumns();
 
   function sync() {
