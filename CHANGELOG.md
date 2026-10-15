@@ -1,6 +1,111 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.121.0] - 2026-10-15
+
+### Bug Fixes
+
+- **runtime:** Collect stale host namespaces without losing recovery
+- **process:** Classify impossible unix pids as absent
+- **monitor:** Retain auto capacity during incomplete measurements
+- **board:** Bound prompt context reads
+- **monitor:** Defer merged acceptance settlement for live launches
+- **issue-monitor:** Distinguish completed launch recovery
+- **diagnostics:** Bind live PM probe project root
+- **deps:** Update rustls for key exchange advisory
+- **deps:** Update rustls to 0.23.46 for key exchange hint safety
+- **gui:** Preserve issue clicks across focus responses
+- **board:** Invalidate moved coordination roots
+- **pm:** Decouple prompt refresh and scan recovery
+- **pm:** Recover metadata failures and stalled scans
+- **pm:** 非互換 JSON の破損バックアップ作成を抑止する
+- **update:** Move automatic update policy out of issue monitor
+- **gui:** Cycle existing agent tabs without reframing
+- **pm:** Compact Reports and use English GUI labels
+- **gui:** Include native consent in English copy checks
+- **gui:** Keep slow issue cache loads pending until deadline
+- **knowledge:** 検索中の同 revision 応答でも一覧を保持
+- **deps:** Update rustls to repair the required advisory gate
+- **gwtd:** キュー出力の番号種別を揃える
+- **knowledge:** Skip hidden and unchanged automatic reloads
+- **knowledge:** Publish refresh changes through shared models
+- **settings:** Pass update predicate directly
+- **settings:** Restore Issues selection inside split panes
+- **knowledge:** Render list completions through the view model
+- **issues:** Gate refresh on the embedded Settings surface
+
+### Documentation
+
+- **runtime:** Link namespace collection policy and settle work
+- **gui:** Clarify closing the selected agent tab
+
+### Features
+
+- **gui:** Show confirmed tier for running issue agents
+- **pm:** 計画状態の永続化基盤を追加する
+- **gwtd:** Issue と PR の番号種別を明示する
+- **settings:** Support verified native agent updates
+- **settings:** Integrate Issues into project settings
+- **agent:** 実装エージェントの固有名を割り当てて一貫表示する
+- **skills:** Provider 別 guidance の生成を共通化
+
+### Miscellaneous Tasks
+
+- **work:** Record T24 delivery restart
+- **work:** Link T24 delivery pull request
+- **work:** Record the runtime gc pull request
+- **work:** Record issue 5392 delivery relaunch
+- **work:** Record issue 4357 delivery audit
+- **work:** Record issue 5392 pull request
+- **work:** Record namespace gc documentation pull request
+- **work:** Record issue 4975 pull request
+- **work:** PM 計画状態の配送 PR を記録する
+- **work:** Record Issue 5349 pull request link
+- **work:** Record issue 5393 pull request
+- **work:** Record issue 5413 delivery verification
+- **work:** Record issue 5400 delivery after relaunch
+- **work:** Record issue 5398 pull request
+- **work:** Record Issue 5349 verification follow-up PR
+- **work:** Record issue 5394 pull request
+- **work:** Record issue 5394 delivery pull request
+- **work:** Record PM operation acceptance audit
+- **work:** Record issue 5268 delivery continuation
+- **work:** Record Settings integration PR
+- **work:** 自動段選択の配信済み範囲と残検証の作業履歴を保存
+- **work:** 自動段選択の正式検証再開記録を保存
+
+### Performance
+
+- **knowledge:** Issue 一覧のキャッシュと再描画を効率化
+- **knowledge:** Coalesce concurrent issue cache refreshes
+
+### Refactor
+
+- **skills:** Route workflow details through lazy references
+
+### Testing
+
+- **persistence:** Isolate sync in non-durability fixtures
+- **github-budget:** Isolate the global ledger spawn probe
+- **config:** Scope path type to the unix settings contract
+- **runtime:** Use the process adapter for junction fixtures
+- **monitor:** Align capacity fixtures with retained auto limits
+- **issue-monitor:** Include released in status contract
+- **runtime:** Freeze renewal fixture operation clock
+- **pm:** Isolate scan recovery fixture homes
+- **gui:** Isolate preview keyboard checks from hover
+- **session:** Verify shared ledger reuse at 2500 sessions
+- **gui:** Align manual refresh recovery with load deadline
+- **gui:** Advance load deadlines without replaying animations
+- **pm:** Bound layout fixture CLI waits
+- **settings:** Wait for supported-agent catalog responses
+- **settings:** Align catalog with native Claude channel
+- **settings:** Focus capacity mode before native selection
+- **settings:** Align integration contracts with shared Issues host
+- **gui:** 固有名付き Agent の表示契約と E2E 同期を修正する
+- **skills:** Follow router links for monitor wait examples
+- **gui:** フォーカステストで最新 snapshot の適用を待つ
+
 ## [9.120.0] - 2026-10-14
 
 ### Bug Fixes
