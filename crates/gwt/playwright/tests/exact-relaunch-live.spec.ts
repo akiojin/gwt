@@ -153,21 +153,29 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(tomlString(await syncedResumeId(first.gwt_session_id!), "agent_session_id")).toBe(native);
       await testInfo.attach(`launched-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
 
-      // Window restart: the provider exits, the user presses Restart agent.
+      // Window restart: the provider exits, then an explicit runtime restart
+      // rebinds the same window. The Agents surface hides legacy canvas chrome.
       // Let the SessionStart runtime state land first so it cannot race the exit.
       await expect.poll(async () => (await codexWindows(page)).find((entry) => entry.id === firstWindow.id)?.status,
         { timeout: 60_000, message: "SessionStart runtime state reaches the window" }).toBe("idle");
-      // The provider dies (a clean exit closes the window instead); the window
-      // runtime turns error and the Restart agent control appears.
+      // A clean exit closes the window; a provider failure retains the tile.
+      const beforeExit = await cursor(page);
       process.kill(first.pid, "SIGTERM");
-      const restart = page.locator(`.workspace-window[data-id="${firstWindow.id}"] [data-action="restart"]`);
-      await expect(restart).toBeVisible({ timeout: 60_000 });
-      await restart.click();
+      await page.waitForFunction(({ after, id }) => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "terminal_status"
+        && entry.payload.id === id && entry.payload.status === "error"),
+      { after: beforeExit, id: firstWindow.id }, { timeout: 60_000 });
+      const tile = page.locator(`.agent-tile[data-agent-id="${firstWindow.id}"]`);
+      await expect(tile).toBeVisible();
+      await expect(tile.locator(".agent-tile__header span")).toHaveText("Input unavailable");
+      await sendLiveGwtEvent(page, { kind: "restart_window", id: firstWindow.id });
       const second = await launchAt(2);
       expect(second.argv.slice(second.argv.indexOf("resume"))).toContain(native);
       expect(second.resume_session_id).toBe(native);
       expect(second.provider_session_id).toBe(native);
       await liveCodexWindow(page, second.gwt_session_id!);
+      await expect(tile).toBeVisible();
+      await expect(tile.locator(".agent-tile__header span")).toHaveText("Interactive");
       const secondRecord = await syncedResumeId(second.gwt_session_id!);
       expect(tomlString(secondRecord, "agent_session_id")).toBe(native);
       expect(tomlString(secondRecord, "restore_source_session_id")).toBe(first.gwt_session_id);
