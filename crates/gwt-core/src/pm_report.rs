@@ -153,6 +153,13 @@ fn sync_report_parent(_path: &Path) -> io::Result<()> {
 }
 
 pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
+    load_reports_with_deadline(repo_path).map(|(reports, _)| reports)
+}
+
+/// Return the next peer timeout with the same read that projects its reports.
+pub fn load_reports_with_deadline(
+    repo_path: &Path,
+) -> Result<(Vec<PmReport>, Option<DateTime<Utc>>)> {
     let path = reports_path(repo_path);
     let mut reports = match File::open(&path) {
         Ok(mut file) => {
@@ -169,15 +176,24 @@ pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
             .iter()
             .map(PmReport::from),
     );
-    match crate::pm_peer::reports(&crate::pm_peer::project_dir(repo_path), Utc::now()) {
-        Ok(peer) => reports.extend(peer),
-        Err(error) => tracing::warn!(
-            error = %crate::error_ledger::sanitize_error_message(&error.to_string()),
-            "PM peer store unreadable; peer reports omitted"
-        ),
-    }
+    let deadline = match crate::pm_peer::reports_with_deadline(
+        &crate::pm_peer::project_dir(repo_path),
+        Utc::now(),
+    ) {
+        Ok((peer, deadline)) => {
+            reports.extend(peer);
+            deadline
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %crate::error_ledger::sanitize_error_message(&error.to_string()),
+                "PM peer store unreadable; peer reports omitted"
+            );
+            Some(Utc::now() + chrono::Duration::seconds(5))
+        }
+    };
     reports.sort_by_key(|report| report.created_at);
-    Ok(reports)
+    Ok((reports, deadline))
 }
 
 fn read_reports(file: &mut File, path: &Path) -> Result<Vec<PmReport>> {
@@ -214,6 +230,25 @@ mod tests {
     use crate::test_support::ScopedGwtHome;
 
     #[test]
+    fn temporarily_unreadable_peer_reports_keep_native_reports_and_schedule_retry() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let native = post_report(&repo, PmReportKind::Progress, "saved report", None).unwrap();
+        fs::write(
+            crate::paths::gwt_home().join("pm-peer-messages.json"),
+            "invalid peer data",
+        )
+        .unwrap();
+        let (reports, retry_at) = load_reports_with_deadline(&repo).unwrap();
+        assert_eq!(reports, vec![native]);
+        assert!(
+            retry_at.is_some(),
+            "a transient peer failure must not be cached indefinitely"
+        );
+    }
+
+    #[test]
     fn peer_roundtrip_projects_reports_and_expired_wait_from_one_source() {
         use crate::pm_peer::{self, PeerKind, PeerProject, PeerSend};
         let home = tempfile::tempdir().unwrap();
@@ -242,6 +277,18 @@ mod tests {
             now,
         )
         .unwrap();
+        let (before_timeout, deadline) =
+            pm_peer::reports_with_deadline(&a.project_dir, now).unwrap();
+        assert_eq!(deadline, Some(now + chrono::Duration::seconds(900)));
+        assert!(!before_timeout[0]
+            .body
+            .contains("Waiting for the peer PM to respond"));
+        assert_eq!(
+            pm_peer::reports_with_deadline(&a.project_dir, deadline.unwrap())
+                .unwrap()
+                .1,
+            None
+        );
         assert_eq!(pm_peer::pending(&b.project_dir).unwrap().len(), 1);
         assert_eq!(
             pm_peer::pending(&b.project_dir).unwrap().len(),

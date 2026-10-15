@@ -563,6 +563,23 @@ fn gui_event_loop_stall_warning(label: &str, elapsed_ms: u64) -> Option<String> 
         .then(|| format!("{label} blocked the GUI event loop for {elapsed_ms}ms"))
 }
 
+/// Process creation can block even when the browser launcher detaches its wait.
+/// Keep that work off the native dispatch thread for every tray browser action.
+fn request_tray_browser_launch(runtime: &Runtime, url: &str, action: &'static str) {
+    let url = url.to_owned();
+    runtime.spawn_blocking(move || {
+        if let Err(error) = gwt::cli::tray::open_browser_for_url(&url) {
+            tracing::warn!(
+                target: "gwt_tray",
+                %error,
+                action,
+                %url,
+                "tray menu failed to launch the default browser"
+            );
+        }
+    });
+}
+
 /// Times one event-loop dispatch and warns when it stalls the GUI thread.
 ///
 /// Issue #3611: a `Drop` guard rather than a trailing measurement because
@@ -4726,6 +4743,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            pending_runtime_outputs: HashMap::new(),
             remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -11011,6 +11029,11 @@ fn main() -> std::io::Result<()> {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
+        if let Some(app) = app.as_mut() {
+            clients.dispatch(app.flush_runtime_output_batches(std::time::Instant::now()));
+            *control_flow = app.next_runtime_output_deadline()
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
+        }
         let event = match event {
             Event::UserEvent(UserEvent::DrainAppEvents) => {
                 let Some(event) = proxy.take_next() else { return; };
@@ -11428,20 +11451,10 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.handle_daemon_runtime_approval_wait_state(&id, waiting));
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionChanged { project_root }) => {
-                // `begin` takes `&mut` state, so this cannot become a match
-                // guard; bind it first to keep `collapsible_match` quiet.
-                let started = active_work_refresh_queue.begin(&project_root);
-                if started {
-                    match app.active_work_projection_refresh_job(&project_root) {
-                        Some(job) => spawn_active_work_projection_refresh(
-                            runtime.handle(),
-                            &proxy,
-                            job,
-                        ),
-                        // No open tab owns the project — nothing to rebuild.
-                        None => drop(active_work_refresh_queue.finish(&project_root)),
-                    }
-                }
+                // RuntimeHook already schedules the same project. Use its
+                // memoized latest-wins broker instead of a second worker/GUI
+                // clone pipeline for this notification (Issue #5404).
+                clients.dispatch(app.refresh_active_work_projection_for_project_root(&project_root));
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionRefreshed {
                 project_root,
@@ -12323,16 +12336,8 @@ fn main() -> std::io::Result<()> {
                         // Best-effort browser open. Failure is logged
                         // but does not interrupt the tray loop —
                         // `gwt open` from the CLI is a fallback.
-                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&target_url) {
-                            tracing::warn!(
-                                target: "gwt_tray",
-                                error = %error,
-                                url = target_url.as_str(),
-                                "tray Open menu failed to launch the default browser"
-                            );
-                        } else {
-                            tracing::info!(target: "gwt_tray", "tray Open browser launch requested");
-                        }
+                        request_tray_browser_launch(&runtime, &target_url, "Open");
+                        tracing::info!(target: "gwt_tray", "tray Open browser launch requested");
                     }
                     Some(MenuAction::CopyUrl) => {
                         if let Err(error) = gwt_clipboard::ClipboardText::set_text(&browser_url) {
@@ -12354,9 +12359,7 @@ fn main() -> std::io::Result<()> {
                     }
                     None => {
                         if let Some(action) = tray_generation.resolve(event.id.as_ref()) {
-                            if let Err(error) = gwt::cli::tray::open_browser_for_url(&action.url) {
-                                tracing::warn!(target: "gwt_tray", %error, "tray Project menu failed to launch the default browser");
-                            }
+                            request_tray_browser_launch(&runtime, &action.url, "Project");
                         }
                     }
                 }
@@ -12412,6 +12415,11 @@ fn main() -> std::io::Result<()> {
                 );
             }
             _ => {}
+        }
+        if matches!(*control_flow, ControlFlow::Wait) {
+            if let Some(deadline) = app.next_runtime_output_deadline() {
+                *control_flow = ControlFlow::WaitUntil(deadline);
+            }
         }
     });
 }

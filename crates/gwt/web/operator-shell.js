@@ -26,7 +26,7 @@ export function initOperatorShell(deps = {}) {
   safeWire("theme toggle", () => wireThemeToggle({ doc, themeManager }), markDegraded);
   safeWire("legacy chrome keys", () => removeLegacyChromeKeys(win), markDegraded);
   safeWire("rail commands", () => wireRailCommands({ doc }), markDegraded);
-  safeWire("status strip clock", () => wireStatusStripClock({ doc }), markDegraded);
+  safeWire("status strip clock", () => wireStatusStripClock({ doc, win }), markDegraded);
   if (shellDegraded) hideMissionBriefingImmediately(doc);
   else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
   safeWire("hotkey overlay", () => wireHotkeyOverlay({ doc, hotkey }), markDegraded);
@@ -131,7 +131,7 @@ function wireRailCommands({ doc }) {
 // Status Strip — live clock + counters
 // ------------------------------------------------------------
 
-function wireStatusStripClock({ doc }) {
+export function wireStatusStripClock({ doc, win = doc.defaultView }) {
   const clock = doc.getElementById("op-strip-clock");
   if (!clock) return;
 
@@ -139,7 +139,6 @@ function wireStatusStripClock({ doc }) {
   // mission-control "blink" effect can target only the separators while the
   // numbers stay rock-steady. Clears + rebuilds via DOM nodes (no innerHTML
   // because the security hook flags textContent-as-template-string).
-  const reduced = matchReduced(doc);
   const setClock = (h, m, s) => {
     while (clock.firstChild) clock.removeChild(clock.firstChild);
     const append = (text, isColon) => {
@@ -154,25 +153,18 @@ function wireStatusStripClock({ doc }) {
     append(":", true);
     append(pad2(s), false);
   };
+  let timer = null;
   const tick = () => {
-    const now = new Date();
+    if (timer !== null) win.clearTimeout(timer);
+    timer = null;
+    if (doc.hidden) return;
+    const now = new win.Date();
     setClock(now.getHours(), now.getMinutes(), now.getSeconds());
+    // Re-align on every tick, including callbacks delayed by a busy renderer.
+    timer = win.setTimeout(tick, 1000 - now.getMilliseconds());
   };
+  doc.addEventListener("visibilitychange", tick);
   tick();
-
-  if (reduced.matches) {
-    setInterval(tick, 1000);
-  } else {
-    let last = 0;
-    const loop = (t) => {
-      if (t - last >= 1000) {
-        last = t;
-        tick();
-      }
-      requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
-  }
 }
 
 export function applyTelemetryCounts(doc, counts = {}) {

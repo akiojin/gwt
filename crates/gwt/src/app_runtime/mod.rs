@@ -1432,6 +1432,7 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) pm_sessions: HashMap<PathBuf, String>,
     /// One bounded append reader per Project; native file reads stay off tao.
     pub(crate) pm_conversation_reader: Arc<Mutex<gwt::pm_conversation::PmConversationReader>>,
+    pub(crate) pm_reports_reader: Arc<Mutex<gwt::pm_current::PmReportsReader>>,
     /// SPEC-3431 T-093 (FR-012): per project, the monitor signal set the wake
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
@@ -1483,6 +1484,7 @@ pub(crate) fn initial_project_states(
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
+                    pm_reports_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
@@ -1958,6 +1960,7 @@ pub struct AppRuntime {
     /// delta — an in-place agent restart reusing the same window is fine.
     /// Runtime-only; never persisted.
     pub(crate) window_output_bytes: HashMap<String, u64>,
+    pub(crate) pending_runtime_outputs: HashMap<String, runtime_events::PendingRuntimeOutput>,
     /// Latest parsed preview received from another runtime owner; never persisted.
     pub(crate) remote_terminal_previews: HashMap<String, String>,
     /// Issue #4608: when each pane last wrote to its terminal. The Monitor's
@@ -4245,6 +4248,7 @@ impl AppRuntime {
                     pending_pm_closes: Default::default(),
                     pm_sessions: Default::default(),
                     pm_conversation_reader: Default::default(),
+                    pm_reports_reader: Default::default(),
                     pm_wake_seen: Default::default(),
                     pm_agent_idle_wakes: Default::default(),
                     pending_pm_wakes: Default::default(),
@@ -4629,6 +4633,7 @@ impl AppRuntime {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            pending_runtime_outputs: HashMap::new(),
             remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -14308,6 +14313,7 @@ impl AppRuntime {
     pub(crate) fn seed_window_pty_statuses(&mut self) {
         self.window_pty_statuses.clear();
         self.window_output_bytes.clear();
+        self.pending_runtime_outputs.clear();
         for tab in &self.tabs {
             for window in &tab.workspace.persisted().windows {
                 if window.preset.requires_process() {
@@ -14389,6 +14395,7 @@ impl AppRuntime {
         self.pending_launch_completions.remove(window_id);
         self.window_pty_statuses.remove(window_id);
         self.window_output_bytes.remove(window_id);
+        self.pending_runtime_outputs.remove(window_id);
         self.remote_terminal_previews.remove(window_id);
         self.window_last_output_at.remove(window_id);
         self.window_hook_states.remove(window_id);

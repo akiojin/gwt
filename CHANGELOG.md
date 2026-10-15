@@ -1,6 +1,102 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.123.2] - 2026-10-15
+
+### Bug Fixes
+
+- **startup:** Move tray browser creation off the GUI thread
+- **board:** Route branch mentions to current workspace audiences
+- **usage:** Match complete Codex rollout session ids
+- **issue-monitor:** Keep unmet acceptance open after merge
+- **issue-monitor:** Use spec body comment representation
+- **board:** Preserve delayed appends across prompt reads
+- **monitor:** Remove redundant census predicate borrow
+
+### Miscellaneous Tasks
+
+- **work:** Issue #4738 の再開と配信計画を記録
+- **work:** Link monitor census delivery PR
+
+### Performance
+
+- **usage:** Collect off workers and cache transcript deltas
+- **monitor:** Share each tick's session census across roots
+
+### Testing
+
+- **startup:** Honor the stable hook binary in live checks
+- **core:** Match delivered home isolation fixture
+- **usage:** Keep performance module after production dispatch
+- **gui:** Isolate projection and PTY fixtures
+- **pane:** Separate grant lock regression from latency coverage
+- **perf:** Record integrated monitor CPU reduction
+- **index:** Observe broker admission after transient lock contention
+
+## [9.123.1] - 2026-10-15
+
+### Bug Fixes
+
+- **startup:** Reuse common-dir metadata and record git costs
+- **test:** Forward canonical headed flags to Playwright
+
+### Miscellaneous Tasks
+
+- **work:** Record startup resolver delivery evidence
+
+### Performance
+
+- **terminal:** Batch output and reuse daemon connections
+- **pm:** Cache unchanged reports and current facts
+- **gui:** Stop idle clock frames and pane status polling
+
+### Testing
+
+- **startup:** Count unlogged common-dir processes in paired runs
+- **startup:** Preserve canonical browser runner arguments
+- **paths:** Isolate remaining home-dependent path readers
+- **gui:** Remeasure issue titles after detail replacement
+- **gui:** Isolate projection fingerprint plugin inventory
+
+## [9.123.0] - 2026-10-15
+
+### Bug Fixes
+
+- **index:** Measure actual runner trees instead of lease owners
+- **gui:** Restore kanban focus across phase columns
+- **index:** Recover abandoned broker owners and skip empty trees
+- **monitor:** Isolate reviews and protect active owners
+- **gui:** Preserve board cursor while loading history
+- **session:** Cache runtime sidecars and shorten safe namespace GC
+
+### Features
+
+- **gui:** Keep rail surfaces in a fixed single pane
+
+### Miscellaneous Tasks
+
+- **work:** Record PR #5488 delivery metadata
+- **work:** Preserve resumed runner measurement delivery notes
+- **work:** Issue #5437 の後継実行履歴を確定
+- **work:** Record PR #5496 delivery metadata
+- **work:** Record PR #5497 delivery metadata
+- **work:** Record PR #5509 delivery metadata
+- **work:** Preserve duplicate successor launch history
+- **work:** Record pull request linkage for issue 5499
+
+### Performance
+
+- **gui:** Memoize work projections and share session snapshots
+- **gui:** Bound board history and reuse timeline cards
+- **monitor:** Cache prefs and skip unchanged runtime publications
+
+### Testing
+
+- **index:** Cover all scopes with real E5 on Windows
+- **gui:** Retain work projection verification artifacts
+- Isolate repository fixtures from background state
+- **perf:** Record live fleet GUI resource budget miss
+
 ## [9.122.0] - 2026-10-15
 
 ### Bug Fixes

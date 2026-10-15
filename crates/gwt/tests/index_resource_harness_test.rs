@@ -251,6 +251,206 @@ impl Drop for HarnessWorker {
     }
 }
 
+/// Issue #5437: exercise the checkout runner, real E5, and published indexes on Windows.
+/// Invoked explicitly by nightly CI; missing Python/model assets must fail, never skip.
+#[test]
+#[ignore]
+fn real_e5_all_scopes_build_and_search() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let harness = Harness {
+        python: std::env::var_os("PYTHON").map_or_else(|| PathBuf::from("python"), PathBuf::from),
+        runner: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../gwt-core/runtime/chroma_index_runner.py"),
+        home: tmp.path().join("home"),
+        hf_home: huggingface_cache(),
+        repo_hash: gwt_core::repo_hash::compute_repo_hash(
+            "https://github.com/example/all-scopes-e2e.git",
+        )
+        .to_string(),
+        worktree_hash: gwt_core::worktree_hash::compute_worktree_hash(&project)
+            .unwrap()
+            .to_string(),
+        project,
+    };
+    let write = |path: PathBuf, content: String| {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    };
+    let state = harness.home.join(".gwt/projects").join(&harness.repo_hash);
+    let mut memory = String::new();
+    let mut discussions = String::new();
+    let mut board = String::new();
+    let mut works = Vec::new();
+    // Four distractors make top-three ranking meaningful rather than a nonempty check.
+    for (index, topic) in [
+        "filesystem watcher debounce",
+        "sourdough bread baking recipe",
+        "distant galaxy astronomy telescope",
+        "ceramic pottery kiln glazing",
+        "bicycle mountain racing training",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let name = if index == 0 {
+            "watcher".to_string()
+        } else {
+            format!("unrelated_{index}")
+        };
+        write(
+            harness.project.join(format!("src/{name}.rs")),
+            format!("//! {topic}\npub fn {name}() {{}}\n"),
+        );
+        write(
+            harness.project.join(format!("docs/{name}.md")),
+            format!("# {topic}\n\nDocumentation about {topic}.\n"),
+        );
+        for (offset, labels) in [(100, json!(["bug"])), (200, json!(["gwt-spec"]))] {
+            let number = offset + index;
+            let cache = harness
+                .home
+                .join(".gwt/cache/issues")
+                .join(&harness.repo_hash)
+                .join(number.to_string());
+            write(
+                cache.join("meta.json"),
+                json!({"number": number, "title": topic, "labels": labels,
+                    "state": "OPEN", "updated_at": "2026-10-15T00:00:00Z"})
+                .to_string(),
+            );
+            write(cache.join("body.md"), format!("# {topic}\n\n{topic}\n"));
+            if offset == 200 {
+                write(
+                    cache.join("sections/spec.md"),
+                    format!("# {topic}\n\n{topic}\n"),
+                );
+            }
+        }
+        memory.push_str(&format!(
+            "## 2026-10-15 — {topic}\n\nLearning: {topic}.\n\n"
+        ));
+        discussions.push_str(&format!(
+            "## 2026-10-15 — {topic}\n\nStatus: active\nTopics: {topic}\n\nSummary:\n{topic}\n\n"
+        ));
+        board.push_str(&format!(
+            "{}\n",
+            json!({"type": "message_appended", "entry": {
+                "id": name, "kind": "decision", "author": "Fixture",
+                "title_summary": topic, "body": topic,
+                "created_at": "2026-10-15T00:00:00Z", "updated_at": "2026-10-15T00:00:00Z"
+            }})
+        ));
+        works.push(json!({"id": name, "title": topic, "intent": topic,
+            "summary": topic, "status_category": "done", "events": []}));
+    }
+    write(state.join("work-notes/memory.md"), memory);
+    write(state.join("work-notes/discussions.md"), discussions);
+    write(state.join("coordination/events/000001.jsonl"), board);
+    write(
+        state.join("coordination/events.manifest.json"),
+        json!({"version": 1, "segments": [{"file": "000001.jsonl"}]}).to_string(),
+    );
+    write(
+        state.join("project-state/works.json"),
+        json!({"work_items": works}).to_string(),
+    );
+    let invoke = |action: &str, args: &[&str]| {
+        let output = harness.spawn(action, args).wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{action}: {} {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("runner JSON");
+        assert_eq!(value["ok"], true, "{action}: {value}");
+        value
+    };
+    let mut workers = Vec::new();
+    for (scope, key, identity, expected) in [
+        ("specs", "specResults", "spec_id", json!("200")),
+        ("issues", "issueResults", "number", json!(100)),
+        ("files", "results", "path", json!("src/watcher.rs")),
+        ("files-docs", "results", "path", json!("docs/watcher.md")),
+        (
+            "memory",
+            "memoryResults",
+            "title",
+            json!("filesystem watcher debounce"),
+        ),
+        ("board", "boardResults", "entry_id", json!("watcher")),
+        (
+            "discussions",
+            "discussionResults",
+            "title",
+            json!("filesystem watcher debounce"),
+        ),
+        ("works", "workResults", "work_id", json!("watcher")),
+    ] {
+        let started = Instant::now();
+        let build = invoke(
+            &format!("index-{scope}"),
+            &[
+                "--scope",
+                scope,
+                "--file-index-protocol",
+                "v2",
+                "--qos",
+                "interactive",
+            ],
+        );
+        let build_ms = started.elapsed().as_millis();
+        assert_ne!(build["yielded"], true, "{scope}: {build}");
+        let args = [
+            "--scopes",
+            scope,
+            "--query",
+            "filesystem watcher debounce",
+            "--n-results",
+            "3",
+            "--no-auto-build",
+            "--file-index-protocol",
+            "v2",
+        ];
+        let first_started = Instant::now();
+        let first = invoke("search-multi", &args);
+        let first_search_ms = first_started.elapsed().as_millis();
+        workers.push(HarnessWorker::new(
+            first["worker_pid"].as_u64().expect("real worker") as u32,
+        ));
+        let warm_started = Instant::now();
+        let result = invoke("search-multi", &args);
+        let warm_ms = warm_started.elapsed().as_millis();
+        let hits = result["scope_results"][scope][key]
+            .as_array()
+            .expect("scope results");
+        assert!(
+            hits.iter().any(|hit| hit[identity] == expected),
+            "{scope}: {result}"
+        );
+        assert_eq!(
+            result["model_load_ms"], 0,
+            "{scope}: warm query reloaded model"
+        );
+        assert!(
+            warm_ms <= 5_000,
+            "{scope}: warm search took {warm_ms}ms > 5000ms"
+        );
+        println!(
+            "all-scope E5 report: {}",
+            json!({
+                "platform": std::env::consts::OS, "scope": scope, "build_ms": build_ms,
+                "first_search_ms": first_search_ms, "first_model_load_ms": first["model_load_ms"],
+                "warm_ms": warm_ms, "warm_ceiling_ms": 5000,
+                "top_three": hits, "build": build,
+            })
+        );
+    }
+    drop(workers); // Close only fixture-owned workers before removing their HOME/indexes.
+}
+
 /// Issue #5431: warm means both the query worker and this background model are ready.
 /// Requires the query worker delivered by Issue #5434; no cold-load time is subtracted.
 /// Set HF_HOME to the prepared model cache; PYTHON may select a prepared interpreter.

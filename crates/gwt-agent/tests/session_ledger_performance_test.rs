@@ -9,7 +9,7 @@ use std::{
 };
 
 use gwt_agent::{
-    session_ledger::{load_sessions, SessionLedgerCache},
+    session_ledger::{load_sessions, load_sessions_shared, SessionLedgerCache},
     AgentId, Session,
 };
 use gwt_core::test_support::ScopedGwtHome;
@@ -80,7 +80,7 @@ struct Measurement {
     allocations: AllocationCounts,
 }
 
-fn measure(load: impl FnOnce() -> Vec<Session>) -> (Vec<Session>, Measurement) {
+fn measure<T>(load: impl FnOnce() -> T) -> (T, Measurement) {
     ALLOCATIONS.with(|counter| counter.set(Some(AllocationCounts::default())));
     let started = Instant::now();
     let sessions = load();
@@ -140,6 +140,7 @@ fn shared_session_ledger_warm_sweeps_reduce_allocations() {
     assert_eq!(baseline.len(), SESSION_COUNT);
     baseline.sort_unstable_by(|left, right| left.id.cmp(&right.id));
 
+    let mut owned_warm_requested_bytes = 0;
     for (pass, label) in ["shared cold", "shared second warm", "shared third warm"]
         .into_iter()
         .enumerate()
@@ -158,6 +159,7 @@ fn shared_session_ledger_warm_sweeps_reduce_allocations() {
             );
         }
         if pass > 0 {
+            owned_warm_requested_bytes = measurement.allocations.requested_bytes;
             assert!(
                 measurement.allocations.requested_bytes
                     < baseline_measurement.allocations.requested_bytes,
@@ -165,4 +167,22 @@ fn shared_session_ledger_warm_sweeps_reduce_allocations() {
             );
         }
     }
+
+    let (mut snapshots, shared_measurement) =
+        measure(|| load_sessions_shared(&sessions_dir).expect("load shared Session snapshots"));
+    print_measurement("shared Arc warm", snapshots.len(), &shared_measurement);
+    assert_eq!(snapshots.len(), SESSION_COUNT);
+    snapshots.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    for (expected, actual) in baseline.iter().zip(&snapshots) {
+        assert_eq!(
+            toml::Value::try_from(actual.as_ref()).expect("shared Session content"),
+            toml::Value::try_from(expected).expect("baseline Session content"),
+            "shared Arc changed session {}",
+            expected.id,
+        );
+    }
+    assert!(
+        shared_measurement.allocations.requested_bytes < owned_warm_requested_bytes,
+        "shared Arc warm sweep must allocate fewer bytes than an owned warm sweep",
+    );
 }

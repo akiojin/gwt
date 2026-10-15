@@ -144,7 +144,7 @@ pub fn post_audience_for_session(
     ) {
         push_workspace_for_session(&mut audience, projection, session_id);
     }
-    collect_mention_audience(&mut audience, projection.as_ref(), mentions);
+    collect_mention_audience(&mut audience, projection.as_ref(), mentions)?;
     let audience = normalize_board_audience(audience);
     Ok((!audience.is_empty()).then_some(audience))
 }
@@ -176,7 +176,7 @@ pub fn post_audience_for_gui(
             }
         }
     }
-    collect_mention_audience(&mut audience, projection.as_ref(), mentions);
+    collect_mention_audience(&mut audience, projection.as_ref(), mentions)?;
     let audience = normalize_board_audience(audience);
     Ok((!audience.is_empty()).then_some(audience))
 }
@@ -185,7 +185,7 @@ fn collect_mention_audience(
     audience: &mut Vec<String>,
     projection: Option<&WorkspaceProjection>,
     mentions: &[BoardMention],
-) {
+) -> gwt_core::Result<()> {
     for mention in mentions {
         match mention.target_kind {
             BoardMentionTargetKind::Workspace => push_unique(audience, mention.target.clone()),
@@ -199,9 +199,29 @@ fn collect_mention_audience(
                     push_workspace_for_agent(audience, projection, &mention.target);
                 }
             }
-            BoardMentionTargetKind::User | BoardMentionTargetKind::Branch => {}
+            BoardMentionTargetKind::Branch => {
+                let mut resolved = false;
+                if let Some(projection) = projection {
+                    for agent in projection.assigned_agents().filter(|agent| {
+                        agent.branch.as_deref().map(str::trim) == Some(mention.target.trim())
+                    }) {
+                        if let Some(workspace_id) = workspace_id_for_agent(projection, agent) {
+                            push_unique(audience, workspace_id);
+                            resolved = true;
+                        }
+                    }
+                }
+                if !resolved {
+                    return Err(gwt_core::GwtError::Other(format!(
+                        "unresolved Board branch mention 'branch:{}': no assigned workspace Session on that exact branch; choose a current branch or explicitly broadcast without the mention",
+                        mention.target
+                    )));
+                }
+            }
+            BoardMentionTargetKind::User => {}
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -264,11 +284,12 @@ mod tests {
 
     #[test]
     fn private_helpers_resolve_workspace_audiences() {
-        let assigned = agent(
+        let mut assigned = agent(
             "s-1",
             WorkspaceAgentAffiliationStatus::Assigned,
             Some("ws-a"),
         );
+        assigned.branch = Some("work/x".to_string());
         let unassigned = agent("s-2", WorkspaceAgentAffiliationStatus::Unassigned, None);
         let proj = projection_with("", vec![assigned.clone(), unassigned.clone()]);
 
@@ -320,7 +341,8 @@ mod tests {
                 mention(BoardMentionTargetKind::User, "akiojin"),
                 mention(BoardMentionTargetKind::Branch, "work/x"),
             ],
-        );
+        )
+        .unwrap();
         assert!(mentions.contains(&"ws-explicit".to_string()));
         assert!(mentions.contains(&"ws-a".to_string()));
     }
@@ -334,12 +356,14 @@ mod tests {
             Some("ws-stale"),
         );
         stale.updated_at = older;
+        stale.branch = Some("work/old".to_string());
         let mut current = agent(
             "duplicate-session",
             WorkspaceAgentAffiliationStatus::Assigned,
             Some("ws-current"),
         );
         current.updated_at = older + chrono::Duration::seconds(1);
+        current.branch = Some("work/current".to_string());
         let projection = projection_with("", vec![stale, current]);
 
         let mut session_audience = Vec::new();
@@ -358,8 +382,135 @@ mod tests {
                 mention(BoardMentionTargetKind::Session, "duplicate-session"),
                 mention(BoardMentionTargetKind::Agent, "codex"),
             ],
-        );
+        )
+        .unwrap();
         assert_eq!(mention_audience, vec!["ws-current".to_string()]);
+
+        let mut branch_audience = Vec::new();
+        collect_mention_audience(
+            &mut branch_audience,
+            Some(&projection),
+            &[mention(BoardMentionTargetKind::Branch, "work/current")],
+        )
+        .unwrap();
+        assert_eq!(branch_audience, vec!["ws-current".to_string()]);
+        let error = collect_mention_audience(
+            &mut Vec::new(),
+            Some(&projection),
+            &[mention(BoardMentionTargetKind::Branch, "work/old")],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("branch:work/old"));
+    }
+
+    #[test]
+    fn branch_mentions_reach_normal_show_and_reminder() {
+        use crate::cli::{run_collect, BoardCommand, BoardPostCommand, CliCommand, TestEnv};
+        use gwt_agent::{AgentId, Session};
+
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_home, _home_guard, _userprofile_guard) = isolate_gwt_home();
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        let sender = Session::new(repo, "work/sender", AgentId::Codex);
+        let recipient = Session::new(repo, "work/recipient", AgentId::Codex);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        sender.save(&sessions).unwrap();
+        recipient.save(&sessions).unwrap();
+        let mut sender_agent = agent(
+            &sender.id,
+            WorkspaceAgentAffiliationStatus::Assigned,
+            Some("ws-sender"),
+        );
+        sender_agent.branch = Some(sender.branch.clone());
+        let mut recipient_agent = agent(
+            &recipient.id,
+            WorkspaceAgentAffiliationStatus::Assigned,
+            Some("ws-recipient"),
+        );
+        recipient_agent.branch = Some(recipient.branch.clone());
+        save_workspace_projection(
+            repo,
+            &projection_with("ws-sender", vec![sender_agent, recipient_agent]),
+        )
+        .unwrap();
+        let _sender = ScopedEnvVar::set("GWT_SESSION_ID", &sender.id);
+        let mut env = TestEnv::new(repo.to_path_buf());
+        run_collect(
+            &mut env,
+            CliCommand::Board(BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "handoff".into(),
+                body: Some("branch handoff delivery".into()),
+                mentions: vec!["branch:work/recipient".into()],
+                ..Default::default()
+            }))),
+        )
+        .unwrap();
+        let snapshot = crate::board_provider::load_snapshot(repo).unwrap();
+        assert!(snapshot.board.entries[0]
+            .audience
+            .contains(&"ws-recipient".to_string()));
+
+        let _recipient = ScopedEnvVar::set("GWT_SESSION_ID", &recipient.id);
+        let (_, shown) = run_collect(
+            &mut env,
+            CliCommand::Board(BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+                limit: Some(1),
+                unresolved: false,
+            }),
+        )
+        .unwrap();
+        assert!(shown.contains("branch handoff delivery"), "{shown}");
+        let reminder =
+            crate::cli::hook::board_reminder::compute_plan("SessionStart", &recipient, Utc::now())
+                .unwrap()
+                .unwrap();
+        let mut output = Vec::new();
+        reminder.output.serialize_to(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("branch handoff delivery"), "{output}");
+    }
+
+    #[test]
+    fn branch_mentions_report_unresolved_recipients() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_home, _home_guard, _userprofile_guard) = isolate_gwt_home();
+        let dir = tempdir().unwrap();
+        let mentions = [mention(BoardMentionTargetKind::Branch, "work/missing")];
+        for result in [
+            post_audience_for_session(dir.path(), None, &mentions, false),
+            post_audience_for_gui(dir.path(), &mentions, None, false),
+        ] {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("unresolved Board branch mention"), "{error}");
+            assert!(error.contains("branch:work/missing"), "{error}");
+        }
+        let mut env = crate::cli::TestEnv::new(dir.path().to_path_buf());
+        let error = crate::cli::run_collect(
+            &mut env,
+            crate::cli::CliCommand::Board(crate::cli::BoardCommand::Post(Box::new(
+                crate::cli::BoardPostCommand {
+                    kind: "handoff".into(),
+                    body: Some("must not be silently posted".into()),
+                    mentions: vec!["branch:work/missing".into()],
+                    ..Default::default()
+                },
+            ))),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("branch:work/missing"));
+        assert!(crate::board_provider::load_snapshot(dir.path())
+            .unwrap()
+            .board
+            .entries
+            .is_empty());
     }
 
     #[test]

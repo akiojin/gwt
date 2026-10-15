@@ -1,4 +1,4 @@
-//! Startup and hourly namespace GC shared by GUI and daemon lifetimes.
+//! Startup and periodic namespace GC shared by GUI and daemon lifetimes.
 
 use std::{
     io,

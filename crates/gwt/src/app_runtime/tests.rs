@@ -1136,7 +1136,9 @@ fn long_running_test_pane(id: &str) -> Pane {
     } else {
         (
             "/bin/sh".to_string(),
-            vec!["-lc".to_string(), "sleep 30".to_string()],
+            // Keep this basic fixture in one process: killing a shell can leave
+            // its sleep child orphaned after the direct child has been reaped.
+            vec!["-lc".to_string(), "exec sleep 30".to_string()],
         )
     };
     Pane::new(
@@ -1481,6 +1483,7 @@ fn sample_runtime_with_events(
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_output_bytes: HashMap::new(),
+        pending_runtime_outputs: HashMap::new(),
         remote_terminal_previews: HashMap::new(),
         window_last_output_at: HashMap::new(),
         window_hook_states: HashMap::new(),
@@ -1526,6 +1529,15 @@ fn sample_runtime_with_events(
 /// release path itself is generated from one shared list, so these stand in for
 /// every entry on it.
 fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
+    if let Some(incarnation) = runtime.runtimes.get(window_id).map(|pane| pane.incarnation) {
+        runtime.handle_runtime_output_event(
+            window_id.to_string(),
+            incarnation,
+            b"pending".to_vec(),
+            1,
+        );
+        assert!(runtime.pending_runtime_outputs.contains_key(window_id));
+    }
     let address = runtime.window_lookup[window_id].clone();
     let project_root = runtime
         .tab(&address.tab_id)
@@ -2871,6 +2883,139 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         .next()
         .is_none());
     assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+}
+
+#[test]
+fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for case in [
+        "active",
+        "expired",
+        "invalidated",
+        "review",
+        "restored_review",
+    ] {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        init_repo_with_initial_commit(&repo);
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (mut runtime, events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+        fs::write(
+            runtime
+                .profile_config_path
+                .as_ref()
+                .expect("fixture profile"),
+            "invalid = [",
+        )
+        .expect("stop admitted launches before provider preparation");
+        let mut monitor = gwt::IssueMonitorState::with_prefs(
+            Default::default(),
+            gwt::IssueMonitorPrefs {
+                max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+                max_active_agents: 3,
+                ..Default::default()
+            },
+        );
+        monitor.record_candidate(gwt::IssueMonitorIssue {
+            number: 42,
+            title: "Waiting implementation".to_string(),
+            labels: Vec::new(),
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::Ready,
+            updated_at: None,
+        });
+        let now = Utc::now();
+        let since = if case == "expired" {
+            now - chrono::Duration::hours(4)
+        } else {
+            now
+        };
+        monitor.complete_active_launch_at(42, "other-host::holder", &since.to_rfc3339());
+        monitor.declare_autonomous_wait(
+            42,
+            "verification lease",
+            "holder verification ends",
+            &since.to_rfc3339(),
+        );
+        if case == "invalidated" {
+            monitor.invalidate_autonomous_wait(42, "pm", "condition ended", &now.to_rfc3339());
+        }
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+        gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save wait");
+        let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+            .working_dir(&repo)
+            .linked_issue_number(42)
+            .build();
+        let mut feedback = issue_monitor_feedback(42);
+        feedback.issue_monitor_project_root = Some(repo.clone());
+        feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
+        feedback.issue_monitor_review_dispatch = case == "review";
+        if case == "review" || case == "restored_review" {
+            config
+                .env_vars
+                .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
+        }
+        let result = if case == "restored_review" {
+            runtime.spawn_agent_window(
+                "tab-1",
+                config,
+                canvas_bounds(),
+                Some(WorkspaceResumeContext {
+                    title: Some("Implementation Work".to_string()),
+                    owner: Some("Issue #42".to_string()),
+                    summary: None,
+                    next_action: None,
+                }),
+            )
+        } else {
+            runtime.spawn_agent_window_with_feedback(
+                "tab-1",
+                config,
+                canvas_bounds(),
+                None,
+                feedback,
+            )
+        };
+        if case == "active" {
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|reason| reason.contains("active wait")),
+                "an in-force wait must refuse a second implementation: {result:?}"
+            );
+            assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+        } else {
+            result.expect("expired/invalidated waits and review must permit admission");
+            let windows = &runtime.tabs[0].workspace.persisted().windows;
+            assert_eq!(windows.len(), 1);
+            if case == "review" || case == "restored_review" {
+                assert_eq!(
+                    windows[0].purpose_title.as_deref(),
+                    Some("Review · Issue #42")
+                );
+                assert!(runtime
+                    .issue_monitor_review_dispatch_windows
+                    .contains(&combined_window_id("tab-1", &windows[0].id)));
+                assert!(runtime.pending_workspace_resume_contexts.is_empty());
+            }
+            let completion =
+                take_monitor_launch_complete("post-admission fixture failure", &events);
+            assert!(completion.is_err_and(|reason| reason.detail.contains("config parse error")));
+        }
+        assert!(runtime.runtimes.is_empty());
+        assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    }
 }
 
 #[test]

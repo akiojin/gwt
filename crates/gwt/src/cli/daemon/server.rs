@@ -1517,13 +1517,15 @@ fn spawn_issue_monitor_worker_with_lease(
                             // Issue #3917: a close needs the auto-close authority;
                             // comment-only settlements need only the monitor.
                             crate::IssueMonitorEffectPayload::SettleMergedIssue {
-                                action, ..
+                                issue_number,
+                                action,
+                                ..
                             } => {
                                 monitor.config.enabled
                                     && (!matches!(
                                         action,
                                         crate::MergedIssueSettlementAction::Close { .. }
-                                    ) || monitor.auto_close_merged_issues_enabled())
+                                    ) || monitor.merged_issue_close_allowed(*issue_number))
                             }
                             crate::IssueMonitorEffectPayload::ReleaseClaim { .. }
                             | crate::IssueMonitorEffectPayload::RemoveQueueLabel { .. }
@@ -5134,18 +5136,28 @@ fn try_commit_issue_monitor_effect_result(
                         *issue_number,
                         *pr_number,
                         merge_sha.clone(),
-                        action.clone(),
+                        outcome.unmet_acceptance.map_or_else(
+                            || action.clone(),
+                            |unmet| crate::MergedIssueSettlementAction::UnmetAcceptance { unmet },
+                        ),
                         &completed.completed_at,
                     );
                     settled = true;
                 }
                 (
-                    crate::IssueMonitorEffectPayload::SettleMergedIssue { .. },
+                    crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                        issue_number,
+                        action,
+                        ..
+                    },
                     IssueMonitorEffectOutcome::MergedIssueSettlement(Err(
                         OwnerMutationError::PreSubmit(_),
                     )),
                 ) => {
-                    if current_authority {
+                    if current_authority
+                        && (!matches!(action, crate::MergedIssueSettlementAction::Close { .. })
+                            || candidate.merged_issue_close_allowed(*issue_number))
+                    {
                         let _ = candidate.retry_pending_effect(&key);
                     } else {
                         let _ = candidate.complete_pending_effect(&key);
@@ -5506,9 +5518,6 @@ fn scan_issue_monitor_once_blocking(
         // executor owns the GitHub mutation.
         let proposed = crate::issue_monitor_worker::propose_merged_issue_settlements(
             &mut monitor,
-            &scope.project_root,
-            &owner,
-            &repo,
             &merge_reconciliation.deliveries,
         );
         if !proposed.is_empty() {
@@ -14000,6 +14009,7 @@ exit 0
                         commented: true,
                         closed: true,
                         already_closed: false,
+                        unmet_acceptance: None,
                     },
                 ));
                 assert!(
@@ -14068,6 +14078,7 @@ exit 0
                         commented: true,
                         closed: false,
                         already_closed: false,
+                        unmet_acceptance: None,
                     },
                 ));
                 assert_eq!(
@@ -14088,25 +14099,65 @@ exit 0
     }
 
     #[test]
-    fn daemon_scan_closes_when_the_remaining_criteria_were_delegated() {
-        // Issue #3917 AC-2: a delegation record in the PR body substitutes
-        // for the unchecked criteria.
+    fn daemon_scan_records_a_stale_close_as_unmet_acceptance() {
+        with_settlement_scan_fixture(
+            "settle_close",
+            delivered_prefs(true),
+            |_, prefs_path, mut monitor| {
+                let effect = settlement_effect(&monitor).expect("close proposed");
+                assert!(commit_settlement(
+                    prefs_path,
+                    &mut monitor,
+                    &effect,
+                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                        commented: true,
+                        closed: false,
+                        already_closed: false,
+                        unmet_acceptance: Some(vec!["AC-1".to_string()]),
+                    },
+                ));
+                assert_eq!(
+                    monitor.inbox_item(43).map(|item| item.state),
+                    Some(crate::MonitorInboxState::NeedsHuman)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn daemon_scan_keeps_delegated_unchecked_acceptance_open() {
+        // Issue #5126: delegation prose never substitutes for checked AC.
         with_settlement_scan_fixture(
             "settle_delegated",
             delivered_prefs(true),
-            |_, _, monitor| {
+            |_, prefs_path, mut monitor| {
                 let effect = settlement_effect(&monitor).expect("delegated delivery settles");
                 assert!(
                     matches!(
                         effect.payload,
                         crate::IssueMonitorEffectPayload::SettleMergedIssue {
                             issue_number: 43,
-                            action: crate::MergedIssueSettlementAction::Close { delegated: true },
+                            action: crate::MergedIssueSettlementAction::UnmetAcceptance { .. },
                             ..
                         }
                     ),
                     "{:?}",
                     effect.payload
+                );
+                assert!(commit_settlement(
+                    prefs_path,
+                    &mut monitor,
+                    &effect,
+                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                        commented: true,
+                        closed: false,
+                        already_closed: false,
+                        unmet_acceptance: None,
+                    },
+                ));
+                assert_eq!(
+                    monitor.inbox_item(43).map(|item| item.state),
+                    Some(crate::MonitorInboxState::NeedsHuman)
                 );
             },
         );
@@ -14138,6 +14189,7 @@ exit 0
                     commented: true,
                     closed: false,
                     already_closed: false,
+                    unmet_acceptance: None,
                 },
             ));
             assert_eq!(
@@ -14181,6 +14233,7 @@ exit 0
                         commented: true,
                         closed: true,
                         already_closed: false,
+                        unmet_acceptance: None,
                     },
                 );
                 holder.join().expect("prefs lock holder joins");

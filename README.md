@@ -449,6 +449,10 @@ coordination surface agents use to expose status, decisions, handoffs, and
 requests. The Work Item Knowledge Bridge uses the local Issue cache and semantic
 index rather than rendering direct GitHub API responses in the frontend.
 
+Board keeps up to 1,000 entries in each window. Scroll to the top or choose
+`Load earlier entries` to retrieve older posts. When browsing older history,
+choose `Back to latest entries` to resume the latest updates.
+
 Each worker Agent chooses a short memorable name when it starts. Its badge,
 window title, Fleet, and Kanban cards use that name; duplicate choices receive
 a numeric suffix. The name stays the same through restore and in-place restart.
@@ -687,16 +691,21 @@ monitor armed. The full gate design and threat model live in SPEC
 
 Once a work branch merges into `develop`, the monitor settles the delivered
 Issue itself (`Closes #N` only fires on the default branch). When every
-acceptance criterion is checked — or the PR body / an Issue comment records
-that the remaining criteria were delegated to another Issue
-(`残 AC は別 Issue に委譲`) — it posts a comment carrying the PR number and
+acceptance criterion is checked, it posts a comment carrying the PR number and
 merge SHA and closes the Issue. Unchecked criteria leave the Issue open with a
 `merge 済み・未達 AC あり` comment and a `NeedsHuman` state; a `gwt-spec` Issue
-is closed only after every task phase is complete. Auto-close follows the
+is closed only after every task phase is complete. Delegating remaining criteria
+does not bypass the unchecked checklist. Auto-close follows the
 `Autonomous` toggle by default; `issue.monitor.config.set` with
 `auto_close_merged_issues=true|false` overrides it, and when it is off the
 monitor only records a `merge 済み・close 待ち` comment. An Issue a human
 reopened is never closed again by the same merge.
+
+To find completed Issues whose body still has unchecked acceptance criteria,
+run `node scripts/audit-closed-acceptance.mjs OWNER/REPOSITORY` from this checkout.
+The read-only audit uses `gh` to fetch all closed-Issue pages and prints a JSON
+list with each Issue's number, URL, and unchecked criteria. It excludes pull
+requests and Issues closed as not planned.
 
 Unattended lifecycle events (merge completed, retry scheduled, gate passed,
 needs-human escalations) surface as toasts and accumulate in a persistent,
