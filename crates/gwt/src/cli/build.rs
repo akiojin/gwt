@@ -3290,18 +3290,21 @@ format_version: Some(1),
             error.contains("outside the canonical Work authority"),
             "{error}"
         );
-        let cause = "exact Work terminal confirmation would require a new terminal event";
+        let cause = format!(
+            "exact Work terminal confirmation found unprojected machine-local close event {}",
+            unprojected.id
+        );
         let log = std::fs::read_to_string(gwt_core::logging::current_log_file(
             &gwt_core::paths::gwt_logs_dir(),
         ))
         .expect("checkout compatibility failure must persist its cause");
-        assert!(log.contains(cause), "{log}");
+        assert!(log.contains(&cause), "{log}");
         assert!(
             log.contains("Host workspace transaction failed without committing"),
             "{log}"
         );
         assert!(
-            !error.contains(cause),
+            !error.contains(&cause),
             "the original cause must stay in the machine log: {error}"
         );
         assert_eq!(
