@@ -46,7 +46,6 @@ pub enum WindowPreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowSurface {
     Terminal,
-    FileTree,
     Branches,
     Profile,
     Board,
@@ -55,7 +54,6 @@ pub enum WindowSurface {
     Index,
     Work,
     AgentKanban,
-    Console,
     Mock,
 }
 
@@ -67,7 +65,6 @@ impl WindowSurface {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Terminal => "terminal",
-            Self::FileTree => "file-tree",
             Self::Branches => "branches",
             Self::Profile => "profile",
             Self::Board => "board",
@@ -76,7 +73,6 @@ impl WindowSurface {
             Self::Index => "index",
             Self::Work => "work",
             Self::AgentKanban => "agent-kanban",
-            Self::Console => "console",
             Self::Mock => "mock",
         }
     }
@@ -154,6 +150,7 @@ impl WindowPreset {
             Self::Agent => "agent",
             Self::AgentKanban => "agent-kanban",
             Self::FileTree => "file-tree",
+            Self::Console => "console",
             Self::Branches => "branches",
             Self::Settings => "settings",
             Self::Memo => "memo",
@@ -166,7 +163,6 @@ impl WindowPreset {
             Self::Index => "index",
             Self::Board => "board",
             Self::Pr => "pr",
-            Self::Console => "console",
         }
     }
 
@@ -174,16 +170,15 @@ impl WindowPreset {
         match self {
             Self::Shell | Self::Claude | Self::Codex | Self::Agent => WindowSurface::Terminal,
             Self::AgentKanban => WindowSurface::AgentKanban,
-            Self::FileTree => WindowSurface::FileTree,
+            Self::FileTree | Self::Console | Self::Pr => WindowSurface::Mock,
             Self::Branches => WindowSurface::Branches,
             Self::Memo => WindowSurface::Mock,
             Self::Profile => WindowSurface::Profile,
             Self::Logs => WindowSurface::Logs,
             Self::Board => WindowSurface::Board,
-            Self::Issue | Self::IssueMonitor | Self::Spec | Self::Pr => WindowSurface::Knowledge,
+            Self::Issue | Self::IssueMonitor | Self::Spec => WindowSurface::Knowledge,
             Self::Work => WindowSurface::Work,
             Self::Index => WindowSurface::Index,
-            Self::Console => WindowSurface::Console,
             Self::Settings => WindowSurface::Mock,
         }
     }
@@ -417,13 +412,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_tree_preset_is_non_process_file_tree_surface() {
-        assert_eq!(WindowPreset::FileTree.surface(), WindowSurface::FileTree);
-        assert!(!WindowPreset::FileTree.requires_process());
-        assert_eq!(WindowPreset::FileTree.title(), "File Tree");
-    }
-
-    #[test]
     fn branches_preset_is_non_process_branch_surface() {
         assert_eq!(WindowPreset::Branches.surface(), WindowSurface::Branches);
         assert!(!WindowPreset::Branches.requires_process());
@@ -554,7 +542,6 @@ mod tests {
         assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
         assert_eq!(WindowPreset::Index.surface(), WindowSurface::Index);
-        assert_eq!(WindowPreset::Pr.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Settings.surface(), WindowSurface::Mock);
         // SPEC-2008 camera-focus: terminal-surface presets open work-area large
         // (1280×800) so that flying the camera to frame one at zoom 1.0 fills
@@ -667,10 +654,6 @@ mod tests {
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }
-                WindowPreset::FileTree => {
-                    assert_eq!(preset.surface(), WindowSurface::FileTree);
-                    assert!(!preset.requires_process());
-                }
                 WindowPreset::Branches => {
                     assert_eq!(preset.surface(), WindowSurface::Branches);
                     assert!(!preset.requires_process());
@@ -695,10 +678,7 @@ mod tests {
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }
-                WindowPreset::Issue
-                | WindowPreset::IssueMonitor
-                | WindowPreset::Spec
-                | WindowPreset::Pr => {
+                WindowPreset::Issue | WindowPreset::IssueMonitor | WindowPreset::Spec => {
                     assert_eq!(preset.surface(), WindowSurface::Knowledge);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
@@ -712,12 +692,6 @@ mod tests {
                     assert_eq!(preset.surface(), WindowSurface::Index);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
-                }
-                WindowPreset::Console => {
-                    assert_eq!(preset.surface(), WindowSurface::Console);
-                    assert!(!preset.requires_process());
-                    assert_eq!(preset.command_name(), None);
-                    assert_eq!(preset.default_size(), (720.0, 420.0));
                 }
                 WindowPreset::Agent => unreachable!("WindowPreset::ALL excludes Agent"),
                 other => {

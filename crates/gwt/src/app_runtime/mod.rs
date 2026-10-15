@@ -578,7 +578,6 @@ pub(crate) mod agent_maintenance;
 mod attachments;
 mod board;
 pub(crate) mod continuation;
-mod file_windows;
 mod frontend_action_log;
 mod knowledge;
 mod launch;
@@ -2054,7 +2053,6 @@ pub struct AppRuntime {
     /// SPEC-2009 amendment: per-window selected worktree root for File Tree
     /// windows. Reset every time the user reopens the picker, so this is a
     /// transient in-memory map and is not persisted with the session state.
-    pub(crate) file_tree_worktree_roots: HashMap<String, PathBuf>,
     /// SPEC-2785 FR-E: embedded server URL captured after the axum bind so
     /// `open_server_url_events` can reject requests whose origin differs from
     /// the bound URL. `None` before the server is started (e.g. during early
@@ -4660,7 +4658,6 @@ impl AppRuntime {
             pty_writers,
             attachment_uploads,
             persist_dispatcher,
-            file_tree_worktree_roots: HashMap::new(),
             server_url: None,
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -11257,18 +11254,12 @@ impl AppRuntime {
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
-            | FrontendEvent::LoadFileTree { id, .. }
-            | FrontendEvent::ListFileTreeWorktrees { id, .. }
-            | FrontendEvent::SelectFileTreeWorktree { id, .. }
-            | FrontendEvent::LoadFileContent { id, .. }
-            | FrontendEvent::SaveFileContent { id, .. }
             | FrontendEvent::LoadBranches { id, .. }
             | FrontendEvent::RequestRemoteStartWorkBranches { id, .. }
             | FrontendEvent::LoadBoard { id, .. }
             | FrontendEvent::LoadBoardHistory { id, .. }
             | FrontendEvent::LoadProfile { id, .. }
             | FrontendEvent::LoadLogs { id, .. }
-            | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
             | FrontendEvent::CheckKnowledgeRevision { id, .. }
             | FrontendEvent::ReportKnowledgeError { id, .. }
@@ -11612,18 +11603,12 @@ impl AppRuntime {
             | FrontendEvent::PasteImageUploaded { id, .. }
             | FrontendEvent::AttachmentUploadFailed { id, .. }
             | FrontendEvent::AttachFiles { id, .. }
-            | FrontendEvent::LoadFileTree { id, .. }
-            | FrontendEvent::ListFileTreeWorktrees { id, .. }
-            | FrontendEvent::SelectFileTreeWorktree { id, .. }
-            | FrontendEvent::LoadFileContent { id, .. }
-            | FrontendEvent::SaveFileContent { id, .. }
             | FrontendEvent::LoadBranches { id, .. }
             | FrontendEvent::RequestRemoteStartWorkBranches { id, .. }
             | FrontendEvent::LoadBoard { id, .. }
             | FrontendEvent::LoadBoardHistory { id, .. }
             | FrontendEvent::LoadProfile { id, .. }
             | FrontendEvent::LoadLogs { id, .. }
-            | FrontendEvent::LoadProcessConsole { id, .. }
             | FrontendEvent::LoadKnowledgeBridge { id, .. }
             | FrontendEvent::CheckKnowledgeRevision { id, .. }
             | FrontendEvent::ReportKnowledgeError { id, .. }
@@ -11789,20 +11774,6 @@ impl AppRuntime {
                 bounds,
                 surface_owner,
             } => self.create_window_events(context, preset, bounds, surface_owner),
-            FrontendEvent::LoadProcessConsole { id } => {
-                // SPEC-2809 Phase F2 — Console window mount asks for the
-                // current ring buffer. Use the global hub installed by
-                // `gwt_core::logging::init`. Reply to the requesting
-                // client only so other Consoles do not see duplicates.
-                let hub = gwt_core::process_console::global();
-                vec![OutboundEvent::reply(
-                    client_id.clone(),
-                    BackendEvent::ProcessConsoleSnapshot {
-                        id,
-                        lines: hub.snapshot_all(),
-                    },
-                )]
-            }
             FrontendEvent::FocusWindow { id, bounds } => self.focus_window_events(&id, bounds),
             FrontendEvent::CycleFocus { direction, bounds } => {
                 self.cycle_focus_events(context, direction, bounds)
@@ -11956,61 +11927,6 @@ impl AppRuntime {
                     self.attach_files_events(&id, files)
                 }
             }
-            FrontendEvent::LoadFileTree { id, path } => {
-                let path = path.unwrap_or_default();
-                vec![OutboundEvent::reply(
-                    client_id,
-                    self.load_file_tree_event(&id, &path),
-                )]
-            }
-            FrontendEvent::ListFileTreeWorktrees { id } => vec![OutboundEvent::reply(
-                client_id,
-                self.list_file_tree_worktrees_event(&id),
-            )],
-            FrontendEvent::SelectFileTreeWorktree { id, worktree_id } => {
-                vec![OutboundEvent::reply(
-                    client_id,
-                    self.select_file_tree_worktree_event(&id, &worktree_id),
-                )]
-            }
-            FrontendEvent::LoadFileContent {
-                id,
-                path,
-                mode,
-                hex_offset,
-                hex_length,
-            } => vec![OutboundEvent::reply(
-                client_id,
-                self.load_file_content_event(&id, &path, mode, hex_offset, hex_length),
-            )],
-            FrontendEvent::SaveFileContent {
-                id,
-                path,
-                mode,
-                expected_mtime,
-                expected_size,
-                text,
-                encoding,
-                newline,
-                has_bom,
-                hex_offset,
-                hex_byte,
-            } => vec![OutboundEvent::reply(
-                client_id,
-                self.save_file_content_event(
-                    &id,
-                    &path,
-                    mode,
-                    expected_mtime,
-                    expected_size,
-                    text,
-                    encoding,
-                    newline,
-                    has_bom,
-                    hex_offset,
-                    hex_byte,
-                ),
-            )],
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::RequestRemoteStartWorkBranches { id } => {
                 self.request_remote_start_work_branches_events(&client_id, &id)
@@ -12099,28 +12015,13 @@ impl AppRuntime {
                 knowledge_kind,
                 request_id,
                 number,
-            } => match knowledge_kind {
-                KnowledgeKind::Issue | KnowledgeKind::Spec => self
-                    .select_knowledge_bridge_entry_events(
-                        &client_id,
-                        &id,
-                        knowledge_kind,
-                        request_id,
-                        number,
-                    ),
-                // FR-102 intentionally covers only Issue/SPEC. Keep the PR
-                // surface on its pre-existing full-load selection path.
-                KnowledgeKind::Pr => self.load_knowledge_bridge_events(
-                    &client_id,
-                    KnowledgeLoadRequest {
-                        id: &id,
-                        kind: knowledge_kind,
-                        request_id,
-                        selected_number: Some(number),
-                        refresh: false,
-                    },
-                ),
-            },
+            } => self.select_knowledge_bridge_entry_events(
+                &client_id,
+                &id,
+                knowledge_kind,
+                request_id,
+                number,
+            ),
             FrontendEvent::UpdateKnowledgeBridgePhase {
                 id,
                 request_id,

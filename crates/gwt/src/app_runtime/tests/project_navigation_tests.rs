@@ -463,7 +463,7 @@ fn app_runtime_select_project_tab_preserves_other_project_wizard() {
             "Other",
             other,
             ProjectKind::NonRepo,
-            &[WindowPreset::FileTree],
+            &[WindowPreset::Board],
         ),
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));

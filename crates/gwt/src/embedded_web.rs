@@ -156,7 +156,6 @@ root_js_modules! {
     "release-notes-window.js" => "createReleaseNotesWindow",
     // SPEC-2809 — Console window for external process stdout/stderr live
     // tail (5 fixed kind tabs: gh / git / docker / agent / runner).
-    "console-window.js" => "createConsoleWindow",
     // SPEC-2014 2026-05-29 amendment — Launch Agent setting controls.
     "launch-controls.js" => "buildReasoningField",
     // SPEC-2359 W-17 (FR-398) — shared pending state for Resume/Launch
@@ -202,10 +201,6 @@ root_js_modules! {
     // drawer). app.js imports this at module top level, so the asset MUST be
     // registered or the ES module load fails and the splash hangs.
     "notification-center.js" => "createNotificationCenter",
-    // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
-    // worktree picker + text/hex viewer + window mount) extracted from
-    // app.js.
-    "file-tree-surface.js" => "createFileTreeSurface",
     // SPEC-3064 Phase 3 (E6b) — Branches window & branch cleanup surface
     // (branch list state, cleanup modal flow, window mount) extracted from
     // app.js.

@@ -444,6 +444,12 @@ pub fn pause_process_windows_for_restore(state: &mut PersistedWindowCanvasState)
 }
 
 fn normalize_loaded_workspace_state(state: &mut PersistedWindowCanvasState) {
+    let affected_groups: std::collections::HashSet<_> = state
+        .windows
+        .iter()
+        .filter(|window| window.preset.is_removed_legacy())
+        .filter_map(|window| window.tab_group_id.clone())
+        .collect();
     state
         .windows
         .retain(|window| {
@@ -454,6 +460,9 @@ fn normalize_loaded_workspace_state(state: &mut PersistedWindowCanvasState) {
                 true
             }
         });
+    for group_id in affected_groups {
+        crate::window_canvas::normalize_window_group(&mut state.windows, &group_id);
+    }
     for window in &mut state.windows {
         let canonical = window.preset.canonical_surface_preset();
         if window.preset != canonical {
@@ -1429,7 +1438,9 @@ mod tests {
                     "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
                     "z_index": index + 1,
                     "status": "running",
-                    "persist": true
+                    "persist": true,
+                    "tab_group_id": if *preset == "shell" || *preset == "console" { "shell-group" } else { "board-group" },
+                    "tab_group_active": *preset == "file_tree" || *preset == "console"
                 })
             })
             .collect();
@@ -1450,6 +1461,15 @@ mod tests {
             ["board", "logs", "shell"]
         );
         assert_eq!(loaded.next_z_index, 7);
+        assert!(loaded.windows.iter().any(|window| {
+            window.tab_group_id.as_deref() == Some("board-group") && window.tab_group_active
+        }));
+        let shell = loaded
+            .windows
+            .iter()
+            .find(|window| window.id == "shell")
+            .unwrap();
+        assert_eq!(shell.tab_group_id, None);
     }
 
     #[test]
@@ -1818,9 +1838,9 @@ mod tests {
                     is_pm: false,
                 },
                 PersistedWindowState {
-                    id: "file-tree-1".to_string(),
+                    id: "board-1".to_string(),
                     title: "Files".to_string(),
-                    preset: WindowPreset::FileTree,
+                    preset: WindowPreset::Board,
                     geometry: WindowGeometry {
                         x: 0.0,
                         y: 0.0,

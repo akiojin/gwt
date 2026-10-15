@@ -13,17 +13,15 @@ use crate::repo_browser::{
     preferred_issue_launch_branch, spawn_branch_load_async, spawn_remote_start_work_branches_async,
 };
 use base64::Engine;
-use gwt::protocol::{FileContentErrorKind, FileContentMode};
 use gwt::{
     cleanup_selected_branches_with_progress, collapse_duplicate_session_tabs, detect_shell_program,
-    list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
-    load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
-    read_binary_chunk, read_text_file,
+    list_branch_entries_with_active_sessions, load_knowledge_bridge, load_restored_workspace_state,
+    load_session_state, migrate_legacy_workspace_state,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode, resolve_launch_spec,
     workspace_state_path, AttachmentProgressPhase, BackendEvent, BranchCleanupOptions,
-    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
-    FrontendEvent, KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
-    UiTracePayload, WindowCanvasState, WindowGeometry, WindowPreset, WindowProcessStatus, APP_NAME,
+    BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FrontendEvent,
+    KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig, UiTracePayload,
+    WindowCanvasState, WindowGeometry, WindowPreset, WindowProcessStatus, APP_NAME,
 };
 use gwt_terminal::{Pane, PtyHandle};
 use tao::{
@@ -1977,13 +1975,6 @@ enum UserEvent {
     ProviderUsageSnapshot {
         accounts: Vec<gwt_core::usage::ProviderUsage>,
     },
-    /// SPEC-2809 Phase F1 — one redacted line from an external process
-    /// (gh / git / docker / agent / runner) emitted by
-    /// `ProcessConsoleHub`. Broadcast to all WebSocket clients so the
-    /// Console window and Logs window can both render it.
-    ProcessLine {
-        line: gwt_core::process_console::ProcessLine,
-    },
     RuntimeOutput {
         id: String,
         incarnation: u64,
@@ -2671,7 +2662,6 @@ mod tests {
     use chrono::Utc;
     use tempfile::tempdir;
 
-    use gwt::protocol::{FileContentErrorKind, FileContentMode};
     use gwt::{
         empty_workspace_state, AgentOption, ArrangeMode, BackendEvent, BranchCleanupInfo,
         BranchListEntry, BranchScope, CanvasViewport, FocusCycleDirection, KnowledgeKind,
@@ -4772,7 +4762,6 @@ mod tests {
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
             attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
             persist_dispatcher,
-            file_tree_worktree_roots: HashMap::new(),
 
             server_url: None,
             usage_refresh: None,
@@ -5031,11 +5020,11 @@ mod tests {
             "Repo",
             repo.clone(),
             ProjectKind::NonRepo,
-            &[WindowPreset::FileTree],
+            &[WindowPreset::Board],
         );
         let (mut runtime, _recorded_events) =
             sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-        let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
+        let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
         runtime
             .window_details
             .insert(window_id.clone(), "Paused".to_string());
@@ -5798,7 +5787,7 @@ mod tests {
                 "Other",
                 other.clone(),
                 ProjectKind::NonRepo,
-                &[WindowPreset::FileTree],
+                &[WindowPreset::Board],
             ),
         ];
         let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
@@ -5868,7 +5857,7 @@ mod tests {
             runtime
                 .create_window_events(
                     &runtime.test_context(),
-                    WindowPreset::FileTree,
+                    WindowPreset::Board,
                     bounds.clone(),
                     None
                 )
@@ -5877,11 +5866,11 @@ mod tests {
         );
 
         let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
-        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
-        let file_tree_raw_id = runtime
+        let board_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
+        let board_raw_id = runtime
             .window_lookup
-            .get(&file_tree_id)
-            .expect("file tree lookup")
+            .get(&board_id)
+            .expect("board lookup")
             .raw_id
             .clone();
 
@@ -5933,7 +5922,7 @@ mod tests {
         };
         assert_eq!(
             runtime
-                .update_window_geometry_events(&file_tree_id, geometry.clone(), 10, 1, None)
+                .update_window_geometry_events(&board_id, geometry.clone(), 10, 1, None)
                 .len(),
             1
         );
@@ -5941,7 +5930,7 @@ mod tests {
             .tab("tab-1")
             .expect("tab")
             .workspace
-            .window(&file_tree_raw_id)
+            .window(&board_raw_id)
             .expect("window");
         assert_eq!(updated_window.geometry, geometry);
 
@@ -5950,8 +5939,8 @@ mod tests {
             other => panic!("expected window list, got {other:?}"),
         }
 
-        assert_eq!(runtime.close_window_events(&file_tree_id).len(), 1);
-        assert!(!runtime.window_lookup.contains_key(&file_tree_id));
+        assert_eq!(runtime.close_window_events(&board_id).len(), 1);
+        assert!(!runtime.window_lookup.contains_key(&board_id));
     }
 
     // SPEC-2008 FR-096/FR-097: the Camera-focus model replaced manual maximize.
@@ -6041,11 +6030,9 @@ mod tests {
         );
 
         for preset in [
-            WindowPreset::FileTree,
             WindowPreset::Settings,
             WindowPreset::Profile,
             WindowPreset::Logs,
-            WindowPreset::Pr,
         ] {
             assert_eq!(
                 runtime
@@ -6114,8 +6101,6 @@ mod tests {
         let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
-        fs::create_dir_all(repo.join("src")).expect("create src");
-        fs::write(repo.join("README.md"), "hello").expect("write readme");
         let tab = sample_project_tab(
             "tab-1",
             "Repo",
@@ -6123,232 +6108,13 @@ mod tests {
             ProjectKind::Git,
             &[
                 WindowPreset::Branches,
-                WindowPreset::FileTree,
+                WindowPreset::Board,
                 WindowPreset::Issue,
             ],
         );
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
-        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
-
-        assert!(matches!(
-            runtime.load_file_tree_event("missing", ""),
-            BackendEvent::FileTreeError { ref message, .. } if message == "Window not found"
-        ));
-        assert!(matches!(
-            runtime.load_file_tree_event(&branches_id, ""),
-            BackendEvent::FileTreeError { ref message, .. } if message == "Window is not a file tree"
-        ));
-        assert!(matches!(
-            runtime.load_file_tree_event(&file_tree_id, ""),
-            BackendEvent::FileTreeEntries { ref entries, .. } if !entries.is_empty()
-        ));
-
-        // SPEC-2006 amendment: load_file_content_event covers text, hex, denied,
-        // and window-mismatch paths through the same File Tree window contract.
-        assert!(matches!(
-            runtime.load_file_content_event(
-                "missing",
-                "README.md",
-                FileContentMode::Text,
-                None,
-                None,
-            ),
-            BackendEvent::FileContentError {
-                error_kind: FileContentErrorKind::WindowNotFound,
-                ..
-            }
-        ));
-        assert!(matches!(
-            runtime.load_file_content_event(
-                &branches_id,
-                "README.md",
-                FileContentMode::Text,
-                None,
-                None,
-            ),
-            BackendEvent::FileContentError {
-                error_kind: FileContentErrorKind::WindowMismatch,
-                ..
-            }
-        ));
-        assert!(matches!(
-            runtime.load_file_content_event(
-                &file_tree_id,
-                "README.md",
-                FileContentMode::Text,
-                None,
-                None,
-            ),
-            BackendEvent::FileContentText { ref text, .. } if text == "hello"
-        ));
-        assert!(matches!(
-            runtime.load_file_content_event(
-                &file_tree_id,
-                ".git/HEAD",
-                FileContentMode::Text,
-                None,
-                None,
-            ),
-            BackendEvent::FileContentError {
-                error_kind: FileContentErrorKind::Denied,
-                ..
-            }
-        ));
-        let hex_event = runtime.load_file_content_event(
-            &file_tree_id,
-            "README.md",
-            FileContentMode::Hex,
-            Some(0),
-            Some(16),
-        );
-        match hex_event {
-            BackendEvent::FileContentHex {
-                offset, total_size, ..
-            } => {
-                assert_eq!(offset, 0);
-                assert_eq!(total_size, 5);
-            }
-            other => panic!("expected FileContentHex, got {other:?}"),
-        }
-
-        // SPEC-2009 amendment: Worktree Picker handlers must cover window
-        // mismatch, picker enumeration, and explicit selection.
-        assert!(matches!(
-            runtime.list_file_tree_worktrees_event("missing"),
-            BackendEvent::FileTreeWorktreeError { ref message, .. } if message == "Window not found"
-        ));
-        assert!(matches!(
-            runtime.list_file_tree_worktrees_event(&branches_id),
-            BackendEvent::FileTreeWorktreeError { ref message, .. } if message == "Window is not a file tree"
-        ));
-        let worktrees_event = runtime.list_file_tree_worktrees_event(&file_tree_id);
-        let worktree_id = match worktrees_event {
-            BackendEvent::FileTreeWorktrees { entries, .. } => {
-                assert!(
-                    !entries.is_empty(),
-                    "test repo must list at least one worktree"
-                );
-                entries[0].id.clone()
-            }
-            other => panic!("expected FileTreeWorktrees, got {other:?}"),
-        };
-
-        assert!(matches!(
-            runtime.select_file_tree_worktree_event(&file_tree_id, "unknown-id"),
-            BackendEvent::FileTreeWorktreeError { ref message, .. } if message == "Unknown worktree id"
-        ));
-        assert!(matches!(
-            runtime.select_file_tree_worktree_event(&file_tree_id, &worktree_id),
-            BackendEvent::FileTreeWorktreeSelected { worktree_id: ref selected, .. } if selected == &worktree_id
-        ));
-
-        // SPEC-2006 Phase 2 amendment: save_file_content_event must cover
-        // WindowNotFound / WindowMismatch / successful text save / Conflict
-        // (mismatched expected_mtime) / OutOfRange (hex offset >= size).
-        let missing_save = runtime.save_file_content_event(
-            "missing",
-            "README.md",
-            gwt::FileContentMode::Text,
-            0,
-            0,
-            Some("ignored".to_string()),
-            Some(gwt::Encoding::Utf8),
-            Some(gwt::Newline::Lf),
-            Some(false),
-            None,
-            None,
-        );
-        assert!(matches!(
-            missing_save,
-            BackendEvent::FileContentSaveError {
-                error_kind: gwt::FileContentSaveErrorKind::WindowNotFound,
-                ..
-            }
-        ));
-
-        let wrong_save = runtime.save_file_content_event(
-            &branches_id,
-            "README.md",
-            gwt::FileContentMode::Text,
-            0,
-            0,
-            Some("ignored".to_string()),
-            Some(gwt::Encoding::Utf8),
-            Some(gwt::Newline::Lf),
-            Some(false),
-            None,
-            None,
-        );
-        assert!(matches!(
-            wrong_save,
-            BackendEvent::FileContentSaveError {
-                error_kind: gwt::FileContentSaveErrorKind::WindowMismatch,
-                ..
-            }
-        ));
-
-        // Re-read current README.md metadata to drive a successful save.
-        let read_event = runtime.load_file_content_event(
-            &file_tree_id,
-            "README.md",
-            FileContentMode::Text,
-            None,
-            None,
-        );
-        let (saved_mtime, saved_size, encoding, newline, has_bom) = match read_event {
-            BackendEvent::FileContentText {
-                mtime,
-                total_size,
-                encoding,
-                newline,
-                has_bom,
-                ..
-            } => (mtime, total_size, encoding, newline, has_bom),
-            other => panic!("expected FileContentText, got {other:?}"),
-        };
-
-        let conflict_save = runtime.save_file_content_event(
-            &file_tree_id,
-            "README.md",
-            gwt::FileContentMode::Text,
-            saved_mtime.saturating_add(99),
-            saved_size,
-            Some("conflict".to_string()),
-            Some(encoding),
-            Some(newline),
-            Some(has_bom),
-            None,
-            None,
-        );
-        assert!(matches!(
-            conflict_save,
-            BackendEvent::FileContentSaveError {
-                error_kind: gwt::FileContentSaveErrorKind::Conflict,
-                ..
-            }
-        ));
-
-        let hex_out_of_range = runtime.save_file_content_event(
-            &file_tree_id,
-            "README.md",
-            gwt::FileContentMode::Hex,
-            saved_mtime,
-            saved_size,
-            None,
-            None,
-            None,
-            None,
-            Some(saved_size + 100),
-            Some(0xFF),
-        );
-        assert!(matches!(
-            hex_out_of_range,
-            BackendEvent::FileContentSaveError {
-                error_kind: gwt::FileContentSaveErrorKind::OutOfRange,
-                ..
-            }
-        ));
+        let board_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
 
         let missing_branches = runtime.load_branches_events("client-1", "missing");
         assert_eq!(missing_branches.len(), 1);
@@ -6356,7 +6122,7 @@ mod tests {
             missing_branches[0].event,
             BackendEvent::BranchError { ref message, .. } if message == "Window not found"
         ));
-        let wrong_window_branches = runtime.load_branches_events("client-1", &file_tree_id);
+        let wrong_window_branches = runtime.load_branches_events("client-1", &board_id);
         assert_eq!(wrong_window_branches.len(), 1);
         assert!(matches!(
             wrong_window_branches[0].event,
@@ -6415,7 +6181,7 @@ mod tests {
 
         let cleanup_wrong = runtime.run_branch_cleanup_events(
             "client-1",
-            &file_tree_id,
+            &board_id,
             &[],
             false,
             false,
@@ -6437,8 +6203,7 @@ mod tests {
                 if title == "Launch Agent" && message == "Window not found"
         ));
 
-        let wizard_wrong =
-            runtime.open_launch_wizard("client-1", &file_tree_id, "feature/demo", None);
+        let wizard_wrong = runtime.open_launch_wizard("client-1", &board_id, "feature/demo", None);
         assert_eq!(wizard_wrong.len(), 1);
         assert!(matches!(
             wizard_wrong[0].event,
@@ -6453,80 +6218,13 @@ mod tests {
             BackendEvent::KnowledgeError { ref message, .. } if message == "Window not found"
         ));
 
-        let issue_wrong = runtime.open_issue_launch_wizard_events("client-1", &file_tree_id, 7);
+        let issue_wrong = runtime.open_issue_launch_wizard_events("client-1", &board_id, 7);
         assert_eq!(issue_wrong.len(), 1);
         assert!(matches!(
             issue_wrong[0].event,
             BackendEvent::KnowledgeError { ref message, .. }
                 if message == "Window is not a knowledge bridge"
         ));
-    }
-
-    #[test]
-    fn file_tree_load_uses_selected_linked_worktree_root() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = ScopedGwtHome::set(temp.path());
-        let repo = temp.path().join("repo");
-        init_git_repo(&repo);
-
-        let active_worktree = temp.path().join("work-current");
-        let develop_worktree = temp.path().join("develop");
-        for (branch, path) in [
-            ("work/current", &active_worktree),
-            ("develop", &develop_worktree),
-        ] {
-            let status = gwt_core::process::hidden_command("git")
-                .args(["worktree", "add", "-b", branch])
-                .arg(path)
-                .current_dir(&repo)
-                .status()
-                .expect("git worktree add");
-            assert!(status.success(), "git worktree add {branch} failed");
-        }
-        fs::write(active_worktree.join("ACTIVE_ONLY.txt"), "active").expect("write active file");
-        fs::write(develop_worktree.join("DEVELOP_ONLY.txt"), "develop")
-            .expect("write develop file");
-
-        let tab = sample_project_tab(
-            "tab-1",
-            "Repo",
-            active_worktree,
-            ProjectKind::Git,
-            &[WindowPreset::FileTree],
-        );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
-
-        let worktree_id = match runtime.list_file_tree_worktrees_event(&file_tree_id) {
-            BackendEvent::FileTreeWorktrees { entries, .. } => {
-                entries
-                    .into_iter()
-                    .find(|entry| entry.branch.as_deref() == Some("develop"))
-                    .expect("develop worktree")
-                    .id
-            }
-            other => panic!("expected FileTreeWorktrees, got {other:?}"),
-        };
-
-        assert!(matches!(
-            runtime.select_file_tree_worktree_event(&file_tree_id, &worktree_id),
-            BackendEvent::FileTreeWorktreeSelected { .. }
-        ));
-
-        match runtime.load_file_tree_event(&file_tree_id, "") {
-            BackendEvent::FileTreeEntries { entries, .. } => {
-                let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
-                assert!(
-                    paths.contains(&"DEVELOP_ONLY.txt"),
-                    "selected develop worktree file should be visible: {paths:?}",
-                );
-                assert!(
-                    !paths.contains(&"ACTIVE_ONLY.txt"),
-                    "active worktree file must not leak after selecting develop: {paths:?}",
-                );
-            }
-            other => panic!("expected FileTreeEntries, got {other:?}"),
-        }
     }
 
     #[test]
@@ -6969,9 +6667,7 @@ mod tests {
         let repo = temp.path().join("repo");
         let scratch = temp.path().join("scratch");
         init_git_repo(&repo);
-        fs::create_dir_all(repo.join("src")).expect("create src");
         fs::create_dir_all(&scratch).expect("create scratch");
-        fs::write(repo.join("README.md"), "hello").expect("write readme");
 
         let (mut runtime, events) = sample_runtime_with_events(
             temp.path(),
@@ -6982,7 +6678,7 @@ mod tests {
                 ProjectKind::Git,
                 &[
                     WindowPreset::Branches,
-                    WindowPreset::FileTree,
+                    WindowPreset::Board,
                     WindowPreset::Issue,
                 ],
             )],
@@ -6991,7 +6687,7 @@ mod tests {
         let context = runtime.test_context();
         let bounds = canvas_bounds();
         let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
-        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
+        let board_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
         let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
 
         assert!(!runtime
@@ -7109,7 +6805,7 @@ mod tests {
                     &context,
                     "client-1".to_string(),
                     gwt::FrontendEvent::UpdateWindowGeometry {
-                        id: file_tree_id.clone(),
+                        id: board_id.clone(),
                         geometry: WindowGeometry {
                             x: 20.0,
                             y: 30.0,
@@ -7147,19 +6843,6 @@ mod tests {
                 },
             )
             .is_empty());
-        assert_eq!(
-            runtime
-                .handle_frontend_event_for_project(
-                    &context,
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::LoadFileTree {
-                        id: file_tree_id,
-                        path: Some("src".to_string()),
-                    },
-                )
-                .len(),
-            1
-        );
         assert_eq!(
             runtime
                 .handle_frontend_event_for_project(
@@ -8529,10 +8212,6 @@ mod tests {
         assert_eq!(
             knowledge_kind_for_preset(WindowPreset::Spec),
             Some(KnowledgeKind::Issue)
-        );
-        assert_eq!(
-            knowledge_kind_for_preset(WindowPreset::Pr),
-            Some(KnowledgeKind::Pr)
         );
         assert_eq!(knowledge_kind_for_preset(WindowPreset::Branches), None);
     }
@@ -10107,10 +9786,6 @@ mod tests {
             super::knowledge_kind_for_preset(WindowPreset::Spec),
             Some(KnowledgeKind::Issue)
         );
-        assert_eq!(
-            super::knowledge_kind_for_preset(WindowPreset::Pr),
-            Some(KnowledgeKind::Pr)
-        );
         assert_eq!(super::knowledge_kind_for_preset(WindowPreset::Shell), None);
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -10795,30 +10470,6 @@ fn main() -> std::io::Result<()> {
                 }
             }));
         }
-        // SPEC-2809 Phase F1 — subscribe to the ProcessConsoleHub
-        // broadcast channel and fan out every line as a UserEvent. The
-        // existing tracing UI forwarder above is unchanged; the two
-        // streams are independent (summary tracing vs. line-level
-        // process I/O).
-        let mut process_rx = log_handles.process_console_hub.subscribe();
-        let process_proxy = proxy.clone();
-        drop(runtime.handle().spawn(async move {
-            loop {
-                match process_rx.recv().await {
-                    Ok(line) => {
-                        let _ = process_proxy.send_event(UserEvent::ProcessLine { line });
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // Slow subscribers can fall behind during
-                        // bursts (e.g. `docker pull`). Drop the lag
-                        // signal and keep going; the ring buffer is
-                        // the durable replay surface, not this stream.
-                        continue;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        }));
     }
 
     // SPEC-2963 FR-005: bind a dedicated fixed loopback port for the OAuth
@@ -11476,11 +11127,6 @@ fn main() -> std::io::Result<()> {
                 // Issue #3366 — gated on an open Logs window; see
                 // `AppRuntime::log_entry_events`.
                 clients.dispatch(app.log_entry_events(entry));
-            }
-            Event::UserEvent(UserEvent::ProcessLine { line }) => {
-                // Issue #3366 — gated on an open Console window; see
-                // `AppRuntime::process_line_events`.
-                clients.dispatch(app.process_line_events(line));
             }
             Event::UserEvent(UserEvent::ProviderUsageSnapshot { accounts }) => {
                 // Issue #3616: corroborate and re-check pending quota
