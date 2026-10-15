@@ -155,8 +155,11 @@ Module._resolveFilename = function(request, parent, ...rest) {
     }
     & node $playwright install chromium
     if ($LASTEXITCODE) { throw 'Chromium installation failed.' }
+    # Keep evidence outside verify.run's disposable TEMP, as run-visual-tests.sh does.
+    $artifacts = Join-Path $repoRoot ('crates/gwt/playwright/test-results/issue-5404-' + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
     & node $playwright test --config (Join-Path $repoRoot 'crates/gwt/playwright/playwright.config.ts') --workers=1 `
-        --output (Join-Path $checkHome 'playwright') --grep 'Issue #5404' `
+        --output $artifacts --grep 'Issue #5404' `
         'work-projection-memo-live.spec.ts' @PlaywrightArgs
     if ($LASTEXITCODE) { throw 'Issue #5404 headed verification failed.' }
 } finally {
