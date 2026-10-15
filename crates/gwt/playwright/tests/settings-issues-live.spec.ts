@@ -68,6 +68,20 @@ async function selectCapacityMode(page: Page, mode: "auto" | "manual"): Promise<
   { before, mode }, { timeout: 30_000 });
 }
 
+async function setAutoApplyUpdates(page: Page, enabled: boolean): Promise<void> {
+  const control = panel(page, "system").getByLabel("Auto-apply updates", { exact: true });
+  const before = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+  // Status broadcasts may restore the old authoritative value between the
+  // native click and the save acknowledgement. Wait for that new response.
+  await control.click();
+  await page.waitForFunction(({ before, enabled }) => ((window as any).__gwtPlaywrightMessages ?? [])
+    .some(({ sequence, payload }: any) => sequence > before
+      && payload.kind === "update_settings" && payload.status.auto_apply_updates === enabled),
+  { before, enabled });
+  if (enabled) await expect(control).toBeChecked();
+  else await expect(control).not.toBeChecked();
+}
+
 async function closeFixtureMigrationDrawer(page: Page): Promise<void> {
   // These disposable Normal Git projects intentionally keep their original
   // identities. Close only the unrelated startup drawer through its renderer
@@ -309,7 +323,7 @@ test.describe("Issue #5322 Settings", () => {
         await expect(issues.getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
         await expect(updates).toBeEnabled();
         await expect(updates).not.toBeChecked();
-        await updates.check();
+        await setAutoApplyUpdates(page, true);
         await expect(updatesB).toBeChecked();
         await expect(updates.locator("..")).toContainText("Auto-apply updates");
         await expect(panel(page, "system")).toContainText(/at least one open project.*Autonomous/);
@@ -347,7 +361,7 @@ test.describe("Issue #5322 Settings", () => {
             .some(({ payload }: any) => payload.kind === "system_settings_error"));
           await expect(updates).toBeChecked();
         } finally { await writeFile(configPath, savedConfig); }
-        await updates.uncheck();
+        await setAutoApplyUpdates(page, false);
         await expect(updates).not.toBeChecked();
         await expect(updatesB).not.toBeChecked();
         await expect(panel(page, "system")).toContainText("Saved: Off · Effective: Off");
@@ -362,7 +376,7 @@ test.describe("Issue #5322 Settings", () => {
         expect(runCli("issue.monitor.config.set", { update_drain: false }).status).toBe(0);
         await sendLiveGwtEvent(page, { kind: "get_update_settings" });
         await expect(panel(page, "system")).toContainText("No update pending");
-        await updates.check();
+        await setAutoApplyUpdates(page, true);
         await expect(updatesB).toBeChecked();
 
         for (const current of [page, pageB]) {
