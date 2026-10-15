@@ -57,6 +57,8 @@ test.describe("Agent-prioritized focus cycling", () => {
     await page.evaluate(() => (window as any).__emitAgentFocusCycleFutureState("running"));
     await expect(windowById(page, "agent-live-future").locator(".status-chip"))
       .toHaveAttribute("aria-label", /^Running: .*focus-cycle runtime running$/);
+    await expect(windowById(page, "agent-live-future").locator(".title-text"))
+      .toHaveAttribute("title", "focus-cycle snapshot running");
     await pressFocusCycle(page, "ArrowRight", "Control");
     await expectAgentTabFocus(page, "agent-running");
     await expect.poll(() => focusTargets(page)).toEqual([
@@ -329,6 +331,7 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
       });
       // Focus echoes must agree with this runtime update, including when the
       // receive dispatcher coalesces an earlier workspace snapshot.
+      target.dynamic_title_detail = `focus-cycle snapshot ${status}`;
       return socket?.emit(workspaceState());
     };
     (window as any).__releaseAgentFocusCycleActivation = () => {
