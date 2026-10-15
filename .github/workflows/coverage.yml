@@ -80,6 +80,7 @@ jobs:
           # Nextest starts one process per test. Share four online-merge
           # profiles per instrumented module instead of one copy per PID.
           LLVM_PROFILE_FILE_NAME: gwt-%4m.profraw
+          NEXTEST_PROFILE: coverage
         run: node scripts/coverage-summary.mjs --output-path target/coverage-summary.json --nextest -- --workspace --all-features
         timeout-minutes: 20
       - name: Enforce coverage threshold (gwt-core + gwt @ 90%)
