@@ -231,25 +231,6 @@ test("Issue #5401 mounts all 200 rows but virtualizes larger lists", async t => 
   assert.ok(fixture.body.querySelector(".knowledge-virtual-spacer"));
 });
 
-test("Issue #5401 PR Kanban reuses cards, virtualizes large columns and retains empty guidance", async t => {
-  const fixture = await makeFixture({ kind: "pr" });
-  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
-  const entries = Array.from({ length: 201 }, (_, index) => knowledgeEntry(index + 1));
-  const receive = rows => fixture.surface.applyKnowledgeReceiveEvent({
-    kind: "knowledge_entries", id: "win-1", knowledge_kind: "pr", request_id: fixture.load.request_id,
-    entries: rows, refresh_enabled: true,
-  });
-  receive(entries);
-  const card = fixture.body.querySelector('.kanban-card[data-issue-number="2"]');
-  assert.ok(card);
-  assert.ok(fixture.body.querySelectorAll(".kanban-card").length < 200);
-  receive([{ ...entries[0], title: "Changed card" }, ...entries.slice(1)]);
-  assert.equal(fixture.body.querySelector('.kanban-card[data-issue-number="2"]'), card);
-  const empty = fixture.body.querySelector('[data-phase="done"] .kanban-column-body');
-  empty.dispatchEvent(new fixture.window.Event("scroll"));
-  assert.ok(empty.querySelector(".kanban-column-empty"));
-});
-
 function overflowActions(row) {
   return [...row.querySelectorAll(".knowledge-row-menu-list button[data-action]")].map(
     (button) => button.dataset.action,

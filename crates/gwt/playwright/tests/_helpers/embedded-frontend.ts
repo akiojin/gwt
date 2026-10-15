@@ -57,7 +57,6 @@ const ROOT_MODULES = new Set([
   "clone-modal-focus-guard.js",
   "custom-agent-env-editor.js",
   // SPEC-3064 Phase 3 (E6a) — File Tree window surface.
-  "file-tree-surface.js",
   // SPEC-2008 camera-focus / FR-094 — always-on Fleet Minimap carrier.
   "fleet-minimap.js",
   // Issue #4777 T-1 — rail surface selection (Issues / Agents / Board / Settings).
@@ -104,7 +103,6 @@ const ROOT_MODULES = new Set([
   // SPEC #2780 — Release Notes window opened from #app-version label.
   "release-notes-window.js",
   // SPEC-2809 — Console window per-kind tab live tail.
-  "console-window.js",
   // SPEC-3064 Phase 3 (E4) — Settings windows surface.
   "settings-surface.js",
   "socket-receive-dispatcher.js",

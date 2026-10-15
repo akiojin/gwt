@@ -30,8 +30,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator canvas** — arrange Agent, Board, Issue, SPEC, Logs, Profile,
-  File Tree, Branches, and PR surfaces in one mission-control style workspace.
+- **Operator canvas** — arrange Agent, Board, Logs, Profile, Index, and
+  Settings surfaces in one mission-control style workspace.
 
 ## Install
 
@@ -423,7 +423,6 @@ Common windows include:
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
 - `Profile` — environment/profile management
-- `File Tree` — live read-only repository tree
 - `Branches` — branch inspection, filtering, cleanup, and Git details
 - `Settings` — application and agent configuration. The `System` tab lets
   you choose the narrative output language (Auto / English / 日本語) used
@@ -441,8 +440,6 @@ Common windows include:
   System shows the saved and effective values and pending-update blockers.
   Change the preference in the GUI; agents can read it with
   `update.settings.status`. It is no longer an Issue Monitor setting.
-- `PR` — pull-request workflow surface; detailed list support depends on the
-  cache-backed PR source as it lands
 
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and

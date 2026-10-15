@@ -30,8 +30,6 @@
     <link rel="stylesheet" href="/styles/typography.css" />
     <link rel="stylesheet" href="/styles/components.css" />
     <link rel="stylesheet" href="/assets/xterm/xterm.css" />
-    <!-- SPEC-2009 Phase 2b: dark syntax highlighting theme for File Tree text viewer. -->
-    <link rel="stylesheet" href="/assets/highlight/github-dark.min.css" />
     <link rel="preload" as="style" href="/styles/app.css" />
     <link rel="stylesheet" href="/styles/app.css" />
   </head>
@@ -584,25 +582,11 @@
           <div class="preset-section" data-category="surface">
             <div class="preset-section-label">Surfaces</div>
             <div class="preset-list">
-              <button class="preset-button" data-preset="file_tree" data-category="surface">
-                <span class="preset-button__icon" aria-hidden="true">⊟</span>
-                <span class="preset-button__text">
-                  <strong>File Tree</strong>
-                  <span>Browse repository files in a read-only tree</span>
-                </span>
-              </button>
               <button class="preset-button" data-preset="logs" data-category="surface">
                 <span class="preset-button__icon" aria-hidden="true">≡</span>
                 <span class="preset-button__text">
                   <strong>Logs</strong>
                   <span>Open the logs surface</span>
-                </span>
-              </button>
-              <button class="preset-button" data-preset="console" data-category="surface">
-                <span class="preset-button__icon" aria-hidden="true">❯</span>
-                <span class="preset-button__text">
-                  <strong>Console</strong>
-                  <span>External process stdout/stderr per kind</span>
                 </span>
               </button>
               <button class="preset-button" data-preset="board" data-category="surface">
@@ -625,13 +609,6 @@
                 <span class="preset-button__text">
                   <strong>Issues</strong>
                   <span>Open Settings › Project › Issues</span>
-                </span>
-              </button>
-              <button class="preset-button" data-preset="pr" data-category="knowledge">
-                <span class="preset-button__icon" aria-hidden="true">⇄</span>
-                <span class="preset-button__text">
-                  <strong>PR</strong>
-                  <span>Open the PR surface</span>
                 </span>
               </button>
               <button class="preset-button" data-preset="index" data-category="knowledge">
@@ -735,53 +712,6 @@
           role="dialog"
           aria-modal="true"
           aria-label="Close window"
-          tabindex="-1"
-        ></div>
-      </div>
-      <!-- SPEC-2009 amendment: Worktree Picker modal for the File Tree
-           window. Renderer lives in /app.js (frontendUnits.worktreePicker).
-           Opens once per File Tree window open; selection routes the tree
-           through the new gwt-managed worktree inventory. -->
-      <div
-        class="modal-backdrop"
-        id="file-tree-worktree-picker-modal"
-        aria-hidden="true"
-      >
-        <div
-          class="modal-shell worktree-picker-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Select worktree for File Tree"
-          tabindex="-1"
-        ></div>
-      </div>
-      <!-- SPEC-2009 amendment Phase 2: Discard / Conflict modal landing
-           pads for the File Tree editor. Renderers live in /app.js and
-           reuse the shared `.modal-shell` primitive without overriding the
-           canonical declaration that the embedded contract test checks. -->
-      <div
-        class="modal-backdrop"
-        id="file-tree-discard-modal"
-        aria-hidden="true"
-      >
-        <div
-          class="modal-shell discard-modal-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Discard unsaved changes"
-          tabindex="-1"
-        ></div>
-      </div>
-      <div
-        class="modal-backdrop"
-        id="file-tree-conflict-modal"
-        aria-hidden="true"
-      >
-        <div
-          class="modal-shell conflict-modal-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Resolve external change conflict"
           tabindex="-1"
         ></div>
       </div>

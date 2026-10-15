@@ -264,14 +264,14 @@ fn close_project_reopen_registers_restored_windows_without_changing_other_projec
             "a",
             "window-a",
             root_a.clone(),
-            WindowPreset::FileTree,
+            WindowPreset::Board,
             WindowProcessStatus::Stopped,
         ),
         sample_project_tab_with_window_at(
             "b",
             "window-b",
             root_b,
-            WindowPreset::FileTree,
+            WindowPreset::Board,
             WindowProcessStatus::Stopped,
         ),
     ];

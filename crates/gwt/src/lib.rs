@@ -29,8 +29,6 @@ pub mod daemon_supervisor;
 mod discussion_resume;
 pub mod disk_space;
 pub mod error_report;
-pub mod file_content;
-pub mod file_tree;
 pub mod gui_single_instance;
 pub mod handlers;
 pub mod index_resources;
@@ -52,7 +50,6 @@ pub mod migration;
 pub mod monitor_duplicate_runtime;
 pub mod native_app;
 pub mod native_notification_permission;
-pub(crate) mod path_filter;
 #[doc(hidden)]
 pub mod perf;
 pub mod persistence;
@@ -145,12 +142,6 @@ pub use custom_agents_service::{
     update_custom_agent, CustomAgentsServiceError,
 };
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
-pub use file_content::{
-    file_kind, read_binary_chunk, read_text_file, write_binary_byte, write_text_file, BinaryChunk,
-    ContentLimits, Encoding, ExpectedMetadata, FileContentError, FileKind, Newline, TextResult,
-    WriteOutcome,
-};
-pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_search::{search_project_index, work_advisory};
 pub use index_worker::{
@@ -271,11 +262,11 @@ pub use preset::{
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkItemView,
     ActiveWorkProjectionView, ActiveWorkspaceWorkView, AppStateView, ArrangeMode,
-    AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContinueWorkOutcomeKind,
-    CustomAgentErrorCode, FileAttachment, FileContentErrorKind, FileContentMode,
-    FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
-    HubProjectView, HubStateView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-    IndexSearchTarget, LogScopeSelection, ManagedHookHealthView, ManagedHookPendingDiscussionView,
+    AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContentLimits,
+    ContinueWorkOutcomeKind, CustomAgentErrorCode, FileAttachment, FocusCycleDirection,
+    FrontendEvent, GitHubRepositorySearchResultView, HubProjectView, HubStateView,
+    IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
+    LogScopeSelection, ManagedHookHealthView, ManagedHookPendingDiscussionView,
     ManagedHookPendingGoalView, ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView,
     ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
     RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus, RunningAgentSummary,
