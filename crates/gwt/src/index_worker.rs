@@ -2209,9 +2209,11 @@ pub fn poll_registered_project_index_sources(broker: &RefreshBroker) -> Result<(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     for project in projects.values() {
+        if let Some(repo_hash) = detect_repo_hash(&project.project_root) {
+            submit_repo_source_refreshes(broker, &project.project_root, &repo_hash)?;
+        }
         for root in &project.worktree_roots {
             if let Some(repo_hash) = detect_repo_hash(root) {
-                submit_repo_source_refreshes(broker, root, &repo_hash)?;
                 // File scopes share one overlay target and the existing path
                 // policy. Git supplies tracked/unignored files without walking
                 // build outputs; metadata observes edits as well as branch moves.
@@ -4293,6 +4295,12 @@ detached
         std::fs::write(roots[0].join("lib.rs"), "fn changed_source() {}\n").unwrap();
         poll_registered_project_index_sources(&broker).unwrap();
         let after = broker.inspect().unwrap();
+        let memory_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Memory]);
+        assert_eq!(
+            before.target(&memory_target).unwrap().desired_epoch(),
+            after.target(&memory_target).unwrap().desired_epoch(),
+            "repo sources must not alternate between worktree fallback paths"
+        );
         assert_ne!(
             before.target(&targets[0]).unwrap().desired_snapshot(),
             after.target(&targets[0]).unwrap().desired_snapshot()
