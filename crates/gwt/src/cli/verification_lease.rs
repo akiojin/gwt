@@ -702,6 +702,7 @@ fn reclaim_holder(
         owner.pid,
         std::process::id()
     );
+    current.record_ttl_overrun(Some(confirmed.cpu_percent));
     coordinator.record_lease_reclaimed(lease_id, target, owner.clone(), &record);
     out.push_str("verification lease: reclaimed\n");
     out.push_str(&format!("lease_id: {lease_id}\n"));
