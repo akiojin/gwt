@@ -194,12 +194,15 @@ test("FR-132: shared controller routes gear and pm-settings command to Settings"
   panel.bindEntryPoints({ document });
 
   const openedTargets = [];
+  const openedOwners = [];
   document.addEventListener("settings:open", (event) => {
     openedTargets.push(event.detail?.target);
+    openedOwners.push(event.detail?.surface_owner);
   });
 
   required(document, "#op-pm-settings-button").click();
   assert.deepEqual(openedTargets, ["project-manager"]);
+  assert.deepEqual(openedOwners, ["pm"], "PM Settings must retain its opening surface");
   assert.deepEqual(sent, [], "opening Settings must not start or mutate the PM");
 
   openedTargets.length = 0;

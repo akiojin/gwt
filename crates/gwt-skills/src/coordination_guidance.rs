@@ -99,6 +99,10 @@ an explicit `params.mentions` entry:
 - `branch:<name>` - target a workspace branch audience
 - `params.broadcast:true` - make the post visible repo-wide/cross-workspace
 
+For scoped posts, `branch:<name>` resolves to the workspaces of the latest assigned Sessions on that exact branch (case-sensitive).
+Unresolved branch mentions reject the post before it is saved; choose a current branch name or remove the mention and explicitly broadcast.
+Explicit broadcasts skip audience resolution.
+
 Only the registered PM session may use `user:<id>` in agent Board posts.
 Implementation agents address `agent:pm` or the PM's exact `session:<id>`;
 the PM handles human decisions. The operation enforces this for ordinary and
@@ -401,6 +405,14 @@ reserving a lease. Use `verify.lease.status` to inspect contention;
 when admission times out. Inspect the reported holder before retrying;
 there is no manual acquire loop or fixed retry schedule.
 
+`deferred` is a temporary wait, not a verification failure or a terminal outcome.
+While the verification tool process is alive, keep polling that same invocation.
+After `deferred`, retry `verify.run` with the identical full requested matrix,
+or declare an active wait through `issue.monitor.wait` with explicit `params.number`
+for the owner Issue, `params.reason`, and `params.resume_condition`. Keep ownership
+until that condition is met. On a resume notification, retry the same matrix;
+do not leave the owner idle. Never use `execution.blocked` or `build.abort` for ordinary admission contention.
+
 Heavy Cargo commands use a bounded verification slot pool. Independent
 worktrees and effective target directories may run concurrently; the same
 worktree or target remains serialized. Capacity follows host CPU/memory or
@@ -537,6 +549,10 @@ entry にしません。
 - `session:<id>` — 実行中 session への返信
 - `branch:<name>` — workspace branch への audience
 - `params.broadcast:true` — repo-wide / cross-workspace に表示
+
+For scoped posts, `branch:<name>` resolves to the workspaces of the latest assigned Sessions on that exact branch (case-sensitive).
+Unresolved branch mentions reject the post before it is saved; choose a current branch name or remove the mention and explicitly broadcast.
+Explicit broadcasts skip audience resolution.
 
 Only the registered PM session may use `user:<id>` in agent Board posts.
 Implementation agents address `agent:pm` or the PM's exact `session:<id>`;
@@ -1097,6 +1113,8 @@ mod tests {
             "`agent:<id>`",
             "`session:<id>`",
             "`branch:<name>`",
+            "latest assigned Sessions on that exact branch",
+            "Unresolved branch mentions reject the post",
             "params.broadcast:true",
             "Without `params.broadcast:true`",
             "gwtd <<'JSON'",
@@ -1183,6 +1201,12 @@ mod tests {
             "first remaining command's admission",
             "Overall: PASS",
             "required headed Chromium evidence",
+            "`deferred` is a temporary wait, not a verification failure or a terminal outcome",
+            "keep polling that same invocation",
+            "explicit `params.number`",
+            "On a resume notification, retry",
+            "do not leave the owner idle",
+            "Never use `execution.blocked` or `build.abort` for ordinary admission contention",
         ];
         let tmp = TempDir::new().unwrap();
         crate::distribute::distribute_to_worktree(tmp.path()).unwrap();

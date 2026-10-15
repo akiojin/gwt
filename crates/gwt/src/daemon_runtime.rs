@@ -214,6 +214,17 @@ impl std::fmt::Display for AgentBridgeFailure {
                     .join(" or ")
             )?;
         }
+        // Keep the Host's free-form cause private. Only our known diagnostic
+        // tokens select static guidance to the actual persisted surface.
+        match self.diagnostic_reason.as_deref() {
+            Some("workspace_transaction_failed") => formatter.write_str(
+                "; inspect ~/.gwt/logs/gwt.log.* for the original cause; do not retry until the cause is resolved",
+            )?,
+            Some("workspace_transaction_log_unavailable") => formatter.write_str(
+                "; diagnostic logging failed; report the unavailable diagnostic to the PM; do not retry without resolving the cause",
+            )?,
+            _ => {}
+        }
         if self.http_status.is_some()
             || self.bridge_code.is_some()
             || self.bridge_reason.is_some()
@@ -2629,6 +2640,33 @@ mod tests {
             .expect_err("non-canonical materialization probe target must fail closed");
             assert!(!error.contains("secret"));
         }
+    }
+
+    #[test]
+    fn workspace_transaction_diagnostic_guidance_keeps_bridge_causes_private() {
+        let response: WorkspaceBridgeDiagnosticResponse =
+            serde_json::from_value(serde_json::json!({
+                "code": "transaction_conflict",
+                "message": "private original cause sentinel",
+                "diagnostic_reason": "workspace_transaction_failed",
+                "recovery_operations": ["execution.status"]
+            }))
+            .unwrap();
+        let failure = AgentBridgeFailure::rejected(
+            AgentBridgeFailureReason::OperationRejected,
+            StatusCode::CONFLICT,
+            Some(&response),
+            false,
+            "Host Work terminalization bridge rejected the close; no local fallback was attempted",
+        );
+        let output = failure.to_string();
+        assert!(output.contains("~/.gwt/logs/gwt.log.*"), "{output}");
+        assert!(output.contains("do not retry"), "{output}");
+        assert!(
+            output.contains("run JSON operation `execution.status`"),
+            "{output}"
+        );
+        assert!(!output.contains("sentinel"), "{output}");
     }
 
     #[test]

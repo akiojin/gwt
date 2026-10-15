@@ -19,6 +19,7 @@
 //   takes over the screen.
 // - sendWizardAction(action): wizard action transport (owned by app.js so
 //   the frontendUnits registry and visibleBounds() stay there).
+import { createUiStateStore } from "/ui-state-store.js";
 import { createInteractionGuard } from "/interaction-guard.js";
 import { createFocusTrap } from "/focus-trap.js";
 import {
@@ -68,6 +69,7 @@ export function createLaunchWizardSurface({
       const displayBranchName = (name) =>
         typeof name === "string" ? name.replace(/^origin\//, "") : name;
 
+      const visibilityModel = createUiStateStore({ open: false });
       let launchWizard = null;
       let launchWizardOpenError = null;
       let launchWizardOpening = null;
@@ -123,10 +125,16 @@ export function createLaunchWizardSurface({
               message: deferred.message || "Unable to open Launch Wizard",
             };
           }
+          publishLaunchWizardVisibility();
           renderLaunchWizard();
         },
       });
       let branchCleanupWindowId = null;
+
+      function publishLaunchWizardVisibility() {
+        const open = Boolean(launchWizard || launchWizardOpenError || launchWizardOpening);
+        visibilityModel?.update(state => state.open === open ? state : { open });
+      }
 
       function setLaunchWizardPendingDisabled(root, disabled) {
         if (!disabled) return;
@@ -929,6 +937,7 @@ export function createLaunchWizardSurface({
         // backend state. Discard (do not replay) the deferred event
         // so we don't undo the user-initiated close.
         wizardInteractionGuard.discard();
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -943,6 +952,7 @@ export function createLaunchWizardSurface({
         launchWizardPendingAction = action || null;
         launchWizardPendingActionDisconnected = false;
         launchWizardPendingActionQueued = false;
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -1001,6 +1011,7 @@ export function createLaunchWizardSurface({
           meta,
           message,
         };
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -2162,6 +2173,7 @@ export function createLaunchWizardSurface({
           launchWizardOpenError = null;
         }
         launchWizard = event.wizard;
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
         const nextHolderFingerprint = currentHolderDecision()?.fingerprint || null;
         if (
@@ -2193,6 +2205,7 @@ export function createLaunchWizardSurface({
           title: event.title || "Launch Agent",
           message: event.message || "Unable to open Launch Wizard",
         };
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -2315,6 +2328,7 @@ export function createLaunchWizardSurface({
       }
 
       return {
+        visibilityModel,
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,

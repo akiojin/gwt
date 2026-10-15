@@ -19,7 +19,7 @@
 //! while preserving the broadcast/persist contract through the existing
 //! `workspace_state_broadcast` and `persist` helpers on `AppRuntime`.
 
-use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
+use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection, WindowSurfaceOwner};
 
 use super::{
     close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowGeometry,
@@ -119,6 +119,7 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
         $visit!($runtime, $id, window_output_bytes);
+        $visit!($runtime, $id, pending_runtime_outputs);
         $visit!($runtime, $id, window_last_output_at);
         $visit!($runtime, $id, window_hook_states);
         $visit!($runtime, $id, window_approval_waiting);
@@ -190,6 +191,7 @@ impl AppRuntime {
         context: &super::ProjectContext,
         preset: WindowPreset,
         bounds: WindowGeometry,
+        surface_owner: Option<WindowSurfaceOwner>,
     ) -> Vec<OutboundEvent> {
         if preset.is_removed_legacy() {
             return Vec::new();
@@ -198,7 +200,12 @@ impl AppRuntime {
             return Vec::new();
         }
         let tab_id = context.tab_id.clone();
-        if shares_work_surface_singleton(preset) {
+        let surface_owner = surface_owner
+            .filter(|owner| *owner != WindowSurfaceOwner::Pm || !preset.is_agent_terminal());
+        if shares_work_surface_singleton(preset)
+            || (preset.canonical_surface_preset() == WindowPreset::Settings
+                && surface_owner == Some(WindowSurfaceOwner::Pm))
+        {
             let existing_id = {
                 let Some(tab) = self.tab_mut(&tab_id) else {
                     return Vec::new();
@@ -209,8 +216,9 @@ impl AppRuntime {
                     .windows
                     .iter()
                     .filter(|window| {
-                        shares_work_surface_singleton(window.preset)
-                            || window.preset == WindowPreset::Settings
+                        window.surface_owner == surface_owner
+                            && (shares_work_surface_singleton(window.preset)
+                                || window.preset == WindowPreset::Settings)
                     })
                     .max_by_key(|window| window.z_index)
                     .map(|window| window.id.clone());
@@ -231,7 +239,9 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.add_window(preset, bounds.clone())
+            let window = tab.workspace.add_window(preset, bounds.clone());
+            tab.workspace.set_surface_owner(&window.id, surface_owner);
+            window
         };
         self.register_window(&tab_id, &window.id);
         let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);

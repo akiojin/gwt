@@ -22,6 +22,7 @@ type SentMessage = {
   kind?: string;
   id?: string;
   preset?: string;
+  surface_owner?: string;
   bounds?: { width: number; height: number };
 };
 
@@ -29,6 +30,79 @@ test.describe("Surface rail", () => {
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1440, height: 900 },
+  });
+
+  test("PM owns only its terminal and auxiliary Settings across reload with nearby agents and Start Work", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(String(error)));
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page, false, true);
+    await page.goto(surfaceAppUrl);
+    const main = page.getByRole("region", { name: "Main pane", exact: true });
+    const openPm = () => page.locator("#op-pm-entry").click();
+    const expectPm = async () => {
+      await expect(main).toHaveAttribute("data-surface", "pm");
+      await expect(main.locator('[data-id="pm-window"]')).toBeVisible();
+      await expect(main.locator('.workspace-window')).toHaveCount(1);
+      for (const id of ["agent-one", "agent-two", "naming-window", "start-work-shell"]) await expect(windowById(page, id)).toBeHidden();
+      await expect(page.locator("#canvas")).toBeHidden();
+      await expect(page.locator("#split-view-button")).toBeDisabled();
+    };
+    await openPm();
+    await expectPm();
+    await page.evaluate(() => (window as any).__updateSurfaceAgent("pm-window", {}));
+    await expectPm();
+    await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "hub_state", hub: {
+      app_version: "playwright", projects: [{ id: "tab-1", title: "Surface Rail Fixture", project_root: "/fixture", kind: "git" }], recent_projects: [],
+    } }));
+    await expectPm();
+    await main.locator('[data-id="pm-window"] .xterm').evaluate(node => { (window as any).__ownedPmTerminal = node; });
+    await page.locator("#op-pm-settings-button").click();
+    const auxiliary = main.locator('.workspace-window[data-preset="settings"]');
+    await expect(auxiliary).toBeVisible();
+    const auxiliaryId = await auxiliary.getAttribute("data-id");
+    expect((await sentMessages(page)).filter(message => message.kind === "create_window" && message.surface_owner === "pm")).toHaveLength(1);
+    await auxiliary.getByRole("tab", { name: "Project Manager", exact: true }).click();
+    await openPm();
+    expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await expect(main.locator(".agent-tile")).toHaveCount(4);
+    await expect(main.locator('[data-agent-id="start-work-shell"]')).toContainText("Interactive");
+    await page.locator('[data-agent-id="start-work-shell"] .xterm-helper-textarea').press("s");
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "start-work-shell", data: "s" });
+    await openPm();
+    await page.locator("#op-pm-settings-button").click();
+    await page.reload();
+    await openPm();
+    await expectPm();
+    await page.locator("#op-pm-settings-button").click();
+    await expect(auxiliary).toHaveAttribute("data-id", auxiliaryId!);
+    await auxiliary.locator('[data-action="close"]').click();
+    const close = page.locator("#window-close-confirm-modal");
+    await close.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(auxiliary).toBeVisible();
+    await auxiliary.locator('[data-action="close"]').click();
+    await close.getByRole("button", { name: "Close window", exact: true }).click();
+    await expectPm();
+    await page.locator("#op-pm-settings-button").click();
+    await expect(auxiliary).toBeVisible();
+    await openPm();
+    await expectPm();
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await expect(main.locator(".agent-tile")).toHaveCount(3);
+    await expect(main.locator('[data-agent-id="start-work-shell"]')).toHaveCount(0);
+    await expect(main.locator('[data-agent-id="pm-window"]')).toHaveCount(0);
+    await expect(page.locator("#split-view-button")).toBeEnabled();
+    await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "launch_wizard_open_error", title: "Start Work", message: "Fixture opening state" }));
+    await expect(page.locator("#wizard-modal")).toBeVisible();
+    await expect(main).toHaveAttribute("data-surface", "agents");
+    await page.locator("#wizard-cancel-button").click();
+    await openPm();
+    await expectPm();
+    await page.screenshot({ path: testInfo.outputPath("pm-surface-ownership.png") });
+    expect((await sentMessages(page)).filter(message => message.kind === "open_pm_agent")).toEqual([]);
+    expect(errors).toEqual([]);
   });
 
   test("rail surfaces fill one fixed pane and split collapses to the active live view", async ({ page }, testInfo) => {
@@ -464,7 +538,7 @@ test.describe("Surface rail", () => {
     // marker (is_pm), not the claude preset, decides where it belongs.
     await clearMessages(page);
     await entry("pm").click();
-    await expect.poll(() => inCanvasView(page, "pm-window")).toBe(true);
+    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="pm-window"]')).toBeVisible();
     await windowById(page, "pm-window").locator(".titlebar").click();
     await expect.poll(() => pressedSurfaces(page)).toEqual(["pm"]);
 
@@ -563,8 +637,8 @@ async function clearMessages(page: Page): Promise<void> {
   });
 }
 
-async function installSurfaceRailBackend(page: Page, groupedSettings = false): Promise<void> {
-  await page.addInitScript((groupedSettings) => {
+async function installSurfaceRailBackend(page: Page, groupedSettings = false, ownership = false): Promise<void> {
+  await page.addInitScript(({ groupedSettings, ownership }) => {
     (window as any).__gwtPlaywrightTestBridge = true;
     const canvasWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
@@ -639,6 +713,13 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
       windows.push(canvasWindow("settings-grouped", { preset: "settings", tab_group_id: "group", tab_group_active: false }));
     }
 
+    if (ownership) {
+      windows.push(canvasWindow("naming-window", { title: "Naming…", status: "running", session_id: "session-naming" }));
+      windows.push(canvasWindow("start-work-shell", { preset: "shell", status: "running", surface_owner: "agents", persist: false }));
+      for (const data of windows) data.geometry = { x: 80, y: 80, width: 560, height: 340 };
+      const saved = sessionStorage.getItem("surface-ownership-windows");
+      if (saved) windows.splice(0, windows.length, ...JSON.parse(saved));
+    }
     let zCounter = 20;
     let socket: FixtureWebSocket | null = null;
 
@@ -704,9 +785,15 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
         if (message.kind === "create_window" && message.preset) {
           zCounter += 1;
           const id = `${message.preset}-new`;
-          windows.push(canvasWindow(windows.some(data => data.id === id) ? `${id}-${zCounter}` : id, { preset: message.preset, z_index: zCounter }));
+          windows.push(canvasWindow(windows.some(data => data.id === id) ? `${id}-${zCounter}` : id, { preset: message.preset, surface_owner: message.surface_owner, z_index: zCounter }));
           this.emit(workspaceState());
         }
+        if (message.kind === "close_window") {
+          const index = windows.findIndex(data => data.id === message.id);
+          if (index >= 0) windows.splice(index, 1);
+          this.emit(workspaceState());
+        }
+        if (ownership) sessionStorage.setItem("surface-ownership-windows", JSON.stringify(windows.filter(windowData => windowData.persist !== false)));
         if (message.kind === "activate_window_tab") {
           const target = windows.find((data) => data.id === message.id);
           if (target?.tab_group_id) {
@@ -747,5 +834,5 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false): P
       if (data) Object.assign(data, updates);
       socket?.emit(workspaceState());
     };
-  }, groupedSettings);
+  }, { groupedSettings, ownership });
 }

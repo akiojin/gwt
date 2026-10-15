@@ -4106,6 +4106,11 @@ fn resolve_monitor_wait_issue_number(
     explicit.or_else(|| launch_context?.trim().parse::<u64>().ok())
 }
 
+// Wait declarations are durable CLI commands, outside the GUI's 200ms hot path.
+// Keep a bounded budget for both the preflight and the single publish; never
+// replay an ambiguous ACK timeout or write around the daemon's authority.
+const MONITOR_WAIT_IPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Issue #3844: whether `number` has a live launch in the Issue Monitor that
 /// owns `project_root` — the daemon snapshot when one is running, the
 /// persisted prefs otherwise.
@@ -4113,8 +4118,11 @@ fn monitor_launch_is_live(
     project_root: &std::path::Path,
     number: u64,
 ) -> Result<bool, SpecOpsError> {
-    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status(project_root)
-        .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
+    if let Some(status) = crate::daemon_publisher::read_issue_monitor_status_with_timeout(
+        project_root,
+        MONITOR_WAIT_IPC_TIMEOUT,
+    )
+    .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?
     {
         let status = serde_json::from_value::<crate::IssueMonitorAgentStatus>(status)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?;
@@ -4135,7 +4143,11 @@ fn publish_monitor_wait_control(
         serde_json::json!({ "wait": wait }),
         std::process::id(),
     );
-    crate::daemon_publisher::publish_issue_monitor_control(project_root, payload)
+    crate::daemon_publisher::publish_issue_monitor_control_with_timeout(
+        project_root,
+        payload,
+        MONITOR_WAIT_IPC_TIMEOUT,
+    )
 }
 
 /// Issue #4078 AC-2: commit the wait declaration straight to the durable Issue
@@ -4274,7 +4286,9 @@ fn run_monitor_wait<E: CliEnv>(
                 &serde_json::json!({
                     "number": number,
                     "status": "failed",
+                    "refusal": quota_hold_clear_publish_refusal(&error),
                     "detail": format!("wait declaration publish failed: {error}"),
+                    "recovery": "run issue.monitor.status with this project root to inspect active_launches and last_error (including prefs-lock holder/deadline diagnostics); an unknown outcome may already be committed, so check waiting before retrying and never write prefs around daemon authority",
                 })
                 .to_string(),
             );
@@ -12632,6 +12646,221 @@ mod tests {
             prefs.queued_launch_session_strategies.get(&3705),
             Some(&crate::IssueMonitorLaunchSessionStrategy::FreshRequired)
         );
+    }
+
+    #[test]
+    fn monitor_wait_eight_concurrent_declarations_survive_slow_ack_under_cpu_load() {
+        use crate::cli::daemon::transport::IpcListener;
+        use gwt_core::daemon::{
+            persist_endpoint, ClientFrame, DaemonEndpoint, DaemonFrame, DaemonStatus,
+            IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, RuntimeTarget,
+            DAEMON_PROTOCOL_VERSION,
+        };
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // Keep the Unix socket below sockaddr_un's limit even with a long TMPDIR.
+        #[cfg(unix)]
+        let tmp = tempfile::Builder::new()
+            .prefix("gwt-wait-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        #[cfg(not(unix))]
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let _home = ScopedGwtHome::set(&home);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let prefs = crate::IssueMonitorPrefs {
+            launched_issues: (1..=8)
+                .map(|issue_number| crate::IssueMonitorLaunchedIssue {
+                    issue_number,
+                    window_id: format!("tab::agent-{issue_number}"),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let status = serde_json::to_value(
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs)
+                .agent_status(),
+        )
+        .unwrap();
+        let scope = RuntimeScope::from_project_root(&repo, RuntimeTarget::Host).unwrap();
+        let bind = tmp.path().join("wait.sock").to_string_lossy().into_owned();
+        #[cfg(windows)]
+        let bind = gwt_core::daemon::windows_pipe_name_for(&bind);
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            bind,
+            "wait-test".into(),
+            "test".into(),
+        );
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn({
+            let home = home.clone();
+            move || {
+                let _home = ScopedGwtHome::set(home);
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async move {
+                        let mut listener = IpcListener::bind(Path::new(&endpoint.bind)).unwrap();
+                        persist_endpoint(
+                            &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+                            &endpoint,
+                        )
+                        .unwrap();
+                        ready_tx.send(()).unwrap();
+                        let mut handlers = tokio::task::JoinSet::new();
+                        let requests = tokio::time::timeout(Duration::from_secs(30), async {
+                            for _ in 0..16 {
+                                let stream = listener.accept().await.unwrap();
+                                let status = status.clone();
+                                let repo = repo.clone();
+                                handlers.spawn(async move {
+                                    let (reader, mut writer) = stream.into_split();
+                                    let mut reader = BufReader::new(reader);
+                                    let mut line = String::new();
+                                    reader.read_line(&mut line).await.unwrap();
+                                    let _: IpcHandshakeRequest =
+                                        serde_json::from_str(line.trim()).unwrap();
+                                    let handshake = IpcHandshakeResponse {
+                                        protocol_version: DAEMON_PROTOCOL_VERSION,
+                                        daemon_version: "test".into(),
+                                        accepted: true,
+                                        rejection_reason: None,
+                                    };
+                                    writer
+                                        .write_all(
+                                            format!(
+                                                "{}\n",
+                                                serde_json::to_string(&handshake).unwrap()
+                                            )
+                                            .as_bytes(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                    line.clear();
+                                    reader.read_line(&mut line).await.unwrap();
+                                    let frame: ClientFrame =
+                                        serde_json::from_str(line.trim()).unwrap();
+                                    // Model a loaded worker after receipt, beyond the old GUI budget.
+                                    tokio::time::sleep(Duration::from_millis(300)).await;
+                                    let response = match frame {
+                                        ClientFrame::Status => DaemonFrame::Status(DaemonStatus {
+                                            protocol_version: DAEMON_PROTOCOL_VERSION,
+                                            daemon_version: "test".into(),
+                                            uptime_seconds: 0,
+                                            broadcast_channels: 0,
+                                            connections: 1,
+                                            issue_monitor: Some(status),
+                                        }),
+                                        ClientFrame::Publish { payload, .. } => {
+                                            let wait = &payload["payload"]["wait"];
+                                            record_monitor_wait_in_prefs(
+                                                &repo,
+                                                wait["issue_number"].as_u64().unwrap(),
+                                                wait["reason"].as_str().unwrap(),
+                                                wait["resume_condition"].as_str().unwrap(),
+                                                false,
+                                                wait["at"].as_str().unwrap(),
+                                            )
+                                            .unwrap();
+                                            DaemonFrame::Ack
+                                        }
+                                        other => panic!("unexpected frame: {other:?}"),
+                                    };
+                                    let _ = writer
+                                        .write_all(
+                                            format!(
+                                                "{}\n",
+                                                serde_json::to_string(&response).unwrap()
+                                            )
+                                            .as_bytes(),
+                                        )
+                                        .await;
+                                });
+                            }
+                            while let Some(result) = handlers.join_next().await {
+                                result.unwrap();
+                            }
+                        })
+                        .await;
+                        requests.is_ok()
+                    })
+            }
+        });
+        ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let load_ready = Arc::new(std::sync::Barrier::new(3));
+        let failures = std::thread::scope(|threads| {
+            let loads: Vec<_> = (0..2)
+                .map(|_| {
+                    let stop = Arc::clone(&stop);
+                    let load_ready = Arc::clone(&load_ready);
+                    threads.spawn(move || {
+                        load_ready.wait();
+                        while !stop.load(Ordering::Acquire) {
+                            std::hint::black_box(7_u64.wrapping_mul(13));
+                            std::hint::spin_loop();
+                        }
+                    })
+                })
+                .collect();
+            load_ready.wait();
+            let calls: Vec<_> = (1..=8)
+                .map(|number| {
+                    let repo = tmp.path().join("repo");
+                    let home = home.clone();
+                    threads.spawn(move || {
+                        let _home = ScopedGwtHome::set(home);
+                        let env = crate::cli::TestEnv::new(repo.clone());
+                        let mut out = String::new();
+                        let result = run_monitor_wait(
+                            &env,
+                            Some(&repo),
+                            Some(number),
+                            Some("host busy"),
+                            Some("verification finishes"),
+                            false,
+                            &mut out,
+                        );
+                        (result, out)
+                    })
+                })
+                .collect();
+            let results: Vec<_> = calls.into_iter().map(|call| call.join()).collect();
+            stop.store(true, Ordering::Release);
+            for load in loads {
+                load.join().unwrap();
+            }
+            results
+        });
+        let complete = server.join().unwrap();
+        for result in failures {
+            let (code, out) = result.unwrap();
+            assert_eq!(code.unwrap(), 0, "{out}");
+            let output: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(output["status"], "waiting");
+            assert_eq!(output["transport"], "daemon");
+        }
+        assert!(
+            complete,
+            "all eight status reads and single publishes must arrive"
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(persisted.autonomous_records.len(), 8);
+        assert!(persisted.autonomous_records.iter().all(|record| record
+            .wait
+            .as_ref()
+            .is_some_and(|wait| wait.reason == "host busy")));
     }
 
     /// Issue #4078 AC-1/AC-2: accepting a wait declaration must not depend on

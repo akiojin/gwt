@@ -14,7 +14,8 @@ const TARGET_TTL_SECS: u64 = 600;
 const RAM_FLOOR_BYTES: u64 = 512 * 1024 * 1024;
 const SCAN_ENTRIES_PER_REFRESH: usize = 2_048;
 const SCAN_TIME_PER_REFRESH: Duration = Duration::from_millis(20);
-const MACHINE_REFRESH_SECS: u64 = 5;
+pub const CAPACITY_TICK_INTERVAL: Duration = Duration::from_secs(5);
+const MACHINE_REFRESH_SECS: u64 = 10;
 const MAX_REASON_CHARS: usize = 512;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -494,12 +495,20 @@ fn capacity_reason_summary(mut reason: String, diagnostics: &[String]) -> String
 /// GUI-independent refresh. CPU baselines and target walks survive ticks;
 /// only complete positive target measurements enter the shared atomic file.
 pub fn refresh_machine_capacity(project_root: &Path) -> io::Result<()> {
+    refresh_machine_capacity_for_projects(&[project_root.to_path_buf()])
+}
+
+/// One host tick shares its machine sample, target-walk budget and atomic write.
+pub fn refresh_machine_capacity_for_projects(project_roots: &[PathBuf]) -> io::Result<()> {
+    if project_roots.is_empty() {
+        return Ok(());
+    }
     static PROBE: OnceLock<Mutex<RuntimeProbe>> = OnceLock::new();
     let mut probe = PROBE
         .get_or_init(|| Mutex::new(RuntimeProbe::default()))
         .lock()
         .map_err(|_| io::Error::other("capacity probe poisoned"))?;
-    probe.refresh(project_root)
+    probe.refresh_projects(project_roots)
 }
 
 #[derive(Default)]
@@ -514,7 +523,12 @@ struct RuntimeProbe {
 }
 
 impl RuntimeProbe {
+    #[cfg(test)]
     fn refresh(&mut self, project_root: &Path) -> io::Result<()> {
+        self.refresh_projects(&[project_root.to_path_buf()])
+    }
+
+    fn refresh_projects(&mut self, project_roots: &[PathBuf]) -> io::Result<()> {
         use fs2::FileExt;
         let directory = capacity_directory();
         if self.runtime_dir != directory {
@@ -562,7 +576,10 @@ impl RuntimeProbe {
         };
         self.machine_sample = Some(machine.clone());
         let inventory = machine.inventory;
-        let mut roots = BTreeSet::from([normalized(project_root)]);
+        let mut roots = project_roots
+            .iter()
+            .map(|root| normalized(root))
+            .collect::<BTreeSet<_>>();
         roots.extend(
             inventory
                 .sessions
@@ -694,10 +711,9 @@ impl RuntimeProbe {
         });
         snapshot.machine_budget = machine.machine_budget;
         snapshot.constraints = machine.constraints;
-        snapshot
-            .projects
-            .entry(normalized(project_root))
-            .or_default();
+        for root in project_roots {
+            snapshot.projects.entry(normalized(root)).or_default();
+        }
         for row in &snapshot.inventory.sessions {
             let count = snapshot
                 .projects
@@ -726,14 +742,10 @@ impl RuntimeProbe {
         previous: &MachineCapacitySnapshot,
         now: u64,
     ) -> MachineCapacitySnapshot {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
         self.system.refresh_memory();
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_exe(UpdateKind::OnlyIfNotSet),
+        let inventory = crate::session_inventory::observe_machine_sessions_with_system(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &mut self.system,
         );
         let gui = self
             .system
@@ -778,9 +790,6 @@ impl RuntimeProbe {
         };
         self.last_cpu_sample = Some(Instant::now());
         self.gui_identities = current_gui.clone();
-        let inventory = crate::session_inventory::observe_machine_sessions(
-            &gwt_core::paths::gwt_sessions_dir(),
-        );
         let per_agent_ram_bytes = inventory
             .sessions
             .iter()
@@ -1714,7 +1723,11 @@ mod tests {
             reusable_machine_sample(100, Duration::ZERO, 106),
             "a just-completed slow census is reused without resetting its original observed_at"
         );
-        assert!(!reusable_machine_sample(100, Duration::from_secs(5), 105));
+        assert!(
+            reusable_machine_sample(100, Duration::from_secs(5), 105),
+            "the next five-second tick must reuse the machine observation"
+        );
+        assert!(!reusable_machine_sample(100, Duration::from_secs(10), 110));
         assert!(!reusable_machine_sample(105, Duration::from_secs(1), 104));
         assert!(
             !reusable_machine_sample(100, Duration::ZERO, 130),
@@ -1736,9 +1749,10 @@ mod tests {
             std::fs::write(root.join("target/artifact"), [0_u8; 1]).unwrap();
         }
         let mut probe = RuntimeProbe::default();
-        probe.refresh(&first).unwrap();
+        probe
+            .refresh_projects(&[first.clone(), second.clone()])
+            .unwrap();
         let path = snapshot_path();
-        probe.refresh(&second).unwrap();
         assert_eq!(path, snapshot_path());
         let snapshot = read_snapshot(&path).unwrap();
         assert!(snapshot

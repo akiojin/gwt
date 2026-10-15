@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::Path,
 };
 
@@ -342,9 +342,9 @@ pub enum IssueMonitorEffectPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MergedIssueSettlementAction {
-    /// Every acceptance criterion is checked, or the remainder was delegated
-    /// to another Issue: post the close comment and close (AC-1 / AC-2).
+    /// Every acceptance criterion is checked: post the close comment and close.
     Close {
+        /// Legacy journal field; delegation no longer authorizes a close.
         #[serde(default)]
         delegated: bool,
     },
@@ -354,8 +354,8 @@ pub enum MergedIssueSettlementAction {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unmet: Vec<String>,
     },
-    /// Unchecked criteria without a delegation record: comment and hand the
-    /// Issue to a human (AC-2). An empty list means the block is missing.
+    /// Unchecked criteria: comment and hand the Issue to a human.
+    /// An empty list means the block is missing.
     UnmetAcceptance {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unmet: Vec<String>,
@@ -382,39 +382,14 @@ pub struct MergedIssueSettlement {
     pub settled_at: String,
 }
 
-/// Phrases that record "the remaining acceptance criteria were delegated to
-/// another Issue" in a PR body or Issue comment (Issue #3917 AC-2). Matched
-/// case-insensitively as substrings.
-const MERGED_ISSUE_DELEGATION_MARKERS: &[&str] = &[
-    "残 ac は別 issue に委譲",
-    "残acは別issueに委譲",
-    "remaining acceptance criteria delegated",
-    "remaining ac delegated",
-];
-
-/// Whether any text carries a delegation record.
-pub fn delegation_recorded<'a>(texts: impl IntoIterator<Item = &'a str>) -> bool {
-    texts.into_iter().any(|text| {
-        let lower = text.to_lowercase();
-        MERGED_ISSUE_DELEGATION_MARKERS
-            .iter()
-            .any(|marker| lower.contains(marker))
-    })
-}
-
 /// Issue #3917: decide what settling a merged delivery does for `issue`.
 ///
-/// Pure. `delegation_evidence` is consulted only when unchecked criteria
-/// remain and auto-close is on, so callers can defer the PR-body / comment
-/// readback to that case; `None` from it means the evidence could not be read
-/// and the decision is deferred to a later scan. Returns `None` when nothing
-/// must happen: the Issue is already closed, it is a `gwt-spec` Issue whose
-/// tasks are not all complete (AC-3: phase merges never settle the SPEC), or
-/// the evidence is unavailable.
+/// Pure and syntactic: Issue #5126 forbids substituting PR prose or delegation
+/// for unchecked criteria. Returns `None` for a closed Issue or a `gwt-spec`
+/// Issue whose tasks are not all complete (phase merges never settle the SPEC).
 pub fn decide_merged_issue_settlement(
     issue: &IssueMonitorIssue,
     auto_close: bool,
-    delegation_evidence: impl FnOnce(&[String]) -> Option<bool>,
 ) -> Option<MergedIssueSettlementAction> {
     if issue.state != IssueMonitorIssueState::Open {
         return None;
@@ -439,9 +414,6 @@ pub fn decide_merged_issue_settlement(
     }
     if criteria.all_checked() {
         return Some(MergedIssueSettlementAction::Close { delegated: false });
-    }
-    if criteria.machine_checkable && delegation_evidence(&unmet)? {
-        return Some(MergedIssueSettlementAction::Close { delegated: true });
     }
     Some(MergedIssueSettlementAction::UnmetAcceptance { unmet })
 }
@@ -5896,21 +5868,92 @@ pub fn issue_monitor_launch_plan(issue: &IssueMonitorIssue) -> IssueMonitorLaunc
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static PREFS_IO_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(crate) fn prefs_io_counts_for_test() -> (usize, usize) {
+    PREFS_IO_COUNTS.get()
+}
+
+struct CachedIssueMonitorPrefs {
+    modified: std::time::SystemTime,
+    size: u64,
+    prefs: IssueMonitorPrefs,
+}
+
+fn issue_monitor_prefs_cache(
+) -> &'static std::sync::Mutex<BTreeMap<std::path::PathBuf, CachedIssueMonitorPrefs>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<BTreeMap<std::path::PathBuf, CachedIssueMonitorPrefs>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
 fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPrefs> {
-    if !path.exists() {
-        return Ok(IssueMonitorPrefs::default());
+    let key = std::path::absolute(path)?;
+    // Serialize misses as well as hits so concurrent readers parse a generation once.
+    // The cross-process sibling writer lock still owns every mutation transaction.
+    let mut cache = issue_monitor_prefs_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut file = match fs::File::open(&key) {
+        Ok(file) => file,
+        Err(error) => {
+            cache.remove(&key);
+            return if error.kind() == io::ErrorKind::NotFound {
+                Ok(IssueMonitorPrefs::default())
+            } else {
+                Err(error)
+            };
+        }
+    };
+    // Stamp the opened file, not a path that an atomic rename could replace
+    // between stat and read. Never retain an old value on any read/decode error.
+    let previous = cache.remove(&key);
+    let metadata = file.metadata()?;
+    let modified = metadata.modified()?;
+    let size = metadata.len();
+    if let Some(previous) = previous {
+        if previous.modified == modified && previous.size == size {
+            let prefs = previous.prefs.clone();
+            cache.insert(key, previous);
+            return Ok(prefs);
+        }
     }
-    let content = fs::read_to_string(path)?;
-    crate::update_settings::decode_project_prefs(&content).map_err(|error| {
-        let kind = match error.classify() {
-            serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
-                io::ErrorKind::InvalidData
-            }
-            serde_json::error::Category::Data => io::ErrorKind::InvalidInput,
-            serde_json::error::Category::Io => io::ErrorKind::Other,
-        };
-        io::Error::new(kind, error)
-    })
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    #[cfg(test)]
+    PREFS_IO_COUNTS.set((PREFS_IO_COUNTS.get().0 + 1, PREFS_IO_COUNTS.get().1));
+    let prefs: IssueMonitorPrefs =
+        crate::update_settings::decode_project_prefs(&content).map_err(|error| {
+            let kind = match error.classify() {
+                serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+                    io::ErrorKind::InvalidData
+                }
+                serde_json::error::Category::Data => io::ErrorKind::InvalidInput,
+                serde_json::error::Category::Io => io::ErrorKind::Other,
+            };
+            io::Error::new(kind, error)
+        })?;
+    let after = file.metadata()?;
+    if after.len() == size && after.modified()? == modified {
+        // Bound retention when a long-running GUI opens many repositories.
+        if cache.len() >= 32 {
+            cache.pop_first();
+        }
+        cache.insert(
+            key,
+            CachedIssueMonitorPrefs {
+                modified,
+                size,
+                prefs: prefs.clone(),
+            },
+        );
+    }
+    Ok(prefs)
 }
 
 /// Per-process-unique scratch path for the atomic prefs write, placed in the
@@ -6015,7 +6058,16 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
     crate::update_settings::migrate_before_project_save(path, false)?;
-    durable_atomic_write(path, content.as_bytes())?;
+    let committed = durable_atomic_write(path, content.as_bytes());
+    // Invalidate even if parent sync failed after the rename became visible.
+    // Local writers cannot rely on metadata granularity to distinguish a save.
+    issue_monitor_prefs_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&std::path::absolute(path)?);
+    committed?;
+    #[cfg(test)]
+    PREFS_IO_COUNTS.set((PREFS_IO_COUNTS.get().0, PREFS_IO_COUNTS.get().1 + 1));
     // Issue #3883 AC-2: keep the generation this commit just made readable from
     // somewhere the canonical file's own corruption cannot reach. The recovery
     // below needs a floor, and without one it resets to `Default` — losing
@@ -13192,6 +13244,14 @@ impl IssueMonitorState {
             .unwrap_or(self.autonomous_mode)
     }
 
+    /// A failed independent review vetoes even a previously journaled close.
+    pub fn merged_issue_close_allowed(&self, issue_number: u64) -> bool {
+        self.auto_close_merged_issues_enabled()
+            && self
+                .autonomous_record(issue_number)
+                .is_none_or(|record| record.review_passed != Some(false))
+    }
+
     /// Change the auto-close override. Like the autonomous toggle, a change
     /// advances the effect authority so unsubmitted settlement grants are
     /// revoked and an in-flight one cannot close under stale authority.
@@ -14150,6 +14210,26 @@ impl IssueMonitorState {
         // Issue #4117 AC-2: the verdict is the review window's last act; its
         // slot is free even though the idle pane is closed a scan later.
         self.forget_review_window(issue_number);
+        // A close worker may already be doing remote readback. Preserve the
+        // veto now instead of waiting for its settlement to mark work done.
+        if !passed
+            && self.pending_effects.iter().any(|effect| {
+                matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::SettleMergedIssue {
+                        issue_number: owner,
+                        action: MergedIssueSettlementAction::Close { .. },
+                        ..
+                    } if *owner == issue_number
+                )
+            })
+        {
+            self.escalate_to_needs_human(
+                issue_number,
+                NeedsHumanKind::UserChoiceRequired,
+                "merged delivery has a failed independent acceptance review; resolve the review before closing",
+            );
+        }
     }
 
     /// Issue #4117: live independent review windows, ordered by Issue.
@@ -17880,6 +17960,19 @@ impl IssueMonitorState {
         evidence: IssueCompletionEvidence,
         live_pane: bool,
     ) -> bool {
+        // Issue #5126: merge is not acceptance evidence. Preserve a failed
+        // independent review before completion cleanup can erase its veto.
+        if self
+            .autonomous_record(issue_number)
+            .is_some_and(|record| record.review_passed == Some(false))
+        {
+            self.escalate_to_needs_human(
+                issue_number,
+                NeedsHumanKind::UserChoiceRequired,
+                "merged delivery has a failed independent acceptance review; resolve the review before closing",
+            );
+            return false;
+        }
         let issue = self.inbox_item(issue_number).map(|item| item.issue.clone());
         let decision = issue
             .as_ref()
@@ -18723,6 +18816,34 @@ impl IssueMonitorState {
 
         let live_window = match self.resolve_exact_launch(target, StopIdentityMatch::Operator) {
             Ok(window_id) => window_id,
+            Err(IssueMonitorStopMismatch::NotRunning)
+                if self.failed_issues.contains_key(&issue_number)
+                    && !self.active_launches.contains(&issue_number)
+                    && !self.launched_claims.contains_key(&issue_number)
+                    && !self.launched_windows.contains_key(&issue_number)
+                    && self.pending_launch_delivery_id(issue_number).is_none()
+                    && target.claim_id.is_none()
+                    && target.delivery_id.is_none()
+                    && target.window_id.is_none()
+                    && !self.merged_issues.contains(&issue_number)
+                    && !self.issue_is_closed(issue_number)
+                    && !matches!(
+                        self.inbox_item(issue_number).map(|item| item.state),
+                        Some(MonitorInboxState::Merged | MonitorInboxState::Released)
+                    ) =>
+            {
+                // Issue #4425 AC-4: failure consumes the live identity. Recover
+                // only its durable owner, never a caller-supplied pane.
+                let window_id = self.failed_windows.get(&issue_number).cloned();
+                if window_id.as_deref().is_some_and(|window_id| {
+                    self.conflicting_launch_window_owner(issue_number, window_id)
+                        .is_some()
+                }) {
+                    return self
+                        .refuse_stop(issue_number, IssueMonitorStopMismatch::WindowMismatch);
+                }
+                window_id
+            }
             Err(mismatch) => return self.refuse_stop(issue_number, mismatch),
         };
 
@@ -18935,7 +19056,10 @@ impl IssueMonitorState {
     }
 
     fn revoke_launch_binding(&mut self, issue_number: u64) {
-        if let Some(window_id) = self.launched_window_id(issue_number) {
+        if let Some(window_id) = self
+            .launched_window_id(issue_number)
+            .or_else(|| self.failed_windows.get(&issue_number).cloned())
+        {
             self.launch_bindings.retain(|window, bound_issue| {
                 *bound_issue != issue_number || !issue_monitor_window_ids_match(window, &window_id)
             });
@@ -28807,6 +28931,76 @@ mod tests {
         assert_ne!(monitor.status_view().state, "error");
     }
 
+    /// Issue #4425 AC-4: a failed launch loses its live identity before the
+    /// operator can stop it. Its durable failure still identifies the owner.
+    #[test]
+    fn issue_4425_stop_recovers_a_failed_launch_by_issue_number() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor.record_launch_failed_at(
+            42,
+            "launch driver stopped responding",
+            "2026-09-15T15:00:00Z",
+        );
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(!monitor.launch_identity(42).active);
+        assert_eq!(monitor.live_claim_id(42), None);
+        assert_eq!(monitor.launched_window_id(42), None);
+        let attempts = monitor.attempt_count(42);
+        let mut daemon = monitor.clone();
+
+        assert_eq!(
+            monitor.stop_only(
+                &IssueMonitorStopTarget {
+                    issue_number: 42,
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                "recover unresponsive launch",
+                "2026-09-15T15:20:00Z",
+            ),
+            IssueMonitorStopOutcome::Stopped {
+                window_id: "tab-1::agent-42".into(),
+            }
+        );
+        daemon.rebase_daemon_driver_prefs(&monitor.prefs());
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), daemon.prefs());
+        assert_eq!(
+            restored.stop_only_reason(42).as_deref(),
+            Some("recover unresponsive launch")
+        );
+        assert_eq!(restored.attempt_count(42), attempts);
+        assert!(!restored.launch_bindings.contains_key("tab-1::agent-42"));
+        assert_eq!(restored.requeue_window("tab-1::agent-42"), None);
+        assert!(!restored.queued_issue_numbers().contains(&42));
+    }
+
+    #[test]
+    fn issue_4425_stop_refuses_a_failed_window_rebound_to_another_issue() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        monitor.record_launch_failed_at(42, "launch failed", "2026-09-15T15:00:00Z");
+        monitor.launch_bindings.insert("tab-1::agent-42".into(), 43);
+        let before = monitor.prefs();
+
+        assert_eq!(
+            monitor.stop_only(
+                &IssueMonitorStopTarget {
+                    issue_number: 42,
+                    claim_id: None,
+                    delivery_id: None,
+                    window_id: None,
+                },
+                "recover unresponsive launch",
+                "2026-09-15T15:20:00Z",
+            ),
+            IssueMonitorStopOutcome::Mismatch(IssueMonitorStopMismatch::WindowMismatch)
+        );
+        assert_eq!(monitor.prefs(), before);
+        assert_eq!(monitor.launch_bindings.get("tab-1::agent-42"), Some(&43));
+    }
+
     /// SPEC-3431 FR-033: every identity component must match exactly, and a
     /// mismatch closes nothing. A stale notification or a concurrent scan is
     /// exactly how the wrong agent gets killed.
@@ -36138,6 +36332,64 @@ mod tests {
     }
 
     #[test]
+    fn prefs_cache_reuses_snapshots_and_invalidates_on_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issue-monitor.json");
+        let mut prefs = IssueMonitorPrefs::default();
+        fs::write(&path, serde_json::to_vec(&prefs).unwrap()).unwrap();
+        let before = prefs_io_counts_for_test().0;
+        let mut copy = load_issue_monitor_prefs(&path).unwrap();
+        copy.merged_issues.push(42);
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+        assert_eq!(
+            prefs_io_counts_for_test().0 - before,
+            1,
+            "one parse per generation"
+        );
+
+        // Change only mtime, then only size: neither invalidation may depend on sleeps.
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let stamp =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        file.set_times(fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+        assert_eq!(prefs_io_counts_for_test().0 - before, 2);
+        prefs.merged_issues.push(99);
+        fs::write(&path, serde_json::to_vec(&prefs).unwrap()).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(stamp))
+            .unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+        assert_eq!(prefs_io_counts_for_test().0 - before, 3);
+        drop(file);
+
+        // Local writers and lock-held mutations must observe the newest generation.
+        prefs.enabled = !prefs.enabled;
+        save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+        let (latest, ()) = try_mutate_issue_monitor_prefs(&path, |latest| {
+            assert_eq!(*latest, prefs);
+            latest.merged_issues.push(100);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), latest);
+
+        fs::write(&path, b"{broken").unwrap();
+        assert_eq!(
+            load_issue_monitor_prefs(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            load_issue_monitor_prefs(&path).unwrap(),
+            IssueMonitorPrefs::default()
+        );
+        fs::write(&path, serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+    }
+
+    #[test]
     fn save_issue_monitor_prefs_round_trips_and_leaves_no_scratch_file() {
         // The unique-scratch atomic write still round-trips and cleans up (the
         // rename consumes the temp), leaving only the target file.
@@ -39567,6 +39819,44 @@ mod tests {
         assert_eq!(monitor.attempt_count(42), 0);
     }
 
+    #[test]
+    fn merged_delivery_with_failed_review_keeps_acceptance_unmet() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.set_auto_close_merged_issues_with_effect_revocation(Some(true));
+        scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
+        monitor.begin_review(42, 7, "aaa");
+        assert!(monitor.merged_issue_close_allowed(42));
+        assert!(monitor.propose_merged_issue_settlement(
+            42,
+            &merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+            MergedIssueSettlementAction::Close { delegated: false },
+        ));
+        monitor.record_review_verdict(42, false);
+        assert!(!monitor.merged_issue_close_allowed(42));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "a failed review must park a pending close before its worker finishes"
+        );
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman),
+            "Issue #5126: checked boxes cannot override a failed independent review"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().review_passed,
+            Some(false)
+        );
+        let deliveries = BTreeMap::from([(
+            "work/issue-42".to_string(),
+            merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+        )]);
+        assert!(monitor
+            .merged_issue_settlement_candidates(&deliveries)
+            .is_empty());
+    }
+
     /// Issue #3959 AC-5: a `needs_human` park stamped by the pre-#3930
     /// classifier outlives the classifier — nothing re-evaluates a park, so
     /// #3864 and 33 companions stayed quarantined across the very release that
@@ -40072,11 +40362,11 @@ mod tests {
         use MergedIssueSettlementAction::{AwaitClose, Close, UnmetAcceptance};
         let all_checked = checked_issue(42);
         assert_eq!(
-            decide_merged_issue_settlement(&all_checked, true, |_| panic!("no evidence needed")),
+            decide_merged_issue_settlement(&all_checked, true),
             Some(Close { delegated: false })
         );
         assert_eq!(
-            decide_merged_issue_settlement(&all_checked, false, |_| panic!("off mode never reads")),
+            decide_merged_issue_settlement(&all_checked, false),
             Some(AwaitClose { unmet: vec![] }),
             "AC-5: auto-close off records the merge without closing"
         );
@@ -40085,26 +40375,13 @@ mod tests {
         unmet.body =
             Some("## Acceptance Criteria\n- [x] AC-1: done\n- [ ] AC-2: later\n".to_string());
         assert_eq!(
-            decide_merged_issue_settlement(&unmet, true, |ids| {
-                assert_eq!(ids, ["AC-2"]);
-                Some(true)
-            }),
-            Some(Close { delegated: true }),
-            "AC-2: a delegation record closes despite unchecked criteria"
-        );
-        assert_eq!(
-            decide_merged_issue_settlement(&unmet, true, |_| Some(false)),
+            decide_merged_issue_settlement(&unmet, true),
             Some(UnmetAcceptance {
                 unmet: vec!["AC-2".to_string()]
             })
         );
         assert_eq!(
-            decide_merged_issue_settlement(&unmet, true, |_| None),
-            None,
-            "unreadable evidence defers the decision instead of escalating"
-        );
-        assert_eq!(
-            decide_merged_issue_settlement(&unmet, false, |_| panic!("off mode never reads")),
+            decide_merged_issue_settlement(&unmet, false),
             Some(AwaitClose {
                 unmet: vec!["AC-2".to_string()]
             })
@@ -40112,7 +40389,7 @@ mod tests {
 
         let no_block = issue(44);
         assert_eq!(
-            decide_merged_issue_settlement(&no_block, true, |_| Some(false)),
+            decide_merged_issue_settlement(&no_block, true),
             Some(UnmetAcceptance { unmet: vec![] }),
             "a missing AC block is never vacuously satisfied"
         );
@@ -40124,7 +40401,7 @@ mod tests {
         );
         spec_open.body = all_checked.body.clone();
         assert_eq!(
-            decide_merged_issue_settlement(&spec_open, true, |_| Some(true)),
+            decide_merged_issue_settlement(&spec_open, true),
             None,
             "AC-3: a phase merge of a gwt-spec Issue never settles"
         );
@@ -40135,29 +40412,17 @@ mod tests {
         );
         spec_done.body = all_checked.body.clone();
         assert_eq!(
-            decide_merged_issue_settlement(&spec_done, true, |_| Some(true)),
+            decide_merged_issue_settlement(&spec_done, true),
             Some(Close { delegated: false })
         );
 
         let mut closed = checked_issue(47);
         closed.state = IssueMonitorIssueState::Closed;
         assert_eq!(
-            decide_merged_issue_settlement(&closed, true, |_| Some(true)),
+            decide_merged_issue_settlement(&closed, true),
             None,
             "an already closed Issue has nothing to settle"
         );
-    }
-
-    #[test]
-    fn delegation_marker_is_recognized_in_pr_body_or_comments() {
-        assert!(delegation_recorded([
-            "残 AC は別 Issue に委譲しました (#99)"
-        ]));
-        assert!(delegation_recorded([
-            "Remaining acceptance criteria delegated to #99"
-        ]));
-        assert!(!delegation_recorded(["all done"]));
-        assert!(!delegation_recorded(std::iter::empty::<&str>()));
     }
 
     #[test]
