@@ -3983,6 +3983,11 @@ pub fn validate_monitor_profiles_set(
     let mut providers = std::collections::BTreeSet::new();
     for profile in profiles {
         let provider = match gwt_agent::resolve_agent_id(&profile.agent_id) {
+            Some(gwt_agent::AgentId::Custom(id))
+                if crate::issue_monitor::custom_coding_agent_definition(&id).is_some() =>
+            {
+                id.to_ascii_lowercase()
+            }
             Some(gwt_agent::AgentId::Custom(_)) | None => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -11557,6 +11562,44 @@ mod tests {
         assert!(payload["launch_profile_summary"]
             .as_str()
             .is_some_and(|summary| summary.starts_with("auto (2): ")));
+    }
+
+    #[test]
+    fn issue_monitor_profiles_set_accepts_registered_custom_and_rejects_duplicates() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let config = gwt_config::Settings::global_config_path().expect("config path");
+        fs::create_dir_all(config.parent().unwrap()).expect("config dir");
+        fs::write(
+            &config,
+            r#"[tools.customCodingAgents.my-agent]
+id = "my-agent"
+displayName = "My Agent"
+agentType = "command"
+command = "my-agent-cli"
+"#,
+        )
+        .expect("register custom agent");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let env = crate::cli::TestEnv::new(repo.clone());
+        run_monitor_profiles_set(
+            &env,
+            Some(&repo),
+            vec![pool_patch("codex", &[]), pool_patch("my-agent", &[])],
+            None,
+            &mut String::new(),
+        )
+        .expect("save registered custom candidate");
+        let prefs =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&repo))
+                .expect("read saved candidates");
+        assert_eq!(prefs.launch_profile_pool()[1].agent_id, "my-agent");
+
+        let duplicate = pool_profile("my-agent", &[]);
+        let error = validate_monitor_profiles_set(&[duplicate.clone(), duplicate], None)
+            .expect_err("duplicate custom candidate must be rejected");
+        assert!(error.to_string().contains("duplicate launch candidate"));
     }
 
     /// Issue #4079 AC-3/AC-4/AC-5: reordering the pool with `{agent_id}`-only

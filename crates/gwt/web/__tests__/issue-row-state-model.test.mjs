@@ -32,7 +32,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22row-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 test("pending SessionStart diagnosis uses the existing row reason without changing launch state", async () => {
@@ -229,25 +229,6 @@ test("Issue #5401 mounts all 200 rows but virtualizes larger lists", async t => 
   assert.ok(fixture.body.querySelectorAll(".knowledge-row").length < 200);
   assert.match(fixture.body.querySelector('[data-queue-column="backlog"] h3').textContent, /1545/);
   assert.ok(fixture.body.querySelector(".knowledge-virtual-spacer"));
-});
-
-test("Issue #5401 PR Kanban reuses cards, virtualizes large columns and retains empty guidance", async t => {
-  const fixture = await makeFixture({ kind: "pr" });
-  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
-  const entries = Array.from({ length: 201 }, (_, index) => knowledgeEntry(index + 1));
-  const receive = rows => fixture.surface.applyKnowledgeReceiveEvent({
-    kind: "knowledge_entries", id: "win-1", knowledge_kind: "pr", request_id: fixture.load.request_id,
-    entries: rows, refresh_enabled: true,
-  });
-  receive(entries);
-  const card = fixture.body.querySelector('.kanban-card[data-issue-number="2"]');
-  assert.ok(card);
-  assert.ok(fixture.body.querySelectorAll(".kanban-card").length < 200);
-  receive([{ ...entries[0], title: "Changed card" }, ...entries.slice(1)]);
-  assert.equal(fixture.body.querySelector('.kanban-card[data-issue-number="2"]'), card);
-  const empty = fixture.body.querySelector('[data-phase="done"] .kanban-column-body');
-  empty.dispatchEvent(new fixture.window.Event("scroll"));
-  assert.ok(empty.querySelector(".kanban-column-empty"));
 });
 
 function overflowActions(row) {

@@ -67,7 +67,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         notificationForTransition,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
-      import { createConsoleWindow } from "/console-window.js";
       import {
         computeCameraFrameArea,
         computeViewportForWorldRect,
@@ -90,9 +89,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       import { createToastStack } from "/toast-host.js";
       import { createProjectPageMetadata } from "/project-page-metadata.js";
       import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
-      // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
-      // /file-tree-surface.js.
-      import { createFileTreeSurface } from "/file-tree-surface.js";
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved
       // to /branches-cleanup-surface.js.
       import { createBranchesCleanupSurface } from "/branches-cleanup-surface.js";
@@ -320,9 +316,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       const renderedIssuePreviewBodyKeys = new Map();
       const settingsNavigationModel = createUiStateStore({});
       const renderedIssueWindowHeaderKeys = new Map();
-      // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
-      // /file-tree-surface.js (exported and destructured below so the
-      // window-cleanup call site keeps its text).
       // SPEC-3064 Phase 3 (E6d): knowledgeBridgeStateMap and the knowledge
       // request-id state moved to /knowledge-kanban-surface.js.
       let startupAutoResumeReadySent = false;
@@ -347,13 +340,6 @@ import { createUiStateStore } from "/ui-state-store.js";
             "ensureWindow",
             "mountWindowBody",
             "renderWorkspace",
-          ]),
-        }),
-        fileTreeStateMap: Object.freeze({
-          owner: "file-tree-surface",
-          mutatedBy: Object.freeze([
-            "ensureFileTreeState",
-            "renderFileTree",
           ]),
         }),
         branchListStateMap: Object.freeze({
@@ -960,9 +946,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         ) {
           return "terminal";
         }
-        if (preset === "file_tree") {
-          return "file-tree";
-        }
         if (preset === "agent_kanban") {
           return "agent-kanban";
         }
@@ -981,8 +964,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (
           preset === "issue" ||
           preset === "issue_monitor" ||
-          preset === "spec" ||
-          preset === "pr"
+          preset === "spec"
         ) {
           return "knowledge";
         }
@@ -993,18 +975,12 @@ import { createUiStateStore } from "/ui-state-store.js";
           return "knowledge";
         }
         if (preset === "settings") return "settings";
-        if (preset === "console") {
-          return "console";
-        }
         return "mock";
       }
 
       function knowledgeKindForPreset(preset) {
         if (["settings", "issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
           return "issue";
-        }
-        if (preset === "pr") {
-          return preset;
         }
         return null;
       }
@@ -1173,36 +1149,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         sendFocusedPaneInput(text);
-      }
-
-      // SPEC-2809 — registry of Console window controllers keyed by windowId.
-      // Each Console window registers itself on render and unregisters on
-      // close; the `process_line` dispatcher fans out incoming lines to every
-      // active controller so multiple Console windows stay in sync.
-      const consoleControllers = new Map();
-      function ensureConsoleController(windowId) {
-        let controller = consoleControllers.get(windowId);
-        if (!controller) {
-          controller = createConsoleWindow({
-            document,
-            windowId,
-            send: (payload) => socketTransport.send(payload),
-          });
-          consoleControllers.set(windowId, controller);
-        }
-        return controller;
-      }
-      function disposeConsoleController(windowId) {
-        const controller = consoleControllers.get(windowId);
-        if (controller) {
-          controller.close();
-          consoleControllers.delete(windowId);
-        }
-      }
-      function broadcastProcessLineToConsoles(line) {
-        for (const controller of consoleControllers.values()) {
-          controller.push(line);
-        }
       }
 
       const releaseNotesWindow = createReleaseNotesWindow({
@@ -1730,7 +1676,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           claude: "Claude",
           codex: "Codex",
           agent: "Agent",
-          file_tree: "File Tree",
           branches: "Branches",
           settings: "Settings",
           profile: "Profile",
@@ -1747,7 +1692,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           work: "Issue",
           workspace: "Issue",
           board: "Board",
-          pr: "PR",
         };
         return labels[preset] || presetLabel(preset);
       }
@@ -4678,15 +4622,6 @@ import { createUiStateStore } from "/ui-state-store.js";
                 ["Blocked", "0 cards"],
               ],
             };
-          case "pr":
-            return {
-              heading: "PR Bridge",
-              rows: [
-                ["Cache", "repo-scoped"],
-                ["Checks", "cache-backed"],
-                ["Workflow", "gwt-managed"],
-              ],
-            };
           default:
             return {
               heading: "Work",
@@ -4698,40 +4633,6 @@ import { createUiStateStore } from "/ui-state-store.js";
             };
         }
       }
-
-      // SPEC-3064 Phase 3 (E6a): the File Tree window surface (file tree
-      // state map, worktree picker, text/hex viewer + dirty tracking,
-      // highlight.js lazy load, renderFileTree / renderFileTreeViewer, the
-      // File Tree window mount, and the file_tree_* / file_content_*
-      // receive bodies) moved to /file-tree-surface.js. app.js keeps the
-      // receive() case arms, the frontendUnits registry entries, and the
-      // window-cleanup call sites, wired through this factory.
-      const {
-        fileTreeStateMap,
-        ensureFileTreeState,
-        requestFileTree,
-        renderFileTree,
-        renderFileTreeViewer,
-        openWorktreePicker,
-        closeWorktreePicker,
-        renderWorktreePicker,
-        requestFileContent,
-        requestSaveFileContent,
-        renderDiscardModal,
-        renderConflictModal,
-        queueNavigationGuardedByDirty,
-        beginViewerForFile,
-        applyAfterSaveContinuation,
-        mountFileTreeWindow,
-        applyFileTreeReceiveEvent,
-      } = createFileTreeSurface({
-        send,
-        makeEl,
-        clearChildren,
-        focusWindowLocally,
-        sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
-        windowMap,
-      });
 
       function makeEl(tag, options = {}, children = []) {
         const el = document.createElement(tag);
@@ -5212,7 +5113,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         launchPending,
         continueWork: (workId, bounds) =>
           continueWorkDispatcher.dispatch(workId, bounds),
-        branchesSurface: {
+        branchesFileTreeSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
           renderBranches: (...a) => renderBranches(...a),
@@ -5569,7 +5470,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         element.classList.remove(
           "surface-terminal",
           "surface-agent-kanban",
-          "surface-file-tree",
           "surface-branches",
           "surface-board",
           "surface-logs",
@@ -5578,7 +5478,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           "surface-index",
           "surface-work",
           "surface-profile",
-          "surface-console",
           "surface-mock",
         );
         element.classList.add(`surface-${surface}`);
@@ -5642,13 +5541,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
 
-        if (surface === "file-tree") {
-          // SPEC-3064 Phase 3 (E6a): the File Tree window mount moved to
-          // the file tree surface.
-          mountFileTreeWindow(windowData, body);
-          return;
-        }
-
         if (surface === "branches") {
           // SPEC-3064 Phase 3 (E6b): the Branches window mount moved to
           // the branches cleanup surface.
@@ -5674,20 +5566,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           // SPEC-3064 Phase 3 (E6c): the Logs window mount moved to the
           // board & logs surface.
           mountLogsWindow(windowData, body);
-          return;
-        }
-
-        if (surface === "console") {
-          // SPEC-2809 — Console window mount: register a controller for
-          // this windowId and attach its DOM to the window body. The
-          // controller subscribes implicitly via the shared
-          // `consoleControllers` registry that the `process_line`
-          // dispatcher fans out to.
-          const controller = ensureConsoleController(windowData.id);
-          while (body.firstChild) {
-            body.removeChild(body.firstChild);
-          }
-          controller.mount(body);
           return;
         }
 
@@ -5756,6 +5634,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
+        applyIssueMonitorProfilesError,
         customAgentsState,
         agentBackendsState,
         systemSettingsState,
@@ -6226,7 +6105,6 @@ import { createUiStateStore } from "/ui-state-store.js";
                     if (profileState) {
                       clearProfileSaveTimer(profileState);
                     }
-                    fileTreeStateMap.delete(windowId);
                     branchListStateMap.delete(windowId);
                     profileStateMap.delete(windowId);
                     boardStateMap.delete(windowId);
@@ -6236,6 +6114,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                     workspaceOverviewSurface.deleteState(windowId);
                     clearBranchCleanupForWindow(windowId);
                     clearLocalGeometryEdit(geometrySyncState, windowId);
+                    pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
                     element.remove();
                     windowMap.delete(windowId);
                   });
@@ -6358,29 +6237,13 @@ import { createUiStateStore } from "/ui-state-store.js";
       });
 
       const branchesFileTreeSurface = Object.freeze({
-        ensureFileTreeState,
         ensureBranchListState,
-        requestFileTree,
         requestBranches,
-        renderFileTree,
         renderBranches,
         openBranchCleanupModal,
         closeBranchCleanupModal,
         renderBranchCleanupModal,
         updateBranchCleanupProgress,
-        // SPEC-2009 amendment: Worktree picker + file content viewer.
-        openWorktreePicker,
-        closeWorktreePicker,
-        renderWorktreePicker,
-        renderFileTreeViewer,
-        requestFileContent,
-        // SPEC-2009 amendment Phase 2: edit affordance.
-        requestSaveFileContent,
-        renderDiscardModal,
-        renderConflictModal,
-        queueNavigationGuardedByDirty,
-        beginViewerForFile,
-        applyAfterSaveContinuation,
       });
 
       const profileSurface = Object.freeze({
@@ -6578,6 +6441,9 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "issue_monitor_profiles":
             applyIssueMonitorProfiles(event);
             break;
+          case "issue_monitor_profiles_write_failed":
+            applyIssueMonitorProfilesError(event);
+            break;
           case "issue_monitor_allowed_labels_write_failed":
             applyKnowledgeReceiveEvent(event);
             break;
@@ -6649,20 +6515,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "project_index_search_error":
             handleProjectIndexSearchError(event);
             break;
-          // SPEC-3064 Phase 3 (E6a): file tree / file content state and
-          // rendering live in the file tree surface.
-          case "file_tree_entries":
-          case "file_tree_error":
-          case "file_tree_worktrees":
-          case "file_tree_worktree_selected":
-          case "file_tree_worktree_error":
-          case "file_content_text":
-          case "file_content_hex":
-          case "file_content_saved":
-          case "file_content_save_error":
-          case "file_content_error":
-            applyFileTreeReceiveEvent(event);
-            break;
           case "branch_entries": {
             const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
               event.id,
@@ -6720,24 +6572,6 @@ import { createUiStateStore } from "/ui-state-store.js";
             // SPEC-2963 FR-030: per-project Board routing → Board window chip.
             applyProjectBoardConfigEventToBoard(event);
             break;
-          case "process_line":
-            // SPEC-2809 Phase F1/F2 — fan out the redacted, ANSI-stripped
-            // line from `ProcessConsoleHub` to every Console window
-            // controller. Phase F3 also wires Logs window's Process facet
-            // to consume the same event independently.
-            if (event.line) {
-              broadcastProcessLineToConsoles(event.line);
-            }
-            break;
-          case "process_console_snapshot": {
-            // SPEC-2809 Phase F2 — initial ring buffer replay for the
-            // Console window that just mounted.
-            const target = consoleControllers.get(event.id);
-            if (target) {
-              target.ingestSnapshot(event.lines || []);
-            }
-            break;
-          }
           // SPEC-3064 Phase 3 (E6d): knowledge bridge state and rendering
           // live in the knowledge kanban surface.
           case "knowledge_revision":
@@ -8076,9 +7910,6 @@ import { createUiStateStore } from "/ui-state-store.js";
             return;
           case "open-branches":
             focusOrSpawnPreset("work");
-            return;
-          case "open-files":
-            focusOrSpawnPreset("file_tree");
             return;
           case "open-index":
             focusOrSpawnPreset("index");

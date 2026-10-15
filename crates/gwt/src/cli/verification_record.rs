@@ -51,6 +51,7 @@ pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification
 /// Cap on the per-command output tail echoed back through the envelope.
 const OUTPUT_TAIL_LIMIT: usize = 8 * 1024;
 
+mod admission_resume;
 pub mod cancellation;
 pub mod continuation;
 pub mod driver;
@@ -6714,7 +6715,7 @@ pub(super) fn run_with_response<E: CliEnv>(
                 &token,
             )
             .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
-            let _attempt_watchdog = if cfg!(test) {
+            let mut attempt_watchdog = if cfg!(test) {
                 None
             } else {
                 let executable = driver
@@ -6745,7 +6746,10 @@ pub(super) fn run_with_response<E: CliEnv>(
                 {
                     Ok(None)
                 } else {
-                    crate::cli::verification_lease::admission::admit_for_attempt(
+                    attempt
+                        .set_admission_waiting(true)
+                        .map_err(|error| error.to_string())?;
+                    let admission = crate::cli::verification_lease::admission::admit_for_attempt(
                         env,
                         &worktree,
                         Some(command),
@@ -6760,8 +6764,18 @@ pub(super) fn run_with_response<E: CliEnv>(
                             )
                         },
                         &heavy_attempt,
-                    )
-                    .map(Some)
+                    )?;
+                    attempt
+                        .set_admission_waiting(false)
+                        .map_err(|error| error.to_string())?;
+                    if !cfg!(test) && admission.waited() >= std::time::Duration::from_secs(5) {
+                        if let Some(watchdog) = attempt_watchdog.as_mut() {
+                            if let Err(error) = watchdog.resume_when_idle() {
+                                tracing::warn!(%error, "verification admission resume notification failed");
+                            }
+                        }
+                    }
+                    Ok(Some(admission))
                 }
             };
             let run = run_verification_for_caller(
@@ -6796,10 +6810,16 @@ pub(super) fn run_with_response<E: CliEnv>(
                 .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
             let (record, transcript) = match run {
                 Ok(result) => result,
-                Err(VerificationError::Deferred(deferral)) => {
+                Err(VerificationError::Deferred(mut deferral)) => {
                     attempt.ensure_active().map_err(|error| {
                         SpecOpsError::from(ApiError::Unexpected(error.to_string()))
                     })?;
+                    if let Some(watchdog) = attempt_watchdog.as_mut() {
+                        match watchdog.resume_after_deferral() {
+                            Ok(()) => deferral.resume_notification = Some("watchdog armed: capacity + own idle pane; one self-notification".to_string()),
+                            Err(error) => deferral.resume_notification = Some(format!("not armed: {error}; retry or declare issue.monitor.wait explicitly")),
+                        }
+                    }
                     out.push_str(&format!("{deferral}\n"));
                     *response = Some(RunResponse {
                         status: "deferred",

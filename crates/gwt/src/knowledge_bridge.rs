@@ -167,7 +167,6 @@ fn spec_reference_at(rest: &str) -> Option<u64> {
 pub enum KnowledgeKind {
     Issue,
     Spec,
-    Pr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,7 +454,6 @@ fn canonical_semantic_search_with_runner<R: CanonicalProjectIndexSearchRunner + 
     let scope = match kind {
         KnowledgeKind::Issue => crate::protocol::IndexSearchScope::Issues,
         KnowledgeKind::Spec => crate::protocol::IndexSearchScope::Specs,
-        KnowledgeKind::Pr => return Ok(Vec::new()),
     };
     let outcome = runner
         .search(
@@ -537,10 +535,6 @@ pub fn load_knowledge_bridge(
         ));
     }
 
-    if matches!(kind, KnowledgeKind::Pr) {
-        return Ok(disabled_pr_view());
-    }
-
     if issue_cache_root_for_repo_path(repo_path).is_none() {
         return Ok(non_repo_view(kind));
     }
@@ -551,21 +545,12 @@ pub fn load_knowledge_bridge(
     let cache = Cache::new(issue_cache_root_for_repo_path_or_detached(repo_path));
     let entries = load_cache_summaries(&cache)?;
     let linked_branches = load_linked_branches(repo_path);
-    Ok(match kind {
-        KnowledgeKind::Issue => build_work_item_view(
-            KnowledgeKind::Issue,
-            &entries,
-            linked_branches,
-            selected_number,
-        ),
-        KnowledgeKind::Spec => build_work_item_view(
-            KnowledgeKind::Spec,
-            &entries,
-            linked_branches,
-            selected_number,
-        ),
-        KnowledgeKind::Pr => disabled_pr_view(),
-    })
+    Ok(build_work_item_view(
+        kind,
+        &entries,
+        linked_branches,
+        selected_number,
+    ))
 }
 
 /// Cache-backed single-entry detail (SPEC #3170 FR-102, T-947): reads
@@ -573,7 +558,7 @@ pub fn load_knowledge_bridge(
 /// remotes, never rebuilds the list, never scans Sessions/Work.
 pub fn load_knowledge_bridge_detail(
     repo_path: &Path,
-    kind: KnowledgeKind,
+    _kind: KnowledgeKind,
     number: u64,
 ) -> Result<KnowledgeDetailView, String> {
     if !repo_path.is_dir() {
@@ -581,9 +566,6 @@ pub fn load_knowledge_bridge_detail(
             "project root is not available: {}",
             repo_path.display()
         ));
-    }
-    if matches!(kind, KnowledgeKind::Pr) {
-        return Err("PR knowledge selection is unavailable".to_string());
     }
     if issue_cache_root_for_repo_path(repo_path).is_none() {
         return Err("Knowledge Bridge is available only for Git projects.".to_string());
@@ -593,7 +575,7 @@ pub fn load_knowledge_bridge_detail(
         .load_entry(gwt_github::IssueNumber(number))
         .ok_or_else(|| format!("Issue #{number} not in local cache"))?;
     let linked_branches = load_linked_branches(repo_path);
-    Ok(detail_for_kind(kind, &entry, &linked_branches))
+    Ok(work_item_detail_view(&entry, &linked_branches))
 }
 
 // Cache roots identify the shared project even when requests come from different worktrees.
@@ -888,12 +870,6 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
             repo_path.display()
         ));
     }
-    if matches!(kind, KnowledgeKind::Pr) {
-        return Ok(KnowledgeSearchOutcome {
-            view: disabled_pr_view(),
-            semantic_retry: None,
-        });
-    }
     if issue_cache_root_for_repo_path(repo_path).is_none() {
         return Ok(KnowledgeSearchOutcome {
             view: non_repo_view(kind),
@@ -903,10 +879,7 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
 
     let cache = Cache::new(issue_cache_root_for_repo_path_or_detached(repo_path));
     let summaries = load_cache_summaries(&cache)?;
-    let mut entries = summaries
-        .iter()
-        .filter(|entry| candidate_matches_kind(entry, kind))
-        .collect::<Vec<_>>();
+    let mut entries = summaries.iter().collect::<Vec<_>>();
     entries.sort_by(|left, right| issue_entry_sort(left, right));
     let linked_branches = load_linked_branches(repo_path);
     // FR-098/FR-100: a semantic failure never aborts the completion — the
@@ -949,7 +922,7 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         .filter(|entry| is_exact_search_match(entry, query))
     {
         if seen.insert(entry.number) {
-            list_items.push(list_item_for_kind(kind, entry, &linked_branches, Some(100)));
+            list_items.push(work_item_list_item(entry, &linked_branches, Some(100)));
         }
     }
 
@@ -964,8 +937,7 @@ fn search_knowledge_bridge_outcome_with_typed_client<C: TypedSemanticSearchClien
         let Some(entry) = entries_by_number.get(&hit.number) else {
             continue;
         };
-        list_items.push(list_item_for_kind(
-            kind,
+        list_items.push(work_item_list_item(
             entry,
             &linked_branches,
             hit.distance.map(distance_to_match_score),
@@ -1035,36 +1007,6 @@ fn build_work_item_view(
     }
 }
 
-fn disabled_pr_view() -> KnowledgeBridgeView {
-    KnowledgeBridgeView {
-        kind: KnowledgeKind::Pr,
-        entries: Vec::new(),
-        selected_number: None,
-        empty_message: Some(
-            "PR Bridge is waiting for cache-backed PR list support before it can render data."
-                .to_string(),
-        ),
-        refresh_enabled: false,
-        detail: Some(disabled_pr_detail()),
-    }
-}
-
-fn disabled_pr_detail() -> KnowledgeDetailView {
-    KnowledgeDetailView {
-        number: None,
-        title: "PR Bridge".to_string(),
-        subtitle: "Unavailable".to_string(),
-        state: "unavailable".to_string(),
-        labels: Vec::new(),
-        sections: vec![knowledge_detail_section(
-            "Status",
-            "PR Bridge is waiting for cache-backed PR list support before it can render data.",
-        )],
-        launch_issue_number: None,
-        related_works: Vec::new(),
-    }
-}
-
 fn non_repo_view(kind: KnowledgeKind) -> KnowledgeBridgeView {
     KnowledgeBridgeView {
         kind,
@@ -1085,30 +1027,6 @@ fn knowledge_detail_section(
         title: title.into(),
         body_html: Some(render_markdown_html(&body, MarkdownHtmlProfile::Knowledge)),
         body,
-    }
-}
-
-fn candidate_matches_kind(entry: &IssueSummary, kind: KnowledgeKind) -> bool {
-    match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => {
-            let _ = entry;
-            true
-        }
-        KnowledgeKind::Pr => false,
-    }
-}
-
-fn list_item_for_kind(
-    kind: KnowledgeKind,
-    entry: &IssueSummary,
-    linked_branches: &HashMap<u64, Vec<String>>,
-    match_score: Option<u8>,
-) -> KnowledgeListItem {
-    match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => {
-            work_item_list_item(entry, linked_branches, match_score)
-        }
-        KnowledgeKind::Pr => unreachable!("PR bridge has no list items"),
     }
 }
 
@@ -1164,17 +1082,6 @@ fn spec_list_item(
     let phase = effective_spec_lifecycle_label(entry.state, &entry.labels);
     item.meta = format!("{phase} · Updated {}", short_updated_at(&entry.updated_at));
     item
-}
-
-fn detail_for_kind(
-    kind: KnowledgeKind,
-    entry: &CacheEntry,
-    linked_branches: &HashMap<u64, Vec<String>>,
-) -> KnowledgeDetailView {
-    match kind {
-        KnowledgeKind::Issue | KnowledgeKind::Spec => work_item_detail_view(entry, linked_branches),
-        KnowledgeKind::Pr => disabled_pr_detail(),
-    }
 }
 
 fn work_item_detail_view(
@@ -1716,7 +1623,12 @@ Extra context.
     }
 
     #[test]
-    fn load_knowledge_bridge_returns_non_repo_and_disabled_pr_views() {
+    fn knowledge_kind_rejects_removed_pr_wire_value() {
+        assert!(serde_json::from_str::<KnowledgeKind>(r#""pr""#).is_err());
+    }
+
+    #[test]
+    fn load_knowledge_bridge_returns_non_repo_view() {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let issue_view = load_knowledge_bridge(dir.path(), KnowledgeKind::Issue, None, false)
@@ -1728,14 +1640,6 @@ Extra context.
             Some("Knowledge Bridge is available only for Git projects.")
         );
         assert!(issue_view.detail.is_none());
-
-        let pr_view =
-            load_knowledge_bridge(dir.path(), KnowledgeKind::Pr, Some(12), false).expect("pr view");
-        assert_eq!(pr_view.kind, KnowledgeKind::Pr);
-        assert!(!pr_view.refresh_enabled);
-        let pr_detail = pr_view.detail.expect("disabled PR detail");
-        assert_eq!(pr_detail.title, "PR Bridge");
-        assert_eq!(pr_detail.state, "unavailable");
     }
 
     #[test]

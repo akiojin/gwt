@@ -327,7 +327,6 @@ pub fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> 
             Some(KnowledgeKind::Issue)
         }
         WindowPreset::Spec => Some(KnowledgeKind::Issue),
-        WindowPreset::Pr => Some(KnowledgeKind::Pr),
         _ => None,
     }
 }

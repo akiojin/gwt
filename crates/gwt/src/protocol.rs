@@ -5,6 +5,22 @@ use gwt_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Payload limits shared with the file attachment pipeline.
+#[derive(Debug, Clone, Copy)]
+pub struct ContentLimits {
+    pub text_max_bytes: u64,
+    pub binary_chunk_max_bytes: u64,
+}
+
+impl Default for ContentLimits {
+    fn default() -> Self {
+        Self {
+            text_max_bytes: 5 * 1024 * 1024,
+            binary_chunk_max_bytes: 10 * 1024 * 1024,
+        }
+    }
+}
+
 /// Render-only HTML is derived from durable report Markdown on the host.
 #[derive(Debug, Clone, Serialize)]
 pub struct PmReportView {
@@ -53,8 +69,6 @@ use crate::{
     branch_cleanup::{BranchCleanupProgressPhase, BranchCleanupResultEntry},
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
-    file_content::{Encoding, Newline},
-    file_tree::FileTreeEntry,
     issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView, MonitorNotificationTransition},
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
@@ -63,7 +77,6 @@ use crate::{
         WindowProcessStatus, WindowSurfaceOwner,
     },
     preset::WindowPreset,
-    worktree_inventory::WorktreeEntry,
 };
 
 #[derive(Deserialize)]
@@ -96,25 +109,6 @@ where
         return Err(serde::de::Error::custom("manual capacity must be positive"));
     }
     Ok(value)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileContentMode {
-    Text,
-    Hex,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileContentErrorKind {
-    Denied,
-    TooLarge,
-    IoError,
-    NotAFile,
-    BinaryNotText,
-    WindowNotFound,
-    WindowMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -219,24 +213,6 @@ pub struct IndexSearchResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_terms: Vec<String>,
     pub target: IndexSearchTarget,
-}
-
-/// SPEC-2006 Phase 2 amendment: structured error variants for the write
-/// surface. Kept separate from read-side `FileContentErrorKind` so the GUI
-/// can match exhaustively on save-only outcomes (conflict / read-only /
-/// out-of-range / encoding fallback).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileContentSaveErrorKind {
-    Denied,
-    Conflict,
-    ReadOnly,
-    OutOfRange,
-    TooLarge,
-    IoError,
-    NotAFile,
-    WindowNotFound,
-    WindowMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -674,48 +650,6 @@ pub enum FrontendEvent {
         operation_id: Option<String>,
         files: Vec<FileAttachment>,
     },
-    LoadFileTree {
-        id: String,
-        path: Option<String>,
-    },
-    ListFileTreeWorktrees {
-        id: String,
-    },
-    SelectFileTreeWorktree {
-        id: String,
-        worktree_id: String,
-    },
-    LoadFileContent {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        #[serde(default)]
-        hex_offset: Option<u64>,
-        #[serde(default)]
-        hex_length: Option<u64>,
-    },
-    /// SPEC-2006 Phase 2 amendment: write the modified text or single hex
-    /// byte back to disk. `expected_mtime` / `expected_size` are the values
-    /// returned by the most recent read; mismatch raises Conflict.
-    SaveFileContent {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        expected_mtime: u64,
-        expected_size: u64,
-        #[serde(default)]
-        text: Option<String>,
-        #[serde(default)]
-        encoding: Option<Encoding>,
-        #[serde(default)]
-        newline: Option<Newline>,
-        #[serde(default)]
-        has_bom: Option<bool>,
-        #[serde(default)]
-        hex_offset: Option<u64>,
-        #[serde(default)]
-        hex_byte: Option<u8>,
-    },
     LoadBranches {
         id: String,
     },
@@ -745,13 +679,6 @@ pub enum FrontendEvent {
         id: String,
         #[serde(default)]
         scope: LogScopeSelection,
-    },
-    /// SPEC-2809 Phase F2 — Console window mounts and asks the backend for
-    /// the current `ProcessConsoleHub` ring buffer so historical lines
-    /// (e.g. gh calls that happened before the window opened) are visible
-    /// immediately. Reply is [`BackendEvent::ProcessConsoleSnapshot`].
-    LoadProcessConsole {
-        id: String,
     },
     CheckKnowledgeRevision {
         id: String,
@@ -2254,6 +2181,12 @@ pub enum BackendEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<u64>,
     },
+    /// Client-scoped failure for the exact Settings candidate save.
+    IssueMonitorProfilesWriteFailed {
+        project_root: String,
+        request_id: u64,
+        message: String,
+    },
     /// Client-scoped failure for one label save; uncertain writes can still commit.
     IssueMonitorAllowedLabelsWriteFailed {
         request_id: u64,
@@ -2287,88 +2220,6 @@ pub enum BackendEvent {
     WindowState {
         window_id: String,
         state: WindowProcessStatus,
-    },
-    FileTreeEntries {
-        id: String,
-        path: String,
-        entries: Vec<FileTreeEntry>,
-    },
-    FileTreeError {
-        id: String,
-        path: String,
-        message: String,
-    },
-    FileTreeWorktrees {
-        id: String,
-        entries: Vec<WorktreeEntry>,
-    },
-    FileTreeWorktreeSelected {
-        id: String,
-        worktree_id: String,
-    },
-    FileTreeWorktreeError {
-        id: String,
-        message: String,
-    },
-    FileContentText {
-        id: String,
-        path: String,
-        encoding: Encoding,
-        text: String,
-        total_size: u64,
-        // SPEC-2006 Phase 2 amendment: extra fields the GUI needs to support
-        // dirty/save/conflict flows. Defaults keep older clients compiling.
-        #[serde(default)]
-        mtime: u64,
-        #[serde(default)]
-        has_bom: bool,
-        newline: Newline,
-        #[serde(default)]
-        read_only: bool,
-    },
-    FileContentHex {
-        id: String,
-        path: String,
-        offset: u64,
-        bytes_b64: String,
-        total_size: u64,
-        #[serde(default)]
-        mtime: u64,
-        #[serde(default)]
-        read_only: bool,
-    },
-    FileContentError {
-        id: String,
-        path: String,
-        error_kind: FileContentErrorKind,
-        message: String,
-        #[serde(default)]
-        size: Option<u64>,
-        #[serde(default)]
-        limit: Option<u64>,
-    },
-    /// SPEC-2006 Phase 2 amendment: successful write. `new_mtime` / `new_size`
-    /// become the next `expected_*` baseline so subsequent saves keep their
-    /// conflict checks aligned with what is actually on disk.
-    FileContentSaved {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        new_mtime: u64,
-        new_size: u64,
-        #[serde(default)]
-        encoding_fallback: u64,
-    },
-    FileContentSaveError {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        error_kind: FileContentSaveErrorKind,
-        message: String,
-        #[serde(default)]
-        current_mtime: Option<u64>,
-        #[serde(default)]
-        current_size: Option<u64>,
     },
     BranchEntries {
         id: String,
@@ -2408,21 +2259,6 @@ pub enum BackendEvent {
     },
     LogEntryAppended {
         entry: LogEvent,
-    },
-    /// SPEC-2809 — A single redacted, ANSI-stripped stdout/stderr line
-    /// from an external process (gh / git / docker / agent / runner)
-    /// piped through `gwt_core::process_console::ProcessConsoleHub`.
-    /// Console window and Logs window both consume this event.
-    ProcessLine {
-        line: gwt_core::process_console::ProcessLine,
-    },
-    /// SPEC-2809 Phase F2 — reply to [`FrontendEvent::LoadProcessConsole`]
-    /// containing the current ring buffer for every kind, time-sorted.
-    /// The Console window controller replays these into its per-kind
-    /// buffers so historical lines are visible on first mount.
-    ProcessConsoleSnapshot {
-        id: String,
-        lines: Vec<gwt_core::process_console::ProcessLine>,
     },
     KnowledgeRevision {
         id: String,
@@ -3097,11 +2933,6 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
-        "process_line",
-        BackendEventDeliveryClass::Streamed,
-        BackendEventBackpressurePolicy::PreserveOrder,
-    ),
-    BackendEventPolicy::new(
         "terminal_preview",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
@@ -3164,6 +2995,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_profiles_write_failed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_status",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3197,56 +3033,6 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "window_state",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_entries",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_worktrees",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_worktree_selected",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_worktree_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
-        "file_content_text",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_content_hex",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_content_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
-        "file_content_saved",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_content_save_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
         "branch_entries",
@@ -3645,6 +3431,9 @@ impl BackendEvent {
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
+            BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
+                "issue_monitor_profiles_write_failed"
+            }
             BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
                 "issue_monitor_allowed_labels_write_failed"
             }
@@ -3653,16 +3442,6 @@ impl BackendEvent {
             BackendEvent::IssueMonitorToast { .. } => "issue_monitor_toast",
             BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",
-            BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
-            BackendEvent::FileTreeError { .. } => "file_tree_error",
-            BackendEvent::FileTreeWorktrees { .. } => "file_tree_worktrees",
-            BackendEvent::FileTreeWorktreeSelected { .. } => "file_tree_worktree_selected",
-            BackendEvent::FileTreeWorktreeError { .. } => "file_tree_worktree_error",
-            BackendEvent::FileContentText { .. } => "file_content_text",
-            BackendEvent::FileContentHex { .. } => "file_content_hex",
-            BackendEvent::FileContentError { .. } => "file_content_error",
-            BackendEvent::FileContentSaved { .. } => "file_content_saved",
-            BackendEvent::FileContentSaveError { .. } => "file_content_save_error",
             BackendEvent::BranchEntries { .. } => "branch_entries",
             BackendEvent::RemoteStartWorkBranches { .. } => "remote_start_work_branches",
             BackendEvent::BoardEntries { .. } => "board_entries",
@@ -3670,8 +3449,6 @@ impl BackendEvent {
             BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
             BackendEvent::LogEntries { .. } => "log_entries",
             BackendEvent::LogEntryAppended { .. } => "log_entry_appended",
-            BackendEvent::ProcessLine { .. } => "process_line",
-            BackendEvent::ProcessConsoleSnapshot { .. } => "process_console_snapshot",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
             BackendEvent::KnowledgeRevision { .. } => "knowledge_revision",
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
@@ -4604,13 +4381,6 @@ mod tests {
             BackendEventBackpressurePolicy::PreserveOrder
         );
 
-        let process_line = backend_event_policy("process_line").expect("process_line policy");
-        assert_eq!(process_line.delivery, BackendEventDeliveryClass::Streamed);
-        assert_eq!(
-            process_line.backpressure,
-            BackendEventBackpressurePolicy::PreserveOrder
-        );
-
         let workspace_state =
             backend_event_policy("workspace_state").expect("workspace_state policy");
         assert_eq!(
@@ -4666,17 +4436,6 @@ mod tests {
         assert_eq!(
             runtime_hook_event.backpressure,
             BackendEventBackpressurePolicy::BestEffort
-        );
-
-        let file_content_saved =
-            backend_event_policy("file_content_saved").expect("file_content_saved policy");
-        assert_eq!(
-            file_content_saved.delivery,
-            BackendEventDeliveryClass::Snapshot
-        );
-        assert_eq!(
-            file_content_saved.backpressure,
-            BackendEventBackpressurePolicy::ClientScopedSnapshot
         );
     }
 
