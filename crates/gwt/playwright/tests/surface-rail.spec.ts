@@ -355,6 +355,13 @@ test.describe("Surface rail", () => {
     await expect(preview).toHaveText(`Vireo — ${purpose}`);
     await expect(preview.locator(".agent-title__name")).toHaveText("Vireo");
     expect(await preview.evaluate(node => getComputedStyle(node).whiteSpace)).toBe("nowrap");
+    await right.getByRole("spinbutton", { name: "Agent columns" }).fill("4");
+    for (const heading of [preview, right.locator('[data-agent-id="agent-one"] h3')]) {
+      const identity = await heading.locator(".agent-title__name").boundingBox();
+      const mode = await heading.locator("..").locator(":scope > span").boundingBox();
+      expect(identity!.x + identity!.width).toBeLessThanOrEqual(mode!.x);
+    }
+    await right.getByRole("spinbutton", { name: "Agent columns" }).fill("2");
     await preview.hover();
     await expect(page.locator("#agents-preview-control-explanation")).toHaveText(`Vireo — ${purpose}`);
     await expect(page.locator("#agents-preview-control-explanation")).toBeVisible();
