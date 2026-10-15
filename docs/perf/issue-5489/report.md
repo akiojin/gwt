@@ -1,6 +1,6 @@
 # Issue #5489: 実 fleet の census baseline
 
-この資料は実稼働 GUI と実 Session/runtime ファイルの読み取り記録である。GUI・agent の再起動、設定変更、プロセス停止は行っていない。census 単体は約 80% 減ったが、実 fleet を読む隔離 Monitor worker 全体は約 40% 減で、半減には届かなかった。配布版 GUI の修正後 counter と隔離 worker の値を区別する。
+この資料は実稼働 GUI と実 Session/runtime ファイルの読み取り記録である。GUI・agent の再起動、設定変更、プロセス停止は行っていない。census 単体は約 81% 減ったが、実 fleet を読む隔離 Monitor worker 全体は約 35% 減で、半減には届かなかった。配布版 GUI の修正後 counter と隔離 worker の値を区別する。
 
 ## 対象
 
@@ -13,6 +13,8 @@
 - `E:/llmlb`
 
 旧 census source は commit `7e594c0cbca0f84d888f685002b822424ae36859` の `crates/gwt/src/session_inventory.rs`。保存した `target/issue-5489-baseline/session_inventory.rs` の Git blob は `d780e7819a4e23464e6b9b467e2d5816fff27f91` で、調査時の `origin/develop` の同ファイルとも一致した。これは source の比較基準であり、配布版 GUI の build commit を意味しない。
+
+最新の 3 probe は、CI の Clippy 指摘に対する `&matches → matches` の修正後 source で再取得した。census 比較の開始は `2026-10-15T08:13:44.115Z`、対象 `session_inventory.rs` の SHA-256 は `82e11229432f8dddabcf19c7da7fccbf173dd0d46e22849ae7bbd3edaa69fc26`。この再取得時は gwt の観測 sessions が 11 件だった。下記の本番 GUI baseline と既存 Issue #5385 probe は以前の時刻の一次記録として維持し、今回の改善率には使用しない。
 
 ## 本番 process/thread counter
 
@@ -64,15 +66,15 @@ baseline module が無い fresh checkout では、上記 commit の source を `
 
 ## 同条件の census 比較結果
 
-[comparison.jsonl](comparison.jsonl) の 3 pair で、追加 instrumentation 無しの tick CPU 中央値は `3.187500 → 0.640625 秒`。after/before は `0.200980`、減少率は `79.90%`。各 root の sessions / uncertainties 件数は全 pair で一致した（gwt `12 / 5`、その他各 `1 / 5`）。
+[comparison.jsonl](comparison.jsonl) の 3 pair で、追加 instrumentation 無しの tick CPU 中央値は `3.781250 → 0.734375 秒`。after/before は `0.194215`、減少率は `80.58%`。各 root の sessions / uncertainties 件数は全 pair で一致した（gwt `11 / 5`、その他各 `1 / 5`）。
 
 [breakdown.jsonl](breakdown.jsonl) は別実行の instrumentation 付き記録。CPU は計測 overhead を含むため改善率には使用しない。各モード 3 回の中央値と呼出し数を記す。
 
 | census 内の処理 | before 呼出し数/tick | after 呼出し数/tick | before CPU 秒 | after CPU 秒 |
 | --- | ---: | ---: | ---: | ---: |
-| runtime sidecar load | 17,115 | 3,423 | 1.671875 | 0.312500 |
-| Session ledger load | 1,536（1,534〜1,677） | 308（303〜309） | 0.500000 | 0.093750 |
-| OS 全 process snapshot (`All`) | 10 | 1 | 0.234375 | 0.015625 |
+| runtime sidecar load | 17,250 | 3,450 | 1.671875 | 0.328125 |
+| Session ledger load | 1,615（1,609〜1,624） | 319（319〜322） | 0.468750 | 0.093750 |
+| OS 全 process snapshot (`All`) | 10 | 1 | 0.250000 | 0.031250 |
 | legacy 等の個別 PID refresh (`Some`) | 4 | 1 | 0.062500 | 0.031250 |
 
 `os_process_refresh` は All + Some の合計で、scoped 項目と重複する集計である。これらの CPU 秒は重ねて合計しない。Session ledger load 数は生きている sidecar/Session の変動で揺れる。runtime sidecar と global OS snapshot の root ごとの反復は 1 census/tick へまとまった。
@@ -87,14 +89,14 @@ baseline module が無い fresh checkout では、上記 commit の source を `
 pwsh -NoProfile -File docs/perf/issue-5489/run-probe.ps1 -Worker -OutputName worker-comparison.jsonl
 ```
 
-生記録は [worker-comparison.jsonl](worker-comparison.jsonl)、新旧 census / Monitor source の SHA-256 は [context](worker-comparison.jsonl.context.json)。記録済み source hash を追加した時点で、source から作った temporary copy が実行に使った copy と完全一致することも確認した。
+生記録は [worker-comparison.jsonl](worker-comparison.jsonl)、新旧 census / Monitor source の SHA-256 は [context](worker-comparison.jsonl.context.json)。今回の worker 計測開始は `2026-10-15T08:14:48.747Z`。compile 時に source hash を記録し、実行後に現在の source・temporary copy・記録 hash の一致を照合した。before/after の各 prefs hash も固定 manifest の 5 件と一致した。
 
 | 条件 | thread CPU 秒/tick 3 点 | 中央値 | 合計 CPU 秒 / 合計経過秒 |
 | --- | --- | ---: | ---: |
-| before（PID 36032 / TID 5892） | 6.609375 / 5.750000 / 6.562500 | 6.562500 | 0.526125 コア |
-| after（PID 24852 / TID 35908） | 3.953125 / 3.765625 / 3.984375 | 3.953125 | 0.425164 コア |
+| before（PID 13224 / TID 2244） | 7.515625 / 7.000000 / 7.109375 | 7.109375 | 0.485075 コア |
+| after（PID 30756 / TID 18792） | 4.890625 / 4.640625 / 4.640625 | 4.640625 | 0.378149 コア |
 
-tick CPU 中央値は `39.76%` 減、平均使用コアは `19.19%` 減。この実測では **worker 全体の CPU 半減は未達**。census 以外の publish/counts/prefs 等も実 worker に含まれ、それらの内訳をこの run だけで特定したとは主張しない。Issue #5499 の prefs 経路調査・修正と組み合わせた再観測へ、この一次記録を引き継ぐ。
+tick CPU 中央値は `34.73%` 減、平均使用コアは `22.04%` 減。この実測では **worker 全体の CPU 半減は未達**。census 以外の publish/counts/prefs 等も実 worker に含まれ、それらの内訳をこの run だけで特定したとは主張しない。Issue #5499 の prefs 経路調査・修正と組み合わせた再観測へ、この一次記録を引き継ぐ。
 
 ## 比較の限界と引継ぎ
 

@@ -1,9 +1,9 @@
 {
-  "observed_at": "2026-10-15T07:42:11.4917721Z",
+  "observed_at": "2026-10-15T08:14:48.7474801Z",
   "instrumented": false,
   "profile": "diagnostic opt-level=0, existing target/debug dependencies",
   "baseline_sha256": "e1a7f70534cbe5c2cd5a86287469113ea4bb931121dd9449557fb9d707ddb22f",
-  "current_sha256": "63571cf63d161dbf8da30c17c7ae75be049f577b288e2238b81d266464e0bb7e",
+  "current_sha256": "82e11229432f8dddabcf19c7da7fccbf173dd0d46e22849ae7bbd3edaa69fc26",
   "sessions_dir": "C:\\Users\\AkioJinsenji秦泉寺章夫\\.gwt\\sessions",
   "roots": [
     "E:\\gwt",

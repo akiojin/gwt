@@ -258,7 +258,7 @@ impl ProjectSessionCensus {
             uncertainties: self
                 .uncertainties
                 .iter()
-                .filter(|(_, scope)| scope.as_ref().is_none_or(&matches))
+                .filter(|(_, scope)| scope.as_ref().is_none_or(matches))
                 .map(|(uncertainty, _)| uncertainty.clone())
                 .collect(),
         };
