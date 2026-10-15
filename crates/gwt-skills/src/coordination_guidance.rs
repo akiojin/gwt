@@ -99,6 +99,10 @@ an explicit `params.mentions` entry:
 - `branch:<name>` - target a workspace branch audience
 - `params.broadcast:true` - make the post visible repo-wide/cross-workspace
 
+For scoped posts, `branch:<name>` resolves to the workspaces of the latest assigned Sessions on that exact branch (case-sensitive).
+Unresolved branch mentions reject the post before it is saved; choose a current branch name or remove the mention and explicitly broadcast.
+Explicit broadcasts skip audience resolution.
+
 Only the registered PM session may use `user:<id>` in agent Board posts.
 Implementation agents address `agent:pm` or the PM's exact `session:<id>`;
 the PM handles human decisions. The operation enforces this for ordinary and
@@ -537,6 +541,10 @@ entry にしません。
 - `session:<id>` — 実行中 session への返信
 - `branch:<name>` — workspace branch への audience
 - `params.broadcast:true` — repo-wide / cross-workspace に表示
+
+For scoped posts, `branch:<name>` resolves to the workspaces of the latest assigned Sessions on that exact branch (case-sensitive).
+Unresolved branch mentions reject the post before it is saved; choose a current branch name or remove the mention and explicitly broadcast.
+Explicit broadcasts skip audience resolution.
 
 Only the registered PM session may use `user:<id>` in agent Board posts.
 Implementation agents address `agent:pm` or the PM's exact `session:<id>`;
@@ -1097,6 +1105,8 @@ mod tests {
             "`agent:<id>`",
             "`session:<id>`",
             "`branch:<name>`",
+            "latest assigned Sessions on that exact branch",
+            "Unresolved branch mentions reject the post",
             "params.broadcast:true",
             "Without `params.broadcast:true`",
             "gwtd <<'JSON'",
