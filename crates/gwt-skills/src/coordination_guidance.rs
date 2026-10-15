@@ -1082,6 +1082,9 @@ mod tests {
                 read_contract(tmp.path().join(provider).join("skills/gwt-pm/SKILL.md")).unwrap();
             assert!(pm.contains("Explicit Board read receipts"));
             assert!(pm.contains("\"operation\":\"board.show\""));
+            assert!(pm.contains(
+                r#"{"schema_version":1,"operation":"board.show","params":{"all":true}}"#
+            ));
             assert!(pm.contains("unread `blocked` or `handoff`"));
             assert!(pm.contains("git fetch origin"));
         }

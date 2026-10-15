@@ -975,7 +975,7 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   Every cycle, read the Board bodies with this operation before making a
   lifecycle decision:
 
-      {"schema_version":1,"operation":"board.show","params":{"all":true,"json":true}}
+      {"schema_version":1,"operation":"board.show","params":{"all":true}}
 
   Only entries returned by the operation are acknowledged for your Session;
   a limited or filtered read cannot acknowledge omitted entries. Stop refuses
