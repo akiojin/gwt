@@ -1,30 +1,30 @@
 
 running 1 test
-test usage_poller::performance_tests::usage_poll_before_after_wall_and_thread_cpu ... usage_poll_fixture ledger_rows=2646 active_rows=32 transcript_bytes=33598656 repeats=3 cpu_scope=collecting_thread
-usage_poll baseline_warm repeat=1 wall_ms=453.113 thread_cpu_ms=437.500 transcript_bytes=42004400
-usage_poll baseline_warm repeat=2 wall_ms=508.316 thread_cpu_ms=437.500 transcript_bytes=42004400
-usage_poll baseline_warm repeat=3 wall_ms=526.020 thread_cpu_ms=453.125 transcript_bytes=42004400
-usage_poll baseline_warm mean_wall_ms=495.817 mean_thread_cpu_ms=442.708 total_transcript_bytes=126013200
-usage_poll baseline_forced repeat=1 wall_ms=658.825 thread_cpu_ms=640.625 transcript_bytes=75603056
-usage_poll baseline_forced repeat=2 wall_ms=715.386 thread_cpu_ms=640.625 transcript_bytes=75603056
-usage_poll baseline_forced repeat=3 wall_ms=905.439 thread_cpu_ms=750.000 transcript_bytes=75603056
-usage_poll baseline_forced mean_wall_ms=759.884 mean_thread_cpu_ms=677.083 total_transcript_bytes=226809168
-usage_poll new_cold repeat=1 wall_ms=991.320 thread_cpu_ms=484.375 transcript_bytes=33598656
-usage_poll new_cold repeat=2 wall_ms=1109.412 thread_cpu_ms=468.750 transcript_bytes=33598656
-usage_poll new_cold repeat=3 wall_ms=653.756 thread_cpu_ms=421.875 transcript_bytes=33598656
-usage_poll new_cold mean_wall_ms=918.162 mean_thread_cpu_ms=458.333 total_transcript_bytes=100795968
-usage_poll new_warm repeat=1 wall_ms=298.182 thread_cpu_ms=140.625 transcript_bytes=0
-usage_poll new_warm repeat=2 wall_ms=189.531 thread_cpu_ms=187.500 transcript_bytes=0
-usage_poll new_warm repeat=3 wall_ms=182.552 thread_cpu_ms=109.375 transcript_bytes=0
-usage_poll new_warm mean_wall_ms=223.422 mean_thread_cpu_ms=145.833 total_transcript_bytes=0
-usage_poll new_forced repeat=1 wall_ms=263.259 thread_cpu_ms=140.625 transcript_bytes=0
-usage_poll new_forced repeat=2 wall_ms=178.817 thread_cpu_ms=140.625 transcript_bytes=0
-usage_poll new_forced repeat=3 wall_ms=319.139 thread_cpu_ms=171.875 transcript_bytes=0
-usage_poll new_forced mean_wall_ms=253.739 mean_thread_cpu_ms=151.042 total_transcript_bytes=0
-usage_poll new_appended repeat=1 wall_ms=216.450 thread_cpu_ms=171.875 transcript_bytes=552
-usage_poll new_appended repeat=2 wall_ms=249.097 thread_cpu_ms=218.750 transcript_bytes=0
-usage_poll new_appended repeat=3 wall_ms=156.813 thread_cpu_ms=125.000 transcript_bytes=0
-usage_poll new_appended mean_wall_ms=207.453 mean_thread_cpu_ms=171.875 total_transcript_bytes=552
+test usage_poller::performance_tests::usage_poll_before_after_wall_and_thread_cpu ... usage_poll_fixture ledger_rows=2646 active_rows=32 transcript_bytes=33599424 repeats=3 cpu_scope=collecting_thread
+usage_poll baseline_warm repeat=1 wall_ms=457.492 thread_cpu_ms=453.125 transcript_bytes=42005360
+usage_poll baseline_warm repeat=2 wall_ms=449.081 thread_cpu_ms=437.500 transcript_bytes=42005360
+usage_poll baseline_warm repeat=3 wall_ms=489.665 thread_cpu_ms=484.375 transcript_bytes=42005360
+usage_poll baseline_warm mean_wall_ms=465.413 mean_thread_cpu_ms=458.333 total_transcript_bytes=126016080
+usage_poll baseline_forced repeat=1 wall_ms=653.829 thread_cpu_ms=609.375 transcript_bytes=75604784
+usage_poll baseline_forced repeat=2 wall_ms=701.822 thread_cpu_ms=593.750 transcript_bytes=75604784
+usage_poll baseline_forced repeat=3 wall_ms=647.849 thread_cpu_ms=640.625 transcript_bytes=75604784
+usage_poll baseline_forced mean_wall_ms=667.833 mean_thread_cpu_ms=614.583 total_transcript_bytes=226814352
+usage_poll new_cold repeat=1 wall_ms=453.899 thread_cpu_ms=437.500 transcript_bytes=33599424
+usage_poll new_cold repeat=2 wall_ms=492.229 thread_cpu_ms=453.125 transcript_bytes=33599424
+usage_poll new_cold repeat=3 wall_ms=463.399 thread_cpu_ms=312.500 transcript_bytes=33599424
+usage_poll new_cold mean_wall_ms=469.842 mean_thread_cpu_ms=401.042 total_transcript_bytes=100798272
+usage_poll new_warm repeat=1 wall_ms=169.620 thread_cpu_ms=171.875 transcript_bytes=0
+usage_poll new_warm repeat=2 wall_ms=152.478 thread_cpu_ms=140.625 transcript_bytes=0
+usage_poll new_warm repeat=3 wall_ms=238.328 thread_cpu_ms=156.250 transcript_bytes=0
+usage_poll new_warm mean_wall_ms=186.809 mean_thread_cpu_ms=156.250 total_transcript_bytes=0
+usage_poll new_forced repeat=1 wall_ms=288.843 thread_cpu_ms=234.375 transcript_bytes=0
+usage_poll new_forced repeat=2 wall_ms=296.770 thread_cpu_ms=218.750 transcript_bytes=0
+usage_poll new_forced repeat=3 wall_ms=320.041 thread_cpu_ms=156.250 transcript_bytes=0
+usage_poll new_forced mean_wall_ms=301.885 mean_thread_cpu_ms=203.125 total_transcript_bytes=0
+usage_poll new_appended repeat=1 wall_ms=173.303 thread_cpu_ms=125.000 transcript_bytes=558
+usage_poll new_appended repeat=2 wall_ms=180.411 thread_cpu_ms=93.750 transcript_bytes=0
+usage_poll new_appended repeat=3 wall_ms=163.670 thread_cpu_ms=125.000 transcript_bytes=0
+usage_poll new_appended mean_wall_ms=172.461 mean_thread_cpu_ms=114.583 total_transcript_bytes=558
 ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1947 filtered out; finished in 20.72s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1947 filtered out; finished in 16.85s

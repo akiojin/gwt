@@ -398,18 +398,23 @@ fn visit_rollouts(dir: &Path, f: &mut impl FnMut(PathBuf, std::time::SystemTime)
     }
 }
 
-/// Locate a rollout file whose name contains the given session id (uuid).
+/// Match the full session id at the end of a rollout filename without allocating.
+pub(super) fn rollout_matches_session(path: &Path, session_id: &str) -> bool {
+    !session_id.is_empty()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".jsonl"))
+            .and_then(|stem| stem.strip_suffix(session_id))
+            .is_some_and(|prefix| prefix.ends_with('-'))
+}
+
+/// Locate a rollout file for the exact session id (uuid).
 pub fn rollout_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
     let sessions = home.join("sessions");
     let mut found = None;
     visit_rollouts(&sessions, &mut |path, _| {
-        if found.is_none()
-            && path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.contains(session_id))
-                .unwrap_or(false)
-        {
+        if found.is_none() && rollout_matches_session(&path, session_id) {
             found = Some(path);
         }
     });

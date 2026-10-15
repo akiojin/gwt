@@ -155,11 +155,7 @@ impl UsageCache {
         let path = self
             .paths(home, UsageProvider::Codex)
             .iter()
-            .find(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.contains(session_id))
-            })?
+            .find(|path| codex::rollout_matches_session(path, session_id))?
             .clone();
         self.active_paths.insert(path.clone());
         let mut usage = self
@@ -288,6 +284,38 @@ mod tests {
     use super::*;
     use crate::usage::{claude, codex, consumption};
     use std::{fs, io::Write};
+
+    #[test]
+    fn cached_and_stateless_session_readers_match_the_exact_rollout_id() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join("sessions");
+        fs::create_dir(&sessions).unwrap();
+        let exact = sessions.join("rollout-older-short-id.jsonl");
+        let distractor = sessions.join("rollout-newer-short-id-extra.jsonl");
+        let text = r#"{"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100}}}}"#;
+        fs::write(&exact, text).unwrap();
+        fs::write(&distractor, text.replace("100", "900")).unwrap();
+        for (path, seconds) in [(&exact, 1), (&distractor, 2)] {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new().set_modified(
+                        std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(seconds),
+                    ),
+                )
+                .unwrap();
+        }
+        let expected = Some(codex::parse_codex_session("short-id", text));
+        let mut cache = UsageCache::default();
+        assert_eq!(cache.codex_session(home.path(), "short-id"), expected);
+        assert_eq!(codex::read_codex_session(home.path(), "short-id"), expected);
+        fs::remove_file(exact).unwrap();
+        cache.begin_poll();
+        assert!(cache.codex_session(home.path(), "short-id").is_none());
+        assert!(codex::read_codex_session(home.path(), "short-id").is_none());
+    }
 
     #[test]
     fn cached_transcripts_match_full_read_and_only_read_appended_bytes() {
