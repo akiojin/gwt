@@ -4,6 +4,7 @@
 // profile apart from a failing test (Issue #4628).
 //
 //   node scripts/coverage-summary.mjs --output-path <summary.json> -- <cargo llvm-cov args>
+// Add --nextest before -- to run the same inventory in isolated parallel processes.
 //
 // `cargo llvm-cov` fails the whole run when one raw profile cannot be merged,
 // which reads exactly like a test regression. This script runs the tests with
@@ -413,7 +414,12 @@ async function main() {
     return REPORT_FAILURE_EXIT;
   }
 
-  const testExit = cargoLlvmCov(cargo, ["--no-report", ...runArgs]);
+  const testExit = cargoLlvmCov(cargo, [
+    ...(own.includes("--nextest") ? ["nextest"] : []),
+    "--no-report",
+    ...(own.includes("--nextest") ? ["--retries", "0"] : []),
+    ...runArgs,
+  ]);
   if (testExit !== 0) {
     console.error(
       `coverage-summary: FAIL [test-failure] cargo llvm-cov exited ${testExit} while running tests; nothing was aggregated`,

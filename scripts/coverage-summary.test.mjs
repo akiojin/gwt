@@ -162,10 +162,10 @@ process.exit(2);`,
   return { root, targetDir, profdata, cargo, output, currentObject };
 }
 
-function run(box, extraArgs = ["--workspace", "--all-features"]) {
+function run(box, extraArgs = ["--workspace", "--all-features"], ownArgs = []) {
   const result = spawnSync(
     process.execPath,
-    [SCRIPT, "--output-path", box.output, "--", ...extraArgs],
+    [SCRIPT, "--output-path", box.output, ...ownArgs, "--", ...extraArgs],
     {
       encoding: "utf8",
       env: {
@@ -187,6 +187,21 @@ function run(box, extraArgs = ["--workspace", "--all-features"]) {
 }
 
 const reportCalls = (calls) => calls.filter((args) => args[1] === "report");
+
+test("nextest covers the same workspace without forwarding runner flags to artifact enumeration", () => {
+  const box = sandbox({ "gwt-1-111_0.profraw": profile(4096) });
+  const result = run(box, ["--workspace", "--all-features"], ["--nextest"]);
+  assert.equal(result.status, 0, result.text);
+  assert.deepEqual(
+    result.calls.find((args) => args.includes("--no-report")),
+    ["llvm-cov", "nextest", "--no-report", "--retries", "0", "--workspace", "--all-features"],
+  );
+  const build = result.calls.find((args) => args[0] === "test");
+  assert.ok(build.includes("--workspace") && build.includes("--all-features"));
+  assert.ok(!build.includes("--nextest") && !build.includes("--retries"));
+  assert.deepEqual(result.calls[0], ["llvm-cov", "clean", "--workspace", "--profraw-only"]);
+  assert.equal(reportCalls(result.calls).length, 1);
+});
 
 test("inspectProfiles classifies healthy, truncated, empty, malformed, and corrupt profiles", async () => {
   const box = sandbox({});
@@ -350,12 +365,12 @@ test("(c) a malformed profile fails as profile damage without aggregating", () =
   assert.ok(!fs.existsSync(box.output));
 });
 
-test("a test failure is reported as a test failure and never aggregated", () => {
+test("a nextest failure is reported as a test failure and never aggregated", () => {
   const box = sandbox(
     { "gwt-1-111_0.profraw": profile(4096) },
     { testExit: 101 },
   );
-  const result = run(box);
+  const result = run(box, ["--workspace", "--all-features"], ["--nextest"]);
 
   assert.equal(result.status, 101, result.text);
   assert.equal(reportCalls(result.calls).length, 0);

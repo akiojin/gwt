@@ -102,8 +102,36 @@ tests = sorted({line.removesuffix(": test") for line in
                 pathlib.Path(listing).read_text().splitlines()
                 if line.endswith(": test")})
 if kind == "test":
-    # A direct integration target is already one changed test file.
     selected = tests
+    if crate == "gwt":
+        # Consolidated targets contain several original test files. Reuse the
+        # classifier's Cargo/source map to retain only their changed modules.
+        sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
+        from test_layout import integration_sources
+        try:
+            sources = integration_sources(pathlib.Path.cwd())
+        except (OSError, ValueError):
+            sources = {}
+        modules = set()
+        for name in changed:
+            if not name.startswith("crates/gwt/tests/"):
+                continue
+            source = sources.get(name)
+            if source is None:
+                modules.clear()
+                break
+            source_target, module = source
+            if source_target != target:
+                continue
+            if (module is None or not pathlib.Path(name).is_file()
+                    or not any(test.startswith(f"{module}::") for test in tests)):
+                # A changed harness, deleted file, or missing module cannot
+                # safely narrow the target, even if another file is mapped.
+                modules.clear()
+                break
+            modules.add(module)
+        if modules:
+            selected = [test for test in tests if test.partition("::")[0] in modules]
 elif kind == "lib":
     functions = set()
     for name in changed:

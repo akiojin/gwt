@@ -410,7 +410,7 @@ jobs:
       - name: Re-run the changed test targets until the outcome wobbles
         env:
           GWT_FLAKE_TARGETS: ${{ needs.changes.outputs.flake_targets }}
-          GWT_FLAKE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          GWT_FLAKE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           GWT_FLAKE_LOG_DIR: ${{ runner.temp }}/gwt-flake-logs
         run: scripts/ci-flake-detect.sh
         timeout-minutes: 45

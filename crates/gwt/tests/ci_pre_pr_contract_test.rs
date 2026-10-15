@@ -68,3 +68,29 @@ fn coverage_measures_the_requested_source_without_cancelling_its_caller() {
             && run.contains(scope))));
     }
 }
+
+#[test]
+fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest() {
+    let coverage = workflow("coverage.yml");
+    let steps = coverage["jobs"]["rust-coverage"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let cache = steps
+        .iter()
+        .find(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("Swatinem/rust-cache@"))
+        })
+        .unwrap();
+    assert_eq!(cache["with"]["workspaces"], ". -> target/llvm-cov-target");
+    let saves = cache["with"]["save-if"].as_str().unwrap();
+    assert!(saves.contains("github.ref == 'refs/heads/develop'"));
+    assert!(saves.contains("github.event_name == 'schedule'"));
+    assert!(saves.contains("github.event_name == 'workflow_dispatch'"));
+    assert!(steps
+        .iter()
+        .any(|s| s["with"]["tool"].as_str() == Some("cargo-nextest@0.9.146")));
+    let summary = steps.iter().find(|s| s["run"].as_str() == Some("node scripts/coverage-summary.mjs --output-path target/coverage-summary.json --nextest -- --workspace --all-features")).unwrap();
+    assert_eq!(summary["env"]["LLVM_PROFILE_FILE_NAME"], "gwt-%4m.profraw");
+}

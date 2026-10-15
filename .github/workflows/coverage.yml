@@ -54,10 +54,18 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          # llvm-cov builds into its own instrumented target, not target/debug.
+          # Develop writes the base-branch cache every PR can restore; reports
+          # retain their existing save path. A miss still builds from source.
+          workspaces: . -> target/llvm-cov-target
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         continue-on-error: true
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
       # Coverage is measured workspace-wide so every crate is visible in
       # Codecov, but the 90% release threshold applies to gwt-core + gwt
       # only (historical mandate surface; outer shells are excluded inside
@@ -68,7 +76,11 @@ jobs:
       # before aggregating, so a truncated profile is reported apart from a
       # test failure and re-aggregated once, on record (Issue #4628).
       - name: Generate workspace summary
-        run: node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features
+        env:
+          # Nextest starts one process per test. Share four online-merge
+          # profiles per instrumented module instead of one copy per PID.
+          LLVM_PROFILE_FILE_NAME: gwt-%4m.profraw
+        run: node scripts/coverage-summary.mjs --output-path target/coverage-summary.json --nextest -- --workspace --all-features
         timeout-minutes: 20
       - name: Enforce coverage threshold (gwt-core + gwt @ 90%)
         run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"
