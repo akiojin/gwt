@@ -550,6 +550,30 @@ function mountCleanupSurface(surfaceModule, windowId) {
   return { surface, sent, dialogEl };
 }
 
+test("Issue #5531: branch resync reissues a lost read and preserves its cleanup operation", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const sent = [];
+  const surface = surfaceModule.createBranchesCleanupSurface({
+    send: message => sent.push(message),
+    windowMap: new Map([["branches", { querySelector: selector => selector === ".branch-list-root" ? {} : null }]]),
+  });
+  const state = surface.ensureBranchListState("branches");
+  state.loading = true;
+  state.cleanupSelected.add("work/keep");
+  state.cleanupModal.stage = "running";
+  state.cleanupModal.operationId = "cleanup-keep";
+  surface.ensureBranchListState("other-project").loading = true;
+
+  surface.resyncBranches(["branches"]);
+
+  assert.deepEqual(sent, [
+    { kind: "load_branches", id: "branches" },
+    { kind: "sync_branch_cleanup", id: "branches", operation_id: "cleanup-keep" },
+  ]);
+  assert.equal(state.cleanupModal.stage, "running");
+  assert.ok(state.cleanupSelected.has("work/keep"));
+});
+
 test("Issue #4433: a cleanup run is tagged with an operation id", async () => {
   const surfaceModule = await loadBranchesCleanupSurfaceForTest();
   const windowId = "branches-1";

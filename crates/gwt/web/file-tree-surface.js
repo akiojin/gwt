@@ -47,6 +47,7 @@ export function createFileTreeSurface({
             selectedWorktreeId: "",
             selectedWorktreeLabel: "",
             splitterRatio: 0.4,
+            lastContentRequest: null,
             viewer: {
               path: "",
               mode: "empty", // empty | text | binary | hex | error | loading
@@ -104,6 +105,7 @@ export function createFileTreeSurface({
       }
 
       function requestFileContent(windowId, path, mode, hexOffset = null, hexLength = null) {
+        ensureFileTreeState(windowId).lastContentRequest = { path, mode, hexOffset, hexLength };
         send({
           kind: "load_file_content",
           id: windowId,
@@ -427,6 +429,7 @@ export function createFileTreeSurface({
         } else {
           return;
         }
+        v.error = { kind: "", message: "", size: null, limit: null };
         v.saveInFlight = true;
         state.lastSavePayload = payload;
         send(payload);
@@ -946,6 +949,35 @@ export function createFileTreeSurface({
         });
       }
 
+      function resyncFileTree(windowIds) {
+        for (const windowId of windowIds) {
+          const state = fileTreeStateMap.get(windowId);
+          if (!state) continue;
+          if (state.viewer.saveInFlight) {
+            applyFileTreeReceiveEvent({
+              kind: "file_content_save_error",
+              id: windowId,
+              error_kind: "save_result_unknown",
+              message: "Save result unknown after synchronization. Your edits are preserved; retry saving.",
+            });
+            const body = document.querySelector(`[data-id='${CSS.escape(windowId)}'] .file-tree-viewer-body`);
+            body?.prepend(makeEl("div", { className: "file-tree-viewer-error", text: state.viewer.error.message }));
+          }
+          const paths = new Set(["", ...state.expanded, ...state.loading]);
+          state.loading.clear();
+          if (state.picker.open || !state.selectedWorktreeId) {
+            requestFileTreeWorktrees(windowId);
+          }
+          if (!state.selectedWorktreeId) continue;
+          for (const path of paths) requestFileTree(windowId, path);
+          const read = state.lastContentRequest;
+          if (read && state.viewer.mode === "loading" &&
+              !state.viewer.dirty && !state.viewer.saveInFlight) {
+            requestFileContent(windowId, read.path, read.mode, read.hexOffset, read.hexLength);
+          }
+        }
+      }
+
 
       function applyFileTreeSplitterRatio(split, ratio) {
         if (!split) return;
@@ -1305,6 +1337,7 @@ export function createFileTreeSurface({
             const state = ensureFileTreeState(
               event.id,
             );
+            if (state.viewer.dirty) break;
             const text = event.text || "";
             const newline = (event.newline || "lf").toString();
             state.viewer = {
@@ -1338,6 +1371,7 @@ export function createFileTreeSurface({
             const state = ensureFileTreeState(
               event.id,
             );
+            if (state.viewer.dirty) break;
             const bytes = decodeBase64ToBytes(event.bytes_b64 || "");
             state.viewer = {
               ...state.viewer,
@@ -1466,6 +1500,7 @@ export function createFileTreeSurface({
         fileTreeStateMap,
         ensureFileTreeState,
         requestFileTree,
+        resyncFileTree,
         renderFileTree,
         renderFileTreeViewer,
         openWorktreePicker,

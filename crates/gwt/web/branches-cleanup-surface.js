@@ -159,6 +159,20 @@ export function createBranchesCleanupSurface({
         });
       }
 
+      function resyncBranches(windowIds) {
+        const ids = [...windowIds];
+        for (const windowId of ids) {
+          const state = branchListStateMap.get(windowId);
+          if (!state) continue;
+          state.loading = false;
+          // Cleanup owners can be hosted in an Issue window without a list.
+          if (windowMap.get(windowId)?.querySelector(".branch-list-root")) {
+            requestBranches(windowId);
+          }
+        }
+        syncRunningBranchCleanups(ids);
+      }
+
       function createBranchRow(windowId, branchName) {
         const row = document.createElement("div");
         row.className = "branch-row";
@@ -595,8 +609,10 @@ export function createBranchesCleanupSurface({
       // Issue #4433 AC-2: after reconnecting, re-subscribe to every cleanup
       // this client still shows as running. The backend replies with the
       // operation's latest progress or its final result.
-      function syncRunningBranchCleanups() {
-        for (const [windowId, state] of branchListStateMap.entries()) {
+      function syncRunningBranchCleanups(windowIds = branchListStateMap.keys()) {
+        for (const windowId of windowIds) {
+          const state = branchListStateMap.get(windowId);
+          if (!state) continue;
           const operationId = state.cleanupModal.operationId;
           if (state.cleanupModal.stage !== "running" || !operationId) {
             continue;
@@ -1135,6 +1151,7 @@ export function createBranchesCleanupSurface({
         branchListStateMap,
         ensureBranchListState,
         requestBranches,
+        resyncBranches,
         renderBranches,
         syncBranchSelectionState,
         openBranchCleanupModal,

@@ -19,6 +19,28 @@ function freshDocument() {
   return document;
 }
 
+test("Issue #5531: Console resync requests a full snapshot and replaces existing lines", () => {
+  const document = freshDocument();
+  const sent = [];
+  const controller = createConsoleWindow({ document, send: message => sent.push(message), windowId: "console" });
+  const host = document.getElementById("host");
+  controller.mount(host);
+  const line = { kind: "gh", spawn_id: 1, message: "retained line", stream: "stdout" };
+  controller.push(line);
+  controller.activate("git");
+
+  controller.resyncConsole();
+  controller.ingestSnapshot([line, { ...line, message: "missed line" }]);
+
+  assert.deepEqual(sent, [
+    { kind: "load_process_console", id: "console" },
+    { kind: "load_process_console", id: "console" },
+  ]);
+  assert.deepEqual(controller._state.panes.get("gh").buffer.map(row => row.message), ["retained line", "missed line"]);
+  assert.equal(host.querySelectorAll(".console-window__line").length, 2);
+  assert.equal(controller._state.activeKind, "git");
+});
+
 test("Console window renders 5 fixed kind tabs", () => {
   const document = freshDocument();
   const controller = createConsoleWindow({ document });

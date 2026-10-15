@@ -880,6 +880,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         setIndexStatus,
         handleProjectIndexSearchResults,
         handleProjectIndexSearchError,
+        resyncProjectIndexSearch,
         mountProjectIndexSurface,
         indexSearchStateMap,
         pendingIndexOpenTargetsByPreset,
@@ -1358,7 +1359,25 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderRouteNotFound(document);
       }
 
+      function requestSocketSnapshots() {
+        if (socket?.readyState !== WebSocket.OPEN) return;
+        send({ kind: "frontend_ready" });
+        recoveryCenterController?.reconnect();
+        if (!socketProjectKey) return;
+        const ids = (activeWorkspace()?.windows || []).map((entry) => entry.id);
+        resyncBoardLogs(ids);
+        resyncBranches(ids);
+        resyncKnowledge(ids);
+        resyncFileTree(ids);
+        resyncProfile(ids);
+        resyncProjectIndexSearch(ids);
+        resyncSettings();
+        for (const controller of consoleControllers.values()) controller.resyncConsole();
+        requestVisiblePmReports();
+      }
+
       function handleSocketOpen() {
+        socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcherGeneration += 1;
         const ownGeneration = socketReceiveDispatcherGeneration;
         socketReceiveDispatcher = createSocketReceiveDispatcher({
@@ -1372,6 +1391,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             traceUi(kind, fields);
           },
           shouldTrace: uiTraceWiring.isTracing,
+          onResync: () => {
+            if (ownGeneration === socketReceiveDispatcherGeneration) requestSocketSnapshots();
+          },
           // Issue #3365 — a receive() failure keeps the event stream alive but
           // must not stay console-only: surface it as a degradation notice.
           onReceiveError: (error, eventKind) => {
@@ -1474,6 +1496,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       function handleSocketClose() {
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
+        socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
         setConnectionState(false);
         if (reconnectTimer) {
@@ -4692,6 +4715,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         fileTreeStateMap,
         ensureFileTreeState,
         requestFileTree,
+        resyncFileTree,
         renderFileTree,
         renderFileTreeViewer,
         openWorktreePicker,
@@ -4756,6 +4780,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         profileStateMap,
         ensureProfileState,
         requestProfile,
+        resyncProfile,
         renderProfile,
         createProfile,
         setActiveProfile,
@@ -4850,6 +4875,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
+        resyncKnowledge,
         scheduleKnowledgeRelatedWorkRefresh,
         resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,
@@ -4953,6 +4979,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         ensureBoardState,
         ensureLogState,
         requestBoard,
+        resyncBoardLogs,
         requestOlderBoardEntries,
         requestLogs,
         renderBoard,
@@ -5148,6 +5175,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         branchListStateMap,
         ensureBranchListState,
         requestBranches,
+        resyncBranches,
         renderBranches,
         syncBranchSelectionState,
         openBranchCleanupModal,
@@ -5749,6 +5777,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
@@ -7899,6 +7928,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (document.hidden) {
           return;
         }
+        socketReceiveDispatcher?.resume?.();
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
         refreshVisibleKnowledgeWindows();

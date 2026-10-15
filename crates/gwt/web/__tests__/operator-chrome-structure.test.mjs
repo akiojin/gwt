@@ -4,6 +4,27 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createProfileWindowSurface } from "../profile-window-surface.js";
+
+test("Issue #5531: Profile resync reloads a lost read while preserving the draft and save", () => {
+  const sent = [];
+  const surface = createProfileWindowSurface({ send: message => sent.push(message), windowMap: new Map() });
+  const state = surface.ensureProfileState("profile");
+  state.loading = true;
+  state.draft = { name: "unsaved profile" };
+  state.saving = true;
+  state.saveInFlight = true;
+  state.saveTimer = 17;
+  surface.ensureProfileState("other-project").loading = true;
+
+  surface.resyncProfile(["profile"]);
+
+  assert.deepEqual(sent, [{ kind: "load_profile", id: "profile" }]);
+  assert.equal(state.draft.name, "unsaved profile");
+  assert.equal(state.saving, true);
+  assert.equal(state.saveInFlight, true);
+  assert.equal(state.saveTimer, 17);
+});
 
 const here = dirname(fileURLToPath(import.meta.url));
 const indexPath = resolve(here, "../index.html");

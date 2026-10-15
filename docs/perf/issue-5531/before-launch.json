@@ -1,0 +1,28 @@
+{
+  "test_sha256": {
+    "scripts/diagnostics/issue-5531-browser-check.ps1": "fd6f77ce5f2076f6fd2bf0ca291863e565d947a7cd3aa09a481d2017eecbdebc",
+    "crates/gwt/playwright/tests/socket-receive-backpressure-live.spec.ts": "72df8bae2e00522152ec5b57bde6ecc95339548454a2dca7744fef36391af9ba"
+  },
+  "native_visibility": "isolated runner: focus emulation disabled; browser background defaults restored",
+  "label": "before",
+  "playwright_version": "1.49.1",
+  "checkout": "E:\\gwt\\work\\issue-5531",
+  "source_sha256": {
+    "settings-surface.js": "e757df78dc49871f61b489070fc7d81bf63439daa2f4890a5526ef1398584313",
+    "socket-receive-dispatcher.js": "528b73593022850585acb0166e92978eb0d6cb231bc4086ac48e0090191ef88e",
+    "knowledge-kanban-surface.js": "53e6b080e325e7a74bd352cb3304edb64191e928a9919018862da20cb4ffe7e0",
+    "profile-window-surface.js": "68f2aac1a3324f779247a4099b163549e219c27f5196e2755500e9e93165b27a",
+    "branches-cleanup-surface.js": "bde7167028994867cd651344e4578b4690ab45082f89439511ce9b5ea2839760",
+    "file-tree-surface.js": "6fed771e5183327d33392f0cbe227d9a474fe01960e739b2c96ea7d99d79c596",
+    "project-index-search-surface.js": "4285ce41b2b6e66a281cd0cb48e69578005e6e4c1166a008f4023d969e81f3e0",
+    "console-window.js": "19a5d4a3617385456bd792fe01ff4e1a595e76e78406dd00e17e2c61bbdc803e",
+    "app.js": "b361991dfeb376faf6c3b36fbe3fdad7ab81f10e34fa4553d1c15d2631a202d1",
+    "board-logs-surface.js": "85b9c423b99a84a44194b53e8650ded353a4494ba72f846b3e28b0f62441334e"
+  },
+  "acceptance_duration": true,
+  "baseline_sha": "bc175f05a2b730775e1f5302b3af0d588ba4470a",
+  "isolated_home": "E:\\gwt\\work\\issue-5531\\target\\issue-5531-home-04e436df16284f3ea5c579ca3641706c",
+  "background_milliseconds": 1800000,
+  "head_sha": "85b2253c81b62e34e05fe79bbab79cbc1264d09f",
+  "owned_pid": 42340
+}

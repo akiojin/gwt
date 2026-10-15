@@ -827,6 +827,30 @@ export function createSettingsSurface({
         purgeDetachedSettingsBodies();
         if (settingsWindowBodies.size) send({ kind: "list_supported_agents" });
       }
+
+      function requestSettingsSnapshots(forceCustomAgents = false) {
+        if (activeProjectTab()?.project_root) {
+          send({ kind: "list_issue_monitor" });
+          send({ kind: "get_issue_monitor_profiles" });
+        }
+        send({ kind: "list_supported_agents" });
+        send({ kind: "get_system_settings" });
+        send({ kind: "get_update_settings" });
+        send({ kind: "get_board_auth_status" });
+        send({ kind: "get_autostart_status" });
+        if (forceCustomAgents || (!customAgentsState.loading && customAgentsState.agents.length === 0)) {
+          customAgentsState.loading = true;
+          send({ kind: "list_custom_agents" });
+        }
+        for (const agent of ["claudeCode", "codex"]) {
+          send({ kind: "list_agent_backends", agent });
+        }
+      }
+
+      function resyncSettings() {
+        purgeDetachedSettingsBodies();
+        if (settingsWindowBodies.size) requestSettingsSnapshots(true);
+      }
       let pendingAddFromPreset = null;
       let editingCustomAgentId = null;
 
@@ -1035,38 +1059,16 @@ export function createSettingsSurface({
           }
         }));
         renderProjectSettings(body);
-        if (project?.project_root) {
-          send({ kind: "list_issue_monitor" });
-          send({ kind: "get_issue_monitor_profiles" });
-        }
-
         renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
-        send({ kind: "list_supported_agents" });
         renderUsagePanel(panelUsage);
-        // Always request fresh system settings on open so the dropdown
-        // reflects the on-disk config, even if the user changed it from a
-        // different gwt instance.
-        send({ kind: "get_system_settings" });
-        send({ kind: "get_update_settings" });
-        // SPEC-2963: also fetch remote Board provider sign-in state.
-        send({ kind: "get_board_auth_status" });
-        send({ kind: "get_autostart_status" });
-
         renderSettingsAgentList();
-        if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
-          customAgentsState.loading = true;
-          send({ kind: "list_custom_agents" });
-        }
-
         // SPEC-1921 2026-05-18 amendment / FR-099: hydrate the Agent
         // Backends panel for both built-in agents that support Backend
         // Override (Claude Code, Codex). The backend returns the redacted
         // list (api_key replaced with `***REDACTED***`).
         renderAgentBackendsPanel(panelBackends);
-        for (const agent of ["claudeCode", "codex"]) {
-          send({ kind: "list_agent_backends", agent });
-        }
+        requestSettingsSnapshots();
 
         // Honour any pending settings:open dispatch (e.g. from the badge
         // click) by switching to the requested tab once the panel is mounted.
@@ -1262,7 +1264,22 @@ export function createSettingsSurface({
         return { teamId, channelId };
       }
 
+      function syncAutostartCheckbox(autostartCheckbox) {
+        autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
+        autostartCheckbox.disabled = systemSettingsState.autostartPending === true;
+      }
+
       function renderSystemPanel(panel) {
+        // Reads used for recovery must not destroy explicit-save drafts,
+        // including secrets that only exist in these input elements.
+        if (panel.querySelector(".board-config-form[data-dirty='true'], .board-oauth-port-form[data-dirty='true']")) {
+          const autostart = panel.querySelector("input[id$='-settings-system-autostart']");
+          if (autostart) {
+            syncAutostartCheckbox(autostart);
+          }
+          renderSystemPanelStatus(panel);
+          return;
+        }
         while (panel.firstChild) panel.removeChild(panel.firstChild);
 
         const section = createDiv("settings-section");
@@ -1555,6 +1572,7 @@ export function createSettingsSurface({
         boardSelect.value = systemSettingsState.boardProvider || "local";
         boardSelect.addEventListener("change", (e) => {
           const next = e.target.value;
+          for (const form of panel.querySelectorAll("[data-dirty]")) delete form.dataset.dirty;
           systemSettingsState.boardProvider = next;
           systemSettingsState.statusMessage = "Saving…";
           systemSettingsState.statusKind = "info";
@@ -1585,6 +1603,7 @@ export function createSettingsSurface({
           const cfg = systemSettingsState.boardConfig || {};
           const configForm = createDiv("settings-section board-config-form");
           configForm.dataset.provider = selectedProvider;
+          configForm.addEventListener("input", () => { configForm.dataset.dirty = "true"; });
 
           const makeField = (id, labelText, value, opts = {}) => {
             const wrap = createDiv("settings-field");
@@ -1711,6 +1730,7 @@ export function createSettingsSurface({
                   parsedTeamsChannel.channelId,
                 );
               }
+              delete configForm.dataset.dirty;
               send({
                 kind: "update_board_provider_config",
                 provider: selectedProvider,
@@ -1735,6 +1755,7 @@ export function createSettingsSurface({
                 payload.client_secret = secretInput.value;
               }
             }
+            delete configForm.dataset.dirty;
             send(payload);
           });
           configForm.appendChild(saveBtn);
@@ -1775,12 +1796,14 @@ export function createSettingsSurface({
           };
           renderRedirectHint();
           portInput.addEventListener("input", renderRedirectHint);
+          portInput.addEventListener("input", () => { oauthForm.dataset.dirty = "true"; });
           oauthForm.appendChild(redirectHint);
 
           const savePortBtn = createNode("button", "wizard-button", "Save port");
           savePortBtn.type = "button";
           savePortBtn.addEventListener("click", () => {
             const next = Number(portInput.value);
+            delete oauthForm.dataset.dirty;
             send({
               kind: "update_board_oauth_port",
               port: Number.isFinite(next) && next > 0 ? Math.floor(next) : 0,
@@ -1846,8 +1869,7 @@ export function createSettingsSurface({
         autostartCheckbox.type = "checkbox";
         autostartCheckbox.className = "settings-checkbox";
         autostartCheckbox.id = "settings-system-autostart";
-        autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
-        autostartCheckbox.disabled = systemSettingsState.autostartPending === true;
+        syncAutostartCheckbox(autostartCheckbox);
         autostartCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
           systemSettingsState.autostartPreviousEnabled =
@@ -2162,6 +2184,7 @@ export function createSettingsSurface({
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,

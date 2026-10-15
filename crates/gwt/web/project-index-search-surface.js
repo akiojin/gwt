@@ -289,6 +289,18 @@ export function createProjectIndexSearchSurface({
         renderProjectIndexSearch(windowId);
       }
 
+      function resyncProjectIndexSearch(windowIds) {
+        for (const windowId of windowIds) {
+          const state = indexSearchStateMap.get(windowId);
+          if (!state) continue;
+          if (state.searchTimer) clearTimeout(state.searchTimer);
+          state.searchTimer = 0;
+          invalidateProjectIndexSearchRequest(state);
+          state.searching = false;
+          sendProjectIndexSearch(windowId);
+        }
+      }
+
       function renderProjectIndexSearch(windowId) {
         const state = ensureIndexSearchState(windowId);
         const root = document.querySelector(
@@ -824,6 +836,7 @@ export function createProjectIndexSearchSurface({
         setIndexStatus,
         handleProjectIndexSearchResults,
         handleProjectIndexSearchError,
+        resyncProjectIndexSearch,
         mountProjectIndexSurface,
         indexSearchStateMap,
         pendingIndexOpenTargetsByPreset,

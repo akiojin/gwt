@@ -52,6 +52,15 @@ export function createProfileWindowSurface({
         });
       }
 
+      function resyncProfile(windowIds) {
+        for (const windowId of windowIds) {
+          const state = profileStateMap.get(windowId);
+          if (!state) continue;
+          state.loading = false;
+          requestProfile(windowId);
+        }
+      }
+
       function clearProfileSaveTimer(state) {
         if (state.saveTimer !== null) {
           clearTimeout(state.saveTimer);
@@ -841,6 +850,7 @@ export function createProfileWindowSurface({
         profileStateMap,
         ensureProfileState,
         requestProfile,
+        resyncProfile,
         renderProfile,
         createProfile,
         setActiveProfile,

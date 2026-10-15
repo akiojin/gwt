@@ -100,10 +100,14 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
 
     // SPEC-2809 — request the current ring buffer so historical lines
     // surfaces immediately. Reply arrives as `process_console_snapshot`.
+    resyncConsole();
+    return root;
+  }
+
+  function resyncConsole() {
     if (typeof state.send === "function" && state.windowId) {
       state.send({ kind: "load_process_console", id: state.windowId });
     }
-    return root;
   }
 
   function emptyHintText(kind) {
@@ -112,6 +116,18 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
 
   function ingestSnapshot(lines) {
     if (!Array.isArray(lines)) return;
+    // Every snapshot is the complete backend ring buffer, including resyncs.
+    for (const [kind, pane] of state.panes) {
+      pane.buffer = [];
+      pane.lastSpawnId = null;
+      clearChildren(pane.container);
+      if (pane.container) {
+        pane.emptyHint = document.createElement("span");
+        pane.emptyHint.className = "console-window__empty";
+        pane.emptyHint.textContent = emptyHintText(kind);
+        pane.container.appendChild(pane.emptyHint);
+      }
+    }
     for (const line of lines) {
       push(line);
     }
@@ -229,6 +245,7 @@ export function createConsoleWindow({ document, send = null, windowId = null } =
     mount,
     push,
     ingestSnapshot,
+    resyncConsole,
     activate,
     close,
     isOpen,

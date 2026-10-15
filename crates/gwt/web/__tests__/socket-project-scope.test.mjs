@@ -32,6 +32,15 @@ function fixture({ routeProjectKey = null } = {}) {
     closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
     projectPageMetadata: { resetConnection() {} },
     requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(),
+    activeWorkspace: () => ({ windows: [{ id: "pane-a" }] }),
+    resyncCalls: [], consoleControllers: new Map(),
+    resyncBoardLogs: (ids) => context.resyncCalls.push(["board-logs", ...ids]),
+    resyncBranches: (ids) => context.resyncCalls.push(["branches", ...ids]),
+    resyncKnowledge: (ids) => context.resyncCalls.push(["knowledge", ...ids]),
+    resyncFileTree: (ids) => context.resyncCalls.push(["files", ...ids]),
+    resyncProfile: (ids) => context.resyncCalls.push(["profile", ...ids]),
+    resyncProjectIndexSearch: (ids) => context.resyncCalls.push(["index", ...ids]),
+    resyncSettings: () => context.resyncCalls.push(["settings"]),
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
     routeProjectKey, routeProjectMissing: false, routeWebSocketUrl, projectUrlPath,
@@ -45,7 +54,11 @@ function fixture({ routeProjectKey = null } = {}) {
     document: {},
     droppedInputs: 0, connectionOverlay: { reportInputDropped() { context.droppedInputs += 1; } },
     clearTimeout() {}, clearPickerPending() {}, setConnectionState() {}, syncRunningBranchCleanups() {},
-    createSocketReceiveDispatcher: ({ receive }) => ({ handle(event) { receive(JSON.parse(event.data)); } }),
+    dispatcherOptions: [],
+    createSocketReceiveDispatcher: (options) => {
+      context.dispatcherOptions.push(options);
+      return { handle(event) { options.receive(JSON.parse(event.data)); } };
+    },
     received: [], receive(event) { context.received.push(event); },
     uiTraceWiring: { isTracing: () => false }, traceUi() {},
   });
@@ -57,6 +70,7 @@ function fixture({ routeProjectKey = null } = {}) {
   }
   // Allow the pre-change implementation to reach behavioral assertions.
   if (source.includes("function activeProjectKey(")) vm.runInContext(functionSource("activeProjectKey"), context);
+  if (source.includes("function requestSocketSnapshots(")) vm.runInContext(functionSource("requestSocketSnapshots"), context);
   const select = (key) => { context.appState = { active_tab_id: key, tabs: [{ id: key, project_key: key }] }; context.connectSocket(); };
   return { context, sockets, select, opened };
 }
@@ -169,6 +183,29 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }], "reconnect re-requests only this client's full sync");
+});
+
+test("receive recovery requests pane and open surface snapshots only on the owning socket", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  sockets[1].open();
+  const old = context.dispatcherOptions.at(-1);
+  let recoveryLoads = 0;
+  context.recoveryCenterController = { reconnect() { recoveryLoads++; } };
+  assert.equal(typeof old.onResync, "function", "overflow must have a snapshot recovery callback");
+  old.onResync("overflow");
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "frontend_ready" }]);
+  assert.deepEqual(context.resyncCalls, [
+    ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
+    ["files", "pane-a"], ["profile", "pane-a"],
+    ["index", "pane-a"], ["settings"],
+  ]);
+  assert.equal(recoveryLoads, 1, "a lost Recovery Center read is reissued");
+  sockets[1].close();
+  context.connectSocket();
+  sockets.at(-1).open();
+  old.onResync("visible");
+  assert.equal(sockets.at(-1).sent.length, 1, "a stale dispatcher cannot resync a replacement socket");
 });
 
 

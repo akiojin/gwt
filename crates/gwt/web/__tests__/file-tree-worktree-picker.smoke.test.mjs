@@ -145,6 +145,117 @@ function clearChildren(element) {
   while (element.firstChild) element.removeChild(element.firstChild);
 }
 
+test("Issue #5531: File Tree resync reloads lost tree reads while preserving editor changes", (t) => {
+  const previousDocument = globalThis.document;
+  const previousCss = globalThis.CSS;
+  t.after(() => {
+    globalThis.document = previousDocument;
+    globalThis.CSS = previousCss;
+  });
+  globalThis.document = parseHTML(`<!doctype html><body><div data-id="files">
+    <div class="file-tree-viewer"><div class="file-tree-viewer-header"></div>
+    <div class="file-tree-viewer-body"></div></div></div></body>`).document;
+  globalThis.CSS = { escape: value => String(value) };
+  const sent = [];
+  const surface = createFileTreeSurface({ send: message => sent.push(message), windowMap: new Map(), makeEl, clearChildren });
+  const state = surface.ensureFileTreeState("files");
+  state.selectedWorktreeId = "worktree";
+  state.loading.add("");
+  state.loading.add("src");
+  state.expanded.add("src");
+  state.viewer.path = "src/edited.rs";
+  state.viewer.mode = "hex";
+  state.viewer.hexBytes = btoa("B");
+  state.viewer.originalBytes = Uint8Array.of(65);
+  state.viewer.originalMtime = 123;
+  state.viewer.originalSize = 10;
+  state.viewer.dirty = true;
+  state.viewer.saveInFlight = true;
+  state.discardModal.pendingAction = { kind: "switch_file", path: "other.rs", queuedFromDiscard: true };
+  surface.ensureFileTreeState("other-project").loading.add("");
+
+  surface.resyncFileTree(["files"]);
+
+  assert.deepEqual(sent, [
+    { kind: "load_file_tree", id: "files", path: null },
+    { kind: "load_file_tree", id: "files", path: "src" },
+  ]);
+  assert.equal(state.viewer.hexBytes, btoa("B"));
+  assert.equal(state.viewer.dirty, true);
+  assert.equal(state.viewer.saveInFlight, false, "a discarded save reply must not leave editing locked");
+  assert.equal(state.viewer.error.kind, "save_result_unknown");
+  assert.equal(state.discardModal.pendingAction, null, "uncertain saves must not continue navigation");
+  assert.match(document.querySelector(".file-tree-viewer-error")?.textContent || "", /Save result unknown/);
+  assert.equal(document.querySelector(".file-tree-viewer-save").hasAttribute("disabled"), false);
+
+  surface.requestSaveFileContent("files");
+  assert.deepEqual(sent.at(-1), {
+    kind: "save_file_content", id: "files", path: "src/edited.rs", mode: "hex",
+    expected_mtime: 123, expected_size: 10, hex_offset: 0, hex_byte: 66,
+  }, "retrying must retain the original conflict guard");
+  assert.equal(document.querySelector(".file-tree-viewer-error"), null, "retrying clears the stale error");
+});
+
+test("Issue #5531: File Tree resync recovers a lost content read and worktree picker", () => {
+  const sent = [];
+  const surface = createFileTreeSurface({ send: message => sent.push(message), windowMap: new Map() });
+  const state = surface.ensureFileTreeState("files");
+  state.selectedWorktreeId = "worktree";
+  state.viewer.mode = "loading";
+  surface.requestFileContent("files", "image.bin", "hex", 512, 256);
+  sent.length = 0;
+
+  surface.resyncFileTree(["files"]);
+
+  assert.deepEqual(sent.at(-1), {
+    kind: "load_file_content", id: "files", path: "image.bin", mode: "hex", hex_offset: 512, hex_length: 256,
+  });
+  state.selectedWorktreeId = "";
+  state.picker.loading = true;
+  sent.length = 0;
+  surface.resyncFileTree(["files"]);
+  assert.deepEqual(sent, [{ kind: "list_file_tree_worktrees", id: "files" }]);
+});
+
+test("Issue #5531: a late resync content reply cannot replace edits made after the original reply", (t) => {
+  const previousDocument = globalThis.document;
+  const previousCss = globalThis.CSS;
+  t.after(() => {
+    globalThis.document = previousDocument;
+    globalThis.CSS = previousCss;
+  });
+  globalThis.document = parseHTML("<!doctype html><body></body>").document;
+  globalThis.CSS = { escape: value => String(value) };
+  for (const mode of ["text", "hex"]) {
+    const sent = [];
+    const surface = createFileTreeSurface({ send: message => sent.push(message), windowMap: new Map() });
+    const state = surface.ensureFileTreeState("files");
+    state.selectedWorktreeId = "worktree";
+    state.viewer.mode = "loading";
+    surface.requestFileContent("files", "edited.txt", mode);
+    surface.resyncFileTree(["files"]);
+    assert.equal(sent.filter(message => message.kind === "load_file_content").length, 2);
+    const reply = { kind: `file_content_${mode}`, id: "files", path: "edited.txt",
+      text: "original", bytes_b64: btoa("A"), total_size: 1, mtime: 123 };
+    surface.applyFileTreeReceiveEvent(reply);
+    state.viewer.text = "unsaved edit";
+    state.viewer.hexBytes = btoa("B");
+    state.viewer.dirty = true;
+    const draft = state.viewer;
+    surface.applyFileTreeReceiveEvent(reply);
+    assert.equal(state.viewer, draft, `${mode}: the later recovered read must keep the editable draft`);
+    assert.equal(state.viewer.text, "unsaved edit");
+    assert.equal(state.viewer.hexBytes, btoa("B"));
+    assert.equal(state.viewer.dirty, true);
+    // Accepted navigation clears dirty before dispatching the next read.
+    surface.beginViewerForFile("files", "next.txt");
+    surface.applyFileTreeReceiveEvent({ kind: "file_content_text", id: "files", path: "next.txt", text: "next" });
+    assert.equal(state.viewer.path, "next.txt");
+    assert.equal(state.viewer.text, "next");
+    assert.equal(state.viewer.dirty, false);
+  }
+});
+
 test("File Tree waits for worktree selection confirmation before loading the root", () => {
   const { document: fixtureDocument, window } = parseHTML(`<!doctype html><body>
     <div id="file-tree-worktree-picker-modal" class="modal-backdrop" aria-hidden="true">
