@@ -1512,9 +1512,11 @@ fn push_slot_admission_fields(
         );
         out.push_str(&format!("slots[{label}].exclusive_reason: {reason}\n"));
     }
-    if let Some(context) = &holder.holder_context {
-        out.push_str(&format!("slots[{label}].command: {}\n", context.action));
-    }
+    let command = holder
+        .holder_context
+        .as_ref()
+        .map_or("unknown", |context| context.action.as_str());
+    out.push_str(&format!("slots[{label}].command: {command}\n"));
     let worktree = holder
         .holder_context
         .as_ref()
@@ -2263,6 +2265,7 @@ mod tests {
         push_slot_admission_fields(&mut out, "legacy", &HeavyLeaseStatus::default(), None, None);
         assert!(out.contains("executable: unknown"), "{out}");
         assert!(out.contains("worktree: unknown"), "{out}");
+        assert!(out.contains("command: unknown"), "{out}");
     }
 
     #[test]
