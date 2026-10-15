@@ -15,10 +15,13 @@ import json
 import math
 import os
 import re
+import secrets
+import socket
 import stat
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -9224,6 +9227,7 @@ def _action_search_multi_v2_pinned(
     whole batch or silently returning empty results (FR-387 / FR-388). The
     Rust caller owns repair scheduling and the stale refresh queue.
     """
+    model_load_started = _MODEL_LOAD_MS
     valid_scopes = {
         "issues",
         "specs",
@@ -9401,7 +9405,7 @@ def _action_search_multi_v2_pinned(
                 payload[key] = value
     payload["scopes"] = scope_states
     payload["scope_results"] = scope_results
-    payload["model_load_ms"] = _MODEL_LOAD_MS
+    payload["model_load_ms"] = _MODEL_LOAD_MS - model_load_started
     if stale_scopes:
         payload["stale_scopes"] = stale_scopes
     return payload
@@ -9612,6 +9616,167 @@ def action_status_v2(
 # =====================================================================
 
 
+def _read_search_worker_message(connection: socket.socket) -> Dict[str, Any]:
+    """Read one bounded ASCII/UTF-8 JSON line from the local transport."""
+    frame = bytearray()
+    while len(frame) <= 16 * 1024 * 1024:
+        chunk = connection.recv(65536)
+        if not chunk:
+            raise ConnectionError("search worker connection closed")
+        frame.extend(chunk)
+        if len(frame) > 16 * 1024 * 1024:
+            break
+        if b"\n" in frame:
+            line, _, remainder = frame.partition(b"\n")
+            if remainder:
+                raise ValueError("unexpected data after search worker request")
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise ValueError("search worker message must be an object")
+            return payload
+    raise ValueError("search worker message is too large")
+
+
+def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
+    """Reuse one model process while Rust retains its normal search lease."""
+    qos = args.qos or "interactive"
+    identity = _sha256_json({
+        "script": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "python": str(Path(sys.executable).resolve()),
+        "prefix": str(Path(sys.prefix).resolve()),
+        "fake_embedding": os.environ.get("GWT_INDEX_FAKE_EMBEDDING", ""),
+        "qos": qos,
+    })
+    worker_dir = _gwt_home() / "runtime" / "search-workers" / identity
+    endpoint_path = worker_dir / "endpoint.json"
+
+    def connect():
+        endpoint = json.loads(endpoint_path.read_text(encoding="utf-8"))
+        port, token = endpoint["port"], endpoint["token"]
+        if not isinstance(port, int) or not isinstance(token, str):
+            raise ValueError("invalid search worker endpoint")
+        connection = socket.create_connection(("127.0.0.1", port), timeout=1)
+        connection.settimeout(None)  # Rust owns the request deadline.
+        return connection, token
+
+    # Only startup is locked: the existing host-wide heavy lease serializes
+    # searches. Never replay a request after sending it to a worker.
+    with acquire_lock(worker_dir):
+        try:
+            connection, token = connect()
+        except (OSError, ValueError, KeyError, TypeError):
+            process = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()),
+                 "--action", "serve-search-worker", "--worker-dir", str(worker_dir),
+                 "--qos", qos],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    connection, token = connect()
+                    break
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        if process.poll() is None:
+                            process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        raise RuntimeError("search worker failed to start") from error
+                    time.sleep(0.1)
+
+    with connection:
+        request = {"token": token, "args": vars(args)}
+        connection.sendall(json.dumps(request, ensure_ascii=True).encode("ascii") + b"\n")
+        return _read_search_worker_message(connection)
+
+
+def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
+    """Serve search-multi only; release model memory after idle expiry."""
+    worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    worker_dir.chmod(0o700)
+    endpoint_path = worker_dir / "endpoint.json"
+    token = secrets.token_hex(32)
+    pid = os.getpid()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        server.settimeout(idle_timeout)
+        _write_json_atomic(endpoint_path, {
+            "pid": pid, "port": server.getsockname()[1], "token": token,
+        })
+        endpoint_path.chmod(0o600)
+        try:
+            while True:
+                try:
+                    connection, _ = server.accept()
+                except socket.timeout:
+                    return 0
+                with connection:
+                    completed = threading.Event()
+                    try:
+                        connection.settimeout(10)
+                        request = _read_search_worker_message(connection)
+                        supplied_token = request.get("token")
+                        arguments = request.get("args")
+                        if (
+                            not isinstance(supplied_token, str)
+                            or not secrets.compare_digest(supplied_token, token)
+                            or not isinstance(arguments, dict)
+                            or arguments.get("action") != "search-multi"
+                            or not arguments.get("repo_hash")
+                            or not arguments.get("query")
+                        ):
+                            raise ValueError("invalid search worker request")
+                        connection.settimeout(None)
+
+                        def cancel_on_disconnect(connection=connection, completed=completed):
+                            try:
+                                connection.recv(1)
+                            except OSError:
+                                pass
+                            if not completed.is_set():
+                                # A killed/timed-out Rust caller has dropped its
+                                # heavy lease. No embedding may outlive it.
+                                os._exit(1)
+
+                        threading.Thread(target=cancel_on_disconnect, daemon=True).start()
+                        payload = action_search_multi_v2(
+                            repo_hash=arguments["repo_hash"],
+                            worktree_hash=arguments.get("worktree_hash") or None,
+                            project_root=arguments.get("project_root") or None,
+                            query=arguments["query"],
+                            n_results=arguments.get("n_results", 10),
+                            scopes=[scope.strip() for scope in arguments.get("scopes", "").split(",") if scope.strip()],
+                            match_mode=arguments.get("match_mode", "semantic"),
+                            db_root=Path(arguments["db_root"]) if arguments.get("db_root") else None,
+                            file_index_protocol=arguments.get("file_index_protocol", "legacy"),
+                        )
+                    except ValueError as error:
+                        payload = {"ok": False, "error_code": "BAD_ARGS", "error": str(error)}
+                    except Exception as error:
+                        payload = {"ok": False, "error_code": "RUNTIME_ERROR", "error": str(error)}
+                    finally:
+                        completed.set()
+                    payload["worker_pid"] = pid
+                    try:
+                        connection.sendall(json.dumps(payload, ensure_ascii=True).encode("ascii") + b"\n")
+                    except OSError:
+                        pass
+        finally:
+            # A stale worker must never erase a replacement worker's endpoint.
+            with contextlib.suppress(OSError, ValueError):
+                if json.loads(endpoint_path.read_text(encoding="utf-8")).get("pid") == pid:
+                    endpoint_path.unlink()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="gwt ChromaDB index helper")
     parser.add_argument(
@@ -9639,9 +9804,11 @@ def parse_args() -> argparse.Namespace:
             "index-works",
             "search-works",
             "search-multi",
+            "serve-search-worker",
         ],
     )
     parser.add_argument("--project-root", default="")
+    parser.add_argument("--worker-dir", default="")
     parser.add_argument("--db-path", default="")
     parser.add_argument("--query", default="")
     parser.add_argument("--n-results", type=int, default=10)
@@ -9877,6 +10044,11 @@ def main() -> int:
         # action can trigger the lazy model import.
         configure_qos_threads(args.qos or default_qos_for_action(action))
 
+        if action == "serve-search-worker":
+            if not args.worker_dir:
+                raise ValueError("--worker-dir is required")
+            return _serve_search_worker(Path(args.worker_dir))
+
         # Issue #2933: when the caller omitted --repo-hash (e.g. an agent pane
         # whose launch env did not export GWT_REPO_HASH / GWT_WORKTREE_HASH)
         # but did pass --project-root, derive the hashes here so the v2 search
@@ -9890,6 +10062,22 @@ def main() -> int:
 
         # Phase 8: when --repo-hash is supplied, dispatch the v2 action layer.
         if args.repo_hash:
+            if action == "search-multi":
+                if not args.query:
+                    emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
+                    return 2
+                try:
+                    payload = _search_worker_request(args)
+                except (OSError, ValueError, RuntimeError):
+                    payload = {
+                        "ok": False,
+                        "error_code": "SEARCH_UNAVAILABLE",
+                        "retryable": True,
+                        "reason": "search worker transport failed",
+                        "retry_after_ms": 250,
+                    }
+                emit(payload)
+                return 0 if payload.get("ok") else 1
             return _dispatch_v2(action, args)
 
         if action == "probe":
