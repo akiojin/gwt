@@ -13,6 +13,7 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
         &runtime.test_context(),
         WindowPreset::Branches,
         canvas_bounds(),
+        None,
     );
     let legacy = runtime
         .tab("tab-1")
@@ -21,8 +22,12 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
         .persisted()
         .windows[0]
         .clone();
-    let events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    let events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -78,8 +83,12 @@ fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
             .tab_group_active
     );
 
-    let events =
-        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    let events = runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let after = runtime.tab("tab-1").expect("tab").workspace.persisted();
     let work = after
         .windows
@@ -123,7 +132,12 @@ fn app_runtime_work_singleton_preserves_historical_duplicates() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, canvas_bounds());
+    runtime.create_window_events(
+        &runtime.test_context(),
+        WindowPreset::Work,
+        canvas_bounds(),
+        None,
+    );
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -168,11 +182,13 @@ fn app_runtime_work_singleton_preserves_shell_multi_instance_runtime() {
         &runtime.test_context(),
         WindowPreset::Shell,
         canvas_bounds(),
+        None,
     );
     runtime.create_window_events(
         &runtime.test_context(),
         WindowPreset::Shell,
         canvas_bounds(),
+        None,
     );
     let shell_ids = runtime
         .tab("tab-1")

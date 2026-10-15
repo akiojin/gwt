@@ -1131,13 +1131,18 @@ fn spawn_issue_monitor_worker_with_lease(
                             }
                             effect_execution_requested = !monitor.pending_effects().is_empty();
                         }
-                        IssueMonitorControlCommit::Rejected => {
+                        rejection @ (IssueMonitorControlCommit::Rejected
+                        | IssueMonitorControlCommit::WaitNotLaunched) => {
                             let (drained, completion, authorizing) = pending_authority_controls
                                 .as_mut()
                                 .expect("authority barrier exists during retry")
                                 .committed_front();
                             if let Some(completion) = completion {
-                                completion.reject(IssueMonitorControlQueueError::Rejected);
+                                completion.reject(if rejection == IssueMonitorControlCommit::WaitNotLaunched {
+                                    IssueMonitorControlQueueError::WaitNotLaunched
+                                } else {
+                                    IssueMonitorControlQueueError::Rejected
+                                });
                             }
                             if drained {
                                 pending_authority_controls = None;
@@ -1517,13 +1522,15 @@ fn spawn_issue_monitor_worker_with_lease(
                             // Issue #3917: a close needs the auto-close authority;
                             // comment-only settlements need only the monitor.
                             crate::IssueMonitorEffectPayload::SettleMergedIssue {
-                                action, ..
+                                issue_number,
+                                action,
+                                ..
                             } => {
                                 monitor.config.enabled
                                     && (!matches!(
                                         action,
                                         crate::MergedIssueSettlementAction::Close { .. }
-                                    ) || monitor.auto_close_merged_issues_enabled())
+                                    ) || monitor.merged_issue_close_allowed(*issue_number))
                             }
                             crate::IssueMonitorEffectPayload::ReleaseClaim { .. }
                             | crate::IssueMonitorEffectPayload::RemoveQueueLabel { .. }
@@ -2140,6 +2147,7 @@ enum IssueMonitorControlCommit {
         authority_changed: bool,
     },
     Rejected,
+    WaitNotLaunched,
     RetryableFailure,
     TerminalFailure,
 }
@@ -2350,9 +2358,14 @@ fn apply_or_queue_issue_monitor_control(
             }
             should_scan
         }
-        IssueMonitorControlCommit::Rejected => {
+        rejection @ (IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::WaitNotLaunched) => {
             if let Some(completion) = completion {
-                completion.reject(IssueMonitorControlQueueError::Rejected);
+                completion.reject(if rejection == IssueMonitorControlCommit::WaitNotLaunched {
+                    IssueMonitorControlQueueError::WaitNotLaunched
+                } else {
+                    IssueMonitorControlQueueError::Rejected
+                });
             }
             false
         }
@@ -3035,6 +3048,7 @@ fn apply_issue_monitor_control_with_disk_migration(
     match try_apply_issue_monitor_control_with_disk_migration(prefs_path, monitor, control) {
         IssueMonitorControlCommit::Committed { should_scan, .. } => should_scan,
         IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::WaitNotLaunched
         | IssueMonitorControlCommit::RetryableFailure
         | IssueMonitorControlCommit::TerminalFailure => false,
     }
@@ -3113,7 +3127,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         .last_control_receipt()
         .is_some_and(|receipt| receipt.control_id == accepted.control_id);
     let mut receipt_convergence_failed = false;
-    let mut rejected = false;
+    let mut rejected = None;
     let recovery_baseline = monitor.prefs();
     let mut candidate = monitor.clone();
     let transaction = crate::issue_monitor::mutate_issue_monitor_prefs_recovering_observed(
@@ -3181,7 +3195,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     disk.clone(),
                 );
                 if !issue_monitor_agent_failure_source_matches(&accepted.control, &canonical) {
-                    rejected = true;
+                    rejected = Some(IssueMonitorControlCommit::Rejected);
                     return;
                 }
             }
@@ -3192,12 +3206,14 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 &accepted.processed_at,
             ));
             authority_changed = candidate.effect_authority_epoch() != authority_epoch_before;
-            if ((typed_failure || fenced_agent_failure) && applied == Some(Some(false)))
-                || (wait_declaration && applied == Some(None))
-            {
+            if wait_declaration && applied == Some(None) {
                 // An unrecorded wait is refused, not ACKed and not a terminal
                 // failure of the control lane (Issue #5066).
-                rejected = true;
+                rejected = Some(IssueMonitorControlCommit::WaitNotLaunched);
+                return;
+            }
+            if (typed_failure || fenced_agent_failure) && applied == Some(Some(false)) {
+                rejected = Some(IssueMonitorControlCommit::Rejected);
                 return;
             }
             if applied.is_some_and(|result| result.is_some()) {
@@ -3212,9 +3228,9 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
     );
     match transaction {
         Ok(_) => {
-            if rejected {
+            if let Some(rejection) = rejected {
                 *monitor = candidate;
-                return IssueMonitorControlCommit::Rejected;
+                return rejection;
             }
             if receipt_convergence_failed {
                 monitor.record_control_commit_error(
@@ -3289,6 +3305,76 @@ fn issue_5062_host_drain_can_requeue_a_review_delivery_through_control() {
     assert!(
         matches!(decode_issue_monitor_control(payload), Some(IssueMonitorControl::ReviewDispatchDeferred(dispatch)) if dispatch.issue_number == 5062 && dispatch.pr_number == 42)
     );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
+    let _prefs_budget = pin_prefs_hang_guard();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    for launched in [false, true] {
+        let prefs_path = temp.path().join(format!("monitor-{launched}.json"));
+        let before = crate::IssueMonitorPrefs {
+            launched_issues: if launched {
+                vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 5524,
+                    window_id: "tab-1::agent-live".to_string(),
+                }]
+            } else {
+                Vec::new()
+            },
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            before.clone(),
+        );
+        let hub = BroadcastHub::new();
+        let mut receiver = hub
+            .take_issue_monitor_control_receiver()
+            .expect("claim control receiver");
+        let receipt = hub
+            .enqueue_issue_monitor_control(DaemonFrame::Ack)
+            .await
+            .expect("admit control");
+        let (_, completion) = receiver.recv().await.expect("receive control").into_parts();
+        let mut pending = None;
+        assert!(!apply_or_queue_issue_monitor_control(
+            &hub,
+            &prefs_path,
+            &mut monitor,
+            IssueMonitorControl::WaitDeclared {
+                issue_number: 5524,
+                reason: "verification".to_string(),
+                resume_condition: "lease available".to_string(),
+                at: "2026-10-15T00:00:00Z".to_string(),
+            },
+            &mut IssueMonitorEffectPermit::new(),
+            &mut pending,
+            Some(completion),
+        ));
+        assert!(pending.is_none(), "a settled wait is not a retry barrier");
+        let completion = receipt.await.expect("completion is settled");
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+        if launched {
+            assert_eq!(completion, Ok(()), "a durable live launch is accepted");
+            assert!(monitor.autonomous_wait(5524).is_some());
+            assert!(monitor.last_control_receipt().is_some());
+            assert_eq!(persisted, monitor.prefs());
+        } else {
+            let error = completion.expect_err("missing durable launch must reject its receipt");
+            let message = error.message();
+            assert!(message.contains("rejected before commit"), "{message}");
+            assert!(message.contains("reason=not_launched"), "{message}");
+            assert!(message.contains("durable launch"), "{message}");
+            assert!(message.contains("issue.monitor.status"), "{message}");
+            assert!(message.contains("launch context"), "{message}");
+            assert_eq!(monitor.prefs(), before);
+            assert_eq!(persisted, before);
+            assert!(monitor.last_control_receipt().is_none());
+        }
+    }
 }
 
 fn decode_issue_monitor_control_in_repo(
@@ -4732,6 +4818,37 @@ fn execute_issue_monitor_effect(
                             *pr_number,
                             merge_sha.as_deref(),
                             action,
+                            || {
+                                let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(
+                                    &scope.project_root,
+                                );
+                                let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(
+                                    |error| {
+                                        OwnerMutationError::PreSubmit(ApiError::Unexpected(
+                                            format!(
+                                            "cannot recheck merged-issue close authority: {error}"
+                                        ),
+                                        ))
+                                    },
+                                )?;
+                                if prefs.enabled
+                                    && prefs.effect_authority_epoch == effect.authority_epoch
+                                    && prefs
+                                        .auto_close_merged_issues
+                                        .unwrap_or(prefs.autonomous_mode)
+                                    && !prefs.autonomous_records.iter().any(|record| {
+                                        record.issue_number == *issue_number
+                                            && record.review_passed == Some(false)
+                                    })
+                                {
+                                    Ok(())
+                                } else {
+                                    Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+                                        "merged-issue close authority revoked or independent review failed"
+                                            .to_string(),
+                                    )))
+                                }
+                            },
                         )
                     }
                     Err(error) => Err(OwnerMutationError::PreSubmit(
@@ -5134,18 +5251,28 @@ fn try_commit_issue_monitor_effect_result(
                         *issue_number,
                         *pr_number,
                         merge_sha.clone(),
-                        action.clone(),
+                        outcome.unmet_acceptance.map_or_else(
+                            || action.clone(),
+                            |unmet| crate::MergedIssueSettlementAction::UnmetAcceptance { unmet },
+                        ),
                         &completed.completed_at,
                     );
                     settled = true;
                 }
                 (
-                    crate::IssueMonitorEffectPayload::SettleMergedIssue { .. },
+                    crate::IssueMonitorEffectPayload::SettleMergedIssue {
+                        issue_number,
+                        action,
+                        ..
+                    },
                     IssueMonitorEffectOutcome::MergedIssueSettlement(Err(
                         OwnerMutationError::PreSubmit(_),
                     )),
                 ) => {
-                    if current_authority {
+                    if current_authority
+                        && (!matches!(action, crate::MergedIssueSettlementAction::Close { .. })
+                            || candidate.merged_issue_close_allowed(*issue_number))
+                    {
                         let _ = candidate.retry_pending_effect(&key);
                     } else {
                         let _ = candidate.complete_pending_effect(&key);
@@ -5506,9 +5633,6 @@ fn scan_issue_monitor_once_blocking(
         // executor owns the GitHub mutation.
         let proposed = crate::issue_monitor_worker::propose_merged_issue_settlements(
             &mut monitor,
-            &scope.project_root,
-            &owner,
-            &repo,
             &merge_reconciliation.deliveries,
         );
         if !proposed.is_empty() {
@@ -9634,7 +9758,7 @@ exit 0
                     at: "2026-06-29T01:00:00Z".to_string(),
                 },
             ),
-            super::IssueMonitorControlCommit::Rejected
+            super::IssueMonitorControlCommit::WaitNotLaunched
         );
         assert_eq!(monitor.prefs(), before);
         assert_eq!(
@@ -14000,6 +14124,7 @@ exit 0
                         commented: true,
                         closed: true,
                         already_closed: false,
+                        unmet_acceptance: None,
                     },
                 ));
                 assert!(
@@ -14068,6 +14193,7 @@ exit 0
                         commented: true,
                         closed: false,
                         already_closed: false,
+                        unmet_acceptance: None,
                     },
                 ));
                 assert_eq!(
@@ -14088,25 +14214,65 @@ exit 0
     }
 
     #[test]
-    fn daemon_scan_closes_when_the_remaining_criteria_were_delegated() {
-        // Issue #3917 AC-2: a delegation record in the PR body substitutes
-        // for the unchecked criteria.
+    fn daemon_scan_records_a_stale_close_as_unmet_acceptance() {
+        with_settlement_scan_fixture(
+            "settle_close",
+            delivered_prefs(true),
+            |_, prefs_path, mut monitor| {
+                let effect = settlement_effect(&monitor).expect("close proposed");
+                assert!(commit_settlement(
+                    prefs_path,
+                    &mut monitor,
+                    &effect,
+                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                        commented: true,
+                        closed: false,
+                        already_closed: false,
+                        unmet_acceptance: Some(vec!["AC-1".to_string()]),
+                    },
+                ));
+                assert_eq!(
+                    monitor.inbox_item(43).map(|item| item.state),
+                    Some(crate::MonitorInboxState::NeedsHuman)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn daemon_scan_keeps_delegated_unchecked_acceptance_open() {
+        // Issue #5126: delegation prose never substitutes for checked AC.
         with_settlement_scan_fixture(
             "settle_delegated",
             delivered_prefs(true),
-            |_, _, monitor| {
+            |_, prefs_path, mut monitor| {
                 let effect = settlement_effect(&monitor).expect("delegated delivery settles");
                 assert!(
                     matches!(
                         effect.payload,
                         crate::IssueMonitorEffectPayload::SettleMergedIssue {
                             issue_number: 43,
-                            action: crate::MergedIssueSettlementAction::Close { delegated: true },
+                            action: crate::MergedIssueSettlementAction::UnmetAcceptance { .. },
                             ..
                         }
                     ),
                     "{:?}",
                     effect.payload
+                );
+                assert!(commit_settlement(
+                    prefs_path,
+                    &mut monitor,
+                    &effect,
+                    crate::issue_monitor_settlement::MergedIssueSettlementOutcome {
+                        commented: true,
+                        closed: false,
+                        already_closed: false,
+                        unmet_acceptance: None,
+                    },
+                ));
+                assert_eq!(
+                    monitor.inbox_item(43).map(|item| item.state),
+                    Some(crate::MonitorInboxState::NeedsHuman)
                 );
             },
         );
@@ -14138,6 +14304,7 @@ exit 0
                     commented: true,
                     closed: false,
                     already_closed: false,
+                    unmet_acceptance: None,
                 },
             ));
             assert_eq!(
@@ -14181,6 +14348,7 @@ exit 0
                         commented: true,
                         closed: true,
                         already_closed: false,
+                        unmet_acceptance: None,
                     },
                 );
                 holder.join().expect("prefs lock holder joins");

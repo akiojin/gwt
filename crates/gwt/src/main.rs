@@ -563,6 +563,23 @@ fn gui_event_loop_stall_warning(label: &str, elapsed_ms: u64) -> Option<String> 
         .then(|| format!("{label} blocked the GUI event loop for {elapsed_ms}ms"))
 }
 
+/// Process creation can block even when the browser launcher detaches its wait.
+/// Keep that work off the native dispatch thread for every tray browser action.
+fn request_tray_browser_launch(runtime: &Runtime, url: &str, action: &'static str) {
+    let url = url.to_owned();
+    runtime.spawn_blocking(move || {
+        if let Err(error) = gwt::cli::tray::open_browser_for_url(&url) {
+            tracing::warn!(
+                target: "gwt_tray",
+                %error,
+                action,
+                %url,
+                "tray menu failed to launch the default browser"
+            );
+        }
+    });
+}
+
 /// Times one event-loop dispatch and warns when it stalls the GUI thread.
 ///
 /// Issue #3611: a `Drop` guard rather than a trailing measurement because
@@ -2560,7 +2577,8 @@ mod tests {
             "&tray_open,",
             "&tray_copy_url,",
             "&tray_projects,",
-            "&tray_about,",
+            "&tray_open_project,",
+            "&tray_clone,",
             "&tray_quit,",
         ];
         let positions: Vec<_> = ordered
@@ -3820,6 +3838,7 @@ mod tests {
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         }
     }
@@ -4726,6 +4745,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_output_bytes: HashMap::new(),
+            pending_runtime_outputs: HashMap::new(),
             remote_terminal_previews: HashMap::new(),
             window_last_output_at: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -5463,6 +5483,85 @@ mod tests {
     }
 
     #[test]
+    fn autostart_status_queues_os_probe_without_blocking_frontend() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+
+        let dispatch_started = Instant::now();
+        let events = runtime
+            .handle_frontend_event("settings".into(), gwt::FrontendEvent::GetAutostartStatus);
+        let dispatch_elapsed = dispatch_started.elapsed();
+
+        assert!(events.is_empty(), "OS status must arrive from a worker");
+        assert_eq!(tasks.lock().unwrap().len(), 1, "queue the OS probe");
+        let settings =
+            runtime.handle_frontend_event("settings".into(), gwt::FrontendEvent::GetSystemSettings);
+        assert!(matches!(
+            settings[0].event,
+            gwt::BackendEvent::SystemSettings { .. }
+        ));
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "status remains pending"
+        );
+
+        // Model the old synchronous path and the new worker with the same
+        // 200ms probe latency. Assert ordering/routing rather than a flaky
+        // sub-30ms wall-clock deadline on a saturated CI host.
+        let synchronous_started = Instant::now();
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = gwt::cli::tray::autostart::AutostartManager::status();
+        let synchronous_elapsed = synchronous_started.elapsed();
+        let task = tasks.lock().unwrap().pop().unwrap();
+        let worker_elapsed = std::thread::spawn(move || {
+            let started = Instant::now();
+            std::thread::sleep(Duration::from_millis(200));
+            task();
+            started.elapsed()
+        })
+        .join()
+        .unwrap();
+        let recorded = recorded.lock().unwrap();
+        let UserEvent::Dispatch(replies) = &recorded[0] else {
+            panic!("expected worker dispatch");
+        };
+        assert_eq!(replies[0].target, DispatchTarget::Client("settings".into()));
+        assert!(matches!(
+            replies[0].event,
+            gwt::BackendEvent::AutostartStatus { .. } | gwt::BackendEvent::AutostartError { .. }
+        ));
+        eprintln!(
+            "autostart_dispatch_ms synchronous_model={:.3} worker_dispatch={:.3} worker_probe={:.3} gui_event_loop_stall_before={} gui_event_loop_stall_after={}",
+            synchronous_elapsed.as_secs_f64() * 1000.0,
+            dispatch_elapsed.as_secs_f64() * 1000.0,
+            worker_elapsed.as_secs_f64() * 1000.0,
+            gui_event_loop_stall_warning("GetAutostartStatus", synchronous_elapsed.as_millis() as u64).is_some(),
+            gui_event_loop_stall_warning("GetAutostartStatus", dispatch_elapsed.as_millis() as u64).is_some(),
+        );
+    }
+
+    #[test]
+    fn autostart_update_queues_os_mutation_without_running_it_on_frontend() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+
+        let events = runtime.handle_frontend_event(
+            "settings".into(),
+            gwt::FrontendEvent::UpdateAutostart { enabled: true },
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(tasks.lock().unwrap().len(), 1);
+        // Deliberately drop the queued task: tests must not change OS login settings.
+    }
+
+    #[test]
     fn agent_maintenance_interlock_refuses_prepared_app_update_and_keeps_it_retryable() {
         let temp = tempdir().unwrap();
         let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -5759,7 +5858,8 @@ mod tests {
                 .create_window_events(
                     &runtime.test_context(),
                     WindowPreset::Branches,
-                    bounds.clone()
+                    bounds.clone(),
+                    None
                 )
                 .len(),
             3
@@ -5769,7 +5869,8 @@ mod tests {
                 .create_window_events(
                     &runtime.test_context(),
                     WindowPreset::FileTree,
-                    bounds.clone()
+                    bounds.clone(),
+                    None
                 )
                 .len(),
             3
@@ -5948,7 +6049,7 @@ mod tests {
         ] {
             assert_eq!(
                 runtime
-                    .create_window_events(&runtime.test_context(), preset, bounds.clone())
+                    .create_window_events(&runtime.test_context(), preset, bounds.clone(), None)
                     .len(),
                 3,
                 "{preset:?} should create through the normal window path",
@@ -5986,7 +6087,12 @@ mod tests {
             .z_index;
         assert_eq!(
             runtime
-                .create_window_events(&runtime.test_context(), WindowPreset::Work, bounds.clone())
+                .create_window_events(
+                    &runtime.test_context(),
+                    WindowPreset::Work,
+                    bounds.clone(),
+                    None
+                )
                 .len(),
             1,
             "Work must focus the existing Settings surface",
@@ -6924,6 +7030,7 @@ mod tests {
                     gwt::FrontendEvent::CreateWindow {
                         preset: WindowPreset::Settings,
                         bounds: bounds.clone(),
+                        surface_owner: None,
                     },
                 )
                 .len(),
@@ -10778,15 +10885,15 @@ fn main() -> std::io::Result<()> {
     if let Err(error) = std::thread::Builder::new()
         .name("gwt-agent-capacity".into())
         .spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(gwt::agent_capacity::CAPACITY_TICK_INTERVAL);
             let roots = capacity_roots
                 .read()
                 .map(|projects| projects.clone())
                 .unwrap_or_default();
+            if let Err(error) = gwt::agent_capacity::refresh_machine_capacity_for_projects(&roots) {
+                tracing::warn!(%error, "agent capacity observation failed");
+            }
             for root in roots {
-                if let Err(error) = gwt::agent_capacity::refresh_machine_capacity(&root) {
-                    tracing::warn!(%error, project_root = %root.display(), "agent capacity observation failed");
-                }
                 // Failed observations must also publish expiry instead of leaving
                 // an old positive Auto limit on a stopped Monitor.
                 if capacity_proxy
@@ -10835,7 +10942,7 @@ fn main() -> std::io::Result<()> {
 
     // SPEC #2920 Phase 4 + 5: tray-resident front door. The wry/tao
     // native WebView path is removed; instead we build a tray-icon menu
-    // with `[Open] / About / [Quit]` and rely on the existing
+    // with Hub / project intake / Projects / Copy URL / Quit and rely on the existing
     // `EmbeddedServer` + browser UI for the actual GUI surface. The tao
     // event_loop is still used to keep the OS runloop alive (NSApp on
     // macOS, MS message pump on Windows, GTK main loop on Linux). The
@@ -10855,7 +10962,18 @@ fn main() -> std::io::Result<()> {
         true,
         None,
     );
-    let tray_about = MenuItem::with_id(gwt::cli::tray::menu::ids::ABOUT, "About GWT", true, None);
+    let tray_open_project = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::OPEN_PROJECT,
+        "Open Project…",
+        true,
+        None,
+    );
+    let tray_clone = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::CLONE,
+        "Clone from GitHub…",
+        true,
+        None,
+    );
     let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
     let tray_projects = Submenu::new("Projects", false);
     let mut tray_generation = gwt::cli::tray::menu::TrayMenuGeneration::new(
@@ -10869,7 +10987,8 @@ fn main() -> std::io::Result<()> {
             &tray_copy_url,
             &tray_projects,
             &PredefinedMenuItem::separator(),
-            &tray_about,
+            &tray_open_project,
+            &tray_clone,
             &PredefinedMenuItem::separator(),
             &tray_quit,
         ])
@@ -10999,6 +11118,11 @@ fn main() -> std::io::Result<()> {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
+        if let Some(app) = app.as_mut() {
+            clients.dispatch(app.flush_runtime_output_batches(std::time::Instant::now()));
+            *control_flow = app.next_runtime_output_deadline()
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
+        }
         let event = match event {
             Event::UserEvent(UserEvent::DrainAppEvents) => {
                 let Some(event) = proxy.take_next() else { return; };
@@ -12289,27 +12413,20 @@ fn main() -> std::io::Result<()> {
                 )]);
             }
             // SPEC #2920 Phase 4: the tray menu event handler is now
-            // cross-platform. The tray icon menu (Open / About / Quit) is the
+            // cross-platform. The tray icon menu is the
             // only producer; the legacy macOS native menubar
             // (NativeMenuCommand) was removed alongside the wry
             // WebView.
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
                 use gwt::cli::tray::menu::MenuAction;
                 match MenuAction::from_id(event.id.as_ref()) {
-                    Some(MenuAction::Open) => {
+                    Some(action @ (MenuAction::Open | MenuAction::OpenProject | MenuAction::Clone)) => {
+                        let target_url = action.browser_url(&browser_url).expect("browser-opening menu action");
                         // Best-effort browser open. Failure is logged
                         // but does not interrupt the tray loop —
                         // `gwt open` from the CLI is a fallback.
-                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&browser_url) {
-                            tracing::warn!(
-                                target: "gwt_tray",
-                                error = %error,
-                                url = browser_url.as_str(),
-                                "tray Open menu failed to launch the default browser"
-                            );
-                        } else {
-                            tracing::info!(target: "gwt_tray", "tray Open browser launch requested");
-                        }
+                        request_tray_browser_launch(&runtime, &target_url, "Open");
+                        tracing::info!(target: "gwt_tray", "tray Open browser launch requested");
                     }
                     Some(MenuAction::CopyUrl) => {
                         if let Err(error) = gwt_clipboard::ClipboardText::set_text(&browser_url) {
@@ -12329,23 +12446,9 @@ fn main() -> std::io::Result<()> {
                             reason: GuiShutdownReason::QuitApp,
                         });
                     }
-                    Some(MenuAction::About) => {
-                        let about_url =
-                            gwt::cli::tray::menu::about_url_for_browser_url(&browser_url);
-                        if let Err(error) = gwt::cli::tray::open_browser_for_url(&about_url) {
-                            tracing::warn!(
-                                target: "gwt_tray",
-                                error = %error,
-                                url = about_url.as_str(),
-                                "tray About menu failed to launch the default browser"
-                            );
-                        }
-                    }
                     None => {
                         if let Some(action) = tray_generation.resolve(event.id.as_ref()) {
-                            if let Err(error) = gwt::cli::tray::open_browser_for_url(&action.url) {
-                                tracing::warn!(target: "gwt_tray", %error, "tray Project menu failed to launch the default browser");
-                            }
+                            request_tray_browser_launch(&runtime, &action.url, "Project");
                         }
                     }
                 }
@@ -12401,6 +12504,11 @@ fn main() -> std::io::Result<()> {
                 );
             }
             _ => {}
+        }
+        if matches!(*control_flow, ControlFlow::Wait) {
+            if let Some(deadline) = app.next_runtime_output_deadline() {
+                *control_flow = ControlFlow::WaitUntil(deadline);
+            }
         }
     });
 }

@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+mod reports;
+pub use reports::PmReportsReader;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmIssueFact {
     pub issue_number: Option<u64>,
@@ -151,6 +154,15 @@ pub fn snapshot(
     let observed_at = Utc::now();
     let inventory =
         crate::session_inventory::observe_sessions(repo, &gwt_core::paths::gwt_sessions_dir());
+    snapshot_from_inventory(repo, update, observed_at, &inventory)
+}
+
+fn snapshot_from_inventory(
+    repo: &Path,
+    update: Option<&gwt_core::update::UpdateState>,
+    observed_at: DateTime<Utc>,
+    inventory: &crate::session_inventory::SessionInventory,
+) -> Result<PmCurrentSnapshot, String> {
     let monitor = crate::cli::issue::load_monitor_agent_status(repo, inventory.sessions.len()).map(
         |(mut status, _capacity)| {
             crate::cli::issue::merge_board_escalations_into_needs_human(repo, &mut status);
@@ -244,6 +256,39 @@ pub fn snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_poll_skips_unchanged_loads_but_hydrates_each_viewer() {
+        use super::reports::{PmReportsData, PmReportsReader};
+        let mut reader = PmReportsReader::default();
+        let now = Utc::now();
+        let data = PmReportsData::default();
+        assert!(reader
+            .poll_with(Some(vec![]), "client-a/pm", now, || data.clone())
+            .is_some());
+        assert!(reader
+            .poll_with(Some(vec![]), "client-a/pm", now, || panic!(
+                "unchanged inputs must not be read"
+            ))
+            .is_none());
+        assert!(reader
+            .poll_with(Some(vec![]), "client-b/pm", now, || panic!(
+                "new viewers reuse the snapshot"
+            ))
+            .is_some());
+        let mut changed = data.clone();
+        changed.error = Some("unreadable status".into());
+        let changed_input = Some(vec![super::reports::SourceStamp::Update(
+            serde_json::json!(1),
+        )]);
+        assert!(reader
+            .poll_with(changed_input.clone(), "client-a/pm", now, || changed
+                .clone())
+            .is_some());
+        assert!(reader
+            .poll_with(changed_input, "client-a/pm", now, || data.clone())
+            .is_some());
+    }
 
     #[cfg(unix)]
     #[test]

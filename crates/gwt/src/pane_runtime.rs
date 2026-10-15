@@ -7,7 +7,7 @@ use std::{
     io::Read,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use gwt_terminal::{Pane, PaneStatus};
@@ -39,12 +39,14 @@ pub fn spawn_output_thread(
     pane: Arc<Mutex<Pane>>,
     sink: impl Fn(PaneRuntimeEvent) + Send + 'static,
 ) -> JoinHandle<()> {
+    // Reserve the reader before the status worker can observe an immediate
+    // exit and release descriptors. This clone still drains after release.
+    let reader = pane
+        .lock()
+        .map_err(|error| error.to_string())
+        .and_then(|pane| pane.reader().map_err(|error| error.to_string()));
     thread::spawn(move || {
-        let reader = match pane
-            .lock()
-            .map_err(|error| error.to_string())
-            .and_then(|pane| pane.reader().map_err(|error| error.to_string()))
-        {
+        let reader = match reader {
             Ok(reader) => reader,
             Err(error) => {
                 sink(PaneRuntimeEvent::Status {
@@ -154,41 +156,37 @@ pub fn spawn_status_thread(
     pane: Arc<Mutex<Pane>>,
     sink: impl Fn(PaneRuntimeEvent) + Send + 'static,
 ) -> JoinHandle<()> {
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(100));
-        let status = pane
+    thread::spawn(move || {
+        let pty = pane
             .lock()
             .map_err(|error| error.to_string())
-            .and_then(|mut pane| {
-                pane.check_status()
+            .map(|pane| pane.shared_pty());
+        // The OS wait owns neither the pane mutex nor the child-state mutex.
+        // PTY input, kill, and nonblocking probes can proceed while idle.
+        let status = pty
+            .and_then(|pty| pty.wait().map_err(|error| error.to_string()))
+            .and_then(|_| {
+                let mut pane = pane.lock().map_err(|error| error.to_string())?;
+                let status = pane
+                    .check_status()
                     .cloned()
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                // Descendants can keep the slave open after direct-child exit.
+                // Terminate them so the reserved reader can drain to EOF.
+                let _ = pane.kill();
+                Ok(status)
             });
 
         match status {
-            Ok(PaneStatus::Running) => continue,
             Ok(status) => {
-                if matches!(status, PaneStatus::Completed(_)) {
-                    if let Ok(pane) = pane.lock() {
-                        let _ = pane.kill();
-                    }
-                }
                 let (status, detail) = runtime_status_from_pane_status(&status);
-                let exit_confirmed = pane
-                    .lock()
-                    .ok()
-                    .and_then(|pane| pane.process_has_exited().ok())
-                    .unwrap_or(false);
                 sink(PaneRuntimeEvent::Status {
-                    id: id.clone(),
+                    id,
                     incarnation,
                     status,
                     detail,
-                    exit_confirmed,
+                    exit_confirmed: true,
                 });
-                if exit_confirmed {
-                    break;
-                }
             }
             Err(error) => {
                 sink(PaneRuntimeEvent::Status {
@@ -198,7 +196,6 @@ pub fn spawn_status_thread(
                     detail: Some(error),
                     exit_confirmed: false,
                 });
-                break;
             }
         }
     })
@@ -234,6 +231,22 @@ mod tests {
     use super::{spawn_output_thread, spawn_status_thread, PaneRuntimeEvent};
 
     #[test]
+    fn status_worker_has_no_idle_polling_timer() {
+        let source = include_str!("pane_runtime.rs");
+        let worker = source
+            .split("pub fn spawn_status_thread(")
+            .nth(1)
+            .unwrap()
+            .split("fn runtime_status_from_pane_status(")
+            .next()
+            .unwrap();
+        assert!(
+            !worker.contains("thread::sleep"),
+            "idle panes must block on child exit instead of waking a polling timer"
+        );
+    }
+
+    #[test]
     fn workers_deliver_output_and_confirmed_exit_without_a_gui() {
         let temp = tempfile::tempdir().unwrap();
         let (command, args) = if cfg!(windows) {
@@ -249,7 +262,13 @@ mod tests {
         } else {
             (
                 "/bin/sh",
-                vec!["-c", "printf pane-worker-output; read line; exit 7"],
+                // The descendant keeps the slave open after the direct child
+                // exits. Status must therefore advance independently of EOF,
+                // then terminate the remaining group so output drains fully.
+                vec![
+                    "-c",
+                    "(trap '' HUP; sleep 60) & printf pane-worker-output; read line; exit 7",
+                ],
             )
         };
         let pane = Arc::new(Mutex::new(

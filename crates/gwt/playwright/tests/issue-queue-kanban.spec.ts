@@ -48,16 +48,25 @@ async function drag(page: Page, number: number, target: Locator) {
   await row(page, number).dragTo(target);
 }
 async function titleMetrics(title: Locator) {
-  return title.evaluate(element => {
-    const oneLine = element.cloneNode(false) as HTMLElement;
-    oneLine.textContent = "M";
-    Object.assign(oneLine.style, { position: "absolute", visibility: "hidden", width: `${element.clientWidth}px`, height: "auto" });
-    element.parentElement!.appendChild(oneLine);
-    const lineHeight = oneLine.getBoundingClientRect().height;
-    oneLine.remove();
-    return { height: element.getBoundingClientRect().height, lineHeight,
-      fits: element.scrollHeight <= element.clientHeight && element.scrollWidth <= element.clientWidth };
-  });
+  let metrics: { height: number; lineHeight: number; fits: boolean } | null = null;
+  // A detail reply may replace the title after Playwright resolves the locator.
+  // Re-resolve it instead of accepting zero geometry from the detached node.
+  await expect.poll(async () => {
+    metrics = await title.evaluate(element => {
+      if (!element.isConnected || element.clientWidth === 0
+        || getComputedStyle(element).visibility !== "visible") return null;
+      const oneLine = element.cloneNode(false) as HTMLElement;
+      oneLine.textContent = "M";
+      Object.assign(oneLine.style, { position: "absolute", visibility: "hidden", width: `${element.clientWidth}px`, height: "auto" });
+      element.parentElement!.appendChild(oneLine);
+      const lineHeight = oneLine.getBoundingClientRect().height;
+      oneLine.remove();
+      return { height: element.getBoundingClientRect().height, lineHeight,
+        fits: element.scrollHeight <= element.clientHeight && element.scrollWidth <= element.clientWidth };
+    });
+    return metrics !== null && metrics.height > 0 && metrics.lineHeight > 0;
+  }, { message: "the current visible title has measurable geometry" }).toBe(true);
+  return metrics!;
 }
 
 test("Issue #5400 unchanged entry revisions retain the list and current detail", async ({ page }) => {
@@ -684,6 +693,7 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   await expect(popup).not.toBeVisible();
   await page.evaluate(() => (window as any).__queueRefreshDetail());
   await expect(page.locator(".issue-detail-title")).toHaveText("Refreshed issue");
+  await expect(page.locator(".issue-detail-title")).toBeVisible();
   await expect(source).toBeFocused();
   await expect(popup).not.toBeVisible();
   await expect(popup).toContainText("Auto-refill added this issue");

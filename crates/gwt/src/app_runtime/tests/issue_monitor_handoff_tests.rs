@@ -2608,6 +2608,14 @@ fn app_runtime_issue_monitor_profiles_set_acknowledges_save_with_git_attention()
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     fs::write(repo.join(".git"), "gitdir: missing\n").expect("broken Git metadata");
+    // The worker's cached diagnosis makes the unrelated snapshot notice
+    // deterministic, without depending on a Git subprocess or its deadline.
+    gwt_git::repository::git_health::record_metadata_failure(
+        &repo,
+        "git remote get-url origin",
+        "fatal: not a git repository: missing",
+    )
+    .expect("cached Git attention diagnosis");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let mut seeded = gwt::IssueMonitorPrefs::default();
     seeded.set_launch_profile_pool(vec![pool_profile("claude")]);
@@ -2627,7 +2635,7 @@ fn app_runtime_issue_monitor_profiles_set_acknowledges_save_with_git_attention()
             &event.event, BackendEvent::IssueMonitorToast { level, message, .. }
                 if level == "error" && message.contains("Git needs attention")
         )),
-        "fixture must retain the unrelated Git attention notice"
+        "fixture must retain the unrelated Git attention notice: {events:?}"
     );
     assert!(
         events.iter().all(|event| !matches!(
