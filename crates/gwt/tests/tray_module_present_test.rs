@@ -61,6 +61,33 @@ fn tray_event_loop_does_not_wait_for_project_bootstrap() {
 }
 
 #[test]
+fn tray_browser_process_creation_stays_off_the_event_loop() {
+    let handler = MAIN_RS
+        .rsplit_once("Event::UserEvent(UserEvent::MenuEvent(event)) => {")
+        .expect("native tray handler")
+        .1
+        .split("Event::MainEventsCleared =>")
+        .next()
+        .unwrap();
+    assert!(
+        !handler.contains("open_browser_for_url("),
+        "native browser process creation must not block a tray dispatch"
+    );
+    assert_eq!(handler.matches("request_tray_browser_launch(").count(), 3);
+    let worker = MAIN_RS
+        .split_once("fn request_tray_browser_launch(")
+        .expect("tray browser worker")
+        .1
+        .split("\nfn ")
+        .next()
+        .unwrap();
+    assert!(
+        worker.find("spawn_blocking(move ||").unwrap()
+            < worker.find("open_browser_for_url(").unwrap()
+    );
+}
+
+#[test]
 fn cli_root_declares_tray_and_open_modules() {
     assert!(
         CLI_ROOT.contains("pub mod tray;"),

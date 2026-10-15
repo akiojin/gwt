@@ -255,10 +255,43 @@ fn tray_ready_ms(log: &str) -> Option<f64> {
         })
 }
 
+fn startup_latency_budget_passes(
+    tray_ms: Option<f64>,
+    native_ms: Option<f64>,
+    click_ms: Option<f64>,
+) -> bool {
+    tray_ms.is_some_and(|ms| ms <= 2000.0)
+        && native_ms.is_some_and(|ms| ms <= 2000.0)
+        && click_ms.is_some_and(|ms| ms <= 500.0)
+}
+
 #[test]
 fn startup_metric_and_native_command_contract() {
     let mark = r#"{"startup":{"phase":"tray_ready","start_ms":0},"value":1750}"#;
     assert_eq!(tray_ready_ms(mark), Some(1750.0));
+    assert!(startup_latency_budget_passes(
+        tray_ready_ms(mark),
+        Some(1750.0),
+        Some(120.0)
+    ));
+    assert!(startup_latency_budget_passes(
+        Some(2000.0),
+        Some(2000.0),
+        Some(500.0)
+    ));
+    for (tray_ms, native_ms, click_ms) in [
+        (Some(2001.0), Some(2000.0), Some(500.0)),
+        (Some(2000.0), Some(2001.0), Some(500.0)),
+        (Some(2000.0), Some(2000.0), Some(501.0)),
+        (None, Some(2000.0), Some(500.0)),
+        (Some(2000.0), None, Some(500.0)),
+        (Some(2000.0), Some(2000.0), None),
+    ] {
+        assert!(
+            !startup_latency_budget_passes(tray_ms, native_ms, click_ms),
+            "startup budget must reject overrun or unmeasured latency: {tray_ms:?}, {native_ms:?}, {click_ms:?}"
+        );
+    }
     let menu = include_str!("../src/main.rs")
         .rsplit_once("let tray_menu = Menu::new();")
         .unwrap()
@@ -427,9 +460,7 @@ fn startup_tray_under_large_stopped_session_load() {
     let ready_p95 = percentile("tray_ready_ms");
     let native_p95 = percentile("native_window_ms");
     let click_p95 = percentile("click_ack_ms");
-    let passed = ready_p95.is_some_and(|ms| ms <= 2000.0)
-        && native_p95.is_some_and(|ms| ms <= 2000.0)
-        && click_p95.is_some_and(|ms| ms <= 500.0)
+    let passed = startup_latency_budget_passes(ready_p95, native_p95, click_p95)
         && dispatch_observation_complete
         && project_restore_completed
         && probe_timeouts == 0
