@@ -5756,6 +5756,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
+        applyIssueMonitorProfilesError,
         customAgentsState,
         agentBackendsState,
         systemSettingsState,
@@ -6577,6 +6578,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "issue_monitor_profiles":
             applyIssueMonitorProfiles(event);
+            break;
+          case "issue_monitor_profiles_write_failed":
+            applyIssueMonitorProfilesError(event);
             break;
           case "issue_monitor_allowed_labels_write_failed":
             applyKnowledgeReceiveEvent(event);

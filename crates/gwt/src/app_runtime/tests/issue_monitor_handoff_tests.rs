@@ -2602,6 +2602,61 @@ fn app_runtime_issue_monitor_profiles_set_preserves_sparse_candidate_settings() 
 }
 
 #[test]
+fn app_runtime_issue_monitor_profiles_set_acknowledges_save_with_git_attention() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::write(repo.join(".git"), "gitdir: missing\n").expect("broken Git metadata");
+    // The worker's cached diagnosis makes the unrelated snapshot notice
+    // deterministic, without depending on a Git subprocess or its deadline.
+    gwt_git::repository::git_health::record_metadata_failure(
+        &repo,
+        "git remote get-url origin",
+        "fatal: not a git repository: missing",
+    )
+    .expect("cached Git attention diagnosis");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut seeded = gwt::IssueMonitorPrefs::default();
+    seeded.set_launch_profile_pool(vec![pool_profile("claude")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let event = serde_json::from_value(serde_json::json!({
+        "kind": "issue_monitor_profiles_set",
+        "profiles": [{"agent_id": "codex"}], "request_id": 43
+    }))
+    .expect("candidate editing event");
+    let events = runtime.handle_frontend_event("client-1".into(), event);
+    let saved = gwt::load_issue_monitor_prefs(&prefs_path).expect("saved pool");
+    assert_eq!(saved.launch_profile_pool()[0].agent_id, "codex");
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event, BackendEvent::IssueMonitorToast { level, message, .. }
+                if level == "error" && message.contains("Git needs attention")
+        )),
+        "fixture must retain the unrelated Git attention notice: {events:?}"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            event.event,
+            BackendEvent::IssueMonitorProfilesWriteFailed { .. }
+        )),
+        "a successful write must not report an unrelated snapshot error: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::IssueMonitorProfiles {
+                request_id: Some(43),
+                ..
+            }
+        )),
+        "the successful write must acknowledge this request: {events:?}"
+    );
+}
+
+#[test]
 fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
@@ -2612,6 +2667,7 @@ fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing(
     let mut seeded = gwt::IssueMonitorPrefs::default();
     seeded.set_launch_profile_pool(vec![pool_profile("claude")]);
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
+    let project_root = repo.display().to_string();
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     for payload in [
@@ -2622,11 +2678,19 @@ fn app_runtime_issue_monitor_profiles_set_rejects_invalid_edits_without_writing(
         let before = fs::read(&prefs_path).expect("read prefs");
         let mut payload = payload;
         payload["kind"] = "issue_monitor_profiles_set".into();
+        payload["request_id"] = 42.into();
         let event = serde_json::from_value(payload).expect("candidate editing event");
         let events = runtime.handle_frontend_event("client-1".into(), event);
         assert!(events.iter().any(|event| matches!(
             &event.event, BackendEvent::IssueMonitorToast { level, .. } if level == "error"
         )));
+        assert!(events.iter().any(|event| {
+            let wire = serde_json::to_value(&event.event).expect("serialize failure");
+            wire["kind"] == "issue_monitor_profiles_write_failed"
+                && wire["request_id"] == 42
+                && wire["project_root"] == project_root
+                && !wire["message"].as_str().unwrap_or_default().is_empty()
+        }));
         assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
     }
 }
