@@ -952,7 +952,9 @@ fn evaluate_authenticated_execution_continuation(
     })
 }
 
-fn continuation_requires_new_session(
+/// Read the same canonical Work boundary for continuation and startup restore.
+/// Terminal Work must use a fresh Session even while its execution is Active.
+pub fn continuation_requires_new_session(
     project_state_root: &Path,
     session: &Session,
 ) -> std::result::Result<bool, AgentWorkspaceUpdateError> {
