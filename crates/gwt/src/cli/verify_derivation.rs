@@ -2047,7 +2047,7 @@ mod tests {
         assert_eq!(
             workflow_cargo_tests("test.yml", "test"),
             vec![
-                "cargo nextest run --workspace --all-features --test-threads=1".to_string(),
+                "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6".to_string(),
                 "cargo test --workspace --all-features --doc".to_string(),
                 // The xvfb `--ignored` real-binary family stays CI-owned:
                 // it needs a display server, so it is deliberately outside
