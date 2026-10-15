@@ -1,4 +1,5 @@
 # Build this checkout's gwt and gwtd first. Additional Playwright arguments are forwarded.
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [string]$Spec = 'knowledge-load-recovery.spec.ts',
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
