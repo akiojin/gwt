@@ -7238,8 +7238,9 @@ button.workspace-board-ref:focus-visible {
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
-  white-space: pre;
+  white-space: nowrap;
 }
+.agent-title__name:not(:empty) + .agent-title__purpose:not(:empty) { padding-inline-start: var(--space-1); }
 .agent-title__purpose::-webkit-scrollbar { display: none; }
 .agent-title:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .agents-tabs .agents-tab-close {

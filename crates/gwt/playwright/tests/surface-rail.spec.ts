@@ -303,7 +303,7 @@ test.describe("Surface rail", () => {
     const originalHeader = await header.boundingBox();
     const originalTerminal = await terminal.boundingBox();
     const originalTab = await page.getByRole("tab", { name: "Aster", exact: true }).boundingBox();
-    const purpose = "Investigate terminal output, preserve agent identity, and deliver the smallest verified change across the existing application surfaces. ".repeat(2).trim();
+    const purpose = "Investigate terminal output, preserve agent identity, and deliver the smallest verified change across the existing application surfaces.\n".repeat(2).trim();
     const fullTitle = `Aster — ${purpose}`;
     await page.evaluate(purpose => (window as any).__updateSurfaceAgent("agent-one", { dynamic_title: purpose }), purpose);
     await expect(title).toHaveText(fullTitle);
