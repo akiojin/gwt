@@ -153,7 +153,29 @@ collector は今後の観測に release tag / commit と fix commit の祖先関
 
 [deployment-wait.json](deployment-wait.json) は更新 cache と各実 5 root の拒否原記録を保存したもの。`13:55:31Z` に `v9.123.2` を検出したが、`13:55:35Z` に `pending_refused`、`Administrator privileges required; the update stays staged` となった。管理者権限での適用を agent が代行せず、Board escalation `206976b5-a230-4c76-adf7-5674d7108ca5` / Issue #5489 comment `6193825907` で PM に調整を引き継いだ。設定・GUI 停止の操作は行っていない。**実 GUI の修正後 CPU は未測定、AC-3 は未チェックである。**
 
-`node docs/perf/issue-5489/verify.mjs` は配信済みの census / 隔離 worker 証拠と新しい修正前 raw の整合性を検証する。成功しても AC-3 を完了とはせず、`PENDING AC-3` を出力する。更新後は collector で `deployed-gui-after.json` を取得し、`node docs/perf/issue-5489/verify.mjs --deployed-after` を実行する。この専用検査は after 記録なしで失敗し、版への fix 包含・同じ実 5 root・Monitor 平均コア半減をすべて要求する。両時点の窓数・runtime 規模・他の統合修正も併記し、単独修正の因果効果とは区別する。
+`node docs/perf/issue-5489/verify.mjs` は配信済みの census / 隔離 worker 証拠と新しい修正前 raw の整合性を検証する。after を指定しない成功は AC-3 の完了を意味せず、`PENDING AC-3` を出力する。`node docs/perf/issue-5489/verify.mjs --deployed-after` は after 記録なしで失敗し、版への fix 包含・同じ実 5 root・Monitor 平均コア半減をすべて要求する。
+
+## 更新後の実 GUI 比較（2026-10-15T14:19Z）
+
+PM による通常更新後、Velden が既存 collector を読み取り専用で実行し、[deployed-gui-after.json](deployed-gui-after.json) を取得した。GUI は PID `36240`、起動 `14:11:46.6269894Z`、version `9.123.2`、release commit `4c909ebe1e428cf668f76142e46eabda0b3c4baf`。collector と verifier の双方が、release tag に fix commit `2b6ca0eca084db53ed381a09a85c7d8eb4e2acf0` が含まれることを確認した。GUI・agent の起動、停止、設定変更はこの観測では行っていない。上記の更新拒否は更新前の履歴であり、現時点の blocker ではない。
+
+| 条件 | 修正前 v9.123.1 | 修正後 v9.123.2 |
+| --- | ---: | ---: |
+| 観測開始（UTC） | 13:07:54 | 14:19:44 |
+| 観測時間（秒） | 30.9205409 | 30.2322192 |
+| named Monitor thread CPU（秒） | 9.9375 | 4.109375 |
+| Monitor 平均使用コア | 0.3213883 | 0.1359270 |
+| GUI 全体の平均使用コア | 2.1481473 | 2.0544101 |
+| implementation agent 窓（区間前後とも） | 12 | 8 |
+| runtime namespaces / files | 375 / 3,812 | 375 / 3,867 |
+
+実 5 root は前後で完全一致し、保持した同一 thread handle で測った `gwt-monitor-runtime` の平均使用コアは **57.71% 減**だった。`node docs/perf/issue-5489/verify.mjs --deployed-after` はこれを含む全 assertion に PASS した。AC-3 の実 fleet の半減を直接観測した証拠であるが、窓数、ファイル数、経過時刻と他の配布済み修正が異なるため、Issue #5489 単独の因果効果とは主張しない。同条件での因果比較は上記の交互 census / 隔離 worker 証拠で補完する。
+
+独立レビューで、verifier が観測時刻を検査せず、after を GUI 起動前の時刻へ変えても PASS することを再現した（RED）。日時の parse 可能性、GUI 起動後の観測、baseline より後の after という assertion を追加し、不正な時系列の拒否と元の raw の PASS を確認した（GREEN）。raw は検査前後で同一 bytes に復元した。
+
+今回の最小 Plan は、Goal: 未配信の collector / baseline と実 GUI after を検証・配信すること、Acceptance criteria: 修正版の包含・実 5 root の一致・named Monitor CPU 半減を専用 verifier で再検査し、fresh `verify.run` と必須 CI 後に develop へマージすること。Non-goals / What stays untouched: runtime の追加最適化、GUI の設定・再起動、別 owner の修正、Issue #5385 の 60 分計測。新しい probe や runtime 修正を加える案と比較し、既存 collector と verifier の再利用を採用した。source の根本修正は既に配信済みで、残る受け入れ要件は実 GUI の観測だからである。
+
+Issue #5385 の 7〜8 窓 / 60 分再測定にはこの raw と版包含証明を引き継ぐ。GUI 全体はなお約 2.05 コアであり、family 全体の平均 1 コア未満という予算達成は主張しない。AC の確定は今回の証跡も `origin/develop` に含まれることを確認してから行う。
 
 ## 比較の限界と引継ぎ
 

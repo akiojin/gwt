@@ -104,6 +104,10 @@ if (!process.argv.includes('--historical-only')) {
   const fix = '2b6ca0eca084db53ed381a09a85c7d8eb4e2acf0';
   for (const sample of [before, ...(after ? [after] : [])]) {
     assert.equal(sample.issue, 5489);
+    const observedAt = Date.parse(sample.observed_at);
+    const startedAt = Date.parse(sample.gui_started_at);
+    assert.ok(Number.isFinite(observedAt) && Number.isFinite(startedAt), 'GUI observation and start timestamps are required');
+    assert.ok(startedAt <= observedAt, 'GUI must start before its observation');
     assert.ok(sample.elapsed_seconds >= 30);
     assert.equal(sample.roots.length, 5);
     assert.equal(sample.monitor.name, 'gwt-monitor-runtime');
@@ -130,6 +134,7 @@ if (!process.argv.includes('--historical-only')) {
   assert.ok(wait.refusals.every((row) => `v${row.version}` === wait.release_tag && row.stage === 'pending_refused' && /elevated permissions|Administrator privileges/.test(row.reason)));
   console.log(`PASS deployment boundary: ${wait.release_tag} contains census fix; administrator refusal recorded for all five roots`);
   if (after) {
+    assert.ok(Date.parse(before.observed_at) < Date.parse(after.observed_at), 'after observation must follow the baseline');
     assert.equal(after.release_tag, `v${after.gui_version}`);
     assert.equal(after.release_commit, execFileSync('git', ['rev-parse', `${after.release_tag}^{commit}`], { cwd: repo, encoding: 'utf8' }).trim());
     assert.equal(after.census_fix_commit, fix);
