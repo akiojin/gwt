@@ -42,6 +42,7 @@ def summarize(snapshot):
         raise ValueError("no merged PRs in snapshot")
     cycles, waits, required_waits = [], [], []
     durations, job_waits = defaultdict(list), defaultdict(list)
+    step_durations = defaultdict(lambda: defaultdict(list))
     excluded, missing, run_ids, unavailable_waits = Counter(), [], [], []
     required = set(snapshot.get("required_check_names", []))
     for pr in prs:
@@ -62,6 +63,10 @@ def summarize(snapshot):
                 continue
             if job.get("started_at"):
                 durations[job["name"]].append(minutes(job["started_at"], job["completed_at"]))
+                for step in job.get("steps", []):
+                    if step.get("conclusion") == "success" and step.get("started_at") and step.get("completed_at"):
+                        step_durations[job["name"]][step["name"]].append(
+                            minutes(step["started_at"], step["completed_at"]))
                 if job.get("created_at") and timestamp(job["created_at"]) <= timestamp(job["started_at"]):
                     wait = minutes(job["created_at"], job["started_at"])
                     waits.append(wait)
@@ -94,6 +99,8 @@ def summarize(snapshot):
         "required_runner_wait_minutes": distribution(required_waits),
         "unavailable_runner_wait_jobs": unavailable_waits,
         "jobs": {name: {"duration_minutes": distribution(values),
+                        "step_duration_minutes": {step: distribution(times)
+                                                  for step, times in sorted(step_durations[name].items())},
                         "runner_wait_minutes": distribution(job_waits[name])}
                  for name, values in sorted(durations.items())},
         "excluded_runs": dict(sorted(excluded.items())), "missing_workflow_prs": missing,
