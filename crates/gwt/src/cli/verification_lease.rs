@@ -1493,12 +1493,48 @@ fn render(
 const QUEUE_BYPASS_RECOVERY: &str =
     "FIFO position retained; rerun verify.run with the identical full matrix to reclaim priority";
 
+/// Explain root exclusion without confusing a current unknown-resource command
+/// with a pre-pool binary. Older tickets are attributed from live process data.
+fn push_slot_admission_fields(
+    out: &mut String,
+    label: &str,
+    holder: &HeavyLeaseStatus,
+    executable: Option<&Path>,
+    cwd: Option<&Path>,
+) {
+    let exclusive = label == "legacy";
+    let mode = if exclusive { "exclusive" } else { "shared" };
+    out.push_str(&format!("slots[{label}].mode: {mode}\n"));
+    if exclusive {
+        let reason = holder.holder_context.as_ref().map_or(
+            "legacy or unclassified runner holds the root lock",
+            |context| context.qos.as_str(),
+        );
+        out.push_str(&format!("slots[{label}].exclusive_reason: {reason}\n"));
+    }
+    if let Some(context) = &holder.holder_context {
+        out.push_str(&format!("slots[{label}].command: {}\n", context.action));
+    }
+    let worktree = holder
+        .holder_context
+        .as_ref()
+        .map(|context| context.project_root.as_path())
+        .or(cwd);
+    for (field, path) in [("executable", executable), ("worktree", worktree)] {
+        out.push_str(&format!(
+            "slots[{label}].{field}: {}\n",
+            path.map_or_else(|| "unknown".to_string(), |path| path.display().to_string())
+        ));
+    }
+}
+
 fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_project: &str) {
     if let Some(capacity) = status.capacity {
         out.push_str(&format!(
             "capacity: {capacity}\nrunning: {}\navailable: {}\n",
             status.running, status.available
         ));
+        out.push_str("exclusive_commands: headed Playwright, coverage, and other commands without a resolved Cargo target; legacy root locks also exclude all slots\n");
         for slot in &status.slots {
             let label = slot
                 .slot
@@ -1516,6 +1552,30 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
                 holder.holder_stale,
                 holder_project_relation(holder.target.as_deref(), current_project).as_str(),
             ));
+            if holder.held || holder.holder_stale {
+                use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+                let mut system = System::new();
+                if let Some(owner) = &holder.owner {
+                    system.refresh_processes_specifics(
+                        ProcessesToUpdate::Some(&[Pid::from_u32(owner.pid)]),
+                        true,
+                        ProcessRefreshKind::nothing()
+                            .with_exe(UpdateKind::Always)
+                            .with_cwd(UpdateKind::Always),
+                    );
+                }
+                let process = holder
+                    .owner
+                    .as_ref()
+                    .and_then(|owner| system.process(Pid::from_u32(owner.pid)));
+                push_slot_admission_fields(
+                    out,
+                    &label,
+                    holder,
+                    process.and_then(|process| process.exe()),
+                    process.and_then(|process| process.cwd()),
+                );
+            }
         }
     }
     if let Some(lease_id) = &status.lease_id {
@@ -1632,6 +1692,16 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
             out.push_str(&format!(
                 "queue[{position}].bypass: {reason}; {QUEUE_BYPASS_RECOVERY}\n"
             ));
+        }
+        if status.capacity.is_some() {
+            let mode = match entry.mode {
+                gwt_core::index_coordinator::HeavyQueueMode::Shared => "shared",
+                gwt_core::index_coordinator::HeavyQueueMode::Exclusive => "exclusive",
+            };
+            out.push_str(&format!("queue[{position}].mode: {mode}\n"));
+            if let Some(reason) = &entry.scheduling_reason {
+                out.push_str(&format!("queue[{position}].scheduling: {reason}\n"));
+            }
         }
     }
 }
@@ -2154,6 +2224,48 @@ mod tests {
     }
 
     #[test]
+    fn status_attributes_exclusive_commands_and_legacy_runners() {
+        let mut out = String::new();
+        let holder = HeavyLeaseStatus {
+            holder_context: Some(gwt_core::index_coordinator::HeavyHolderContext {
+                project_root: PathBuf::from("/work/owner"),
+                action: "node scripts/coverage-summary.mjs".into(),
+                qos: "coverage requires exclusive host resources".into(),
+            }),
+            ..HeavyLeaseStatus::default()
+        };
+        push_slot_admission_fields(&mut out, "legacy", &holder, None, None);
+        assert!(out.contains("mode: exclusive"), "{out}");
+        assert!(
+            out.contains("coverage requires exclusive host resources"),
+            "{out}"
+        );
+        assert!(
+            out.contains("command: node scripts/coverage-summary.mjs"),
+            "{out}"
+        );
+        assert!(out.contains("worktree: /work/owner"), "{out}");
+        out.clear();
+        push_slot_admission_fields(
+            &mut out,
+            "legacy",
+            &HeavyLeaseStatus::default(),
+            Some(Path::new("/old/target/debug/gwtd")),
+            Some(Path::new("/old")),
+        );
+        assert!(
+            out.contains("legacy or unclassified runner holds the root lock"),
+            "{out}"
+        );
+        assert!(out.contains("executable: /old/target/debug/gwtd"), "{out}");
+        assert!(out.contains("worktree: /old"), "{out}");
+        out.clear();
+        push_slot_admission_fields(&mut out, "legacy", &HeavyLeaseStatus::default(), None, None);
+        assert!(out.contains("executable: unknown"), "{out}");
+        assert!(out.contains("worktree: unknown"), "{out}");
+    }
+
+    #[test]
     fn status_explains_bypassed_reservation_recovery() {
         let entry: HeavyQueueEntry = serde_json::from_value(serde_json::json!({
             "priority": "manual-rebuild", "queued_at_ms": 1, "waiting_ms": 180000,
@@ -2201,6 +2313,8 @@ mod tests {
                     HeavyQueueEntry {
                         target: Some("repo--verification--early".to_string()),
                         priority: JobPriority::ManualRebuild,
+                        mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
+                        scheduling_reason: None,
                         queued_at_ms: 500,
                         waiting_ms: 90_000,
                         resident: true,
@@ -2211,6 +2325,8 @@ mod tests {
                     HeavyQueueEntry {
                         target: Some("repo--verification--late".to_string()),
                         priority: JobPriority::ManualRebuild,
+                        mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
+                        scheduling_reason: None,
                         queued_at_ms: 900,
                         waiting_ms: 89_600,
                         resident: true,
