@@ -10,6 +10,57 @@ const html = readFileSync(resolve(here, "../index.html"), "utf8");
 const runtimeCpuUnitsPattern =
   /aggregate CPU.*logical-core-normalized host share.*process rows.*1 core\s*=\s*100%/i;
 
+test("clock uses second boundaries and cancels all work while hidden", async () => {
+  const { wireStatusStripClock } = await importOperatorShell();
+  const { document, window } = parseHTML('<span id="op-strip-clock"></span>');
+  window.matchMedia = () => ({ matches: false });
+  Object.defineProperty(document, "hidden", { configurable: true, writable: true, value: false });
+  let now = new Date(2026, 0, 1, 12, 34, 56, 250).getTime();
+  let nextId = 0;
+  const timers = new Map();
+  const win = {
+    Date: class extends Date { constructor() { super(now); } },
+    setTimeout(callback, delay) { const id = ++nextId; timers.set(id, { callback, delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    requestAnimationFrame() { assert.fail("clock must not request animation frames"); },
+  };
+  const originalFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = win.requestAnimationFrame;
+  try {
+    wireStatusStripClock({ doc: document, win });
+  } finally {
+    globalThis.requestAnimationFrame = originalFrame;
+  }
+  const clock = document.getElementById("op-strip-clock");
+  assert.equal(clock.textContent, "12:34:56");
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0].delay, 750);
+  const fire = () => {
+    const [id, timer] = [...timers.entries()][0];
+    timers.delete(id);
+    timer.callback();
+  };
+  now += 768; // A late callback must align the next tick again.
+  fire();
+  assert.equal(clock.textContent, "12:34:57");
+  assert.equal([...timers.values()][0].delay, 982);
+  document.hidden = true;
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  assert.equal(timers.size, 0);
+  now += 6000;
+  assert.equal(clock.textContent, "12:34:57");
+  document.hidden = false;
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  assert.equal(clock.textContent, "12:35:03");
+  assert.equal(timers.size, 1);
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  assert.equal(timers.size, 1, "repeated visibility events must not duplicate timers");
+  document.hidden = true;
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  wireStatusStripClock({ doc: document, win });
+  assert.equal(timers.size, 0, "initially hidden clocks must schedule no work");
+});
+
 test("Operator shell fails open when browser storage and media APIs are unavailable", async () => {
   const { initOperatorShell } = await importOperatorShell();
   const { document, window } = parseHTML(html);
@@ -18,6 +69,8 @@ test("Operator shell fails open when browser storage and media APIs are unavaila
 
   const brokenWindow = {
     ...window,
+    setTimeout: () => 0,
+    clearTimeout() {},
     localStorage: throwingStorage(),
     sessionStorage: throwingStorage(),
     matchMedia: () => {
@@ -46,6 +99,8 @@ test("Operator shell keeps the Command Rail always visible with no reveal state 
   storage.setItem("gwt:ui:window-controls", "hidden");
   const testWindow = {
     ...window,
+    setTimeout: () => 0,
+    clearTimeout() {},
     localStorage: storage,
     sessionStorage: memoryStorage(),
     matchMedia: () => ({
