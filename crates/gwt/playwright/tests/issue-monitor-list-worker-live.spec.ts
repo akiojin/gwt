@@ -41,15 +41,12 @@ test.describe("Issue Monitor list worker (live backend)", () => {
         await waitForList(page);
         await rm(join(fixture.gate_root, "started"), { force: true });
         await writeFile(join(fixture.gate_root, "armed"), generation);
-        await observeList(page);
+        // Submit both requests in one browser turn. With tracing enabled, a
+        // separate evaluate after polling the gate can miss its I/O deadline.
+        await observeList(page, true);
         await expect.poll(() => readFile(join(fixture.gate_root, "started"), "utf8").catch(() => ""), {
           timeout: 10_000, intervals: [100], message: "the real local reader must enter the armed Git gate",
         }).toBe(generation);
-        await page.evaluate(() => {
-          (window as any).__gwtListWorkerObservation.otherRequestedMs = performance.now()
-            - (window as any).__gwtListWorkerObservation.started;
-          window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail: { kind: "list_windows" } }));
-        });
         await waitForList(page);
         await page.waitForFunction(() => (window as any).__gwtListWorkerObservation.frames
           .some((frame: any) => frame.kind === "window_list"), undefined, { timeout: 10_000 });
@@ -97,8 +94,8 @@ async function requireFixture(): Promise<Fixture> {
   return fixture;
 }
 
-async function observeList(page: Page): Promise<void> {
-  await page.evaluate(() => {
+async function observeList(page: Page, requestOther = false): Promise<void> {
+  await page.evaluate(requestOther => {
     const socket = [...((window as any).__gwtPlaywrightSockets as WebSocket[])].reverse()
       .find(socket => socket.readyState === WebSocket.OPEN && new URL(socket.url).searchParams.has("repo_hash"));
     if (!socket) throw new Error("project WebSocket missing");
@@ -111,7 +108,11 @@ async function observeList(page: Page): Promise<void> {
       }
     });
     window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail: { kind: "list_issue_monitor" } }));
-  });
+    if (requestOther) {
+      (window as any).__gwtListWorkerObservation.otherRequestedMs = performance.now() - observed.started;
+      window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail: { kind: "list_windows" } }));
+    }
+  }, requestOther);
 }
 
 async function waitForList(page: Page): Promise<void> {

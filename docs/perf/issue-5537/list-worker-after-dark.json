@@ -2,16 +2,16 @@
   "issue": 5537,
   "label": "after",
   "theme": "dark",
-  "ownedPid": 49712,
+  "ownedPid": 53276,
   "verified": true,
   "errors": [],
   "gate": "local git origin read under existing operation deadline",
   "observation": {
-    "started": 2509.5,
+    "started": 2174.0999999940395,
     "frames": [
       {
         "kind": "window_list",
-        "elapsedMs": 525.5,
+        "elapsedMs": 1.6000000089406967,
         "payload": {
           "kind": "window_list",
           "windows": [
@@ -38,7 +38,7 @@
       },
       {
         "kind": "issue_monitor_status",
-        "elapsedMs": 1165,
+        "elapsedMs": 1156.5,
         "payload": {
           "kind": "issue_monitor_status",
           "status": {
@@ -72,35 +72,35 @@
               "other_pm_agents": 0,
               "other_implementation_agents": 0,
               "other_review_agents": 0,
-              "gui_cpu_millicores": 0,
+              "gui_cpu_millicores": 258,
               "constraints": [
                 {
                   "resource": "cpu",
-                  "capacity": null,
+                  "capacity": 31,
                   "binding": false,
-                  "reason": "P cores 32; GUI unavailable"
+                  "reason": "P cores 32; GUI 0.26 cores"
                 },
                 {
                   "resource": "ram",
-                  "capacity": 35,
+                  "capacity": 17,
                   "binding": false,
-                  "reason": "available RAM 17.64 GiB; per-agent 0.50 GiB; live 0"
+                  "reason": "available RAM 8.89 GiB; per-agent 0.50 GiB; live 0"
                 },
                 {
                   "resource": "disk",
                   "capacity": null,
                   "binding": false,
-                  "reason": "free disk 173.95 GiB; measured target unavailable; live 0"
+                  "reason": "free disk 1075.47 GiB; measured target unavailable; live 0"
                 }
               ],
               "limiting_constraint": "",
-              "reason": "measurement_unavailable: cpu,disk; inventory_complete=true; other=0; own_pm=0; pm_reserve=1; own_untracked=0; monitor_reviews=0; target measurement unavailable: wait for the scan; if missing/empty, build the project or use Manual; target: E:\\gwt\\work\\issue-5537\\target; gui_cpu_warming; per_agent_ram: 0.5 GiB lower-bound estimate (no live PTY RSS); target_measurement_in_progress: E:\\gwt\\work\\issue-5537\\target; wait for the scan or use Manual",
-              "observed_at": 1792088794,
-              "expires_at": 1792088824
+              "reason": "measurement_unavailable: disk; inventory_complete=true; other=0; own_pm=0; pm_reserve=1; own_untracked=0; monitor_reviews=0; target measurement unavailable: wait for the scan; if missing/empty, build the project or use Manual; target: E:\\gwt\\work\\issue-5537\\target; per_agent_ram: 0.5 GiB lower-bound estimate (no live PTY RSS); target_measurement_in_progress: E:\\gwt\\work\\issue-5537\\target; wait for the scan or use Manual",
+              "observed_at": 1792096360,
+              "expires_at": 1792096390
             },
             "total_candidates": 0,
             "active_issue_number": null,
-            "last_scan_at": "2026-10-15T18:26:43Z",
+            "last_scan_at": "2026-10-15T20:32:42Z",
             "last_error": "git remote get-url origin could not be started: process deadline expired",
             "launch_profile_source": "default",
             "launch_profile_summary": "configure before auto start",
@@ -113,13 +113,13 @@
       },
       {
         "kind": "issue_monitor_inbox",
-        "elapsedMs": 1165.2000000029802,
+        "elapsedMs": 1156.7000000029802,
         "payload": {
           "kind": "issue_monitor_inbox",
           "items": []
         }
       }
     ],
-    "otherRequestedMs": 524.2000000029802
+    "otherRequestedMs": 0.10000000894069672
   }
 }
