@@ -1136,7 +1136,9 @@ fn long_running_test_pane(id: &str) -> Pane {
     } else {
         (
             "/bin/sh".to_string(),
-            vec!["-lc".to_string(), "sleep 30".to_string()],
+            // Keep this basic fixture in one process: killing a shell can leave
+            // its sleep child orphaned after the direct child has been reaped.
+            vec!["-lc".to_string(), "exec sleep 30".to_string()],
         )
     };
     Pane::new(
