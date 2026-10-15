@@ -852,6 +852,14 @@ fn admit_inner<E: CliEnv>(
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
     let (spawn_host, _) = crate::cli::daemon::verification_host::describe_for_lease(&worktree);
     lease.record_spawn_host(spawn_host);
+    // Reuse the lease's exact runner context so status can distinguish a current
+    // exclusive command from an older binary holding the compatibility lock.
+    let resource_reason = if target.is_some() {
+        "resolved Cargo target uses one shared slot"
+    } else {
+        "unknown or unbounded command without a resolved Cargo target"
+    };
+    lease.record_runner_context(&worktree, command.unwrap_or("unknown"), resource_reason);
     let lease_id = lease.id().to_string();
     let queue_wait_ms = lease.queue_wait_ms();
     let lease = Arc::new(Mutex::new(lease));
@@ -1020,6 +1028,8 @@ mod tests {
                 queue: vec![gwt_core::index_coordinator::HeavyQueueEntry {
                     target: Some("project--verification--worktree".into()),
                     priority: JobPriority::ManualRebuild,
+                    mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
+                    scheduling_reason: None,
                     queued_at_ms: 1,
                     waiting_ms: 200,
                     resident: false,
@@ -1682,6 +1692,18 @@ mod tests {
             .unwrap();
         assert_eq!(pool.capacity, 2);
         assert_eq!(pool.used, 2);
+        let context = pool
+            .slots
+            .iter()
+            .find(|slot| slot.status.lease_id.as_deref() == first_admission.lease_id())
+            .unwrap()
+            .status
+            .holder_context
+            .as_ref()
+            .expect("status must retain the admitted command and its resource reason");
+        assert_eq!(context.action, command);
+        assert_eq!(context.project_root, first.path());
+        assert_eq!(context.qos, "resolved Cargo target uses one shared slot");
         assert!(verification_lease::try_lock_build_artifacts(&shared)
             .unwrap()
             .is_none());

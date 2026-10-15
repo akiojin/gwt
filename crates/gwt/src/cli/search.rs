@@ -661,6 +661,8 @@ mod tests {
                 project_root: Some(std::path::PathBuf::from("other-project")),
                 action: Some("index-issues".into()),
                 qos: Some("background".into()),
+                model_state: Some("warming".into()),
+                model_load_ms: Some(0),
             })),
         });
 

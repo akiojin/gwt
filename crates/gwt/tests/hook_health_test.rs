@@ -12,6 +12,341 @@ use gwt::cli::hook::{
 use gwt_agent::PendingDiscussionResume;
 use serde_json::json;
 
+#[test]
+fn issue_3713_plugin_external_skill_conflicts_are_advisory_and_enumerated_in_hook_health() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("external/commands");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        plugin.join("ship.md"),
+        "# Ship\nRun `gh pr create --title forbidden`.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let input = ManagedHookHealthInput {
+        worktree_root: root.path().to_path_buf(),
+        // This advisory-only fixture must not inherit a live Session's runtime.
+        runtime_state_path: None,
+        profile_path: None,
+        expected_hook_bin: None,
+    };
+    let health = read_managed_hook_health(&input);
+    assert_eq!(health.status, ManagedHookHealthStatus::Inactive);
+    let health = serde_json::to_value(health).unwrap();
+    let audit = &health["external_skill_conflicts"];
+    assert_eq!(audit["conflict_count"], 1);
+    assert_eq!(audit["files"].as_array().unwrap().len(), 1);
+    assert_eq!(audit["findings"][0]["line"], 2);
+    assert!(audit["findings"][0]["alternative"]
+        .as_str()
+        .unwrap()
+        .contains("pr.create"));
+    assert!(audit["findings"][0]["file"]
+        .as_str()
+        .unwrap()
+        .ends_with("commands/ship.md"));
+    fs::write(plugin.join("ship.md"), "Run `gh pr view 17`.\n").unwrap();
+    let refreshed = serde_json::to_value(read_managed_hook_health(&input)).unwrap();
+    assert_eq!(
+        refreshed["external_skill_conflicts"]["conflict_count"], 0,
+        "changed external instructions must invalidate cached diagnosis"
+    );
+    fs::write(
+        plugin.join("new.md"),
+        "Run `gh issue comment 17 --body done`.\n",
+    )
+    .unwrap();
+    let refreshed = serde_json::to_value(read_managed_hook_health(&input)).unwrap();
+    assert_eq!(
+        refreshed["external_skill_conflicts"]["conflict_count"], 1,
+        "new command files must invalidate cached diagnosis"
+    );
+}
+
+#[test]
+fn issue_3713_plugin_external_skill_scan_excludes_reads_prohibitions_and_search_strings() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("external/skills/review");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        plugin.join("SKILL.md"),
+        r#"# Review
+Run `gh pr view 17` and `gh api -X GET repos/o/r`.
+Never run `gh pr create --title bad`.
+Do not use `gh issue comment 17 --body bad`.
+Forbidden example: `gh pr merge 17`.
+Do not run the following command:
+```bash
+gh pr create --title example
+```
+```bash
+rg -n "gh pr create|gh issue close" .
+git push origin HEAD
+```
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["conflict_count"], 0);
+    assert_eq!(health["external_skill_conflicts"]["inspected_files"], 1);
+}
+
+#[test]
+fn issue_3713_plugin_external_skill_scan_reports_unavailable_explicit_roots() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("missing")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["status"], "unavailable");
+    assert!(!health["external_skill_conflicts"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn issue_3713_plugin_external_skill_scan_does_not_follow_symlinked_skills() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("external/skills")).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(outside.path().join("SKILL.md"), "Run `gh pr create`.\n").unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("external/skills/escape")).unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["conflict_count"], 0);
+    assert_eq!(health["external_skill_conflicts"]["status"], "partial");
+}
+
+#[test]
+fn issue_3713_plugin_external_skill_scan_file_limit_is_explicit_in_health() {
+    let root = tempfile::tempdir().unwrap();
+    let commands = root.path().join("external/commands");
+    fs::create_dir_all(&commands).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    for n in 0..70 {
+        fs::write(
+            commands.join(format!("{n:03}.md")),
+            "Run `gh pr view 17`.\n",
+        )
+        .unwrap();
+    }
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["inspected_files"], 64);
+    assert_eq!(health["external_skill_conflicts"]["status"], "partial");
+}
+
+#[test]
+fn issue_3713_plugin_inventory_reads_only_enabled_effective_installation() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let current = home.path().join("current/commands");
+    let inactive = home.path().join("inactive/commands");
+    for path in [&current, &inactive] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::create_dir_all(home.path().join(".claude/plugins")).unwrap();
+    fs::write(
+        home.path().join(".claude/settings.json"),
+        r#"{"enabledPlugins":{"ship@market":true,"inactive@market":false}}"#,
+    )
+    .unwrap();
+    fs::write(current.join("ship.md"), "Run `gh pr create`.\n").unwrap();
+    fs::write(inactive.join("inactive.md"), "Run `gh issue close 17`.\n").unwrap();
+    fs::write(home.path().join(".claude/plugins/installed_plugins.json"), serde_json::to_vec(&json!({"plugins": {
+        "ship@market": [{"scope":"project","projectPath":"/foreign","installPath":inactive.parent().unwrap()}, {"scope":"user","installPath":current.parent().unwrap()}],
+        "inactive@market": [{"scope":"user","installPath":inactive.parent().unwrap()}]
+    }})).unwrap()).unwrap();
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let report = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(report["external_skill_conflicts"]["conflict_count"], 1);
+    assert_eq!(
+        report["external_skill_conflicts"]["findings"][0]["plugin"],
+        "ship@market"
+    );
+    assert!(report["external_skill_conflicts"]["findings"][0]["file"]
+        .as_str()
+        .unwrap()
+        .contains("current"));
+    fs::remove_file(current.join("ship.md")).unwrap();
+    fs::remove_dir(&current).unwrap();
+    let empty = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(empty["external_skill_conflicts"]["conflict_count"], 0);
+    fs::create_dir_all(&current).unwrap();
+    fs::write(current.join("ship.md"), "Run `gh pr create`.\n").unwrap();
+    let restored = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(
+        restored["external_skill_conflicts"]["conflict_count"], 1,
+        "new instruction directories must invalidate a previously empty inventory"
+    );
+}
+
+#[test]
+fn issue_3713_plugin_pretool_advisory_targets_skill_and_keeps_authority_unchanged() {
+    use gwt::cli::hook::external_skill_conflicts::advisory_context;
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("external/commands")).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        root.path().join("external/commands/ship.md"),
+        "Run `gh pr create`.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("external/commands/merge.md"),
+        "Run `gh pr merge 17`.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let context = advisory_context(
+        "PreToolUse",
+        r#"{"tool_name":"Skill","tool_input":{"skill":"external:ship"},"activePlugin":"external"}"#,
+        root.path(),
+    )
+    .unwrap();
+    assert!(context.contains("ship.md") && context.contains("pr.create"));
+    assert!(!context.contains("merge.md"));
+    assert!(advisory_context(
+        "PreToolUse",
+        r#"{"tool_name":"Read","active_skill":"external:ship"}"#,
+        root.path()
+    )
+    .is_none());
+    let session_start = advisory_context("SessionStart", "{}", root.path()).unwrap();
+    assert!(session_start.contains("ship.md") && session_start.contains("merge.md"));
+    assert!(
+        gwt::cli::hook::block_bash_policy::evaluate_bash_command("gh pr create", root.path())
+            .is_some(),
+        "advisory identity cannot authorize GitHub writes"
+    );
+}
+
+#[test]
+fn issue_3713_plugin_actual_dispatcher_delivers_context_without_overwriting_denial() {
+    use gwt::cli::hook::event_dispatcher::handle_with_input;
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", root.path());
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+    let _session = ScopedEnvVar::remove("GWT_SESSION_ID");
+    let _runtime = ScopedEnvVar::remove("GWT_SESSION_RUNTIME_PATH");
+    let _url = ScopedEnvVar::remove("GWT_HOOK_FORWARD_URL");
+    let _token = ScopedEnvVar::remove("GWT_HOOK_FORWARD_TOKEN");
+    let _autonomous = ScopedEnvVar::remove("GWT_AUTONOMOUS_EXECUTION");
+    fs::create_dir_all(root.path().join("external/commands")).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        root.path().join("external/commands/ship.md"),
+        "Run `gh pr create`.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    for (event_name, payload) in [
+        ("SessionStart", "{}"),
+        (
+            "PreToolUse",
+            r#"{"tool_name":"Skill","tool_input":{"skill":"external:ship"}}"#,
+        ),
+    ] {
+        let output = handle_with_input(event_name, payload, root.path(), None).unwrap();
+        let mut bytes = Vec::new();
+        output.serialize_to(&mut bytes).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(wire["hookSpecificOutput"]["hookEventName"], event_name);
+        assert!(wire["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("ship.md"));
+        assert!(wire["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none());
+    }
+    let output = handle_with_input("PreToolUse", r#"{"tool_name":"Bash","tool_input":{"command":"gh pr create"},"active_skill":"external:ship"}"#, root.path(), None).unwrap();
+    let mut bytes = Vec::new();
+    output.serialize_to(&mut bytes).unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(wire["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
+fn issue_3713_plugin_shell_continuations_use_the_actual_mutation_policy() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("external/commands")).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(root.path().join("external/commands/api.md"), "# Publish\n```bash\ngh api \\\n  --method POST \\\n  repos/o/r/issues\ngh api graphql -f query='\nmutation { closeIssue(input: {issueId: \"id\"}) { clientMutationId } }\n'\n```\n").unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["conflict_count"], 2);
+    assert_eq!(health["external_skill_conflicts"]["findings"][0]["line"], 3);
+    assert_eq!(health["external_skill_conflicts"]["findings"][1]["line"], 6);
+}
+
 struct ScopedEnvVar {
     key: &'static str,
     previous: Option<std::ffi::OsString>,

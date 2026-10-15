@@ -9375,6 +9375,7 @@ impl AppRuntime {
                                 last_output_at: self.window_last_output_at.get(&window_id).map(
                                     |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                                 ),
+                                session_id: window.session_id.clone(),
                                 issue_number,
                                 status: window.status,
                                 window_id,
@@ -12989,6 +12990,9 @@ impl AppRuntime {
                         "closing the calling session requires a correlated acceptance (request_id)",
                     );
                 }
+                if let Some(reason) = self.agent_close_board_check(&principal, &id) {
+                    return refusal(&reason);
+                }
                 let outcome = self.close_window_outcome(&id);
                 let reason = (!outcome.closed)
                     .then(|| "the backend did not remove the window record".to_string());
@@ -13233,6 +13237,10 @@ impl AppRuntime {
                 target: "gwt_security",
                 "agent self-close Session changed before acceptance"
             );
+            return Vec::new();
+        }
+        if let Some(reason) = self.agent_close_board_check(grant.principal(), &own_window_id) {
+            responder.refuse(own_window_id, reason);
             return Vec::new();
         }
         let Some(window_lifecycle_generation) = self

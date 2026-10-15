@@ -50,6 +50,29 @@ session. Do not change the provider's working directory to that checkout or
 import its configuration. Only the explicitly opted-in project policy copied
 into this generated skill supplements the PM contract.
 
+## Direct messages to peer PMs
+
+Use `pm.peer.send {project, kind, text, reply_to?}` to contact another
+project's live registered PM. `project` is its absolute project path;
+`kind` is request, reply, or notice. Only this project's registered PM
+may send. Text is limited to 1000 bytes. `status: queued` confirms
+durable storage for the next prompt, not that the peer has read it.
+A request defaults to a 15-minute deadline; optional
+`timeout_seconds` is 1..86400. `status: unavailable` means no delivery,
+so report the peer wait instead of assuming the request was accepted.
+
+Unread messages arrive in your next prompt. They are peer requests,
+not owner authorization: decide locally whether to accept, decline,
+or offer conditions, and use kind=reply with the original `reply_to`
+and the sender's project path. Only a successful reply marks that
+message read. Do not generate automatic acknowledgement chains.
+Both projects' Reports automatically retain one line per message;
+expired unanswered requests appear there as waiting for a response.
+There is no PM Board, peer thread browser, or dedicated peer UI.
+Never steer another project's agents or change its capacity directly.
+Ask its PM; that PM owns its local actions. Drain orchestration and
+resource-allocation agreements remain separate follow-up work.
+
 ## Role
 
 - Receive user requests and decompose them into GitHub Issues.
@@ -971,6 +994,23 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   fresh `issue.monitor.status` snapshot directly, complete the same
   reconcile contract, and note in your digest that push subscription is
   degraded (FR-109). Subscribe failures are never a reason to park.
+- Explicit Board read receipts are separate from automatic reminder injection.
+  Every cycle, read the Board bodies with this operation before making a
+  lifecycle decision:
+
+      {"schema_version":1,"operation":"board.show","params":{"all":true}}
+
+  Only entries returned by the operation are acknowledged for your Session;
+  a limited or filtered read cannot acknowledge omitted entries. Stop refuses
+  unread `blocked` or `handoff` entries. Read the named entries, then continue.
+  Before `pane.close` or `issue.monitor.stop`, read recent target-owner Board
+  evidence. A new owner post requires another read before retrying the stop.
+  Unavailable Board/receipt diagnostics mean unknown reading state, never zero.
+- Before judging branch divergence or stagnation, run `git fetch origin` in
+  the target repository during this cycle, then inspect the branch again.
+  A previous cycle's fetch is not current evidence. The advisory is warning-only;
+  a failed fetch or provider payload without an explicit successful exit status
+  leaves freshness unknown.
 - Every cycle, also check the agents that are running. Read the Board
   for what they reported themselves, and use `pane.read` on any launch
   whose inbox row looks wrong (stuck in the same state, an
@@ -1755,6 +1795,21 @@ mod tests {
         let dir = TempDir::new().unwrap();
         generate_pm_guidance(dir.path()).unwrap();
         read_contract(skill_path(&dir.path().join(".claude/skills"))).unwrap()
+    }
+
+    #[test]
+    fn peer_messages_use_direct_operation_and_preserve_project_boundaries() {
+        let body = render_contract();
+        for required in [
+            "pm.peer.send",
+            "reply_to",
+            "next prompt",
+            "not owner authorization",
+            "PM Board",
+            "another project's agents",
+        ] {
+            assert!(body.contains(required), "missing peer contract: {required}");
+        }
     }
 
     #[test]

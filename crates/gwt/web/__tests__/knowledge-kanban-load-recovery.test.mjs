@@ -122,6 +122,19 @@ function seedListAndAuthoritativeA(surface, kind) {
   return surface.knowledgeBridgeStateMap.get("win-1");
 }
 
+test("Issue #5396: semantic list completion does not request an implicit preview", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async ({ fire }) => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    seedListAndAuthoritativeA(surface, "issue");
+    const requestId = startSearch(surface, sent, { fire });
+    const before = sent.length;
+    surface.applyKnowledgeReceiveEvent(searchResultsEvent(requestId));
+    assert.equal(sent.slice(before).filter(message => message.kind === "select_knowledge_bridge_entry").length, 0);
+  });
+});
+
 for (const kind of ["issue", "spec"]) {
   test(`selecting row B renders the local preview synchronously (${kind} preset, AS-17.4)`, async () => {
     const mod = await importSurfaceModule();
@@ -1227,10 +1240,10 @@ test("PR selection retains the baseline full-render/full-view contract", async (
         request_id: state.detailRequestId,
         number: ROW_B.number,
       });
-      assert.notStrictEqual(
+      assert.strictEqual(
         body.querySelectorAll(".kanban-card")[0],
         originalCards[0],
-        "PR selection must keep the legacy immediate full render",
+        "PR selection updates the existing card while retaining the full-view protocol",
       );
 
       const refreshedRowB = { ...ROW_B, title: "Beta PR refreshed" };
@@ -1439,7 +1452,7 @@ test("unchanged entry revisions retain rows while completing loads and preservin
       const updatedRow = element.querySelector('[data-issue-number="2"]');
       receive(undefined, [ROW_A, { ...ROW_B, title: "Legacy beta" }]);
       assert.ok(element.querySelector('[data-issue-number="2"]') !== updatedRow,
-        "events without revision retain their full-render compatibility path");
+        "changed legacy entries still update their row");
 
       receive("rows-v2");
       state.query = "Alpha";
@@ -1487,7 +1500,7 @@ test("unchanged entry revisions retain rows while completing loads and preservin
   }
 });
 
-test("500-row selection keeps list node identity and updates the right pane within p95 50ms", async () => {
+test("virtualized 500-row selection keeps mounted row identity and updates the right pane within p95 50ms", async () => {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML(`
     <section id="knowledge-window">
@@ -1548,7 +1561,7 @@ test("500-row selection keeps list node identity and updates the right pane with
 
     const list = element.querySelector(".knowledge-list");
     const originalRows = [...list.querySelectorAll(".knowledge-row")];
-    assert.equal(originalRows.length, 500);
+    assert.ok(originalRows.length > 0 && originalRows.length < 200);
     const samples = [];
     for (let index = 0; index < 40; index += 1) {
       const target = originalRows[(index * 13) % originalRows.length];

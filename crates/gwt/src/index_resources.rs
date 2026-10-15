@@ -32,19 +32,24 @@ pub struct IndexRunnerHolder {
     pub project_root: Option<PathBuf>,
     pub action: Option<String>,
     pub qos: Option<String>,
+    pub model_state: Option<String>,
+    pub model_load_ms: Option<u64>,
 }
 
 impl std::fmt::Display for IndexRunnerHolder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "repo_hash={} project_root={} action={} qos={}",
+            "repo_hash={} project_root={} action={} qos={} model_state={} model_load_ms={}",
             self.repo_hash,
             self.project_root
                 .as_ref()
                 .map_or_else(|| "unknown".to_string(), |root| root.display().to_string(),),
             self.action.as_deref().unwrap_or("unknown"),
             self.qos.as_deref().unwrap_or("unknown"),
+            self.model_state.as_deref().unwrap_or("unknown"),
+            self.model_load_ms
+                .map_or_else(|| "unknown".to_string(), |ms| ms.to_string()),
         )
     }
 }
@@ -73,6 +78,8 @@ pub(crate) fn index_runner_holder(
             .holder_context
             .as_ref()
             .map(|context| context.qos.clone()),
+        model_state: status.model_state.clone(),
+        model_load_ms: status.model_load_ms,
     })
 }
 
@@ -256,6 +263,22 @@ mod tests {
             lease_id,
             "diagnostics must preserve lease identity"
         );
+        coordinator
+            .write_heavy_progress(&gwt_core::index_coordinator::HeavyProgress {
+                target: key.file_stem(),
+                done: 0,
+                total: 40,
+                batch_size: 1,
+                batch_ms: 0,
+                updated_at_ms: coordinator
+                    .heavy_lease_status()
+                    .unwrap()
+                    .acquired_at_ms
+                    .unwrap(),
+                model_state: Some("warming".into()),
+                model_load_ms: Some(0),
+            })
+            .unwrap();
 
         let diagnostics = collect_index_resources();
         let payload = serde_json::to_value(&diagnostics).expect("diagnostics json");
@@ -266,10 +289,13 @@ mod tests {
         );
         assert_eq!(payload["heavy_holder"]["action"], "index-issues");
         assert_eq!(payload["heavy_holder"]["qos"], "background");
+        assert_eq!(payload["heavy_holder"]["model_state"], "warming");
+        assert_eq!(payload["heavy_holder"]["model_load_ms"], 0);
         let mut out = String::new();
         render_index_resources(&mut out, &diagnostics);
         assert!(out.contains("repo_hash=other-repo"), "{out}");
         assert!(out.contains("action=index-issues qos=background"), "{out}");
+        assert!(out.contains("model_state=warming model_load_ms=0"), "{out}");
     }
 
     #[test]

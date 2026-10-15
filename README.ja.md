@@ -693,6 +693,13 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
   停止します。登録済み PM は孤児化した PM を停止でき、自分自身も GUI 操作なしで
   停止できます。
 
+同じマシンの別プロジェクトの PM と相談したい場合は、相手プロジェクトの絶対パスを
+添えて自分の PM に依頼してください。登録済み PM は `pm.peer.send` で依頼・応答・
+通知を直接送り、未読メッセージは相手の次の PM prompt に届きます。双方の
+**Reports** でやり取りを追え、相手が不在の場合や期限を過ぎた応答待ちも表示されます。
+各 PM は自分のプロジェクト内で判断・操作し、メッセージによって他プロジェクトの
+エージェントを操作する権限は与えられません。
+
 設計は SPEC [#3431](https://github.com/akiojin/gwt/issues/3431) にあります。
 
 ## Knowledge、Search、Managed Skills
@@ -730,6 +737,19 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 Managed hooks は user hook を保持しながら、Agent state、workflow guardrails、
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
+
+agent の停止や pane close が Board の未読を報告した場合は、同じ agent session で
+JSON operation `board.show` に `params:{"all":true}` を渡して本文を読み、再試行します。
+自動 reminder の注入は読了として扱われません。実装 agent の判断依頼は `agent:pm`
+宛に送ります。agent の Board 投稿から `user:<id>` を指定できるのは登録済み PM だけです。
+
+JSON operation `hook.health` では、gwt の GitHub mutation policy と矛盾する外部 skill の
+コマンド、該当ファイル、代替操作を確認できます。既定では有効な Claude plugin を検査します。
+検査する skill/command directory を明示的に選ぶ場合は、`.gwt/external-skill-roots.json` に
+directory path の JSON 配列を保存します。この設定は plugin の自動検出を置き換え、
+相対 path は worktree 基準です。検査したい root をすべて含めてください。ファイルを削除すると
+自動検出へ戻ります。検査が部分的、または実行できない場合は明示されます。仕様は
+[SPEC #3393](https://github.com/akiojin/gwt/issues/3393) を参照してください。
 
 ### Hook ファイルの所有権
 

@@ -1,4 +1,8 @@
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs)
+param(
+    [string]$TestFilter = 'Issue #5287',
+    [string[]]$TestFiles = @('issue-queue-kanban.spec.ts', 'issue-monitor-board-availability.spec.ts'),
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs
+)
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $checkoutGwt = Join-Path $repoRoot 'target/debug/gwt.exe'
@@ -126,9 +130,9 @@ Module._resolveFilename = function(request, parent, ...rest) {
     & node $playwright install chromium
     if ($LASTEXITCODE) { throw 'Chromium installation failed.' }
     & node $playwright test --config (Join-Path $repoRoot 'crates/gwt/playwright/playwright.config.ts') --workers=1 `
-        --output (Join-Path $checkHome 'playwright') --grep 'Issue #5287' `
-        'issue-queue-kanban.spec.ts' 'issue-monitor-board-availability.spec.ts' @PlaywrightArgs
-    if ($LASTEXITCODE) { throw 'Issue #5287 headed verification failed.' }
+        --output (Join-Path $checkHome 'playwright') --grep $TestFilter `
+        @TestFiles @PlaywrightArgs
+    if ($LASTEXITCODE) { throw 'Issue surface headed verification failed.' }
 } finally {
     foreach ($name in $savedVars.Keys) { [Environment]::SetEnvironmentVariable($name, $savedVars[$name], 'Process') }
     if ($anchorSocket) { $anchorSocket.Abort(); $anchorSocket.Dispose() }

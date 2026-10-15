@@ -25,8 +25,7 @@ fn evaluate_bash_command_without_observation(
         .or_else(|| block_file_ops::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_git_dir_override::evaluate_bash_command_in(command, command_cwd))
         .or_else(|| evaluate_long_pr_ci_polling_sleep(command))
-        .or_else(|| evaluate_github_workflow_cli(command))
-        .or_else(|| evaluate_github_mutation_sinks(command));
+        .or_else(|| github_mutation_policy(command));
     if decision.is_none() {
         record_agent_gh_spend(command, &gwt_core::github_budget::BudgetLedger::global());
     }
@@ -130,6 +129,12 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
         }
     }
     None
+}
+
+/// Pure policy diagnosis shared by enforcement and external-skill advisories.
+/// It deliberately does not record budget spend or effect observations.
+pub(crate) fn github_mutation_policy(command: &str) -> Option<HookOutput> {
+    evaluate_github_workflow_cli(command).or_else(|| evaluate_github_mutation_sinks(command))
 }
 
 /// The inherited repository flag may precede either the category or its verb.

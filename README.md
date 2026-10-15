@@ -755,6 +755,13 @@ unchanged.
   one from the CLI — a registered PM can retire an orphan or stand down itself
   without a GUI click.
 
+Ask your PM to consult another project's PM on the same machine, giving the
+other project's absolute path. Registered PMs use `pm.peer.send` for direct
+requests, replies, and notices; unread messages arrive at the next PM prompt.
+Both projects' **Reports** show the exchange, including unavailable peers and
+requests waiting past their deadline. Each PM decides and acts only within its
+own project; peer messages do not grant control over another project's agents.
+
 The design lives in SPEC
 [#3431](https://github.com/akiojin/gwt/issues/3431).
 
@@ -794,6 +801,21 @@ entrypoints are:
 Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
+
+If an agent stop or pane close reports unread Board evidence, read the bodies
+in that same agent session with JSON operation `board.show` and
+`params:{"all":true}`, then retry. Automatic reminders do not acknowledge a
+read. Implementation agents send decision requests to `agent:pm`; only the
+registered PM may address a `user:<id>` from an agent Board post.
+
+JSON operation `hook.health` lists external skill commands that conflict with
+gwt's GitHub mutation policy, together with the affected files and alternatives.
+By default it inspects enabled Claude plugins. To select explicit skill/command
+roots instead, put a JSON array of directory paths in
+`.gwt/external-skill-roots.json`; this replaces automatic plugin discovery, and
+relative paths resolve from the worktree. Include every root you want checked,
+or remove the file to restore automatic discovery. A partial or unavailable scan
+is reported explicitly. See [SPEC #3393](https://github.com/akiojin/gwt/issues/3393).
 
 ### Hook file ownership
 

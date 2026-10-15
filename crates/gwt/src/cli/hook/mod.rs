@@ -19,6 +19,7 @@ pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
+pub(crate) mod branch_freshness;
 mod context;
 pub mod coordination_event;
 pub mod diagnostics;
@@ -26,6 +27,7 @@ pub mod effect_classifier;
 pub mod envelope;
 pub mod event_dispatcher;
 pub mod execution_control_stop_check;
+pub mod external_skill_conflicts;
 pub mod forward;
 pub mod health;
 mod identity;
@@ -149,6 +151,9 @@ pub struct HookEvent {
     pub tool_input: Option<serde_json::Value>,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
+    /// Advisory provenance only; these fields never grant authority.
+    pub active_skill: Option<String>,
+    pub active_plugin: Option<String>,
 }
 
 impl HookEvent {

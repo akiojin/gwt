@@ -4908,6 +4908,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // runtime read-only, so the live output streams but no input path exists.
         createTerminalRuntime: (id, terminalRoot, options) =>
           createTerminalRuntime(id, terminalRoot, { ...options, readOnly: Boolean(agentsHost) || options?.readOnly }),
+        isAgentsSurfaceMounted: () => Boolean(agentsHost),
         windowDisplayTitle,
         windowRoleBadgeLabel,
         // SPEC-3671 FR-010: Windowize is the same Canvas handoff the Agent Kanban

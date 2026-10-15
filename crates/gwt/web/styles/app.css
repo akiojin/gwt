@@ -2105,6 +2105,12 @@ body {
   display: grid;
 }
 
+.knowledge-virtual-spacer {
+  flex: 0 0 auto;
+  pointer-events: none;
+  overflow-anchor: none;
+}
+
 .knowledge-state-filter {
   display: inline-flex;
   align-items: center;

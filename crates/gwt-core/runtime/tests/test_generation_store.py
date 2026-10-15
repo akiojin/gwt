@@ -59,6 +59,19 @@ def _make_project(base: Path, docs: int) -> Path:
 
 
 class GenerationStoreTests(unittest.TestCase):
+    def test_staging_count_error_never_publishes_an_empty_generation(self):
+        collection = mock.Mock()
+        collection.count.side_effect = RuntimeError("count unavailable")
+        with mock.patch.object(
+            runner, "_open_chroma_collection", return_value=(mock.Mock(), collection)
+        ), mock.patch.object(runner, "_publish_generation") as publish:
+            result = runner._finish_full_build(
+                self.base / "board", self.base / "board.staging", "board"
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["error_code"], "BUILD_VERIFY_FAILED")
+        publish.assert_not_called()
+
     def setUp(self):
         runner._MODEL_CACHE = None
         self._tmp = tempfile.TemporaryDirectory()

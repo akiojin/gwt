@@ -14,6 +14,7 @@ pub mod backend_service;
 pub mod board_audience;
 pub mod board_discussion_sync;
 pub mod board_provider;
+pub mod board_read_receipts;
 pub mod board_remote;
 pub mod branch_cleanup;
 pub mod branch_list;
