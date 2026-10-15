@@ -66,6 +66,12 @@ test.describe("Surface rail", () => {
     await auxiliary.getByRole("tab", { name: "Project Manager", exact: true }).click();
     await openPm();
     expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await expect(main.locator(".agent-tile")).toHaveCount(4);
+    await expect(main.locator('[data-agent-id="start-work-shell"]')).toContainText("Interactive");
+    await page.locator('[data-agent-id="start-work-shell"] .xterm-helper-textarea').press("s");
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "start-work-shell", data: "s" });
+    await openPm();
     await page.locator("#op-pm-settings-button").click();
     await page.reload();
     await openPm();
@@ -84,12 +90,10 @@ test.describe("Surface rail", () => {
     await openPm();
     await expectPm();
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
-    await expect(main.locator(".agent-tile")).toHaveCount(4);
-    await expect(main.locator('[data-agent-id="start-work-shell"]')).toContainText("Interactive");
+    await expect(main.locator(".agent-tile")).toHaveCount(3);
+    await expect(main.locator('[data-agent-id="start-work-shell"]')).toHaveCount(0);
     await expect(main.locator('[data-agent-id="pm-window"]')).toHaveCount(0);
     await expect(page.locator("#split-view-button")).toBeEnabled();
-    await page.locator('[data-agent-id="start-work-shell"] .xterm-helper-textarea').press("s");
-    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "start-work-shell", data: "s" });
     await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "launch_wizard_open_error", title: "Start Work", message: "Fixture opening state" }));
     await expect(page.locator("#wizard-modal")).toBeVisible();
     await expect(main).toHaveAttribute("data-surface", "agents");
@@ -789,7 +793,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
           if (index >= 0) windows.splice(index, 1);
           this.emit(workspaceState());
         }
-        if (ownership) sessionStorage.setItem("surface-ownership-windows", JSON.stringify(windows));
+        if (ownership) sessionStorage.setItem("surface-ownership-windows", JSON.stringify(windows.filter(windowData => windowData.persist !== false)));
         if (message.kind === "activate_window_tab") {
           const target = windows.find((data) => data.id === message.id);
           if (target?.tab_group_id) {
