@@ -207,6 +207,29 @@ test("receive recovery requests pane and open surface snapshots only on the owni
   assert.equal(sockets.at(-1).sent.length, 1, "a stale dispatcher cannot resync a replacement socket");
 });
 
+test("native foreground recovery does not require an observed hidden event", () => {
+  const document = { hidden: false };
+  let resumes = 0;
+  let refreshes = 0;
+  const refresh = () => { refreshes++; };
+  const handlerSource = source.split('document.addEventListener("visibilitychange", ')[1].split("\n      });")[0] + "\n}";
+  const handler = vm.runInNewContext(`(${handlerSource})`, {
+    document,
+    socketReceiveDispatcher: { resume() { resumes++; } },
+    rearmVisibleTerminalViewportRefreshes: refresh,
+    resumeKnowledgeEventRefresh: refresh, refreshVisibleKnowledgeWindows: refresh,
+  });
+  handler({ isTrusted: true });
+  assert.equal(resumes, 1, "native restore can arrive without a preceding hidden event");
+  handler({ isTrusted: false });
+  assert.equal(resumes, 1, "pane visibility notifications must not reset socket recovery");
+  assert.equal(refreshes, 6, "both visible notifications retain the existing display refreshes");
+  document.hidden = true;
+  handler({ isTrusted: true });
+  assert.equal(resumes, 1, "backgrounding never requests snapshots");
+  assert.equal(refreshes, 6);
+});
+
 
 test("Reports history survives disconnect while the Project reconnects", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });

@@ -7826,14 +7826,14 @@ import { createUiStateStore } from "/ui-state-store.js";
         scheduleFit: scheduleTerminalFit,
         markPending: markTerminalViewportRefreshPending,
       });
-      let wasDocumentHidden = document.hidden;
-      document.addEventListener("visibilitychange", () => {
-        const wasHidden = wasDocumentHidden;
-        wasDocumentHidden = document.hidden;
-        if (wasDocumentHidden) {
+      document.addEventListener("visibilitychange", (event) => {
+        if (document.hidden) {
           return;
         }
-        if (wasHidden) socketReceiveDispatcher?.resume?.();
+        // Pane visibility notifications also use this event. Only a native
+        // foreground event should discard the receive backlog; a hidden
+        // event need not have reached this document before the restore.
+        if (event.isTrusted) socketReceiveDispatcher?.resume?.();
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
         refreshVisibleKnowledgeWindows();
