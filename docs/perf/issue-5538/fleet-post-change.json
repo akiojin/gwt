@@ -1,0 +1,2940 @@
+{
+  "issue": 5538,
+  "dark": {
+    "issue": 5538,
+    "theme": "dark",
+    "passed": true,
+    "fixture": {
+      "gui_pid": 39712,
+      "gui_started_at": "2026-10-15T19:40:57.8437078Z",
+      "binary_sha256": "1135DE39E245887B8C294B464839F9ADFACA5839D9891C7531811BEBBE112EAE",
+      "source_snapshot": [
+        {
+          "blob_sha": "c8fa58a7366fdfb8331d4a943e67db95f0070940",
+          "path": "crates/gwt/src/main.rs"
+        },
+        {
+          "blob_sha": "f1137b4bf0b717a781079fd4a3f69bc87b7e9efd",
+          "path": "crates/gwt/src/app_runtime/mod.rs"
+        },
+        {
+          "blob_sha": "b2cc147e72aeb48d84df4c4ac67324f5054b92fc",
+          "path": "crates/gwt/src/perf/dispatch.rs"
+        },
+        {
+          "blob_sha": "80df734832b695519f30a9c00c0a349e5ac9d331",
+          "path": "crates/gwt/src/perf/mod.rs"
+        },
+        {
+          "blob_sha": "3fcb54a6332269332669caa7ba9a50a873d90673",
+          "path": "crates/gwt/src/perf/record.rs"
+        },
+        {
+          "blob_sha": "54cfea8d52df2f8565667849b6e184b6a94b420d",
+          "path": "crates/gwt/src/perf/global.rs"
+        }
+      ],
+      "checkout_sha": "408a80e3dceff0c7be46df8d6f84e735b1388973",
+      "fleet": true
+    },
+    "workload": "8 real builtin Codex agents executing a fixture command; 5s heartbeat and private progress receipts",
+    "observation_started_at": "2026-10-15T19:46:52.352Z",
+    "observation_ended_at": "2026-10-15T20:17:03.855Z",
+    "elapsed_ms": 1811503.1713999999,
+    "dispatch_summary_observed": true,
+    "dispatch_summary_rows": [
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:48:00.137087200Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60351.0166,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:48:00.137087200Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:49:00.599626600Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60462.5399,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:49:00.599626600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:50:00.622932900Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60023.3062,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:50:00.622932900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:51:00.623891500Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.9583,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:51:00.623891500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:52:00.625360Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60001.4685,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:52:00.625360Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:53:00.693920500Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60068.5606,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:53:00.693920500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:54:00.694884900Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.9645,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:54:00.694884900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:55:00.695392100Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.507399999995,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:55:00.695392100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:56:00.696202900Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.8108,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:56:00.696202900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:57:00.697115400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.9121,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:57:00.697115400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:58:00.697823900Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.7085,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:58:00.697823900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:59:00.698654100Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.8306,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:59:00.698654100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:00:00.698812400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.1585,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:00:00.698812400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:01:00.699531400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.718499999995,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:01:00.699531400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:02:00.700226200Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.695,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:02:00.700226200Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:03:00.700991300Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.764599999995,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:03:00.700991300Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:04:00.701480800Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.490300000005,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:04:00.701480800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:05:00.705317300Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60003.835600000006,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:05:00.705317300Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:06:00.705745Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.4284,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:06:00.705745Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:07:00.706579400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.8343,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:07:00.706579400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:08:00.707453900Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.8744,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:08:00.707453900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:09:00.708130500Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.676699999996,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:09:00.708130500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:10:00.708892700Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.7622,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:10:00.708892700Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:11:00.709797100Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.9046,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:11:00.709797100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:12:00.710529800Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.7329,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:12:00.710529800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:13:00.711604900Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60001.074799999995,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:13:00.711604900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:14:00.712260400Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.6557,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:14:00.712260400Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:15:00.879580Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60167.31939999999,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:15:00.879580Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:16:00.883151900Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60003.5703,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:16:00.883151900Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T20:17:00.883621200Z",
+        "stream": "ui",
+        "target": "gui:event_loop",
+        "value": 0,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 0,
+          "total_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0,
+          "pending_max": null,
+          "pending_unknown_count": 0,
+          "window_ms": 60000.469600000004,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T20:17:00.883621200Z"
+        }
+      }
+    ],
+    "complete_window_count": 30,
+    "complete_window_ms": 1801097.5498,
+    "warmup_or_boundary_rows": [
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:41:58.065243600Z",
+        "stream": "ui",
+        "target": "handler:FrontendReady",
+        "value": 140.0633,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 2,
+          "total_ms": 140.0633,
+          "p95_ms": 89.3099,
+          "max_ms": 89.3099,
+          "pending_max": 9,
+          "pending_unknown_count": 0,
+          "window_ms": 60025.7339,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:41:58.065243600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:41:58.065243600Z",
+        "stream": "ui",
+        "target": "handler:LaunchWizardLaunchMaterializationRequested",
+        "value": 404.93,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 404.93,
+          "p95_ms": 404.93,
+          "max_ms": 404.93,
+          "pending_max": 7,
+          "pending_unknown_count": 0,
+          "window_ms": 60025.7339,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:41:58.065243600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:41:58.065243600Z",
+        "stream": "ui",
+        "target": "handler:ListIssueMonitor",
+        "value": 581.1027999999999,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 2,
+          "total_ms": 581.1027999999999,
+          "p95_ms": 471.82059999999996,
+          "max_ms": 471.82059999999996,
+          "pending_max": 14,
+          "pending_unknown_count": 0,
+          "window_ms": 60025.7339,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:41:58.065243600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:41:58.065243600Z",
+        "stream": "ui",
+        "target": "handler:MainEventsCleared",
+        "value": 414.12710000000004,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 414.12710000000004,
+          "p95_ms": 414.12710000000004,
+          "max_ms": 414.12710000000004,
+          "pending_max": 1,
+          "pending_unknown_count": 0,
+          "window_ms": 60025.7339,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:41:58.065243600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:41:58.065243600Z",
+        "stream": "ui",
+        "target": "handler:ProviderUsageSnapshot",
+        "value": 687.3231,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 3,
+          "total_ms": 687.3231,
+          "p95_ms": 564.0018,
+          "max_ms": 564.0018,
+          "pending_max": 11,
+          "pending_unknown_count": 0,
+          "window_ms": 60025.7339,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:41:58.065243600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:41:58.065243600Z",
+        "stream": "ui",
+        "target": "handler:StartupAutoResumeReady",
+        "value": 536.3774999999999,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 536.3774999999999,
+          "p95_ms": 536.3774999999999,
+          "max_ms": 536.3774999999999,
+          "pending_max": 9,
+          "pending_unknown_count": 0,
+          "window_ms": 60025.7339,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:41:58.065243600Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:42:59.292043100Z",
+        "stream": "ui",
+        "target": "handler:FrontendReady",
+        "value": 741.7904,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 2,
+          "total_ms": 741.7904,
+          "p95_ms": 656.3224,
+          "max_ms": 656.3224,
+          "pending_max": 2,
+          "pending_unknown_count": 0,
+          "window_ms": 61226.7917,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:42:59.292043100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:42:59.292043100Z",
+        "stream": "ui",
+        "target": "handler:LaunchWizardLaunchMaterializationRequested",
+        "value": 500.47909999999996,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 500.47909999999996,
+          "p95_ms": 500.47909999999996,
+          "max_ms": 500.47909999999996,
+          "pending_max": 3,
+          "pending_unknown_count": 0,
+          "window_ms": 61226.7917,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:42:59.292043100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:42:59.292043100Z",
+        "stream": "ui",
+        "target": "handler:MainEventsCleared",
+        "value": 785.1984,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 2,
+          "total_ms": 785.1984,
+          "p95_ms": 400.57739999999995,
+          "max_ms": 400.57739999999995,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 61226.7917,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:42:59.292043100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:42:59.292043100Z",
+        "stream": "ui",
+        "target": "handler:NewEvents",
+        "value": 1188.9689,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 3,
+          "total_ms": 1188.9689,
+          "p95_ms": 437.9583,
+          "max_ms": 437.9583,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 61226.7917,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:42:59.292043100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:42:59.292043100Z",
+        "stream": "ui",
+        "target": "handler:ProviderUsageSnapshot",
+        "value": 1950.8088,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 2,
+          "total_ms": 1950.8088,
+          "p95_ms": 1789.2385,
+          "max_ms": 1789.2385,
+          "pending_max": 15,
+          "pending_unknown_count": 0,
+          "window_ms": 61226.7917,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:42:59.292043100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:42:59.292043100Z",
+        "stream": "ui",
+        "target": "handler:RuntimeOutput",
+        "value": 477.7887,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 477.7887,
+          "p95_ms": 477.7887,
+          "max_ms": 477.7887,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 61226.7917,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:42:59.292043100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:43:59.481098500Z",
+        "stream": "ui",
+        "target": "handler:FrontendReady",
+        "value": 1586.7658999999999,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 3,
+          "total_ms": 1586.7658999999999,
+          "p95_ms": 549.7685,
+          "max_ms": 549.7685,
+          "pending_max": 13,
+          "pending_unknown_count": 0,
+          "window_ms": 60189.0634,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:43:59.481098500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:43:59.481098500Z",
+        "stream": "ui",
+        "target": "handler:IssueMonitorCapacityChanged",
+        "value": 425.3854,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 425.3854,
+          "p95_ms": 425.3854,
+          "max_ms": 425.3854,
+          "pending_max": 7,
+          "pending_unknown_count": 0,
+          "window_ms": 60189.0634,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:43:59.481098500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:43:59.481098500Z",
+        "stream": "ui",
+        "target": "handler:LaunchWizardRuntimeResolved",
+        "value": 452.89410000000004,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 452.89410000000004,
+          "p95_ms": 452.89410000000004,
+          "max_ms": 452.89410000000004,
+          "pending_max": 7,
+          "pending_unknown_count": 0,
+          "window_ms": 60189.0634,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:43:59.481098500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:43:59.481098500Z",
+        "stream": "ui",
+        "target": "handler:MainEventsCleared",
+        "value": 1482.5555,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 4,
+          "total_ms": 1482.5555,
+          "p95_ms": 446.848,
+          "max_ms": 446.848,
+          "pending_max": 2,
+          "pending_unknown_count": 0,
+          "window_ms": 60189.0634,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:43:59.481098500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:43:59.481098500Z",
+        "stream": "ui",
+        "target": "handler:NewEvents",
+        "value": 1913.7003,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 6,
+          "total_ms": 1913.7003,
+          "p95_ms": 532.4765,
+          "max_ms": 532.4765,
+          "pending_max": 1,
+          "pending_unknown_count": 0,
+          "window_ms": 60189.0634,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:43:59.481098500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:43:59.481098500Z",
+        "stream": "ui",
+        "target": "handler:OpenActiveWorkLaunchWizard",
+        "value": 56.01,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 56.01,
+          "p95_ms": 56.01,
+          "max_ms": 56.01,
+          "pending_max": 2,
+          "pending_unknown_count": 0,
+          "window_ms": 60189.0634,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:43:59.481098500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:43:59.481098500Z",
+        "stream": "ui",
+        "target": "handler:ProviderUsageSnapshot",
+        "value": 1735.789,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 4,
+          "total_ms": 1735.789,
+          "p95_ms": 542.7471,
+          "max_ms": 542.7471,
+          "pending_max": 7,
+          "pending_unknown_count": 0,
+          "window_ms": 60189.0634,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:43:59.481098500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:43:59.481098500Z",
+        "stream": "ui",
+        "target": "handler:RuntimeDaemonEnsureTick",
+        "value": 538.4203,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 2,
+          "total_ms": 538.4203,
+          "p95_ms": 323.2726,
+          "max_ms": 323.2726,
+          "pending_max": 3,
+          "pending_unknown_count": 0,
+          "window_ms": 60189.0634,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:43:59.481098500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:43:59.481098500Z",
+        "stream": "ui",
+        "target": "handler:RuntimeOutput",
+        "value": 1717.8775,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 4,
+          "total_ms": 1717.8775,
+          "p95_ms": 534.9300999999999,
+          "max_ms": 534.9300999999999,
+          "pending_max": 10,
+          "pending_unknown_count": 0,
+          "window_ms": 60189.0634,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:43:59.481098500Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:44:59.486712800Z",
+        "stream": "ui",
+        "target": "handler:IssueMonitorCapacityChanged",
+        "value": 62.374199999999995,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 62.374199999999995,
+          "p95_ms": 62.374199999999995,
+          "max_ms": 62.374199999999995,
+          "pending_max": 9,
+          "pending_unknown_count": 0,
+          "window_ms": 60005.6138,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:44:59.486712800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:44:59.486712800Z",
+        "stream": "ui",
+        "target": "handler:MainEventsCleared",
+        "value": 2025.2541999999999,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 5,
+          "total_ms": 2025.2541999999999,
+          "p95_ms": 474.32980000000003,
+          "max_ms": 474.32980000000003,
+          "pending_max": 3,
+          "pending_unknown_count": 0,
+          "window_ms": 60005.6138,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:44:59.486712800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:44:59.486712800Z",
+        "stream": "ui",
+        "target": "handler:NewEvents",
+        "value": 1217.4777,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 4,
+          "total_ms": 1217.4777,
+          "p95_ms": 413.4021,
+          "max_ms": 413.4021,
+          "pending_max": 1,
+          "pending_unknown_count": 0,
+          "window_ms": 60005.6138,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:44:59.486712800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:44:59.486712800Z",
+        "stream": "ui",
+        "target": "handler:ProviderUsageSnapshot",
+        "value": 660.9920000000001,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 2,
+          "total_ms": 660.9920000000001,
+          "p95_ms": 588.2431,
+          "max_ms": 588.2431,
+          "pending_max": 9,
+          "pending_unknown_count": 0,
+          "window_ms": 60005.6138,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:44:59.486712800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:44:59.486712800Z",
+        "stream": "ui",
+        "target": "handler:RedrawEventsCleared",
+        "value": 750.4644000000001,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 2,
+          "total_ms": 750.4644000000001,
+          "p95_ms": 381.8147,
+          "max_ms": 381.8147,
+          "pending_max": 7,
+          "pending_unknown_count": 0,
+          "window_ms": 60005.6138,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:44:59.486712800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:44:59.486712800Z",
+        "stream": "ui",
+        "target": "handler:RuntimeDaemonEnsureTick",
+        "value": 72.4316,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 72.4316,
+          "p95_ms": 72.4316,
+          "max_ms": 72.4316,
+          "pending_max": 3,
+          "pending_unknown_count": 0,
+          "window_ms": 60005.6138,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:44:59.486712800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:45:59.496398800Z",
+        "stream": "ui",
+        "target": "handler:IssueMonitorCapacityChanged",
+        "value": 796.4141999999999,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 2,
+          "total_ms": 796.4141999999999,
+          "p95_ms": 420.0481,
+          "max_ms": 420.0481,
+          "pending_max": 7,
+          "pending_unknown_count": 0,
+          "window_ms": 60009.686,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:45:59.496398800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:45:59.496398800Z",
+        "stream": "ui",
+        "target": "handler:NewEvents",
+        "value": 1550.1262000000002,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 4,
+          "total_ms": 1550.1262000000002,
+          "p95_ms": 439.4017,
+          "max_ms": 439.4017,
+          "pending_max": 2,
+          "pending_unknown_count": 0,
+          "window_ms": 60009.686,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:45:59.496398800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:45:59.496398800Z",
+        "stream": "ui",
+        "target": "handler:ProviderUsageSnapshot",
+        "value": 459.6582,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 459.6582,
+          "p95_ms": 459.6582,
+          "max_ms": 459.6582,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60009.686,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:45:59.496398800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:45:59.496398800Z",
+        "stream": "ui",
+        "target": "handler:RuntimeOutput",
+        "value": 919.638,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 3,
+          "total_ms": 919.638,
+          "p95_ms": 361.3641,
+          "max_ms": 361.3641,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60009.686,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:45:59.496398800Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:46:59.786070100Z",
+        "stream": "ui",
+        "target": "handler:IssueMonitorCapacityChanged",
+        "value": 389.9056,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 389.9056,
+          "p95_ms": 389.9056,
+          "max_ms": 389.9056,
+          "pending_max": 7,
+          "pending_unknown_count": 0,
+          "window_ms": 60289.6717,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:46:59.786070100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:46:59.786070100Z",
+        "stream": "ui",
+        "target": "handler:ProviderUsageSnapshot",
+        "value": 223.1582,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 223.1582,
+          "p95_ms": 223.1582,
+          "max_ms": 223.1582,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60289.6717,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:46:59.786070100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:46:59.786070100Z",
+        "stream": "ui",
+        "target": "handler:RedrawEventsCleared",
+        "value": 377.916,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 377.916,
+          "p95_ms": 377.916,
+          "max_ms": 377.916,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60289.6717,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:46:59.786070100Z"
+        }
+      },
+      {
+        "schema_version": 1,
+        "type": "gui_dispatch_summary",
+        "timestamp": "2026-10-15T19:46:59.786070100Z",
+        "stream": "ui",
+        "target": "handler:RuntimeOutput",
+        "value": 446.40229999999997,
+        "unit": "ms",
+        "dispatch": {
+          "pid": 39712,
+          "count": 1,
+          "total_ms": 446.40229999999997,
+          "p95_ms": 446.40229999999997,
+          "max_ms": 446.40229999999997,
+          "pending_max": 0,
+          "pending_unknown_count": 0,
+          "window_ms": 60289.6717,
+          "dropped_windows": 0,
+          "window_ended_at": "2026-10-15T19:46:59.786070100Z"
+        }
+      }
+    ],
+    "top10": [],
+    "limitations": "Only completed >50ms handlers are profiled. Full summary windows strictly inside the measurement interval form top10; warmup and boundary rows are retained separately. An absent summary is not proof of zero stalls or of collector operation. This heartbeat workload writes private progress receipts and does not cover implementation builds.",
+    "browser_errors": [],
+    "user_verification_result": "n/a (autonomous)",
+    "agent_visual_check": "pass",
+    "fleet_sample_count": 234
+  },
+  "light": {
+    "issue": 5538,
+    "theme": "light",
+    "passed": true,
+    "browser_errors": [],
+    "user_verification_result": "n/a (autonomous)",
+    "agent_visual_check": "pass",
+    "dispatch_summary_observed": true
+  },
+  "shutdown": {
+    "owned_gui_stopped": true,
+    "stopped_at": "2026-10-15T20:18:49.8412163Z",
+    "test_exit_code": 0,
+    "cleanup_errors": []
+  },
+  "private_auth_removed": true,
+  "owned_processes": [
+    {
+      "pid": 30784,
+      "parent_pid": 39712,
+      "name": "hermes.exe",
+      "started_at": "2026-10-15T19:41:19.2750380Z"
+    },
+    {
+      "pid": 36048,
+      "parent_pid": 30784,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:19.3137000Z"
+    },
+    {
+      "pid": 50748,
+      "parent_pid": 30784,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:41:19.3396990Z"
+    },
+    {
+      "pid": 47404,
+      "parent_pid": 39712,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:20.9432760Z"
+    },
+    {
+      "pid": 43536,
+      "parent_pid": 39712,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:41:20.9522080Z"
+    },
+    {
+      "pid": 39744,
+      "parent_pid": 43536,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:41:21.0464380Z"
+    },
+    {
+      "pid": 43112,
+      "parent_pid": 50748,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:41:24.2464870Z"
+    },
+    {
+      "pid": 42408,
+      "parent_pid": 43112,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:24.2536720Z"
+    },
+    {
+      "pid": 31720,
+      "parent_pid": 39744,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:41:25.7578070Z"
+    },
+    {
+      "pid": 17176,
+      "parent_pid": 39712,
+      "name": "cmd.exe",
+      "started_at": "2026-10-15T19:41:25.7922160Z"
+    },
+    {
+      "pid": 36472,
+      "parent_pid": 39712,
+      "name": "cmd.exe",
+      "started_at": "2026-10-15T19:41:25.7978410Z"
+    },
+    {
+      "pid": 48816,
+      "parent_pid": 17176,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:25.8001930Z"
+    },
+    {
+      "pid": 43308,
+      "parent_pid": 39712,
+      "name": "cmd.exe",
+      "started_at": "2026-10-15T19:41:25.8020930Z"
+    },
+    {
+      "pid": 51984,
+      "parent_pid": 36472,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:25.8045590Z"
+    },
+    {
+      "pid": 36196,
+      "parent_pid": 39712,
+      "name": "cmd.exe",
+      "started_at": "2026-10-15T19:41:25.8066970Z"
+    },
+    {
+      "pid": 53584,
+      "parent_pid": 43308,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:25.8089770Z"
+    },
+    {
+      "pid": 48100,
+      "parent_pid": 36196,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:25.8141820Z"
+    },
+    {
+      "pid": 15008,
+      "parent_pid": 31720,
+      "name": "codex.exe",
+      "started_at": "2026-10-15T19:41:26.8820100Z"
+    },
+    {
+      "pid": 16648,
+      "parent_pid": 43308,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:41:27.5221060Z"
+    },
+    {
+      "pid": 32876,
+      "parent_pid": 17176,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:41:27.5250590Z"
+    },
+    {
+      "pid": 49852,
+      "parent_pid": 36472,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:41:27.5307130Z"
+    },
+    {
+      "pid": 41856,
+      "parent_pid": 36196,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:41:27.5321870Z"
+    },
+    {
+      "pid": 34092,
+      "parent_pid": 15008,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:41:34.0516160Z"
+    },
+    {
+      "pid": 30192,
+      "parent_pid": 34092,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:34.6090550Z"
+    },
+    {
+      "pid": 37584,
+      "parent_pid": 39712,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:34.6923960Z"
+    },
+    {
+      "pid": 36968,
+      "parent_pid": 39712,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:41:34.7128920Z"
+    },
+    {
+      "pid": 48776,
+      "parent_pid": 36968,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:41:35.2066750Z"
+    },
+    {
+      "pid": 30860,
+      "parent_pid": 34092,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:41:36.9857300Z"
+    },
+    {
+      "pid": 6556,
+      "parent_pid": 48776,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:41:39.3579090Z"
+    },
+    {
+      "pid": 40624,
+      "parent_pid": 6556,
+      "name": "codex.exe",
+      "started_at": "2026-10-15T19:41:40.7708840Z"
+    },
+    {
+      "pid": 11496,
+      "parent_pid": 40624,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:41:47.1576070Z"
+    },
+    {
+      "pid": 51460,
+      "parent_pid": 39712,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:47.6617750Z"
+    },
+    {
+      "pid": 52756,
+      "parent_pid": 11496,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:47.9242670Z"
+    },
+    {
+      "pid": 47740,
+      "parent_pid": 39712,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:41:47.9269700Z"
+    },
+    {
+      "pid": 17020,
+      "parent_pid": 47740,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:41:49.4409240Z"
+    },
+    {
+      "pid": 12680,
+      "parent_pid": 11496,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:41:49.5890150Z"
+    },
+    {
+      "pid": 6628,
+      "parent_pid": 17020,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:41:54.5845330Z"
+    },
+    {
+      "pid": 6100,
+      "parent_pid": 15008,
+      "name": "codex-code-mode-host.exe",
+      "started_at": "2026-10-15T19:41:55.2213680Z"
+    },
+    {
+      "pid": 15088,
+      "parent_pid": 6100,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:55.2352140Z"
+    },
+    {
+      "pid": 46180,
+      "parent_pid": 6628,
+      "name": "codex.exe",
+      "started_at": "2026-10-15T19:41:55.2900270Z"
+    },
+    {
+      "pid": 21568,
+      "parent_pid": 15008,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:41:55.4318340Z"
+    },
+    {
+      "pid": 25032,
+      "parent_pid": 21568,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:41:57.1627360Z"
+    },
+    {
+      "pid": 35284,
+      "parent_pid": 21568,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:41:58.6493630Z"
+    },
+    {
+      "pid": 31824,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:42:01.3155680Z"
+    },
+    {
+      "pid": 25936,
+      "parent_pid": 31824,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:01.3513110Z"
+    },
+    {
+      "pid": 31284,
+      "parent_pid": 46180,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:01.3739300Z"
+    },
+    {
+      "pid": 50188,
+      "parent_pid": 31824,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:42:01.3799770Z"
+    },
+    {
+      "pid": 41340,
+      "parent_pid": 31284,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:02.0291610Z"
+    },
+    {
+      "pid": 28856,
+      "parent_pid": 39712,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:02.1186030Z"
+    },
+    {
+      "pid": 10800,
+      "parent_pid": 39712,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:42:02.1314520Z"
+    },
+    {
+      "pid": 51152,
+      "parent_pid": 10800,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:02.6376210Z"
+    },
+    {
+      "pid": 37892,
+      "parent_pid": 35284,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:42:04.2977670Z"
+    },
+    {
+      "pid": 47152,
+      "parent_pid": 31284,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:42:04.3135350Z"
+    },
+    {
+      "pid": 50816,
+      "parent_pid": 37892,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:42:06.2432520Z"
+    },
+    {
+      "pid": 53332,
+      "parent_pid": 50816,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:06.6568680Z"
+    },
+    {
+      "pid": 39368,
+      "parent_pid": 51152,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:42:07.8463620Z"
+    },
+    {
+      "pid": 42568,
+      "parent_pid": 15008,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:08.7138760Z"
+    },
+    {
+      "pid": 37548,
+      "parent_pid": 39368,
+      "name": "codex.exe",
+      "started_at": "2026-10-15T19:42:08.7470850Z"
+    },
+    {
+      "pid": 31372,
+      "parent_pid": 40624,
+      "name": "codex-code-mode-host.exe",
+      "started_at": "2026-10-15T19:42:09.0781280Z"
+    },
+    {
+      "pid": 48884,
+      "parent_pid": 31372,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:09.2540550Z"
+    },
+    {
+      "pid": 46640,
+      "parent_pid": 42568,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:09.6369800Z"
+    },
+    {
+      "pid": 4532,
+      "parent_pid": 42568,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:42:13.1932710Z"
+    },
+    {
+      "pid": 41156,
+      "parent_pid": 37548,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:16.8055120Z"
+    },
+    {
+      "pid": 31820,
+      "parent_pid": 41156,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:17.3604130Z"
+    },
+    {
+      "pid": 46656,
+      "parent_pid": 39712,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:18.7709410Z"
+    },
+    {
+      "pid": 48540,
+      "parent_pid": 39712,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:42:18.8145230Z"
+    },
+    {
+      "pid": 24052,
+      "parent_pid": 41156,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:42:19.3578330Z"
+    },
+    {
+      "pid": 32856,
+      "parent_pid": 48540,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:19.7209000Z"
+    },
+    {
+      "pid": 19476,
+      "parent_pid": 15008,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:20.1357670Z"
+    },
+    {
+      "pid": 19364,
+      "parent_pid": 19476,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:20.3918800Z"
+    },
+    {
+      "pid": 22592,
+      "parent_pid": 19476,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:42:23.4146680Z"
+    },
+    {
+      "pid": 35032,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:42:23.9694990Z"
+    },
+    {
+      "pid": 31320,
+      "parent_pid": 46180,
+      "name": "codex-code-mode-host.exe",
+      "started_at": "2026-10-15T19:42:23.9762690Z"
+    },
+    {
+      "pid": 43624,
+      "parent_pid": 31320,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:23.9933210Z"
+    },
+    {
+      "pid": 45212,
+      "parent_pid": 35032,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:23.9944340Z"
+    },
+    {
+      "pid": 47116,
+      "parent_pid": 35032,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:42:24.0709290Z"
+    },
+    {
+      "pid": 39400,
+      "parent_pid": 46180,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:24.1316340Z"
+    },
+    {
+      "pid": 30280,
+      "parent_pid": 40624,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:24.4755270Z"
+    },
+    {
+      "pid": 29888,
+      "parent_pid": 32856,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:42:25.6601600Z"
+    },
+    {
+      "pid": 41224,
+      "parent_pid": 29888,
+      "name": "codex.exe",
+      "started_at": "2026-10-15T19:42:26.4148120Z"
+    },
+    {
+      "pid": 49864,
+      "parent_pid": 15008,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:34.5659290Z"
+    },
+    {
+      "pid": 43856,
+      "parent_pid": 49864,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:35.1689200Z"
+    },
+    {
+      "pid": 46856,
+      "parent_pid": 40624,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:35.7521200Z"
+    },
+    {
+      "pid": 46516,
+      "parent_pid": 46856,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:35.7931030Z"
+    },
+    {
+      "pid": 17160,
+      "parent_pid": 41224,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:37.0499080Z"
+    },
+    {
+      "pid": 48828,
+      "parent_pid": 39712,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:37.0500330Z"
+    },
+    {
+      "pid": 38580,
+      "parent_pid": 39712,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:42:37.6736940Z"
+    },
+    {
+      "pid": 3516,
+      "parent_pid": 17160,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:38.1316600Z"
+    },
+    {
+      "pid": 46896,
+      "parent_pid": 49864,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:42:38.2603630Z"
+    },
+    {
+      "pid": 22244,
+      "parent_pid": 38580,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:38.2682590Z"
+    },
+    {
+      "pid": 8300,
+      "parent_pid": 46856,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:42:38.2696180Z"
+    },
+    {
+      "pid": 44276,
+      "parent_pid": 17160,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:42:41.7545080Z"
+    },
+    {
+      "pid": 2680,
+      "parent_pid": 46180,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:42.4431150Z"
+    },
+    {
+      "pid": 7216,
+      "parent_pid": 2680,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:43.1116390Z"
+    },
+    {
+      "pid": 45948,
+      "parent_pid": 37548,
+      "name": "codex-code-mode-host.exe",
+      "started_at": "2026-10-15T19:42:44.8688250Z"
+    },
+    {
+      "pid": 53388,
+      "parent_pid": 45948,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:45.2546360Z"
+    },
+    {
+      "pid": 11288,
+      "parent_pid": 2680,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:42:45.8535220Z"
+    },
+    {
+      "pid": 45664,
+      "parent_pid": 37548,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:42:46.4384570Z"
+    },
+    {
+      "pid": 34288,
+      "parent_pid": 45664,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:42:47.3753830Z"
+    },
+    {
+      "pid": 2180,
+      "parent_pid": 8300,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:42:47.3891970Z"
+    },
+    {
+      "pid": 21592,
+      "parent_pid": 45664,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:42:49.0059810Z"
+    },
+    {
+      "pid": 46680,
+      "parent_pid": 22244,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:42:51.1937730Z"
+    },
+    {
+      "pid": 30664,
+      "parent_pid": 46680,
+      "name": "codex.exe",
+      "started_at": "2026-10-15T19:42:59.6618880Z"
+    },
+    {
+      "pid": 30136,
+      "parent_pid": 37548,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:03.1802420Z"
+    },
+    {
+      "pid": 52464,
+      "parent_pid": 30136,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:03.9868720Z"
+    },
+    {
+      "pid": 38596,
+      "parent_pid": 30136,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:43:07.3126220Z"
+    },
+    {
+      "pid": 49752,
+      "parent_pid": 46180,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:11.0314030Z"
+    },
+    {
+      "pid": 50860,
+      "parent_pid": 49752,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:11.2171600Z"
+    },
+    {
+      "pid": 40680,
+      "parent_pid": 15008,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:11.5513080Z"
+    },
+    {
+      "pid": 29164,
+      "parent_pid": 39712,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:12.5628500Z"
+    },
+    {
+      "pid": 42620,
+      "parent_pid": 40680,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:12.5647370Z"
+    },
+    {
+      "pid": 40160,
+      "parent_pid": 39712,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:43:12.6526510Z"
+    },
+    {
+      "pid": 7996,
+      "parent_pid": 41224,
+      "name": "codex-code-mode-host.exe",
+      "started_at": "2026-10-15T19:43:13.7639930Z"
+    },
+    {
+      "pid": 27808,
+      "parent_pid": 40160,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:13.8756020Z"
+    },
+    {
+      "pid": 47568,
+      "parent_pid": 49752,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:43:14.0060000Z"
+    },
+    {
+      "pid": 2424,
+      "parent_pid": 7996,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:14.3449350Z"
+    },
+    {
+      "pid": 28032,
+      "parent_pid": 30664,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:14.3502530Z"
+    },
+    {
+      "pid": 37568,
+      "parent_pid": 41224,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:14.9430760Z"
+    },
+    {
+      "pid": 40772,
+      "parent_pid": 15008,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:14.9437240Z"
+    },
+    {
+      "pid": 40128,
+      "parent_pid": 37548,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:14.9459960Z"
+    },
+    {
+      "pid": 44660,
+      "parent_pid": 28032,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:15.5347260Z"
+    },
+    {
+      "pid": 29700,
+      "parent_pid": 40680,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:43:15.5349820Z"
+    },
+    {
+      "pid": 38448,
+      "parent_pid": 40128,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:15.5378930Z"
+    },
+    {
+      "pid": 2676,
+      "parent_pid": 37568,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:15.6953780Z"
+    },
+    {
+      "pid": 38092,
+      "parent_pid": 40772,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:16.1260600Z"
+    },
+    {
+      "pid": 41112,
+      "parent_pid": 40624,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:19.2551770Z"
+    },
+    {
+      "pid": 49400,
+      "parent_pid": 41112,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:20.3162620Z"
+    },
+    {
+      "pid": 44752,
+      "parent_pid": 40128,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:43:21.0950410Z"
+    },
+    {
+      "pid": 29428,
+      "parent_pid": 37568,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:43:22.0630300Z"
+    },
+    {
+      "pid": 46084,
+      "parent_pid": 28032,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:43:22.0733130Z"
+    },
+    {
+      "pid": 28900,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:43:22.6634090Z"
+    },
+    {
+      "pid": 43004,
+      "parent_pid": 47568,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:43:22.6635720Z"
+    },
+    {
+      "pid": 10256,
+      "parent_pid": 43004,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:43:23.2498660Z"
+    },
+    {
+      "pid": 46248,
+      "parent_pid": 28900,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:23.2523100Z"
+    },
+    {
+      "pid": 43544,
+      "parent_pid": 10256,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:23.3798590Z"
+    },
+    {
+      "pid": 30428,
+      "parent_pid": 29700,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:43:23.3874720Z"
+    },
+    {
+      "pid": 49692,
+      "parent_pid": 28900,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:43:23.3885660Z"
+    },
+    {
+      "pid": 32552,
+      "parent_pid": 27808,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:43:24.4420800Z"
+    },
+    {
+      "pid": 53268,
+      "parent_pid": 32552,
+      "name": "codex.exe",
+      "started_at": "2026-10-15T19:43:26.3732890Z"
+    },
+    {
+      "pid": 44536,
+      "parent_pid": 41224,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:38.7330600Z"
+    },
+    {
+      "pid": 11496,
+      "parent_pid": 44536,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:39.4525890Z"
+    },
+    {
+      "pid": 30788,
+      "parent_pid": 44536,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:43:42.2565720Z"
+    },
+    {
+      "pid": 12440,
+      "parent_pid": 39712,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:45.8128460Z"
+    },
+    {
+      "pid": 48528,
+      "parent_pid": 39712,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:43:45.8686660Z"
+    },
+    {
+      "pid": 44072,
+      "parent_pid": 48528,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:46.5015980Z"
+    },
+    {
+      "pid": 31024,
+      "parent_pid": 41224,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:50.7197960Z"
+    },
+    {
+      "pid": 46712,
+      "parent_pid": 31024,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:51.1603010Z"
+    },
+    {
+      "pid": 52364,
+      "parent_pid": 15008,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:51.1656120Z"
+    },
+    {
+      "pid": 36060,
+      "parent_pid": 52364,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:51.7511530Z"
+    },
+    {
+      "pid": 41484,
+      "parent_pid": 40624,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:56.0664230Z"
+    },
+    {
+      "pid": 2244,
+      "parent_pid": 46180,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:56.5637060Z"
+    },
+    {
+      "pid": 41644,
+      "parent_pid": 31024,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:43:56.5928730Z"
+    },
+    {
+      "pid": 43196,
+      "parent_pid": 52364,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:43:56.6067820Z"
+    },
+    {
+      "pid": 25904,
+      "parent_pid": 41484,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:56.7710500Z"
+    },
+    {
+      "pid": 27820,
+      "parent_pid": 2244,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:57.3331610Z"
+    },
+    {
+      "pid": 40756,
+      "parent_pid": 30664,
+      "name": "codex-code-mode-host.exe",
+      "started_at": "2026-10-15T19:43:57.7690080Z"
+    },
+    {
+      "pid": 39252,
+      "parent_pid": 40756,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:43:58.2920320Z"
+    },
+    {
+      "pid": 36368,
+      "parent_pid": 30664,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:43:58.8784910Z"
+    },
+    {
+      "pid": 22600,
+      "parent_pid": 36368,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:44:00.0883490Z"
+    },
+    {
+      "pid": 44752,
+      "parent_pid": 36368,
+      "name": "powershell.exe",
+      "started_at": "2026-10-15T19:44:01.8582710Z"
+    },
+    {
+      "pid": 50652,
+      "parent_pid": 37548,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:44:03.2098390Z"
+    },
+    {
+      "pid": 45784,
+      "parent_pid": 41644,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:44:03.8137270Z"
+    },
+    {
+      "pid": 31076,
+      "parent_pid": 41224,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:44:03.8322650Z"
+    },
+    {
+      "pid": 14648,
+      "parent_pid": 31076,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:44:03.8387880Z"
+    },
+    {
+      "pid": 38544,
+      "parent_pid": 50652,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:44:04.2413080Z"
+    },
+    {
+      "pid": 39720,
+      "parent_pid": 43196,
+      "name": "gwtd.exe",
+      "started_at": "2026-10-15T19:44:04.8164730Z"
+    },
+    {
+      "pid": 29448,
+      "parent_pid": 39720,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:44:05.0243440Z"
+    },
+    {
+      "pid": 30692,
+      "parent_pid": 15008,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:44:08.3885440Z"
+    },
+    {
+      "pid": 45892,
+      "parent_pid": 30692,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:44:09.0210730Z"
+    },
+    {
+      "pid": 36092,
+      "parent_pid": 44072,
+      "name": "node.exe",
+      "started_at": "2026-10-15T19:44:09.0511190Z"
+    },
+    {
+      "pid": 22732,
+      "parent_pid": 36092,
+      "name": "codex.exe",
+      "started_at": "2026-10-15T19:44:11.3791630Z"
+    },
+    {
+      "pid": 4664,
+      "parent_pid": 30692,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:44:13.7287770Z"
+    },
+    {
+      "pid": 33636,
+      "parent_pid": 40624,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:44:25.6120070Z"
+    },
+    {
+      "pid": 29268,
+      "parent_pid": 33636,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:44:26.4562420Z"
+    },
+    {
+      "pid": 47956,
+      "parent_pid": 33636,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:44:30.3887260Z"
+    },
+    {
+      "pid": 34088,
+      "parent_pid": 37548,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:44:36.3802580Z"
+    },
+    {
+      "pid": 31916,
+      "parent_pid": 34088,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:44:37.0187050Z"
+    },
+    {
+      "pid": 39432,
+      "parent_pid": 34088,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:44:40.4722050Z"
+    },
+    {
+      "pid": 53108,
+      "parent_pid": 41224,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:44:57.6595310Z"
+    },
+    {
+      "pid": 47068,
+      "parent_pid": 53108,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:44:58.2681700Z"
+    },
+    {
+      "pid": 52800,
+      "parent_pid": 53268,
+      "name": "codex-code-mode-host.exe",
+      "started_at": "2026-10-15T19:44:58.9217550Z"
+    },
+    {
+      "pid": 6352,
+      "parent_pid": 52800,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:44:58.9432130Z"
+    },
+    {
+      "pid": 22292,
+      "parent_pid": 53108,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:45:00.7986600Z"
+    },
+    {
+      "pid": 30216,
+      "parent_pid": 22732,
+      "name": "codex-code-mode-host.exe",
+      "started_at": "2026-10-15T19:45:13.6894990Z"
+    },
+    {
+      "pid": 52640,
+      "parent_pid": 30216,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:45:13.7836130Z"
+    },
+    {
+      "pid": 30380,
+      "parent_pid": 30664,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:45:31.6505290Z"
+    },
+    {
+      "pid": 45712,
+      "parent_pid": 30380,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:45:32.6929170Z"
+    },
+    {
+      "pid": 42244,
+      "parent_pid": 30380,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:45:35.1076100Z"
+    },
+    {
+      "pid": 47908,
+      "parent_pid": 46180,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:45:38.1709120Z"
+    },
+    {
+      "pid": 33732,
+      "parent_pid": 47908,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:45:39.2298520Z"
+    },
+    {
+      "pid": 39524,
+      "parent_pid": 47908,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:45:43.3907450Z"
+    },
+    {
+      "pid": 30936,
+      "parent_pid": 53268,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:46:23.9260840Z"
+    },
+    {
+      "pid": 34516,
+      "parent_pid": 30936,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:46:24.5436130Z"
+    },
+    {
+      "pid": 34296,
+      "parent_pid": 30936,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:46:25.8086610Z"
+    },
+    {
+      "pid": 37156,
+      "parent_pid": 22732,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:46:37.5507610Z"
+    },
+    {
+      "pid": 41124,
+      "parent_pid": 37156,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:46:38.1487810Z"
+    },
+    {
+      "pid": 15904,
+      "parent_pid": 37156,
+      "name": "pwsh.exe",
+      "started_at": "2026-10-15T19:46:38.7933580Z"
+    },
+    {
+      "pid": 45888,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:49:50.0247840Z"
+    },
+    {
+      "pid": 37452,
+      "parent_pid": 45888,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:49:50.0405120Z"
+    },
+    {
+      "pid": 23300,
+      "parent_pid": 45888,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:49:50.2059630Z"
+    },
+    {
+      "pid": 11284,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:50:06.9651070Z"
+    },
+    {
+      "pid": 39328,
+      "parent_pid": 11284,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:50:06.9704540Z"
+    },
+    {
+      "pid": 28652,
+      "parent_pid": 11284,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:50:06.9946410Z"
+    },
+    {
+      "pid": 51164,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:54:01.1152780Z"
+    },
+    {
+      "pid": 26764,
+      "parent_pid": 51164,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:54:01.1284680Z"
+    },
+    {
+      "pid": 10608,
+      "parent_pid": 51164,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:54:01.1476660Z"
+    },
+    {
+      "pid": 38428,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:56:11.9448240Z"
+    },
+    {
+      "pid": 37120,
+      "parent_pid": 38428,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:56:11.9511080Z"
+    },
+    {
+      "pid": 45704,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T19:57:50.2750580Z"
+    },
+    {
+      "pid": 48312,
+      "parent_pid": 45704,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:57:50.4080210Z"
+    },
+    {
+      "pid": 25156,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:58:12.4763950Z"
+    },
+    {
+      "pid": 7136,
+      "parent_pid": 25156,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T19:58:12.4887100Z"
+    },
+    {
+      "pid": 22708,
+      "parent_pid": 25156,
+      "name": "python.exe",
+      "started_at": "2026-10-15T19:58:12.5117410Z"
+    },
+    {
+      "pid": 51344,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T20:01:39.0552040Z"
+    },
+    {
+      "pid": 44136,
+      "parent_pid": 51344,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:01:39.0629340Z"
+    },
+    {
+      "pid": 23164,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:04:29.3835340Z"
+    },
+    {
+      "pid": 29432,
+      "parent_pid": 23164,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:04:29.3914060Z"
+    },
+    {
+      "pid": 11540,
+      "parent_pid": 23164,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:04:29.4113270Z"
+    },
+    {
+      "pid": 32092,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:06:41.0783810Z"
+    },
+    {
+      "pid": 32048,
+      "parent_pid": 32092,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:06:41.0861390Z"
+    },
+    {
+      "pid": 31076,
+      "parent_pid": 32092,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:06:41.1056760Z"
+    },
+    {
+      "pid": 35384,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T20:09:34.7718680Z"
+    },
+    {
+      "pid": 10692,
+      "parent_pid": 35384,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:09:34.7779500Z"
+    },
+    {
+      "pid": 29672,
+      "parent_pid": 35384,
+      "name": "git.exe",
+      "started_at": "2026-10-15T20:09:34.8008190Z"
+    },
+    {
+      "pid": 53512,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T20:10:13.0555560Z"
+    },
+    {
+      "pid": 17120,
+      "parent_pid": 53512,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:10:13.0613370Z"
+    },
+    {
+      "pid": 37132,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T20:10:20.4697430Z"
+    },
+    {
+      "pid": 52520,
+      "parent_pid": 37132,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:10:20.4757760Z"
+    },
+    {
+      "pid": 26828,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T20:11:22.9910610Z"
+    },
+    {
+      "pid": 33868,
+      "parent_pid": 26828,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:11:22.9971450Z"
+    },
+    {
+      "pid": 34344,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:11:53.7443260Z"
+    },
+    {
+      "pid": 38696,
+      "parent_pid": 34344,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:11:53.7614460Z"
+    },
+    {
+      "pid": 38888,
+      "parent_pid": 34344,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:11:53.7819330Z"
+    },
+    {
+      "pid": 53676,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:12:07.8467590Z"
+    },
+    {
+      "pid": 39396,
+      "parent_pid": 53676,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:12:07.9136320Z"
+    },
+    {
+      "pid": 35384,
+      "parent_pid": 53676,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:12:07.9449810Z"
+    },
+    {
+      "pid": 53924,
+      "parent_pid": 39712,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:12:34.7628630Z"
+    },
+    {
+      "pid": 43480,
+      "parent_pid": 53924,
+      "name": "conhost.exe",
+      "started_at": "2026-10-15T20:12:34.8972780Z"
+    },
+    {
+      "pid": 32972,
+      "parent_pid": 53924,
+      "name": "python.exe",
+      "started_at": "2026-10-15T20:12:35.0396500Z"
+    },
+    {
+      "pid": 54128,
+      "parent_pid": 39712,
+      "name": "git.exe",
+      "started_at": "2026-10-15T20:13:21.4515560Z"
+    }
+  ],
+  "tool_result_sources": [
+    {
+      "file": "rollout-2026-10-16T04-41-31-01a14115-832b-7d41-8ba6-ba561d75ad64.jsonl",
+      "sha256": "1352d26c35f2f5120a79de20340efb735c4ac81a7b77e4b1327151fd40aba7ec",
+      "bytes": 369465,
+      "session_id": "e17fe878-8d87-495c-9e43-deaad917068a",
+      "heartbeat_shell_pid": 4664
+    },
+    {
+      "file": "rollout-2026-10-16T04-41-44-01a14115-b1b4-7032-9174-976971b59af2.jsonl",
+      "sha256": "058e7d5a6541b1d901adc3330945d2792281fa80ab1e48e58746de1075159a74",
+      "bytes": 389358,
+      "session_id": "4240b291-e297-4d80-a546-e7b2fd536a69",
+      "heartbeat_shell_pid": 47956
+    },
+    {
+      "file": "rollout-2026-10-16T04-41-58-01a14115-e6d1-7110-bf29-701b6ef88be7.jsonl",
+      "sha256": "ffbd12663fbb62d46b4f6d591177127e80add137454c48e9fea88d99c65a03c7",
+      "bytes": 407635,
+      "session_id": "e8d6900f-adfa-4e7e-9634-c365359d88e8",
+      "heartbeat_shell_pid": 39524
+    },
+    {
+      "file": "rollout-2026-10-16T04-42-12-01a14116-1db6-72b1-a767-b4a652b4fb2a.jsonl",
+      "sha256": "d096a9f7e0d461969c547fc6c5ddb8ba388bd0d5fc37576a7daf4a30f7c5cb37",
+      "bytes": 363214,
+      "session_id": "7d137a90-96e1-4726-a1c1-d6c8a7540428",
+      "heartbeat_shell_pid": 39432
+    },
+    {
+      "file": "rollout-2026-10-16T04-42-31-01a14116-65d5-77e3-a32f-c3c0fd372979.jsonl",
+      "sha256": "a6c5ab8e9bf67d7bcf046f4d7e648159059d2a29ef3f5a4ec28ab6af2caebf1b",
+      "bytes": 455202,
+      "session_id": "9d1ef8c3-9c70-46df-b198-573332c3f5fc",
+      "heartbeat_shell_pid": 22292
+    },
+    {
+      "file": "rollout-2026-10-16T04-43-08-01a14116-f0c0-7162-89e8-aa759069462d.jsonl",
+      "sha256": "66729a0b84f011f03e66209bd4ec669a2fc65dab6fee96737f18a47b40fe3fb8",
+      "bytes": 431062,
+      "session_id": "d6c5514e-81cb-40a0-bbca-c7439906b5b8",
+      "heartbeat_shell_pid": 42244
+    },
+    {
+      "file": "rollout-2026-10-16T04-44-19-01a14118-0e13-7b21-9776-9b0e14abc7c1.jsonl",
+      "sha256": "d78788964124982ec24c2f51569884bea2a8e827a959386264bd423d8bdf73d4",
+      "bytes": 329593,
+      "session_id": "009a555d-22ae-494c-a216-460849c6a831",
+      "heartbeat_shell_pid": 34296
+    },
+    {
+      "file": "rollout-2026-10-16T04-44-31-01a14118-3eb1-7611-b032-56e1fbf3017c.jsonl",
+      "sha256": "c5b250ff14eefcf01b1ed93308aa29e4a7c3ec694b273cfe1a6d8373338c109a",
+      "bytes": 467081,
+      "session_id": "b48997b7-601d-47c3-80ed-0abc87e05be8",
+      "heartbeat_shell_pid": 15904
+    }
+  ],
+  "source_commit": "500d2847fb2f62ba772ffdf6dc1ddde8968cf5af"
+}

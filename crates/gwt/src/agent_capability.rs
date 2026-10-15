@@ -91,6 +91,10 @@ impl std::fmt::Debug for AgentCapabilityGrant {
 pub enum AgentFrontendRequest {
     Ready,
     ListWindows,
+    CloseWork {
+        work_id: String,
+        close_kind: String,
+    },
     Name {
         candidate: String,
         request_id: String,
@@ -125,6 +129,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
         match self {
             Self::Ready => formatter.write_str("AgentFrontendRequest::Ready"),
             Self::ListWindows => formatter.write_str("AgentFrontendRequest::ListWindows"),
+            Self::CloseWork { .. } => {
+                formatter.write_str("AgentFrontendRequest::CloseWork(<redacted>)")
+            }
             Self::Name { .. } => formatter.write_str("AgentFrontendRequest::Name(<redacted>)"),
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
@@ -150,6 +157,7 @@ impl AgentFrontendRequest {
         matches!(
             self,
             Self::Name { .. }
+                | Self::CloseWork { .. }
                 | Self::CloseWindow { .. }
                 | Self::RecoverRestoredWindow { .. }
                 | Self::SendInput { .. }

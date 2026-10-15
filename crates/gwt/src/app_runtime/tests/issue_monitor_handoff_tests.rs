@@ -2339,8 +2339,10 @@ fn app_runtime_issue_monitor_status_reports_last_settings_source() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+    let events = runtime.completed_issue_monitor_list_for_test(
+        "client-1",
+        gwt::daemon_publisher::read_issue_monitor_status,
+    );
 
     let status = events
         .iter()

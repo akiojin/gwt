@@ -77,7 +77,7 @@ pub(crate) struct KnowledgeMonitorSnapshotCache {
 
 pub(crate) type KnowledgeMonitorSnapshot = Arc<Mutex<KnowledgeMonitorSnapshotCache>>;
 
-fn normalized_snapshot_project_root(project_root: &Path) -> PathBuf {
+pub(super) fn normalized_snapshot_project_root(project_root: &Path) -> PathBuf {
     dunce::canonicalize(project_root).unwrap_or_else(|_| {
         if project_root.is_absolute() {
             project_root.to_path_buf()
@@ -187,6 +187,10 @@ impl KnowledgeMonitorSnapshotCache {
 
     fn entry_index(&self, project_root: &Path) -> Option<usize> {
         let project_root = normalized_snapshot_project_root(project_root);
+        self.normalized_entry_index(&project_root)
+    }
+
+    fn normalized_entry_index(&self, project_root: &Path) -> Option<usize> {
         self.entries
             .iter()
             .position(|entry| entry.project_root == project_root)
@@ -201,7 +205,17 @@ impl KnowledgeMonitorSnapshotCache {
     }
 
     fn replace(&mut self, project_root: &Path, items: &[gwt::IssueMonitorInboxItem]) {
-        let previous = self.get(project_root);
+        self.replace_normalized(&normalized_snapshot_project_root(project_root), items);
+    }
+
+    pub(super) fn replace_normalized(
+        &mut self,
+        project_root: &Path,
+        items: &[gwt::IssueMonitorInboxItem],
+    ) {
+        let previous = self
+            .normalized_entry_index(project_root)
+            .map(|index| Arc::clone(&self.entries[index].snapshot));
         let mut snapshot = items
             .iter()
             .map(|item| {
@@ -236,10 +250,10 @@ impl KnowledgeMonitorSnapshotCache {
             }
         }
         let entry = KnowledgeMonitorSnapshotEntry {
-            project_root: normalized_snapshot_project_root(project_root),
+            project_root: project_root.to_path_buf(),
             snapshot: Arc::new(snapshot),
         };
-        if let Some(index) = self.entry_index(project_root) {
+        if let Some(index) = self.normalized_entry_index(project_root) {
             self.entries.remove(index);
         }
         self.entries.push_back(entry);
@@ -252,11 +266,19 @@ impl KnowledgeMonitorSnapshotCache {
         project_root: &Path,
         queue: &[gwt::issue_monitor::IssueMonitorTerminalQueueEntry],
     ) {
-        if self.entry_index(project_root).is_none() {
-            self.replace(project_root, &[]);
+        self.replace_queue_normalized(&normalized_snapshot_project_root(project_root), queue);
+    }
+
+    pub(super) fn replace_queue_normalized(
+        &mut self,
+        project_root: &Path,
+        queue: &[gwt::issue_monitor::IssueMonitorTerminalQueueEntry],
+    ) {
+        if self.normalized_entry_index(project_root).is_none() {
+            self.replace_normalized(project_root, &[]);
         }
         let index = self
-            .entry_index(project_root)
+            .normalized_entry_index(project_root)
             .expect("snapshot initialized");
         let snapshot = Arc::make_mut(&mut self.entries[index].snapshot);
         for item in snapshot.values_mut() {
@@ -1537,6 +1559,7 @@ impl AppRuntime {
         project_root: &Path,
         items: &[gwt::IssueMonitorInboxItem],
     ) {
+        self.remember_issue_monitor_inbox(project_root, items);
         self.knowledge_monitor_snapshot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

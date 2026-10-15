@@ -839,6 +839,9 @@ pub(crate) fn json_envelope(command: &str) -> Option<serde_json::Value> {
 }
 
 pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
+    if operation == "pm.approval.status" {
+        return true;
+    }
     matches!(
         operation,
         "workspace.candidates"

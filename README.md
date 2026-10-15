@@ -438,8 +438,9 @@ Common windows include:
   when at least one open project has Autonomous enabled. Legacy project
   values migrate once: any enabled value enables the application setting.
   System shows the saved and effective values and pending-update blockers.
-  Change the preference in the GUI; agents can read it with
-  `update.settings.status`. It is no longer an Issue Monitor setting.
+  Change the preference in the GUI or ask the PM to use `update.settings.set`
+  with `auto_apply_updates`; `update.settings.status` reports its state.
+  It is no longer an Issue Monitor setting.
 
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
@@ -546,9 +547,9 @@ change membership/order with `issue.monitor.queue.push`,
 queue and requests a scan. Existing `issue.monitor.priority.move` and
 `issue.monitor.priority.set` operations remain available. The
 `issue.monitor.config.set` operation can stop processing, disable autonomous
-mode, or set a positive `max_active` limit. For safety, it rejects
-`enabled=true` and `autonomous_mode=true`; enabling either capability requires
-an explicit action in the GUI. Idle agent windows free their slot on
+mode, or set a positive `max_active` limit. The registered PM for the repository
+can also enable `enabled` or `autonomous_mode`; other agent sessions use the GUI
+to enable them. Idle agent windows free their slot on
 their own: each scan classifies every launched window as
 `review_verdict_published`, `execution_settled`, `binding_dead`, or
 `stuck_unknown` (visible per row and in `idle_windows` in
@@ -767,6 +768,31 @@ unchanged.
   `pm.status` lists every registration in the repository, and `pm.stop` retires
   one from the CLI — a registered PM can retire an orphan or stand down itself
   without a GUI click.
+- A live registered PM can close a selected inactive Work with `workspace.close`,
+  specifying `work_id` and `close_kind: "done"` or `"discarded"`. The same GUI
+  checks apply: manual close must be allowed and that Work must have no active
+  agents. Closing records terminal history and retains its branch and worktree.
+
+You can ask the PM to create and bind a GitHub Discussion, adjust required checks
+on `develop` or `main`, or change global Auto-apply updates. These actions use a
+recorded instruction scoped to the requested action or an OS-native approval
+dialog. Choose **Approve once** or remember approval for that repository and
+operation kind; ask the PM to inspect or revoke saved approvals through
+`pm.approval.status` / `pm.approval.revoke`. Required-check changes use
+`repository.required_checks.update` and preserve the branch's strict policy and
+retained checks' app bindings.
+
+The same scoped permission route supports `pr.reopen` for a chosen PR,
+`pr.review.submit` for an authorized GitHub review, `release.metadata.set` for
+existing release name/notes/prerelease, and `repository.settings.set` for
+supported reversible metadata, features, merge preferences and archive status.
+Topic replacements use `topics` alone. Existing review and CI checks remain in
+force; release publishing, assets and latest selection use the gated workflow.
+
+For an explicitly authorized PR close, build-cache cleanup, or provider approval
+response, the PM uses `pm.operation.execute` with the existing `pr.close`,
+`worktree.gc_build_artifacts`, or `pm.message.send` action. This route supports
+only those three operations and retains their existing checks.
 
 Ask your PM to consult another project's PM on the same machine, giving the
 other project's absolute path. Registered PMs use `pm.peer.send` for direct
@@ -941,8 +967,17 @@ worktree without restarting the app.
 
 ## Share local Board milestones through GitHub Discussions
 
-To share `decision`, `blocked`, and `handoff` posts across machines, keep the
-**Local** Board provider and add a binding to `.gwt/work/board.toml`:
+To share `decision`, `blocked`, and `handoff` posts across machines, ask the PM to
+create a Discussion with `discussion.create` and `sync_board:true`. To connect
+an existing Discussion, use `board.config.set` with its `github_discussion`
+number; this also recovers a failed binding without creating a duplicate.
+If the effective Board provider is not Local, explicitly request
+`board_provider:"local"` on creation or `provider:"local"` on binding. The
+project's provider override and binding are saved together; global and other
+projects' provider settings are preserved. Without this explicit switch,
+synchronized creation is refused before creating a remote Discussion.
+Both operations use the current repository. Alternatively, keep the **Local**
+Board provider and add a binding to `.gwt/work/board.toml`:
 
 ```toml
 provider = "local"
@@ -1470,6 +1505,22 @@ cargo test -p gwt-core -p gwt --all-features --doc
 Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
 ### CI throughput measurements
+
+To separate queue delays from dependency scheduling in the latest 50 completed
+workflow runs (including failed/cancelled runs), without local Git history:
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --queue --save target/ci-queue.json
+python scripts/ci_throughput.py --input target/ci-queue.json
+```
+
+`--before` fixes the inclusive run creation cutoff; `--workflow test.yml` limits
+the workflows sampled. The report separates run admission, job admission, and
+the time from run start to job creation (dependencies and scheduling), and identifies each
+run's longest job. Job admission includes concurrency-group waits; API timestamps
+alone cannot attribute them to runner capacity. Skipped/cancelled jobs and reused
+attempt timestamps are excluded from job wait distributions. Rerun admission is
+unavailable because the run creation time belongs to the original attempt.
 
 With Python 3.11+, authenticated `gh`, and local Git history for the merged PRs,
 collect the latest 25 develop merges and save their input data:

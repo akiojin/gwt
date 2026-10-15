@@ -14,7 +14,10 @@
 
 use std::{
     io,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -30,6 +33,7 @@ use super::{
 };
 
 static GLOBAL: OnceLock<Mutex<PerfRuntime>> = OnceLock::new();
+static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Kill switch, budgets, smoothing and self-budget wired to one sink.
 pub struct PerfRuntime {
@@ -191,7 +195,12 @@ pub fn install(config: &PerfConfig) -> bool {
     let Ok(runtime) = PerfRuntime::from_config(config) else {
         return false;
     };
-    GLOBAL.set(Mutex::new(runtime)).is_ok()
+    let enabled = runtime.is_enabled();
+    let installed = GLOBAL.set(Mutex::new(runtime)).is_ok();
+    if installed {
+        ENABLED.store(enabled, Ordering::Relaxed);
+    }
+    installed
 }
 
 /// Install the collector from `~/.gwt/config.toml`, falling back to defaults.
@@ -210,12 +219,22 @@ pub fn install_appending_to_established_log_from_settings() -> bool {
     let Ok(runtime) = PerfRuntime::appending_to_established_log(&settings.perf) else {
         return false;
     };
-    GLOBAL.set(Mutex::new(runtime)).is_ok()
+    let enabled = runtime.is_enabled();
+    let installed = GLOBAL.set(Mutex::new(runtime)).is_ok();
+    if installed {
+        ENABLED.store(enabled, Ordering::Relaxed);
+    }
+    installed
 }
 
 /// Whether a collector has been installed in this process.
 pub fn is_installed() -> bool {
     GLOBAL.get().is_some()
+}
+
+/// The install-time kill switch, read without a foreground I/O mutex.
+pub fn is_enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
 }
 
 /// Run `action` against the installed collector, if there is one.
