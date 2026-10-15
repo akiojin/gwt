@@ -1506,6 +1506,22 @@ Nextest runs each test in a separate process, times out a test after 120 seconds
 
 ### CI throughput measurements
 
+To separate queue delays from dependency scheduling in the latest 50 completed
+workflow runs (including failed/cancelled runs), without local Git history:
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --queue --save target/ci-queue.json
+python scripts/ci_throughput.py --input target/ci-queue.json
+```
+
+`--before` fixes the inclusive run creation cutoff; `--workflow test.yml` limits
+the workflows sampled. The report separates run admission, job admission, and
+the time from run start to job creation (dependencies and scheduling), and identifies each
+run's longest job. Job admission includes concurrency-group waits; API timestamps
+alone cannot attribute them to runner capacity. Skipped/cancelled jobs and reused
+attempt timestamps are excluded from job wait distributions. Rerun admission is
+unavailable because the run creation time belongs to the original attempt.
+
 With Python 3.11+, authenticated `gh`, and local Git history for the merged PRs,
 collect the latest 25 develop merges and save their input data:
 

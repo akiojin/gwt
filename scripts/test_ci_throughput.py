@@ -35,6 +35,37 @@ def sample():
 
 
 class ThroughputTests(unittest.TestCase):
+    def test_queue_report_separates_runner_admission_from_dependency_scheduling(self):
+        run = copy.deepcopy(sample()["pull_requests"][0]["runs"][0])
+        run.update(name="Test", head_sha="abc", head_branch="feature/test", event="pull_request")
+        job = run["jobs"][0]
+        job.update(created_at="2026-10-07T21:10:00Z", started_at="2026-10-07T21:10:02Z")
+        report = throughput.summarize_queue({"schema_version": 1, "repo": "owner/repo",
+                                             "before": "2026-10-08T00:00:00Z", "runs": [run]})
+        self.assertAlmostEqual(report["job_queue_minutes"]["p50"], 2 / 60)
+        self.assertEqual(report["dependency_scheduling_minutes"]["p50"], 10)
+        self.assertEqual(report["run_queue_minutes"]["p50"], 0)
+        self.assertEqual(report["runs"][0]["longest_job"]["name"], "Test (Rust)")
+        # A rerun's reused job timestamps must not count as fresh queue evidence.
+        run["run_started_at"] = "2026-10-07T22:00:00Z"
+        run["updated_at"] = "2026-10-07T22:30:00Z"
+        run["run_attempt"] = 2
+        report = throughput.summarize_queue({"schema_version": 1, "repo": "owner/repo",
+                                             "before": "2026-10-08T00:00:00Z", "runs": [run]})
+        self.assertIsNone(report["job_queue_minutes"]["p50"])
+        self.assertIsNone(report["run_queue_minutes"]["p50"])
+        self.assertEqual(report["unavailable_job_ids"], [job["id"]])
+
+    def test_queue_collector_keeps_latest_completed_runs_including_cancellation(self):
+        rows = [{"id": number, "run_attempt": 2, "created_at": f"2026-10-07T21:0{number}:00Z",
+                 "status": "completed", "conclusion": conclusion}
+                for number, conclusion in ((3, "cancelled"), (2, "failure"), (1, "success"))]
+        with patch.object(throughput, "api", return_value={"workflow_runs": rows}), \
+                patch.object(throughput, "paged", return_value=[]) as jobs:
+            snapshot = throughput.collect_queue("owner/repo", 2, "2026-10-08T00:00:00Z", None)
+        self.assertEqual([run["id"] for run in snapshot["runs"]], [3, 2])
+        self.assertEqual(jobs.call_args_list[0].args[1], "actions/runs/3/attempts/2/jobs")
+
     def test_all_requested_metrics_have_explicit_units_and_sample_counts(self):
         report = throughput.summarize(sample())
         self.assertEqual(report["pr_created_to_merged_minutes"]["p50"], 180)
