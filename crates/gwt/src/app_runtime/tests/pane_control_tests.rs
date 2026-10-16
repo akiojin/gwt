@@ -4039,7 +4039,8 @@ fn agent_name_refuses_pm_and_missing_without_mutation() {
     tab.workspace
         .set_session_id("agent", Some("session".into()));
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
-    for (session, candidate) in [("missing", "Falcon")] {
+    {
+        let (session, candidate) = ("missing", "Falcon");
         let principal = AgentSessionPrincipal::for_test(&root, session).unwrap();
         let events = runtime.handle_agent_frontend_event(
             "caller".into(),

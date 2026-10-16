@@ -787,7 +787,7 @@ fn worktree_form_comes_from_attached_or_detached_head_not_path_prefix() {
         |_| RecoveryDeliveryRoute::new(RecoveryProvider::Local, Box::new(LocalProvider)),
         |_| Ok(branch.clone()),
         |_, authority| {
-            RecoveryStore::new(&branch_path.join("recovery"), authority.authority().clone())
+            RecoveryStore::new(branch_path.join("recovery"), authority.authority().clone())
         },
     );
     assert_eq!(report.state, RecoveryDeliveryState::Acknowledged);
