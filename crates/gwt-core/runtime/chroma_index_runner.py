@@ -56,14 +56,18 @@ def default_qos_for_action(action: str) -> str:
     return "background" if action.startswith("index") else "interactive"
 
 
-def configure_qos_threads(qos: str) -> None:
+def configure_qos_threads(qos: str, *, single_query: bool = False) -> None:
     """Apply the FR-385 QoS profile: embedding thread caps (background=2 /
     interactive=4), inter-op 1, tokenizer parallelism off, and a lowered
-    process priority for background work. Must run before the lazy model
-    import; it never imports torch itself."""
+    process priority for background work. Single-query searches use one
+    thread to avoid parallel overhead and Windows Normal priority rather
+    than inheriting the launching agent's BelowNormal class. Must run before
+    the lazy model import; it never imports torch itself."""
     caps = QOS_THREAD_CAPS.get(qos)
     if caps is None:
         raise ValueError(f"unknown qos profile: {qos}")
+    if single_query and qos == "interactive":
+        caps = "1"
     for key in QOS_THREAD_ENV_KEYS:
         os.environ[key] = caps
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -78,6 +82,18 @@ def configure_qos_threads(qos: str) -> None:
             pass
     if qos == "background":
         _lower_process_priority()
+    elif single_query and os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel = ctypes.windll.kernel32
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.SetPriorityClass.restype = wintypes.BOOL
+            kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x00000020)  # Normal
+        except OSError:
+            pass
 
 
 def _lower_process_priority() -> None:
@@ -2044,9 +2060,49 @@ def _reset_chroma_store(db_path: Path) -> None:
                 pass
 
 
+SEARCH_WORKER_READ_CLIENT_LIMIT = 16
+_SEARCH_WORKER_READ_CLIENTS: Optional[Dict[tuple[Path, str], tuple[Path, Any, Any]]] = None
+
+
+@contextlib.contextmanager
+def _search_worker_read_clients() -> Iterator[None]:
+    """Retain bounded immutable Issue-store readers for one worker lifetime."""
+    global _SEARCH_WORKER_READ_CLIENTS
+    previous = _SEARCH_WORKER_READ_CLIENTS
+    retained: Dict[tuple[Path, str], tuple[Path, Any, Any]] = {}
+    _SEARCH_WORKER_READ_CLIENTS = retained
+    try:
+        yield
+    finally:
+        _SEARCH_WORKER_READ_CLIENTS = previous
+        for _, client, _ in retained.values():
+            _close_chroma_client(client)
+
+
 def _open_chroma_collection(db_path: Path, collection_name: str):
     """Open an existing collection without silently creating a new one."""
     import chromadb  # type: ignore
+
+    db_path = Path(db_path)
+    retained = _SEARCH_WORKER_READ_CLIENTS
+    cache_key = None
+    # Closing the last Chroma client stops its System. Issue indexing always
+    # publishes a new generation. Other repo scopes update the active store
+    # in place, so retaining their readers would keep stale query vectors.
+    if (
+        retained is not None
+        and db_path.parent.name.endswith(GENERATIONS_DIR_SUFFIX)
+        and db_path.name.startswith("gen-")
+        and collection_name == V2_ISSUES_COLLECTION
+    ):
+        db_path = db_path.resolve()
+        cache_key = (db_path.parent, collection_name)
+        cached = retained.pop(cache_key, None)
+        if cached is not None:
+            if cached[0] == db_path:
+                retained[cache_key] = cached
+                return cached[1], cached[2]
+            _close_chroma_client(cached[1])
 
     client = chromadb.PersistentClient(path=_chroma_store_path(db_path))
     ef = E5EmbeddingFunction()
@@ -2058,6 +2114,11 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
     except Exception:
         _close_chroma_client(client)
         raise
+    if cache_key is not None:
+        retained[cache_key] = (db_path, client, collection)
+        while len(retained) > SEARCH_WORKER_READ_CLIENT_LIMIT:
+            _, oldest_client, _ = retained.pop(next(iter(retained)))
+            _close_chroma_client(oldest_client)
     return client, collection
 
 
@@ -5663,17 +5724,55 @@ def _issue_source_fingerprint(issues: Sequence[Dict[str, Any]]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+_ISSUE_SOURCE_CACHE: Dict[tuple, tuple] = {}
+
+
+def _issue_source_revision(repo_hash: str) -> Optional[str]:
+    """Canonical IssueCache writers publish this only when source bytes change."""
+    try:
+        revision = (_issue_cache_root(repo_hash) / "source-revision").read_text(encoding="utf-8")
+        return str(uuid.UUID(revision))
+    except (OSError, ValueError, UnicodeDecodeError):
+        # Legacy/unversioned sources still use the complete read on every call.
+        return None
+
+
+def _cached_issue_source(repo_hash: str, kind: str, load: Callable[[], Any]) -> Any:
+    key = (str(_issue_cache_root(repo_hash)), kind)
+    revision = _issue_source_revision(repo_hash)
+    cached = _ISSUE_SOURCE_CACHE.get(key)
+    if revision is not None and cached is not None and cached[0] == revision:
+        return cached[1]
+    _ISSUE_SOURCE_CACHE.pop(key, None)
+    result = load()
+    # Do not retain a snapshot spanning a concurrent canonical mutation.
+    if revision is not None and revision == _issue_source_revision(repo_hash):
+        if len(_ISSUE_SOURCE_CACHE) >= 16:
+            _ISSUE_SOURCE_CACHE.pop(next(iter(_ISSUE_SOURCE_CACHE)))
+        _ISSUE_SOURCE_CACHE[key] = (revision, result)
+    return result
+
+
 def _issue_cache_source_snapshot(repo_hash: str) -> Dict[str, Any]:
-    issues = _load_cached_issue_documents(repo_hash)
+    def load() -> Dict[str, Any]:
+        issues = _load_cached_issue_documents(repo_hash)
+        return {"fingerprint": _issue_source_fingerprint(issues), "document_count": len(issues)}
+
+    source = _cached_issue_source(repo_hash, "issues", load)
     refresh_meta = _issue_cache_refresh_meta(repo_hash)
     return {
-        "fingerprint": _issue_source_fingerprint(issues),
-        "document_count": len(issues),
+        **source,
         "cache_refresh_at": refresh_meta.get("last_full_refresh"),
     }
 
 
 def _load_cached_spec_documents(
+    repo_hash: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    return _cached_issue_source(repo_hash, "specs", lambda: _read_cached_spec_documents(repo_hash))
+
+
+def _read_cached_spec_documents(
     repo_hash: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     root = _issue_cache_root(repo_hash)
@@ -7301,6 +7400,10 @@ def _legacy_residue_detected(
 
 
 def _close_chroma_client(client) -> None:
+    if _SEARCH_WORKER_READ_CLIENTS is not None and any(
+        cached[1] is client for cached in _SEARCH_WORKER_READ_CLIENTS.values()
+    ):
+        return
     try:
         client.close()
     except Exception:
@@ -9705,7 +9808,7 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
     endpoint_path = worker_dir / "endpoint.json"
     token = secrets.token_hex(32)
     pid = os.getpid()
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+    with _search_worker_read_clients(), socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.bind(("127.0.0.1", 0))
         server.listen(1)
         server.settimeout(idle_timeout)
@@ -10062,7 +10165,10 @@ def main() -> int:
 
         # Phase 70 FR-385: thread caps / priority must be in place before any
         # action can trigger the lazy model import.
-        configure_qos_threads(args.qos or default_qos_for_action(action))
+        configure_qos_threads(
+            args.qos or default_qos_for_action(action),
+            single_query=action in {"search-multi", "serve-search-worker"},
+        )
 
         if action == "serve-search-worker":
             if not args.worker_dir:

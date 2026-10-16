@@ -824,7 +824,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         handleProjectIndexSearchResults,
         handleProjectIndexSearchError,
         mountProjectIndexSurface,
-        indexSearchStateMap,
+        disposeIndexSearchWindow,
         pendingIndexOpenTargetsByPreset,
         getIndexStatus,
       } = createProjectIndexSearchSurface({
@@ -991,7 +991,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       }
 
-      const uiTraceWiring = createUiTraceWiring({
+      const { receive: applyUiTraceReceiveEvent, ...uiTraceWiring } = createUiTraceWiring({
         profiler: uiTraceProfiler,
         send,
         alert: (message) => window.alert(message),
@@ -1152,6 +1152,10 @@ import { createUiStateStore } from "/ui-state-store.js";
         confirmUpdate: (version) =>
           window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`),
         openReleaseNotes: (version) => releaseNotesWindow.open(version || null),
+      });
+      const updateRestartImpactModel = createUiStateStore(null);
+      updateRestartImpactModel.subscribe(impact => impact, impact => {
+        if (impact) updateCtaController.handleUpdateRestartImpact(impact);
       });
 
       // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
@@ -4937,7 +4941,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                     branchListStateMap.delete(windowId);
                     boardStateMap.delete(windowId);
                     logStateMap.delete(windowId);
-                    indexSearchStateMap.delete(windowId);
+                    disposeIndexSearchWindow(windowId);
                     clearKnowledgeBridgeState(windowId);
                     workspaceOverviewSurface.deleteState(windowId);
                     clearBranchCleanupForWindow(windowId);
@@ -5187,12 +5191,8 @@ import { createUiStateStore } from "/ui-state-store.js";
             );
             break;
           case "ui_trace_saved":
-            window.alert(
-              `UI trace saved\n${event.path}\nentries: ${event.entries}`,
-            );
-            break;
           case "ui_trace_error":
-            window.alert(`UI trace error: ${event.message}`);
+            applyUiTraceReceiveEvent(event);
             break;
           case "release_notes_payload":
             applyReleaseNotesPayload(event);
@@ -5537,6 +5537,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             updateCtaController.handleUpdateApplyPendingPersisted({
               version: event.version,
             });
+            break;
+          case "update_restart_impact":
+            updateRestartImpactModel.update(() => event);
             break;
           case "update_auto_apply":
             // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.

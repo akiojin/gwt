@@ -350,4 +350,97 @@ test.describe("Update drain CTA", () => {
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
+
+  test("Issue #5646: immediate restart previews all active work and requires a safe explicit choice", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.addInitScript(() => {
+      (window as any).__gwtRestartRequests = [];
+      const originalSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        const payload = typeof data === "string" ? JSON.parse(data) : null;
+        if (["get_update_restart_impact", "apply_update_restart_now", "apply_update_when_idle"].includes(payload?.kind)) {
+          (window as any).__gwtRestartRequests.push(payload);
+          // These actions are observed locally. No installer, restart, or
+          // nonexistent staged manifest reaches the isolated live backend.
+          return;
+        }
+        return originalSend.call(this, data);
+      };
+    });
+    await gotoLiveGwt(page, BASE, { enableTestBridge: true, suppressUpdateApplyStart: true });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
+    const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+    }, detail);
+    const requests = () => page.evaluate(() =>
+      (window as any).__gwtRestartRequests as Array<{ kind: string; request_id?: string }>,
+    );
+    const blocking = [
+      ...Array.from({ length: 12 }, (_, index) => ({
+        kind: "active_pane", window_id: `restart-agent-${index + 1}`,
+        label: `work/issue-${5601 + index}`, state: index === 11 ? "starting" : "running",
+      })),
+      { kind: "pending_acquire_claim", issue_number: 5644 },
+      { kind: "pending_acquire_claim", issue_number: 5645 },
+      { kind: "held_verification_lease", lease_id: "restart-verification" },
+    ];
+    const issueNumbers = [5601, 5602, 5603, 5604, 5605, 5606, 5607, 5608, 5609, 5610, 5611, 5612, 5644, 5645, 5646];
+    await inject({ kind: "update_apply_pending_persisted", version: "9.99.0" });
+    const cta = page.locator("#update-cta");
+    const modal = page.locator("#update-modal");
+    const wait = modal.locator("[data-update-modal-wait-for-idle]");
+    const confirm = modal.locator("[data-update-modal-confirm-restart]");
+    const cancel = modal.locator("[data-update-modal-cancel-restart]");
+    const preview = async () => {
+      const previous = (await requests()).filter((request) => request.kind === "get_update_restart_impact").length;
+      await cta.click();
+      await modal.locator("[data-update-modal-restart-now]").click();
+      await expect(modal).toHaveAttribute("data-state", "restart-preview");
+      await expect(wait).toBeDisabled();
+      await expect(confirm).toBeDisabled();
+      await expect.poll(async () => (await requests()).filter((request) => request.kind === "get_update_restart_impact").length)
+        .toBe(previous + 1);
+      const request = (await requests()).filter((request) => request.kind === "get_update_restart_impact").at(-1)!;
+      await inject({ kind: "update_restart_impact", request_id: request.request_id, blocking, issue_numbers: issueNumbers });
+      await expect(modal).toHaveAttribute("data-state", "restart-confirm");
+    };
+
+    await preview();
+    await expect(modal.locator(".modal-shell")).toHaveAttribute("role", "dialog");
+    await expect(modal.locator(".modal-shell")).toHaveAttribute("aria-modal", "true");
+    await expect(modal).toContainText("Restart gwt and stop active work?");
+    await expect(modal).toContainText("Running / Starting agents: 12. Pending claims: 2. Verification leases: 1.");
+    for (const number of issueNumbers) await expect(modal).toContainText(`#${number}`);
+    await expect(modal).toContainText("Restart now stops these agents and interrupts pending claims and verification.");
+    await expect(wait).toHaveText("Apply after all agents finish");
+    await expect(wait).toHaveClass(/update-modal__btn--primary/);
+    await expect(wait).toBeFocused();
+    await expect(confirm).toHaveText("Restart now");
+    expect((await requests()).filter((request) => request.kind === "apply_update_restart_now")).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("update-restart-impact.png") });
+    await cancel.click();
+    await expect(modal).toHaveCount(0);
+    expect((await requests()).filter((request) => request.kind !== "get_update_restart_impact")).toEqual([]);
+
+    await preview();
+    await wait.click();
+    await expect.poll(async () => (await requests()).map((request) => request.kind)).toContain("apply_update_when_idle");
+    expect((await requests()).filter((request) => request.kind === "apply_update_restart_now")).toEqual([]);
+    // Complete the synthetic pending apply before testing its explicit override.
+    await inject({ kind: "update_apply_pending_persisted", version: "9.99.0" });
+    await inject({ kind: "issue_monitor_status", status: { enabled: true, state: "update_drain", update_drain: {
+      version: "9.99.0", since: new Date().toISOString(), reason: "auto", blocking,
+    } } });
+    await expect(cta).toHaveAttribute("data-status", "draining");
+    await preview();
+    await expect(wait).toBeFocused();
+    expect((await requests()).filter((request) => request.kind === "apply_update_restart_now")).toEqual([]);
+    await confirm.click();
+    await expect.poll(async () => (await requests()).filter((request) => request.kind === "apply_update_restart_now").length).toBe(1);
+    expect(errors).toEqual([]);
+  });
 });

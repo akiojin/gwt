@@ -1,0 +1,1646 @@
+{
+  "boundary": "Diagnostic launch-priority comparison only; all sources/binary/queries/corpus unchanged. Not acceptance evidence for the ordinary inherited-priority launch.",
+  "binary": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery\\gwtd.exe",
+    "bytes": 65569280,
+    "sha256": "5ed8e1a1c145bc28810075004612ae41225663d14c614e9d3a0d4a6d618905a0"
+  },
+  "original_driver_priority": 16384,
+  "host_before": {
+    "captured_utc": "2026-10-16T07:29:19.219173+00:00",
+    "logical_cpus": 32,
+    "total_memory_kib": 133952588,
+    "free_memory_kib": 14853888,
+    "cpu_load_percent": [
+      28
+    ]
+  },
+  "bursts": [
+    {
+      "driver_priority": 16384,
+      "result": {
+        "count": 12,
+        "successes": 12,
+        "p95_ms": 2248.9830999984406,
+        "started_utc": "2026-10-16T07:30:34.464345+00:00",
+        "finished_utc": "2026-10-16T07:30:36.724871+00:00",
+        "p95_method": "nearest rank over every request, including failures/timeouts",
+        "threshold_ms": 3000,
+        "pass": true,
+        "samples": [
+          {
+            "request": 0,
+            "wall_ms": 1925.7789000002958,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474110+00:00",
+            "finished_utc": "2026-10-16T07:30:36.400051+00:00",
+            "query": "search admission heavy lease",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-f2807a0d0da4484d93c602e82a84134d.json",
+            "stdout_sha256": "43d4c405c9a8ac7d59aea8439d3f5ed0c0407d3006d0da8bda67933dc55f997a",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 1,
+            "wall_ms": 1346.6482000003452,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474180+00:00",
+            "finished_utc": "2026-10-16T07:30:35.821144+00:00",
+            "query": "resident worker index sharing",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-65018d4e4e9a49739f5259a5f2f4233b.json",
+            "stdout_sha256": "9cd6fb2cb46ef2736392299e97a389b62965d1ef6a9a59bfa852553ba5495b5f",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 2,
+            "wall_ms": 899.4868999980099,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474248+00:00",
+            "finished_utc": "2026-10-16T07:30:35.373940+00:00",
+            "query": "GUI restart search warmup",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-06b671da0fce4506925569dae877f778.json",
+            "stdout_sha256": "3dcc0adc65eba489962db9ccd448a832de3cdea1087cfcb37bc36f80f7815984",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 3,
+            "wall_ms": 1499.2448999983026,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474628+00:00",
+            "finished_utc": "2026-10-16T07:30:35.974105+00:00",
+            "query": "index generation publication repair",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-2c6307330d714bf790888db486e06676.json",
+            "stdout_sha256": "d8598579cb88c19035b7ca2c36bc2f83bb60797db12db8ce287a69deab396707",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 4,
+            "wall_ms": 1193.954099999246,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474306+00:00",
+            "finished_utc": "2026-10-16T07:30:35.668368+00:00",
+            "query": "Issue Monitor execution settlement",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-3921ecbdb715450ebc8ff3d5d3745dd9.json",
+            "stdout_sha256": "6b0a2250edb29da54b7e3c727e4b0838ba8af6978227680c52c458ad952fb4d1",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 5,
+            "wall_ms": 2248.9830999984406,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474356+00:00",
+            "finished_utc": "2026-10-16T07:30:36.723461+00:00",
+            "query": "Windows provider usage import",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-7e822b40b4c24dc89cd25a210e8edfc8.json",
+            "stdout_sha256": "34d602d807778093d4d18f07c399ed86abb3dda5c8bdd651aeac616866cc9c84",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 6,
+            "wall_ms": 1784.209400000691,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474581+00:00",
+            "finished_utc": "2026-10-16T07:30:36.258884+00:00",
+            "query": "coverage required checks threshold",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-e7001db97a4b4a73b31069f6570942b8.json",
+            "stdout_sha256": "41afeb3a0b201ee5f48f3840f2c70ca65541b470015f3539981e4abb44c38ed9",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 7,
+            "wall_ms": 2094.414600000164,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474404+00:00",
+            "finished_utc": "2026-10-16T07:30:36.568914+00:00",
+            "query": "worktree source revision invalidation",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-f39d8da5095f443da1be3f372c64946a.json",
+            "stdout_sha256": "6998bd81dead9875ed7b35b1c0fdb4befea6c1bdf2ea8fb9b5f5254561ae6630",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 8,
+            "wall_ms": 1635.7863000012003,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474449+00:00",
+            "finished_utc": "2026-10-16T07:30:36.110434+00:00",
+            "query": "semantic memory corpus recovery",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-53428c778e4b4dc9b094ca7df51fbd87.json",
+            "stdout_sha256": "e7604bff3e873e91e54431cac119dd89e7d4fb08b0b719c9ff05fb18fc41f069",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 9,
+            "wall_ms": 749.817100000655,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474535+00:00",
+            "finished_utc": "2026-10-16T07:30:35.224448+00:00",
+            "query": "WebSocket settings responsiveness",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-b76e61baebb74c14ae790c8df4b7d534.json",
+            "stdout_sha256": "d9a8cd4f11225e42c1215a19b4c1316ab70698388f95448c6154776b3b6c7397",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 10,
+            "wall_ms": 595.9404999994149,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.474493+00:00",
+            "finished_utc": "2026-10-16T07:30:35.070658+00:00",
+            "query": "verification lease heartbeat",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-5eeddf352a0c4f2caf0e5a064a0599f3.json",
+            "stdout_sha256": "4e7b1ed1e1eb1753c0e3c3ed5211447cf2488b0604cce0c21539f529eb0f83e4",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 11,
+            "wall_ms": 1044.221899999684,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:34.473991+00:00",
+            "finished_utc": "2026-10-16T07:30:35.518335+00:00",
+            "query": "managed hooks session startup",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-3b3070317b114eed8541989ccf145e1f.json",
+            "stdout_sha256": "692b9b860e725389a07cfccf7a0e67fda25cd25d5652d1f9a65454f297188f6c",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "driver_priority": 32,
+      "result": {
+        "count": 12,
+        "successes": 12,
+        "p95_ms": 2159.411900000123,
+        "started_utc": "2026-10-16T07:30:36.725751+00:00",
+        "finished_utc": "2026-10-16T07:30:38.889108+00:00",
+        "p95_method": "nearest rank over every request, including failures/timeouts",
+        "threshold_ms": 3000,
+        "pass": true,
+        "samples": [
+          {
+            "request": 0,
+            "wall_ms": 944.4149000009929,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.728334+00:00",
+            "finished_utc": "2026-10-16T07:30:37.672959+00:00",
+            "query": "search admission heavy lease",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-540882ed92864e8b8f223ce294c1e2de.json",
+            "stdout_sha256": "43d4c405c9a8ac7d59aea8439d3f5ed0c0407d3006d0da8bda67933dc55f997a",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 1,
+            "wall_ms": 1618.1775000004563,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.727896+00:00",
+            "finished_utc": "2026-10-16T07:30:38.346172+00:00",
+            "query": "resident worker index sharing",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-96aa046a07884ade9afdfd4cc5e2931b.json",
+            "stdout_sha256": "9cd6fb2cb46ef2736392299e97a389b62965d1ef6a9a59bfa852553ba5495b5f",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 2,
+            "wall_ms": 1753.5308999977133,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.728387+00:00",
+            "finished_utc": "2026-10-16T07:30:38.482237+00:00",
+            "query": "GUI restart search warmup",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-ef216a3ef5a24b6293b41c237dc1f315.json",
+            "stdout_sha256": "3dcc0adc65eba489962db9ccd448a832de3cdea1087cfcb37bc36f80f7815984",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 3,
+            "wall_ms": 1490.6900999994832,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.728053+00:00",
+            "finished_utc": "2026-10-16T07:30:38.218850+00:00",
+            "query": "index generation publication repair",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-d76a1d33b652415d96b03d6fe1fffe0d.json",
+            "stdout_sha256": "d8598579cb88c19035b7ca2c36bc2f83bb60797db12db8ce287a69deab396707",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 4,
+            "wall_ms": 799.5522000019264,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.727954+00:00",
+            "finished_utc": "2026-10-16T07:30:37.527620+00:00",
+            "query": "Issue Monitor execution settlement",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-6d959e3511a6447588e1f06cb2a14b91.json",
+            "stdout_sha256": "6b0a2250edb29da54b7e3c727e4b0838ba8af6978227680c52c458ad952fb4d1",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 5,
+            "wall_ms": 1063.8895000010962,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.728008+00:00",
+            "finished_utc": "2026-10-16T07:30:37.792106+00:00",
+            "query": "Windows provider usage import",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-d850ef002a054c81a2fc2afc4f1a5e6a.json",
+            "stdout_sha256": "34d602d807778093d4d18f07c399ed86abb3dda5c8bdd651aeac616866cc9c84",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 6,
+            "wall_ms": 2159.411900000123,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.728114+00:00",
+            "finished_utc": "2026-10-16T07:30:38.887626+00:00",
+            "query": "coverage required checks threshold",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-e146884fa0bd4c329819b6de61cbdd26.json",
+            "stdout_sha256": "41afeb3a0b201ee5f48f3840f2c70ca65541b470015f3539981e4abb44c38ed9",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 7,
+            "wall_ms": 1878.7149999989197,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.728152+00:00",
+            "finished_utc": "2026-10-16T07:30:38.607063+00:00",
+            "query": "worktree source revision invalidation",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-5e6170e13fcc4928b17507404e22d9e1.json",
+            "stdout_sha256": "6998bd81dead9875ed7b35b1c0fdb4befea6c1bdf2ea8fb9b5f5254561ae6630",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 8,
+            "wall_ms": 2026.531100000284,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.728196+00:00",
+            "finished_utc": "2026-10-16T07:30:38.754817+00:00",
+            "query": "semantic memory corpus recovery",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-d7598c5314c847c1a6cc7533bfa62bbd.json",
+            "stdout_sha256": "e7604bff3e873e91e54431cac119dd89e7d4fb08b0b719c9ff05fb18fc41f069",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 9,
+            "wall_ms": 1344.2697999998927,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.728239+00:00",
+            "finished_utc": "2026-10-16T07:30:38.072628+00:00",
+            "query": "WebSocket settings responsiveness",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-50433e136e1241a5b2b4162859645de8.json",
+            "stdout_sha256": "d9a8cd4f11225e42c1215a19b4c1316ab70698388f95448c6154776b3b6c7397",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 10,
+            "wall_ms": 1210.432200001378,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.728286+00:00",
+            "finished_utc": "2026-10-16T07:30:37.938927+00:00",
+            "query": "verification lease heartbeat",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-a4f4d82e881b497e98d2681e7d0ad322.json",
+            "stdout_sha256": "4e7b1ed1e1eb1753c0e3c3ed5211447cf2488b0604cce0c21539f529eb0f83e4",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 11,
+            "wall_ms": 678.3378000000084,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:36.727787+00:00",
+            "finished_utc": "2026-10-16T07:30:37.406336+00:00",
+            "query": "managed hooks session startup",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-d2146b2f8bc34bd382970aab04777a50.json",
+            "stdout_sha256": "692b9b860e725389a07cfccf7a0e67fda25cd25d5652d1f9a65454f297188f6c",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "driver_priority": 32,
+      "result": {
+        "count": 12,
+        "successes": 12,
+        "p95_ms": 1869.9918000020261,
+        "started_utc": "2026-10-16T07:30:38.889921+00:00",
+        "finished_utc": "2026-10-16T07:30:40.764266+00:00",
+        "p95_method": "nearest rank over every request, including failures/timeouts",
+        "threshold_ms": 3000,
+        "pass": true,
+        "samples": [
+          {
+            "request": 0,
+            "wall_ms": 662.7254000013636,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892613+00:00",
+            "finished_utc": "2026-10-16T07:30:39.555442+00:00",
+            "query": "search admission heavy lease",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-90babd3b33da4c80b39cac1e2103ef90.json",
+            "stdout_sha256": "43d4c405c9a8ac7d59aea8439d3f5ed0c0407d3006d0da8bda67933dc55f997a",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 1,
+            "wall_ms": 1597.6232000029995,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892094+00:00",
+            "finished_utc": "2026-10-16T07:30:40.489828+00:00",
+            "query": "resident worker index sharing",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-1ccef96def0343b1bef3247eedef9279.json",
+            "stdout_sha256": "9cd6fb2cb46ef2736392299e97a389b62965d1ef6a9a59bfa852553ba5495b5f",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 2,
+            "wall_ms": 1743.0380000005243,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892790+00:00",
+            "finished_utc": "2026-10-16T07:30:40.636045+00:00",
+            "query": "GUI restart search warmup",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-c8a0436b5f9c4eb79eebd56344b85aa7.json",
+            "stdout_sha256": "3dcc0adc65eba489962db9ccd448a832de3cdea1087cfcb37bc36f80f7815984",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 3,
+            "wall_ms": 910.356899999897,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892515+00:00",
+            "finished_utc": "2026-10-16T07:30:39.803060+00:00",
+            "query": "index generation publication repair",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-691c1b2df64b4f1ebe1a82909d873f17.json",
+            "stdout_sha256": "d8598579cb88c19035b7ca2c36bc2f83bb60797db12db8ce287a69deab396707",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 4,
+            "wall_ms": 1312.381900002947,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892149+00:00",
+            "finished_utc": "2026-10-16T07:30:40.204638+00:00",
+            "query": "Issue Monitor execution settlement",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-55eb95ac0e2a4368937f03fa49712b4f.json",
+            "stdout_sha256": "6b0a2250edb29da54b7e3c727e4b0838ba8af6978227680c52c458ad952fb4d1",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 5,
+            "wall_ms": 794.163300000946,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892198+00:00",
+            "finished_utc": "2026-10-16T07:30:39.686462+00:00",
+            "query": "Windows provider usage import",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-5267b1f8e1314d10b5214397a91f0ac9.json",
+            "stdout_sha256": "34d602d807778093d4d18f07c399ed86abb3dda5c8bdd651aeac616866cc9c84",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 6,
+            "wall_ms": 395.3324000030989,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892311+00:00",
+            "finished_utc": "2026-10-16T07:30:39.287852+00:00",
+            "query": "coverage required checks threshold",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-5396a04973094a48b2ac4d63775c10ce.json",
+            "stdout_sha256": "41afeb3a0b201ee5f48f3840f2c70ca65541b470015f3539981e4abb44c38ed9",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 7,
+            "wall_ms": 1869.9918000020261,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892563+00:00",
+            "finished_utc": "2026-10-16T07:30:40.762756+00:00",
+            "query": "worktree source revision invalidation",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-2f8e857aafc14b8a8bb762159ea9388a.json",
+            "stdout_sha256": "6998bd81dead9875ed7b35b1c0fdb4befea6c1bdf2ea8fb9b5f5254561ae6630",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 8,
+            "wall_ms": 526.0749999979453,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892241+00:00",
+            "finished_utc": "2026-10-16T07:30:39.418546+00:00",
+            "query": "semantic memory corpus recovery",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-5b5f3b0557734722a573a48f10083282.json",
+            "stdout_sha256": "e7604bff3e873e91e54431cac119dd89e7d4fb08b0b719c9ff05fb18fc41f069",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 9,
+            "wall_ms": 1445.8072000015818,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892407+00:00",
+            "finished_utc": "2026-10-16T07:30:40.338326+00:00",
+            "query": "WebSocket settings responsiveness",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-e366d88e10d042bc93bdd16a3d12e226.json",
+            "stdout_sha256": "d9a8cd4f11225e42c1215a19b4c1316ab70698388f95448c6154776b3b6c7397",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 10,
+            "wall_ms": 1036.5127000004577,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.892684+00:00",
+            "finished_utc": "2026-10-16T07:30:39.929416+00:00",
+            "query": "verification lease heartbeat",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-2c32dc69ba9f4a79866c319d3f7bf2f6.json",
+            "stdout_sha256": "4e7b1ed1e1eb1753c0e3c3ed5211447cf2488b0604cce0c21539f529eb0f83e4",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 11,
+            "wall_ms": 1164.0480999994907,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:38.891993+00:00",
+            "finished_utc": "2026-10-16T07:30:40.056255+00:00",
+            "query": "managed hooks session startup",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-bcf644a33a7c464d8cfa4a8811ca4f0e.json",
+            "stdout_sha256": "692b9b860e725389a07cfccf7a0e67fda25cd25d5652d1f9a65454f297188f6c",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "driver_priority": 16384,
+      "result": {
+        "count": 12,
+        "successes": 12,
+        "p95_ms": 1698.3848999989277,
+        "started_utc": "2026-10-16T07:30:40.765279+00:00",
+        "finished_utc": "2026-10-16T07:30:42.469110+00:00",
+        "p95_method": "nearest rank over every request, including failures/timeouts",
+        "threshold_ms": 3000,
+        "pass": true,
+        "samples": [
+          {
+            "request": 0,
+            "wall_ms": 947.48559999789,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.768115+00:00",
+            "finished_utc": "2026-10-16T07:30:41.715729+00:00",
+            "query": "search admission heavy lease",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-785285586c4f41c892e7c47adf0d526a.json",
+            "stdout_sha256": "43d4c405c9a8ac7d59aea8439d3f5ed0c0407d3006d0da8bda67933dc55f997a",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 1,
+            "wall_ms": 1557.5868999985687,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.770111+00:00",
+            "finished_utc": "2026-10-16T07:30:42.327914+00:00",
+            "query": "resident worker index sharing",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-88f56c409fc7415691607a3f1323385f.json",
+            "stdout_sha256": "9cd6fb2cb46ef2736392299e97a389b62965d1ef6a9a59bfa852553ba5495b5f",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 2,
+            "wall_ms": 462.44579999984126,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.768487+00:00",
+            "finished_utc": "2026-10-16T07:30:41.231145+00:00",
+            "query": "GUI restart search warmup",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-fbfef80d41c748d19b1ab0545998b28d.json",
+            "stdout_sha256": "3dcc0adc65eba489962db9ccd448a832de3cdea1087cfcb37bc36f80f7815984",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 3,
+            "wall_ms": 1182.6747999984946,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.768049+00:00",
+            "finished_utc": "2026-10-16T07:30:41.950952+00:00",
+            "query": "index generation publication repair",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-86502f2ef0694ff8b596a1924fccedd4.json",
+            "stdout_sha256": "d8598579cb88c19035b7ca2c36bc2f83bb60797db12db8ce287a69deab396707",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 4,
+            "wall_ms": 710.2058000018587,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.768173+00:00",
+            "finished_utc": "2026-10-16T07:30:41.478574+00:00",
+            "query": "Issue Monitor execution settlement",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-65d0bdac6a3b48f889a1af42dc334b1c.json",
+            "stdout_sha256": "6b0a2250edb29da54b7e3c727e4b0838ba8af6978227680c52c458ad952fb4d1",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 5,
+            "wall_ms": 1299.5411999982025,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.768715+00:00",
+            "finished_utc": "2026-10-16T07:30:42.068350+00:00",
+            "query": "Windows provider usage import",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-62d79453f3704e32a0fbf629478481dc.json",
+            "stdout_sha256": "34d602d807778093d4d18f07c399ed86abb3dda5c8bdd651aeac616866cc9c84",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 6,
+            "wall_ms": 1698.3848999989277,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.769183+00:00",
+            "finished_utc": "2026-10-16T07:30:42.467727+00:00",
+            "query": "coverage required checks threshold",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-50e7a1bcc0274c45b413e5b18859bd02.json",
+            "stdout_sha256": "41afeb3a0b201ee5f48f3840f2c70ca65541b470015f3539981e4abb44c38ed9",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 7,
+            "wall_ms": 586.3811000017449,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.768315+00:00",
+            "finished_utc": "2026-10-16T07:30:41.354919+00:00",
+            "query": "worktree source revision invalidation",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-76fb2bc6f67241969d8e1722b0670672.json",
+            "stdout_sha256": "6998bd81dead9875ed7b35b1c0fdb4befea6c1bdf2ea8fb9b5f5254561ae6630",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 8,
+            "wall_ms": 1067.1823999982735,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.768218+00:00",
+            "finished_utc": "2026-10-16T07:30:41.835495+00:00",
+            "query": "semantic memory corpus recovery",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-1ec7e7deb69a434e854708bc39ce38a9.json",
+            "stdout_sha256": "e7604bff3e873e91e54431cac119dd89e7d4fb08b0b719c9ff05fb18fc41f069",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 9,
+            "wall_ms": 1434.870500001125,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.768358+00:00",
+            "finished_utc": "2026-10-16T07:30:42.203340+00:00",
+            "query": "WebSocket settings responsiveness",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-a45bc1ad71a042c796405a09a3d84f53.json",
+            "stdout_sha256": "d9a8cd4f11225e42c1215a19b4c1316ab70698388f95448c6154776b3b6c7397",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 10,
+            "wall_ms": 333.1370000014431,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.768645+00:00",
+            "finished_utc": "2026-10-16T07:30:41.101982+00:00",
+            "query": "verification lease heartbeat",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-cb8fb06932c14249bb2c1d9f4f989557.json",
+            "stdout_sha256": "4e7b1ed1e1eb1753c0e3c3ed5211447cf2488b0604cce0c21539f529eb0f83e4",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          },
+          {
+            "request": 11,
+            "wall_ms": 829.1573999995308,
+            "exit_code": 0,
+            "stderr": "",
+            "timed_out": false,
+            "started_utc": "2026-10-16T07:30:40.767990+00:00",
+            "finished_utc": "2026-10-16T07:30:41.597252+00:00",
+            "query": "managed hooks session startup",
+            "success": true,
+            "result_count": 3,
+            "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-7e05c5ee5e2c4f8b9af729d919040fc0.json",
+            "stdout_sha256": "692b9b860e725389a07cfccf7a0e67fda25cd25d5652d1f9a65454f297188f6c",
+            "response_projection": {
+              "exit_code": 0,
+              "ok": true,
+              "operation": "search"
+            },
+            "output_projection": {
+              "ok": true,
+              "stale_scopes": [
+                "issues"
+              ],
+              "refresh_queued": true,
+              "result_scopes": [
+                "issues",
+                "issues",
+                "issues"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "prewarm": {
+    "wall_ms": 68705.66179999878,
+    "exit_code": 0,
+    "stderr": "",
+    "timed_out": false,
+    "success": true,
+    "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-bbdff690f7b842f983134570625adb7c.json",
+    "stdout_sha256": "54e72af0539bb339bc00a7d45b8ab2b18865bc318b13cc6ba66c85a37f6d40e1",
+    "output_projection": {
+      "ok": true,
+      "scopes": {
+        "issues": {
+          "state": "stale"
+        }
+      },
+      "stale_scopes": [
+        "issues"
+      ],
+      "model_load_ms": 35103,
+      "timings_ms": {
+        "index_read": 29958.769400000165,
+        "model_load": 35103,
+        "query_encode": 865.2867999981681,
+        "query": 13.435199998639291,
+        "assemble": 0.006699996447423473
+      },
+      "worker_pid": 24964
+    },
+    "result_counts": {
+      "issueResults": 3
+    }
+  },
+  "warmup": {
+    "wall_ms": 960.1956000005885,
+    "exit_code": 0,
+    "stderr": "",
+    "timed_out": false,
+    "started_utc": "2026-10-16T07:30:33.503329+00:00",
+    "finished_utc": "2026-10-16T07:30:34.463760+00:00",
+    "query": "search admission index sharing repair performance",
+    "success": true,
+    "result_count": 3,
+    "stdout_local_path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\diagnostics\\issue-5598\\priority-diagnostic-ea26e7de0d04408c9d0f9a6f56ef70cf.json",
+    "stdout_sha256": "c3001cb819fa912069823e64a17b9c47bb4ce4d0a3987276cf2d417d4b3b717f",
+    "response_projection": {
+      "exit_code": 0,
+      "ok": true,
+      "operation": "search"
+    },
+    "output_projection": {
+      "ok": true,
+      "stale_scopes": [
+        "issues"
+      ],
+      "refresh_queued": true,
+      "result_scopes": [
+        "issues",
+        "issues",
+        "issues"
+      ]
+    }
+  },
+  "cleanup": [
+    {
+      "pid": 24964,
+      "worker_dir": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home\\.gwt\\runtime\\search-workers\\7caa7e584d3d18bb4cddb4c6b511ada635bbb4dd3f9458ab7b03ebaf0cd1aab6",
+      "stopped": true
+    }
+  ],
+  "host_after": {
+    "captured_utc": "2026-10-16T07:30:45.190628+00:00",
+    "logical_cpus": 32,
+    "total_memory_kib": 133952588,
+    "free_memory_kib": 12973148,
+    "cpu_load_percent": [
+      31
+    ]
+  }
+}

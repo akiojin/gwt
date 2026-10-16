@@ -1,0 +1,32 @@
+{
+  "boundary": "Native incremental respect-TTL refresh on independent active-generation clone; publisher return value observed without changing behavior",
+  "runner": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\runners\\chroma_index_runner-04eaf92932fa8080.py",
+  "cache_enabled": false,
+  "db_root": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-publication-clone-1792122892300055600\\index",
+  "wall_ms": 99431.02089999957,
+  "publication_results": [
+    {
+      "ok": false,
+      "error_code": "PUBLISH_FAILED",
+      "error": "failed to publish index generation: [WinError 5] \u30a2\u30af\u30bb\u30b9\u304c\u62d2\u5426\u3055\u308c\u307e\u3057\u305f\u3002: 'E:\\\\gwt\\\\work\\\\issue-5598\\\\target\\\\issue-5598-publication-clone-1792122892300055600\\\\index\\\\99a8660247f5bc49\\\\issues.staging' -> 'E:\\\\gwt\\\\work\\\\issue-5598\\\\target\\\\issue-5598-publication-clone-1792122892300055600\\\\index\\\\99a8660247f5bc49\\\\issues.gen\\\\gen-1792122992054-56516'",
+      "scope": "issues",
+      "retryable": true
+    }
+  ],
+  "result": {
+    "ok": false,
+    "scope": "issues",
+    "error_code": "PUBLISH_FAILED",
+    "error": "issues rebuild failed: PUBLISH_FAILED (1622/1622)",
+    "repair": {
+      "schema_version": 1,
+      "fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3",
+      "failures": 1,
+      "last_error": "PUBLISH_FAILED",
+      "actual_document_count": 1622,
+      "expected_document_count": 1622,
+      "mode": "incremental"
+    },
+    "mode": "incremental"
+  }
+}

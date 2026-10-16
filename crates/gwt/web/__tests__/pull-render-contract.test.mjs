@@ -149,6 +149,18 @@ test("Index health receiver resolves only shared model updates", () => {
     .some(finding => finding.kind.startsWith('dom-')));
 });
 
+test("Index search receivers resolve only shared model updates", () => {
+  const file = 'crates/gwt/web/project-index-search-surface.js';
+  const source = readFileSync(new URL('../project-index-search-surface.js', import.meta.url), 'utf8');
+  for (const name of ['handleProjectIndexSearchResults', 'handleProjectIndexSearchError']) {
+    assert.deepEqual(scanModule(source, file, { rootName: name }), []);
+    const bypass = source.replace(`function ${name}(event) {`,
+      `function ${name}(event) { renderProjectIndexSearch(event.id);`);
+    assert.notEqual(bypass, source);
+    assert.ok(scanModule(bypass, file, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
 test("Release notes receivers resolve only shared model updates", () => {
   const appFile = 'crates/gwt/web/app.js';
   const surfaceFile = 'crates/gwt/web/release-notes-window.js';
@@ -182,6 +194,24 @@ test("Workspace state notice receiver resolves only shared model updates", () =>
     'function receive(notice) { render(notice);');
   assert.notEqual(directRender, notice, 'mutation must target the real notice receiver');
   assert.ok(scanModule(directRender, noticeFile).some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("UI trace feedback receivers resolve only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const traceFile = 'crates/gwt/web/ui-trace-wiring.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const trace = readFileSync(new URL('../ui-trace-wiring.js', import.meta.url), 'utf8');
+  const receivers = source => scanModule(source, appFile, { modules: new Map([[traceFile, trace]]) })
+    .filter(finding => finding.root === 'receive' && /^\/ui_trace_(saved|error)(\||\/|$)/.test(finding.context));
+  assert.deepEqual(receivers(app), []);
+  const bypass = app.replace('case "ui_trace_saved":',
+    'case "ui_trace_saved": window.alert(event.path);');
+  assert.notEqual(bypass, app);
+  assert.ok(receivers(bypass).length > 0);
+  const directRender = trace.replace('function receive(event) {',
+    'function receive(event) { alert(event.message);');
+  assert.notEqual(directRender, trace);
+  assert.ok(scanModule(directRender, traceFile).length > 0);
 });
 
 test("PM settings receiver resolves only shared model updates", () => {
@@ -358,4 +388,33 @@ test("unrelated remote advances leave the default comparison stable; explicit CI
 
 test("checkout baseline satisfies the live and Git base contracts", () => {
   checkRepository();
+});
+
+
+test("cleanup progress/result receivers commit shared data and reject direct rendering", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const surfaceFile = 'crates/gwt/web/branches-cleanup-surface.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../branches-cleanup-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([[surfaceFile, surface]]);
+  const selected = findings => findings.filter(finding =>
+    /\/branch_cleanup_(progress|result)$/.test(finding.context));
+  assert.deepEqual(selected(scanModule(surface, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' })), []);
+  assert.deepEqual(selected(scanModule(app, appFile, { modules })), []);
+  const bypass = surface.replace('case "branch_cleanup_result": {',
+    'case "branch_cleanup_result": { renderBranches(event.id);');
+  assert.notEqual(bypass, surface);
+  assert.ok(selected(scanModule(bypass, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+
+test("Close Project receiver commits shared data and rejects direct rendering", () => {
+  const file = 'crates/gwt/web/close-project-confirm-modal.js';
+  const source = readFileSync(new URL('../close-project-confirm-modal.js', import.meta.url), 'utf8');
+  assert.deepEqual(scanModule(source, file), []);
+  const bypass = source.replace("if (event.kind === 'project_closed') {",
+    "if (event.kind === 'project_closed') { hide();");
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file).some(finding => finding.kind.startsWith('dom-')));
 });

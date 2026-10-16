@@ -318,6 +318,26 @@ fn defer_pending_update_unlocked_in(
     Ok(manifest)
 }
 
+/// An explicit "apply after agents finish" replaces an earlier operator defer.
+pub fn resume_pending_update(version: &str) -> Result<PendingUpdateManifest, String> {
+    resume_pending_update_in(&pending_update_dir(), version)
+}
+
+pub fn resume_pending_update_in(
+    dir: &Path,
+    version: &str,
+) -> Result<PendingUpdateManifest, String> {
+    let _lock = pending_update_manifest_lock(dir)?;
+    let mut manifest = load_pending_update_manifest_in(dir)
+        .ok_or_else(|| "No pending update with a valid payload is staged.".to_string())?;
+    if manifest.version != version {
+        return Err("Pending update changed; reopen the update confirmation.".into());
+    }
+    manifest.auto_apply_deferred = false;
+    write_pending_update_manifest_in(dir, &manifest)?;
+    Ok(manifest)
+}
+
 /// SPEC-2041 Phase 19 (FR-062): load the manifest if it exists. Returns `None`
 /// when the file is absent, malformed, or the referenced payload no longer
 /// exists on disk (so callers don't have to repeat that check).
@@ -4953,6 +4973,37 @@ mod tests {
 
         // Clear is idempotent on missing manifest.
         clear_pending_update_manifest_in(dir.path()).expect("clear-idempotent");
+    }
+
+    #[test]
+    fn issue_5646_explicit_wait_rearms_only_the_requested_staged_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("payload");
+        fs::write(&payload, "prepared").unwrap();
+        let manifest = PendingUpdateManifest {
+            version: "9.200.0".into(),
+            asset_url: "https://example.invalid/update".into(),
+            payload: PreparedPayload::PortableBinary { path: payload },
+            downloaded_at: "2026-10-16T00:00:00Z".into(),
+            origin: PendingUpdateOrigin::ManualLater,
+            auto_apply_deferred: true,
+        };
+        persist_pending_update_manifest_in(dir.path(), &manifest).unwrap();
+        assert!(resume_pending_update_in(dir.path(), "other-version").is_err());
+        let lock = pending_update_manifest_lock(dir.path()).unwrap();
+        assert!(resume_pending_update_in(dir.path(), &manifest.version).is_err());
+        drop(lock);
+        assert_eq!(
+            load_pending_update_manifest_in(dir.path()).unwrap(),
+            manifest
+        );
+        let resumed = resume_pending_update_in(dir.path(), &manifest.version).unwrap();
+        assert!(!resumed.auto_apply_deferred);
+        assert_eq!(resumed.origin, PendingUpdateOrigin::ManualLater);
+        assert_eq!(
+            load_pending_update_manifest_in(dir.path()).unwrap(),
+            resumed
+        );
     }
 
     #[test]

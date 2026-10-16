@@ -14715,6 +14715,56 @@ fn repair_resume_owner_bleed_keeps_legitimate_duplicates_below_threshold() {
 }
 
 #[test]
+fn repair_resume_owner_bleed_preserves_same_branch_successor_lifetimes() {
+    let temp = tempfile::tempdir().unwrap();
+    let works_path = temp.path().join("works.json");
+    let current_path = temp.path().join("current.json");
+    let project_root = Path::new("/repo");
+    let branch = "work/issue-3287";
+    let now = Utc.timestamp_opt(31_000, 0).unwrap();
+    let mut works = WorkItemsProjection::empty(now);
+    let mut work_id = canonical_work_id(project_root, Some(branch), None).unwrap();
+    let mut parent = None;
+    for index in 0..3 {
+        let mut start = bleed_backfill_event(&work_id, branch, index);
+        start.kind = WorkEventKind::Start;
+        start.owner = Some("SPEC-3287".to_string());
+        start.related_work_item_id = parent.take();
+        works.apply_event(start);
+        let mut resume = bleed_resume_event(&work_id, index);
+        resume.owner = Some("SPEC-3287".to_string());
+        works.apply_event(resume);
+        if index < 2 {
+            works.apply_event(WorkEvent::new(WorkEventKind::Done, &work_id, now));
+            parent = Some(work_id.clone());
+            work_id = successor_work_id(&work_id);
+        }
+    }
+    save_workspace_work_items_projection_to_path(&works_path, &works).unwrap();
+    let mut current = WorkspaceProjection::default_for_project(project_root);
+    current.id = work_id.clone();
+    current.title = "gwt-manage-pr".to_string();
+    current.owner = Some("SPEC-3287".to_string());
+    save_workspace_projection_to_path(&current_path, &current).unwrap();
+
+    let report = repair_resume_owner_bleed_paths(&works_path, &current_path, now).unwrap();
+    assert_eq!(
+        report.sanitized_events, 0,
+        "successor history is one branch"
+    );
+    assert!(!report.cleared_current);
+    let reloaded = load_workspace_work_items_from_path(&works_path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded, works, "preserve owners and terminal history");
+    assert_eq!(
+        current_work_id(&reloaded, project_root, Some(branch), None),
+        Some(work_id),
+        "ordinary canonical readers must resolve the launched successor",
+    );
+}
+
+#[test]
 fn repair_resume_owner_bleed_preserves_other_work_session_assignment_after_reload() {
     let temp = tempfile::tempdir().expect("tempdir");
     let works_path = temp.path().join("works.json");
@@ -15941,9 +15991,9 @@ fn delete_pending_marker_handle(path: &Path) -> fs::File {
 
 /// Issue #5208: a contender for `works.lock` used to wait forever when the
 /// caller set no operation deadline, so one long holder silently stalled every
-/// Work writer. The wait is now bounded and the error names the holder.
+/// Work writer. Exercise the fallback deadline without depending on OS scheduling.
 #[test]
-fn work_items_lock_wait_without_ambient_deadline_is_bounded_and_names_the_holder() {
+fn work_items_lock_wait_without_ambient_deadline_is_bounded() {
     let temp = tempfile::tempdir().expect("tempdir");
     let work_items_path = temp.path().join("project-state/works.json");
     std::fs::create_dir_all(work_items_path.parent().unwrap()).expect("project-state dir");
@@ -15956,8 +16006,12 @@ fn work_items_lock_wait_without_ambient_deadline_is_bounded_and_names_the_holder
     let (sender, receiver) = std::sync::mpsc::channel();
     let contender_path = work_items_path.clone();
     std::thread::spawn(move || {
+        // Holder diagnostics are covered by the observed-contention test in
+        // operation_deadline; this zero budget must expire before probing.
+        let _clock =
+            crate::operation_deadline::ScopedOperationClock::set(std::time::Instant::now());
         WORKSPACE_WORK_ITEMS_LOCK_WAIT_OVERRIDE
-            .with(|wait| wait.set(Some(std::time::Duration::from_millis(100))));
+            .with(|wait| wait.set(Some(std::time::Duration::ZERO)));
         let result = with_workspace_work_items_lock(&contender_path, || Ok(()));
         let _ = sender.send(result.map_err(|error| error.to_string()));
     });
@@ -15972,8 +16026,8 @@ fn work_items_lock_wait_without_ambient_deadline_is_bounded_and_names_the_holder
         "{message}"
     );
     assert!(
-        message.contains(&format!("pid={}", std::process::id())),
-        "the error must name the observed holder: {message}"
+        message.contains("lock_contention=not_observed"),
+        "the fallback deadline must expire before probing: {message}"
     );
     drop(holder);
     with_workspace_work_items_lock(&work_items_path, || Ok(()))
