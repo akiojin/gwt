@@ -3557,4 +3557,27 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     );
     assert_eq!(delivery.materializer_pid, Some(host_pid));
     assert_eq!(delivery.materializer_window_id.as_deref(), Some(window_id));
+
+    let retry =
+        runtime.capture_issue_monitor_launch_claim(&repo, 42, "launch:effect-42", window_id);
+    let stamp = super::super::issue_monitor_prefs_stamp(&prefs_path);
+    assert!(retry
+        .claim_or_reuse()
+        .expect("reuse the exact current claim"));
+    assert_eq!(
+        super::super::issue_monitor_prefs_stamp(&prefs_path),
+        stamp,
+        "an unchanged claim must not write shared prefs during revalidation"
+    );
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.pending_launch_deliveries.clear();
+        Ok(())
+    })
+    .expect("retire the delivery after the first claim");
+    assert!(
+        !retry
+            .claim_or_reuse()
+            .expect("revalidate the latest delivery"),
+        "a previously valid tuple must not revive a retired delivery"
+    );
 }

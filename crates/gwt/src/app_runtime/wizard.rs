@@ -449,6 +449,21 @@ fn prepare_issue_monitor_handoff_delivery(
     Ok(preparation)
 }
 
+fn issue_monitor_prepared_prefs_path(context: &super::ProjectContext) -> PathBuf {
+    gwt_core::paths::gwt_project_dir(&context.project_key).join("project-state/issue-monitor.json")
+}
+
+fn record_issue_monitor_gui_phase(
+    phase: &'static str,
+    started: &mut std::time::Instant,
+    issue_number: u64,
+    delivery_id: Option<&str>,
+) {
+    let now = std::time::Instant::now();
+    tracing::info!(target: "gwt.launch.timing", phase, issue_number, delivery_id = delivery_id.unwrap_or("none"), elapsed_ms = now.duration_since(*started).as_secs_f64() * 1000.0, thread = "gui", "Issue Monitor launch phase");
+    *started = now;
+}
+
 fn record_issue_monitor_worker_phase(phase: &'static str, started: &mut std::time::Instant) {
     let now = std::time::Instant::now();
     tracing::info!(target: "gwt.launch.timing", phase, elapsed_ms = now.duration_since(*started).as_millis() as u64, thread = "worker", "Issue Monitor launch phase");
@@ -512,6 +527,24 @@ struct PreparedIssueMonitorDelivery {
 }
 
 impl PreparedIssueMonitorDelivery {
+    fn reusable_fresh_launch(
+        &self,
+        strategy: gwt::IssueMonitorLaunchSessionStrategy,
+    ) -> Option<IssueMonitorLaunchPreparation> {
+        if strategy != gwt::IssueMonitorLaunchSessionStrategy::FreshRequired {
+            return None;
+        }
+        match self.result.as_ref().ok()? {
+            IssueMonitorLaunchPreparation::Launch(facts)
+                if facts.fresh.as_ref().is_some_and(Result::is_ok)
+                    && facts.resume.as_ref().is_ok_and(Option::is_none) =>
+            {
+                Some(IssueMonitorLaunchPreparation::Launch(facts.clone()))
+            }
+            _ => None,
+        }
+    }
+
     fn unsubmitted_handoff_attempt(&self) -> Option<gwt::AutonomousHandoffDeliveryAttempt> {
         let resume = match self.result.as_ref().ok()? {
             IssueMonitorLaunchPreparation::Answer(resume) => resume.as_ref(),
@@ -3140,6 +3173,25 @@ impl AppRuntime {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
+        self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
+            project_root,
+            issue_number,
+            linked_issue_kind,
+            delivery_id,
+            launch_session_strategy,
+            None,
+        )
+    }
+
+    fn auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
+        &mut self,
+        project_root: &Path,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
+        reusable: Option<IssueMonitorLaunchPreparation>,
+    ) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
         };
@@ -3235,6 +3287,7 @@ impl AppRuntime {
             self.capture_issue_monitor_spawn_admission(project_root, issue_number, &branch);
         let failure_delivery_id = request.delivery_id.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let _phase_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_launch", issue_number = request.issue_number, delivery_id = request.delivery_id.as_deref().unwrap_or("none")).entered();
             let mut phase_started = std::time::Instant::now();
             let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
             let prefs = gwt::load_issue_monitor_prefs(&prefs_path).ok();
@@ -3243,20 +3296,41 @@ impl AppRuntime {
                     delivery.issue_number == issue_number && Some(&delivery.delivery_id) == request.delivery_id.as_ref()
                 })?;
                 let window_id = delivery.materializer_window_id.as_ref()?;
-                if !claim_input.as_ref()?.snapshot.as_ref()?.windows.iter().any(|window| &window.window_id == window_id) { return None; }
+                if !claim_input.as_ref()?.snapshot.as_ref()?.windows.iter().any(|window| &window.window_id == window_id && window.issue_number == Some(issue_number)) { return None; }
                 Some((window_id.clone(), delivery.materialized_window_id.as_ref() == Some(window_id), delivery.workspace_durable_window_id.as_ref() == Some(window_id)))
             });
             let claim_input = claim_input.map(|mut input| {
                 if let Some((window_id, _, _)) = existing_window.as_ref() { input.materializer_window_id = window_id.clone(); }
                 input
             });
-            let claim = claim_input.as_ref().map(|input| (input.materializer_window_id.clone(), input.claim()));
+            let retrying_facts = reusable.is_some();
+            let claim = claim_input.as_ref().map(|input| (input.materializer_window_id.clone(), if retrying_facts { input.claim_or_reuse() } else { input.claim() }));
             record_issue_monitor_worker_phase("monitor_claim", &mut phase_started);
             let handoff = issue_monitor_resume_handoff(&request.project_root, issue_number);
             let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request);
             let selection = choice.as_ref().map(|choice| choice.as_ref().map(|choice| (choice.profiles.clone(), choice.tier))).map_err(Clone::clone);
+            let reusable_facts = match reusable {
+                Some(IssueMonitorLaunchPreparation::Launch(facts))
+                    if request.launch_session_strategy == gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
+                        && handoff.as_ref().is_ok_and(Option::is_none)
+                        && facts.fresh.as_ref().is_some_and(Result::is_ok)
+                        && facts.resume.as_ref().is_ok_and(Option::is_none)
+                        && choice.as_ref().is_ok_and(|choice| choice.as_ref().is_some_and(|choice| choice.profiles == facts.choice.profiles && choice.tier == facts.choice.tier)) => Some(facts),
+                _ => None,
+            };
             let mut result = choice.and_then(|choice| match choice {
-                Some(choice) => prepare_issue_monitor_launch(
+                Some(choice) => {
+                    if let Some(mut facts) = reusable_facts {
+                        if let Some(profile) = choice.profiles.preferred_profile() {
+                            if auth_probe(&profile.agent_id) == gwt::issue_monitor::ProviderAuthState::Unauthenticated {
+                                return Err(gwt::issue_monitor::provider_unauthenticated_message(&profile.agent_id));
+                            }
+                        }
+                        facts.choice = choice;
+                        tracing::info!(target: "gwt.launch.timing", issue_number, delivery_id = request.delivery_id.as_deref().unwrap_or("none"), phase = "monitor_facts_reused", thread = "worker", "Issue Monitor launch phase");
+                        return Ok(IssueMonitorLaunchPreparation::Launch(facts));
+                    }
+                    prepare_issue_monitor_launch(
                     &context,
                     live_sessions,
                     &request,
@@ -3267,7 +3341,8 @@ impl AppRuntime {
                     auth_probe,
                     handoff.clone(),
                 )
-                .map(|facts| IssueMonitorLaunchPreparation::Launch(Box::new(facts))),
+                .map(|facts| IssueMonitorLaunchPreparation::Launch(Box::new(facts)))
+                },
                 None => prepare_issue_monitor_answer(
                     &request,
                     &cache,
@@ -3368,6 +3443,7 @@ impl AppRuntime {
         let provider_usage = self.provider_usage_accounts.clone();
         let proxy = self.proxy.clone();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let _phase_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_launch", issue_number = request.issue_number, delivery_id = request.delivery_id.as_deref().unwrap_or("none")).entered();
             let mut phase_started = std::time::Instant::now();
             let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
             let claim = claim_input
@@ -3515,6 +3591,7 @@ impl AppRuntime {
         let failure_context = context.clone();
         let failure_issue_number = request.issue_number;
         if let Err(schedule_error) = self.blocking_tasks.try_spawn(move || {
+            let _phase_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_launch", issue_number = request.issue_number, delivery_id = request.delivery_id.as_deref().unwrap_or("none")).entered();
             let mut phase_started = std::time::Instant::now();
             let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
             let answered = failed_attempt.is_some()
@@ -3654,6 +3731,9 @@ impl AppRuntime {
             provider_usage,
             mut delivery,
         } = prepared;
+        let mut phase_started = std::time::Instant::now();
+        let correlation_delivery_id = request.delivery_id.clone();
+        let correlation_issue_number = request.issue_number;
         let key = issue_monitor_launch_preparation_key(&context, &request);
         let registered = self.issue_monitor_launch_preparations.remove(&key);
         if !self.project_context_is_current(&context) {
@@ -3717,6 +3797,12 @@ impl AppRuntime {
                 }
             };
         }
+        record_issue_monitor_gui_phase(
+            "monitor_gui_context",
+            &mut phase_started,
+            correlation_issue_number,
+            correlation_delivery_id.as_deref(),
+        );
         let roots = self
             .project_contexts()
             .into_iter()
@@ -3730,6 +3816,12 @@ impl AppRuntime {
                     Ok(admission) => !admission.is_current(&roots),
                     Err(error) => error == super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE,
                 });
+        record_issue_monitor_gui_phase(
+            "monitor_gui_admission",
+            &mut phase_started,
+            correlation_issue_number,
+            correlation_delivery_id.as_deref(),
+        );
         let mut session_changed = false;
         if let Ok(preparation) = &delivery.result {
             let resume = match preparation {
@@ -3752,19 +3844,28 @@ impl AppRuntime {
                 }
             }
         }
+        record_issue_monitor_gui_phase(
+            "monitor_gui_session",
+            &mut phase_started,
+            correlation_issue_number,
+            correlation_delivery_id.as_deref(),
+        );
         // Metadata has the same freshness contract as the Monitor prefs cache.
         // Never reacquire the prefs writer lock from the GUI to validate worker facts.
-        if session_changed
-            || delivery
-                .result
-                .as_ref()
-                .is_err_and(|error| error == super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE)
-            || admission_stale
-            || prefs_stamp
-                != super::issue_monitor_prefs_stamp(&gwt::issue_monitor_prefs_path_for_repo_path(
-                    &request.project_root,
-                ))
-            || provider_usage != self.provider_usage_accounts
+        let prefs_changed = prefs_stamp
+            != super::issue_monitor_prefs_stamp(&issue_monitor_prepared_prefs_path(&context));
+        let provider_changed = provider_usage != self.provider_usage_accounts;
+        let source_changed = delivery
+            .result
+            .as_ref()
+            .is_err_and(|error| error == super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE);
+        record_issue_monitor_gui_phase(
+            "monitor_gui_freshness",
+            &mut phase_started,
+            correlation_issue_number,
+            correlation_delivery_id.as_deref(),
+        );
+        if session_changed || source_changed || admission_stale || prefs_changed || provider_changed
         {
             if let Some(attempt) = delivery.unsubmitted_handoff_attempt() {
                 return self.schedule_issue_monitor_launch_failure(
@@ -3774,22 +3875,34 @@ impl AppRuntime {
                     Some(attempt),
                 );
             }
-            return self.auto_launch_issue_monitor_delivery_events_for_project(
+            tracing::info!(target: "gwt.launch.timing", phase = "monitor_gui_reprepare", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), session_changed, source_changed, admission_stale, prefs_changed, provider_changed, thread = "gui", "Issue Monitor launch facts require revalidation");
+            let reusable = (!session_changed && provider_usage == self.provider_usage_accounts)
+                .then(|| delivery.reusable_fresh_launch(request.launch_session_strategy))
+                .flatten();
+            return self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
                 &request.project_root,
                 request.issue_number,
                 request.linked_issue_kind,
                 request.delivery_id,
                 request.launch_session_strategy,
+                reusable,
             );
         }
-        self.apply_issue_monitor_launch_delivery(
+        let events = self.apply_issue_monitor_launch_delivery(
             &request.project_root,
             request.issue_number,
             request.linked_issue_kind,
             request.delivery_id,
             request.launch_session_strategy,
             Some(delivery),
-        )
+        );
+        record_issue_monitor_gui_phase(
+            "monitor_gui_apply",
+            &mut phase_started,
+            correlation_issue_number,
+            correlation_delivery_id.as_deref(),
+        );
+        events
     }
 
     fn apply_issue_monitor_launch_delivery(
@@ -3991,6 +4104,9 @@ impl AppRuntime {
         let failed_attempt = prepared
             .as_ref()
             .and_then(PreparedIssueMonitorDelivery::unsubmitted_handoff_attempt);
+        let reusable = prepared
+            .as_ref()
+            .and_then(|prepared| prepared.reusable_fresh_launch(launch_session_strategy));
         match self.silent_issue_monitor_launch_events_for_project(
             project_root,
             SilentIssueMonitorLaunchRequest {
@@ -4045,12 +4161,13 @@ impl AppRuntime {
                     && failed_attempt.is_none()
                 {
                     recovery_events.extend(
-                        self.auto_launch_issue_monitor_delivery_events_for_project(
+                        self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
                             project_root,
                             issue_number,
                             linked_issue_kind,
                             delivery_id,
                             launch_session_strategy,
+                            reusable,
                         ),
                     );
                 } else {
@@ -4414,6 +4531,8 @@ impl AppRuntime {
             delivery_id,
             launch_session_strategy,
         } = request;
+        let mut phase_started = std::time::Instant::now();
+        let correlation_delivery_id = delivery_id.clone();
         let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(requested_project_root)
         else {
             return Err("Project tab not found".to_string());
@@ -4432,6 +4551,12 @@ impl AppRuntime {
                 ),
             )
         };
+        record_issue_monitor_gui_phase(
+            "monitor_gui_capture",
+            &mut phase_started,
+            issue_number,
+            correlation_delivery_id.as_deref(),
+        );
         let prepared_claim = prepared
             .as_ref()
             .and_then(|prepared| prepared.claim.clone());
@@ -4468,6 +4593,12 @@ impl AppRuntime {
                     &claim_window_id,
                 ),
             };
+            record_issue_monitor_gui_phase(
+                "monitor_gui_claim",
+                &mut phase_started,
+                issue_number,
+                correlation_delivery_id.as_deref(),
+            );
             match claim {
                 Ok(true) => {}
                 Ok(false) => return Ok(Some(Vec::new())),
@@ -4519,7 +4650,7 @@ impl AppRuntime {
         // An answer belongs to its asking Session. Auto settings may have
         // changed provider, model, or tier while the question was pending;
         // defer that selection until the next producing launch.
-        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+        let prefs_path = issue_monitor_prepared_prefs_path(&context);
         let auto_answer_pending = prepared.is_none()
             && review_prompt.is_none()
             && gwt::load_issue_monitor_prefs(&prefs_path)
@@ -4633,6 +4764,12 @@ impl AppRuntime {
                 .unwrap_or(false)
             });
 
+        record_issue_monitor_gui_phase(
+            "monitor_gui_profile",
+            &mut phase_started,
+            issue_number,
+            correlation_delivery_id.as_deref(),
+        );
         let materializer_id = self.issue_monitor_materializer_id.clone();
         let record_launch_tier = || -> Result<(), String> {
             if prepared_autonomous_mode.is_none() && review_prompt.is_none() {
@@ -4729,6 +4866,12 @@ impl AppRuntime {
             None
         };
 
+        record_issue_monitor_gui_phase(
+            "monitor_gui_resume",
+            &mut phase_started,
+            issue_number,
+            correlation_delivery_id.as_deref(),
+        );
         let prepared_fresh = prepared.as_mut().and_then(|facts| facts.fresh.take());
         let (mut session, mut launch_request) = match prepared_fresh {
             Some(fresh) => fresh?,
@@ -4859,6 +5002,12 @@ impl AppRuntime {
             launch_request.set_review_dispatch_context(reviewed_sha);
             session.workspace_resume_context = None;
         }
+        record_issue_monitor_gui_phase(
+            "monitor_gui_config",
+            &mut phase_started,
+            issue_number,
+            correlation_delivery_id.as_deref(),
+        );
         let launch_index = self
             .tab(&session.tab_id)
             .map(|tab| {
@@ -4912,6 +5061,12 @@ impl AppRuntime {
                 return Err("Issue Monitor automatic launch requires an agent target".to_string());
             }
         };
+        record_issue_monitor_gui_phase(
+            "monitor_gui_spawn",
+            &mut phase_started,
+            issue_number,
+            correlation_delivery_id.as_deref(),
+        );
         if let Some(holder_window_id) = resume_holder_window_id {
             events.push(OutboundEvent::project(context.project_key.clone(), BackendEvent::IssueMonitorToast {
                 notification_transition: None,
@@ -4963,7 +5118,7 @@ impl AppRuntime {
         let context = self
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
-        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let prefs_path = issue_monitor_prepared_prefs_path(&context);
         let was_prepared = prepared.is_some();
         let prepared = match prepared {
             Some(prepared) => prepared?,

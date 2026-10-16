@@ -1362,6 +1362,72 @@ impl IssueMonitorLaunchClaimInput {
         )
     }
 
+    /// Reuse an exact durable reservation after checking it against the latest
+    /// prefs and this retry's current canvas. Re-publishing an unchanged claim
+    /// would invalidate other launches preparing against the same prefs file.
+    pub(super) fn claim_or_reuse(
+        &self,
+    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            &self.project_root,
+        ))
+        .map_err(|error| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                "launch delivery capacity read failed: {error}"
+            ))
+        })?;
+        if self.matches_durable_claim(&prefs)
+            && self.preflight_claim(
+                prefs,
+                gwt::process::host_process_start_time(self.materializer_pid),
+            )
+        {
+            return Ok(true);
+        }
+        self.claim()
+    }
+
+    fn matches_durable_claim(&self, prefs: &gwt::IssueMonitorPrefs) -> bool {
+        prefs.pending_launch_deliveries.iter().any(|delivery| {
+            delivery.issue_number == self.issue_number
+                && delivery.delivery_id == self.delivery_id
+                && delivery.materializer_id.as_deref() == Some(self.materializer_id.as_str())
+                && delivery.materializer_pid == Some(self.materializer_pid)
+                && delivery.materializer_window_id.as_deref()
+                    == Some(self.materializer_window_id.as_str())
+        })
+    }
+
+    fn observe_canvas(&self, monitor: &mut gwt::IssueMonitorState, host_started_at: Option<u64>) {
+        if let Some(snapshot) = self.snapshot.as_ref() {
+            if let Some(started) = host_started_at {
+                monitor.record_window_snapshot_from_host(
+                    snapshot.clone(),
+                    self.materializer_pid,
+                    started,
+                    self.snapshot_tabs.clone(),
+                );
+            } else {
+                monitor
+                    .record_window_snapshot_for_tabs(snapshot.clone(), self.snapshot_tabs.clone());
+            }
+        }
+    }
+
+    fn preflight_claim(&self, prefs: gwt::IssueMonitorPrefs, host_started_at: Option<u64>) -> bool {
+        let mut preflight =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        self.observe_canvas(&mut preflight, host_started_at);
+        preflight.claim_launch_delivery(
+            self.issue_number,
+            &self.delivery_id,
+            &self.materializer_id,
+            self.materializer_pid,
+            &self.materializer_window_id,
+            gwt::process::is_host_process_alive,
+        )
+    }
+
     fn claim_with_publishers(
         &self,
         publish_snapshot: impl FnOnce(
@@ -1387,21 +1453,6 @@ impl IssueMonitorLaunchClaimInput {
         let snapshot = self.snapshot.clone();
         let snapshot_tabs = self.snapshot_tabs.clone();
         let host_started_at = gwt::process::host_process_start_time(materializer_pid);
-        let observe = |monitor: &mut gwt::IssueMonitorState| {
-            if let Some(snapshot) = snapshot.as_ref() {
-                if let Some(started) = host_started_at {
-                    monitor.record_window_snapshot_from_host(
-                        snapshot.clone(),
-                        materializer_pid,
-                        started,
-                        snapshot_tabs.clone(),
-                    );
-                } else {
-                    monitor
-                        .record_window_snapshot_for_tabs(snapshot.clone(), snapshot_tabs.clone());
-                }
-            }
-        };
         // A rejected idempotent claim can still be present in prefs. Validate
         // against the current canvas before trusting the daemon readback.
         let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
@@ -1412,17 +1463,7 @@ impl IssueMonitorLaunchClaimInput {
                 "launch delivery capacity read failed: {error}"
             ))
         })?;
-        let mut preflight =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-        observe(&mut preflight);
-        if !preflight.claim_launch_delivery(
-            issue_number,
-            delivery_id,
-            &materializer_id,
-            materializer_pid,
-            materializer_window_id,
-            gwt::process::is_host_process_alive,
-        ) {
+        if !self.preflight_claim(prefs, host_started_at) {
             return Ok(false);
         }
         // The daemon must judge this claim against the same current canvas.
@@ -1454,21 +1495,14 @@ impl IssueMonitorLaunchClaimInput {
                         format!("launch delivery claim readback failed: {error}"),
                     )
                 })?;
-                Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
-                    delivery.issue_number == issue_number
-                        && delivery.delivery_id == delivery_id
-                        && delivery.materializer_id.as_deref() == Some(materializer_id.as_str())
-                        && delivery.materializer_pid == Some(materializer_pid)
-                        && delivery.materializer_window_id.as_deref()
-                            == Some(materializer_window_id)
-                }))
+                Ok(self.matches_durable_claim(&prefs))
             }
             Err(error) if error.allows_local_fallback() => {
                 AppRuntime::commit_local_issue_monitor_control_with_timeout(
                     project_root,
                     self.fallback_timeout,
                     |monitor| {
-                        observe(monitor);
+                        self.observe_canvas(monitor, host_started_at);
                         monitor.claim_launch_delivery(
                             issue_number,
                             delivery_id,

@@ -565,6 +565,171 @@ fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
     );
 }
 
+#[test]
+fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "two-owner-preclaim",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    // Two workers can capture this preview before either creates a pane.
+    let foreign = fixture
+        .runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    let foreign_window_id = combined_window_id("tab-1", &foreign.id);
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    assert!(tab
+        .workspace
+        .set_linked_issue_number(&foreign.id, Some(3166)));
+    tab.workspace
+        .set_status(&foreign.id, WindowProcessStatus::Running);
+    let expected_window_id = combined_window_id(
+        "tab-1",
+        &tab.workspace.next_window_id_preview(WindowPreset::Agent),
+    );
+    fixture.runtime.register_window("tab-1", &foreign.id);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.max_active_agents = 2;
+        let delivery = prefs
+            .pending_launch_deliveries
+            .iter_mut()
+            .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
+            .expect("queued owner A");
+        delivery.materializer_id = Some(fixture.runtime.issue_monitor_materializer_id.clone());
+        delivery.materializer_pid = Some(std::process::id());
+        delivery.materializer_window_id = Some(foreign_window_id.clone());
+        Ok(())
+    })
+    .expect("seed owner A's stale preclaim before owner B used its preview");
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read reprepared claim");
+    let delivery = prefs
+        .pending_launch_deliveries
+        .iter()
+        .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
+        .expect("owner A delivery");
+    assert_eq!(
+        delivery.materializer_window_id.as_deref(),
+        Some(expected_window_id.as_str()),
+        "owner A must not reclaim owner B's pane merely because its ID matches an old preview"
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .tab("tab-1")
+            .unwrap()
+            .workspace
+            .persisted()
+            .windows[0]
+            .linked_issue_number,
+        Some(3166)
+    );
+    assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+}
+
+#[test]
+fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "reuse-fresh-facts",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    let unrelated = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    tab.workspace
+        .set_linked_issue_number(&unrelated.id, Some(3166));
+    tab.workspace
+        .set_status(&unrelated.id, WindowProcessStatus::Running);
+    let expected_window_id = combined_window_id(
+        "tab-1",
+        &tab.workspace.next_window_id_preview(WindowPreset::Agent),
+    );
+    fixture.runtime.register_window("tab-1", &unrelated.id);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.max_active_agents = 3;
+        Ok(())
+    })
+    .expect("change unrelated admission prefs");
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "metadata changes must still revalidate on a worker"
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    drain_queued_blocking_tasks(&queued);
+    let repeated_git = gwt_core::process::thread_git_spawn_count() - before;
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read refreshed delivery");
+    let claim = prefs
+        .pending_launch_deliveries
+        .iter()
+        .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
+        .expect("delivery retained");
+    assert_eq!(
+        claim.materializer_window_id.as_deref(),
+        Some(expected_window_id.as_str()),
+        "the reused facts must claim the current proposed pane"
+    );
+    // This offline fixture rebinds through local fallback, which validates
+    // the origin. Base/hydration/prompt preparation must not run again.
+    assert_eq!(repeated_git, 1, "only the current claim may validate Git");
+    assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+}
+
 fn assert_issue5596_unsubmitted_answer_packet_retries(close_project: bool) {
     let _env_lock = env_test_lock()
         .lock()

@@ -3283,6 +3283,20 @@ pub(super) struct IssueMonitorSpawnAdmissionInput {
 pub(super) const ISSUE_MONITOR_SPAWN_ADMISSION_STALE: &str =
     "Issue Monitor spawn admission changed; prepare the launch again";
 
+fn record_issue_monitor_gui_spawn_phase(
+    issue_number: Option<u64>,
+    phase: &'static str,
+    started: &mut std::time::Instant,
+) {
+    let now = std::time::Instant::now();
+    if let Some(issue_number) = issue_number {
+        tracing::info!(target: "gwt.launch.timing", phase, issue_number,
+            elapsed_ms = now.duration_since(*started).as_secs_f64() * 1000.0,
+            thread = "gui", "Issue Monitor launch phase");
+    }
+    *started = now;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueMonitorAdmissionFileStamp {
     path: PathBuf,
@@ -6448,6 +6462,7 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         options: AgentWindowSpawnOptions,
     ) -> Result<Vec<OutboundEvent>, String> {
+        let mut phase_started = std::time::Instant::now();
         if self.agent_maintenance.busy {
             return Err(agent_maintenance::AGENT_MAINTENANCE_BUSY.to_string());
         }
@@ -6660,6 +6675,11 @@ impl AppRuntime {
                     status.max_active));
             }
         }
+        record_issue_monitor_gui_spawn_phase(
+            issue_monitor_issue_number,
+            "monitor_gui_spawn_admission",
+            &mut phase_started,
+        );
         let project_root = project_root_path.display().to_string();
         let title = config.display_name.clone();
         let resume_title = workspace_resume_context
@@ -6698,6 +6718,11 @@ impl AppRuntime {
             &project_root_path,
             &config,
         )?;
+        record_issue_monitor_gui_spawn_phase(
+            issue_monitor_issue_number,
+            "monitor_gui_spawn_dependencies",
+            &mut phase_started,
+        );
         let tab = self
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
@@ -6763,6 +6788,11 @@ impl AppRuntime {
             Some("Launching...".to_string()),
         ));
 
+        record_issue_monitor_gui_spawn_phase(
+            issue_monitor_issue_number,
+            "monitor_gui_pane_state",
+            &mut phase_started,
+        );
         let proxy = self.proxy.for_project(context);
         let sessions_dir = self.sessions_dir.clone();
         let agent_capability_issuer = self.agent_capability_issuer.clone();
@@ -6815,6 +6845,11 @@ impl AppRuntime {
             );
         });
 
+        record_issue_monitor_gui_spawn_phase(
+            issue_monitor_issue_number,
+            "monitor_gui_spawn_worker",
+            &mut phase_started,
+        );
         Ok(events)
     }
 
