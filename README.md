@@ -441,6 +441,11 @@ Common windows include:
   Change the preference in the GUI or ask the PM to use `update.settings.set`
   with `auto_apply_updates`; `update.settings.status` reports its state.
   It is no longer an Issue Monitor setting.
+  `Restart now` opens a confirmation showing active agent counts, pending
+  claims, verification leases, and affected Issues. When work is active,
+  `Apply after all agents finish` is the default choice; it holds new launches
+  and waits for the existing work to finish. Confirming `Restart now` instead
+  stops active agents and restarts gwt immediately.
 
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
