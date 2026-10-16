@@ -2640,7 +2640,11 @@ fn prepare_agent_launch_inner(
         .ok()?;
         (prefs.registration?.session_id == *source).then(|| input.project_root.clone())
     });
-    if let Some(source) = input.auto_resume_source_session_id.as_ref() {
+    if let Some(source) = input
+        .auto_resume_source_session_id
+        .as_ref()
+        .filter(|source| *source != &session_id)
+    {
         mark_auto_resume_source_completed(&input.sessions_dir, source);
     }
     emit_agent_launch_stage(

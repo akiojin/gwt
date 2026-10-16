@@ -257,6 +257,53 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
 }
 
 #[test]
+fn resume_completion_retires_only_a_replaced_source_session() {
+    for reuse_source in [true, false] {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, recorded, tasks, window_id, mut result) =
+            queued_agent_completion_fixture(temp.path());
+        let completion = result.as_mut().expect("resume completion");
+        completion.9 = gwt_agent::SessionMode::Resume;
+        let session_path = runtime.sessions_dir.join(format!("{}.toml", completion.1));
+        let mut session = gwt_agent::Session::load(&session_path).expect("live Session");
+        session.update_status(gwt_agent::AgentStatus::Running);
+        session
+            .save(&runtime.sessions_dir)
+            .expect("running Session");
+        let mut source = session;
+        if !reuse_source {
+            source.id = "replaced-source".into();
+        }
+        source.restore_window_on_startup = true;
+        source.save(&runtime.sessions_dir).expect("source Session");
+        let source_path = runtime.sessions_dir.join(format!("{}.toml", source.id));
+        runtime
+            .pending_auto_resume_sources
+            .insert(window_id.clone(), source.id);
+
+        runtime.handle_launch_complete(window_id.clone(), result);
+        drain_queued_blocking_tasks(&tasks);
+        runtime.handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+
+        assert!(runtime.runtimes.contains_key(&window_id));
+        let resumed = gwt_agent::Session::load(&session_path).expect("resumed Session");
+        assert_eq!(resumed.status, gwt_agent::AgentStatus::Running);
+        assert!(resumed.restore_window_on_startup);
+        let source = gwt_agent::Session::load(&source_path).expect("source after resume");
+        assert_eq!(source.restore_window_on_startup, reuse_source);
+        assert_eq!(
+            source.status,
+            if reuse_source {
+                gwt_agent::AgentStatus::Running
+            } else {
+                gwt_agent::AgentStatus::Stopped
+            }
+        );
+    }
+}
+
+#[test]
 fn launch_complete_registers_monitor_runtime_from_worker_snapshot() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
