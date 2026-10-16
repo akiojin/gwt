@@ -239,7 +239,8 @@ Approved existing operations:
   lead with the outcome, then at most a few bullets, one line each.
 - Report only milestones, decisions taken, failures, and the questions
   above. An unchanged cycle produces no message.
-- Name work by Issue number and title, never by pane or window ID. Omit
+- Name running work by the assigned agent name and its work; keep the Issue
+  number and title as supporting context, never a pane or window ID. Omit
   internal identifiers, raw diagnostics, and process narration unless
   the user asks for them.
 - Post every user-facing digest, decision, and blocker to the Reports
@@ -299,6 +300,8 @@ Approved existing operations:
 - Maintain the current-status card separately from Reports with
   `pm.status.set`. Send `items`, each with `kind`: `working` or `waiting`,
   a short `text` in the user's language, and an RFC 3339 `started_at`.
+  Lead active-work text with the assigned agent name from the named active
+  row in `issue.monitor.status`, then describe what that agent is doing.
   Include a concrete `next_trigger` and `user_action` as the action the
   user must take, or JSON null when no user action is needed.
   `stale_after_minutes` defaults to 15; pass it only when a different
@@ -475,6 +478,10 @@ body cannot hold `plan` / `tasks` sections.
 
 ## Priority and launches
 
+- Active inbox rows include `agent_name`; `active_launch_details` supplies the
+  same assigned name, provider, and Session alongside the window identity.
+  Use this current assignment directly rather than joining `pane.list` or
+  retaining a predecessor's name after ownership changes.
 - Read the queue with `issue.monitor.status`. One snapshot carries the
   ordered queue, the active launches, the issues sitting at
   `needs_human`, the completed stops in `released`, the inbox rows
@@ -797,11 +804,11 @@ same profile to try again.
 ### Closing an inactive Work
 
 Use `workspace.close {work_id, close_kind}` for a specific inactive Work.
-`work_id` is required; `close_kind` is `done` or `discarded`. This uses
+`work_id` is required; for normal closes, `close_kind` is `done` or `discarded`. This uses
 normal registered-PM authority, without a scoped approval. Only the live
 registered PM may call it through the authenticated Host route.
 
-The Host requires that the exact child Work's `manual_close_allowed` is `true`
+For normal closes, the Host requires that the exact child Work's `manual_close_allowed` is `true`
 and there are zero active agents for that Work, then rechecks the current
 runtime before recording the close. Unavailable, refreshing, stale, unknown,
 or foreign target state refuses the close. Follow a retryable reply's refresh
@@ -810,6 +817,18 @@ successful close or bypass it by editing Work state or closing its pane.
 
 A successful close records terminal Work history and retains its branch and worktree.
 Git and build-cache cleanup remain separate operations with their own gates.
+
+For an invalid deterministic successor occupying a fresh launch's slot, use
+`workspace.close {work_id: "<occupied-work-id>", close_kind: "superseded"}`.
+This explicit repair also handles an already terminal invalid successor; it
+does not use the normal `manual_close_allowed` cache gate. The live registered
+PM is still required. The Host proves the exact terminal predecessor, canonical
+owner branch and local checkout, and rechecks every member's runtime. Foreign
+ownership or lineage, a live writer, or unprovable runtime state refuses repair.
+Success appends a supersession audit and preserves the original events and completion time,
+branch and worktree. It never reopens the occupied Work or attaches a new Session
+to it. After a successful supersession, call `issue.monitor.requeue` with the
+owning Issue number; the next fresh launch creates a new successor Work.
 
 ### Fallback cleanup of windows the runtime failed to close
 
@@ -1700,8 +1719,14 @@ and urgency.
 
 ## Reporting cadence
 
+- Report running work with the assigned agent name as the subject:
+  "<name> is handling <work>". Keep the Issue number as supporting context.
+  Use this form in conversation, `pm.report.post` bodies, `pm.status.set`
+  items, and escalations. On a handover, report "<old name> to <new name>"
+  and use the new name for subsequent updates. For an unnamed legacy window
+  or the PM, retain the existing window-title and Issue fallback.
 - Default each user-facing report to 3-6 lines. Lead with the outcome,
-  identify affected agents by window title, and move supporting detail to
+  identify affected agents by assigned agent name and work, and move supporting detail to
   the owning Issue or Board entry. A pane or window ID may accompany a
   diagnostic artifact, but it is never the only user-facing identity. If
   the window title is unavailable, identify the owning Issue and say
@@ -2376,6 +2401,29 @@ mod tests {
             unwrapped(first_paragraph),
             "The measure of the PM is how little the user has to intervene, but never at the cost of quality. Weigh options on quality first (correctness, depth of verification, acceptance criteria met, gates kept); among options of equal quality, choose the one that needs no user action. Never skip tests, drop acceptance criteria, loosen a gate, or ship a workaround to avoid asking; when quality cannot be kept without the user, that is a question to ask."
         );
+    }
+
+    #[test]
+    fn contract_reports_running_work_by_assigned_agent_name() {
+        let reporting = section("## Reporting cadence");
+        for phrase in [
+            "assigned agent name",
+            "<name> is handling <work>",
+            "Issue number as supporting context",
+            "<old name> to <new name>",
+        ] {
+            assert!(
+                reporting.contains(phrase),
+                "missing named reporting rule: {phrase}"
+            );
+        }
+        let current = section("## Current PM status");
+        assert!(current.contains("assigned agent name"));
+        let references = reference_sections()
+            .find(|(name, _)| *name == "escalation-and-reporting.md")
+            .unwrap()
+            .1;
+        assert!(references.contains("assigned agent name"));
     }
 
     #[test]
@@ -3615,6 +3663,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Update the existing owner's FR/AC",
             "`owner_check`",
             "one to three lines",
+            "invalid deterministic successor",
+            "`workspace.close {work_id: \"<occupied-work-id>\", close_kind: \"superseded\"}`",
+            "preserves the original events and completion time",
+            "After a successful supersession, call `issue.monitor.requeue`",
         ] {
             assert!(
                 intake.contains(phrase),

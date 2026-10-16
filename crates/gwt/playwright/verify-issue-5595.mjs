@@ -167,7 +167,7 @@ try {
     GWT_PLAYWRIGHT_CHECKOUT_ROOT: root, GWT_PLAYWRIGHT_CHECK_HOME: home, GWT_PLAYWRIGHT_PROJECT_ROOT: project };
   const forwarded = process.argv.slice(2);
   const completeSpecs = ["surface-rail.spec.ts", "agent-focus-cycle.spec.ts", "agent-window-scroll.spec.ts", "terminal-input-disconnect.spec.ts",
-    "file-drop-attachments.spec.ts", "window-interrupted-state.spec.ts", "project-open-surfaces.spec.ts"];
+    "file-drop-attachments.spec.ts", "window-interrupted-state.spec.ts", "project-open-surfaces.spec.ts", "agent-title-badge.spec.ts"];
   const testArgs = [playwright, "test", "--config", join(root, "crates/gwt/playwright/playwright.config.ts"),
     ...completeSpecs, "issue-preview.spec.ts", "kanban.spec.ts", "issue-queue-kanban.spec.ts",
     ...(!forwarded.some(argument => argument === "--grep" || argument.startsWith("--grep="))

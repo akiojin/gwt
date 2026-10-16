@@ -241,7 +241,7 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
       }
       const title = windowDisplayTitle(data);
       const name = ["agent", "claude", "codex"].includes(data.preset)
-        ? String(data.agent_name || "").trim() || "Naming…" : "";
+        ? String(data.agent_name || "").trim() : "";
       const open = tile.querySelector(".agent-tile__open");
       setTitle(tile.querySelector("h3"), title, name);
       open.setAttribute("aria-label", `Open ${title} tab`);

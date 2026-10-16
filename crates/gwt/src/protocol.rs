@@ -388,6 +388,11 @@ impl AgentResourceSettings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    ProjectClientAttention {
+        visible: bool,
+        focused: bool,
+        notification_permission: crate::project_notifications::NotificationPermission,
+    },
     RetryWorkspaceStateLoad,
     ProjectAggregateAck {
         revision: u64,
@@ -541,8 +546,9 @@ pub enum FrontendEvent {
         rows: u16,
     },
     ListWindows,
-    /// Authenticated Agent-only self-naming; the principal supplies all scope.
+    /// Fetch the gwt-assigned identity; the principal supplies all scope.
     PaneName {
+        #[serde(default)]
         candidate: String,
         request_id: String,
     },
@@ -1990,6 +1996,9 @@ pub enum BackendEvent {
     ProjectAgentAggregate {
         aggregate: ProjectAgentAggregate,
     },
+    ProjectNotification {
+        notification: crate::project_notifications::NotificationIntent,
+    },
     HubState {
         hub: HubStateView,
     },
@@ -2208,6 +2217,8 @@ pub enum BackendEvent {
         message: String,
     },
     IssueMonitorToast {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notification_transition_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         notification_transition: Option<MonitorNotificationTransition>,
         level: String,
@@ -2891,6 +2902,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "project_notification",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "hub_state",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3416,6 +3432,7 @@ impl BackendEvent {
             BackendEvent::CloseProjectError { .. } => "close_project_error",
             BackendEvent::ProjectClosed { .. } => "project_closed",
             BackendEvent::ProjectAgentAggregate { .. } => "project_agent_aggregate",
+            BackendEvent::ProjectNotification { .. } => "project_notification",
             BackendEvent::HubState { .. } => "hub_state",
             BackendEvent::ProjectNotFound { .. } => "project_not_found",
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
@@ -3584,6 +3601,18 @@ pub enum KnowledgePhaseUpdateResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_client_attention_accepts_only_known_permissions() {
+        let wire = serde_json::json!({
+            "kind": "project_client_attention", "visible": false, "focused": true,
+            "notification_permission": "granted"
+        });
+        assert!(serde_json::from_value::<super::FrontendEvent>(wire.clone()).is_ok());
+        let mut invalid = wire;
+        invalid["notification_permission"] = serde_json::json!("allow");
+        assert!(serde_json::from_value::<super::FrontendEvent>(invalid).is_err());
+    }
+
     use gwt_core::{
         coordination::{
             AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,

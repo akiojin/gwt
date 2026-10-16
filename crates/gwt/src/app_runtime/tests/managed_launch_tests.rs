@@ -1,6 +1,82 @@
 use super::*;
 
 #[test]
+fn registered_pm_can_audit_supersede_an_exact_dead_invalid_successor() {
+    use gwt_core::workspace_projection as work;
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    run_git(&repo, &["checkout", "-b", "work/issue-42"]);
+    let now = Utc::now();
+    let predecessor_id = work::canonical_work_id(&repo, Some("work/issue-42"), None).unwrap();
+    let occupied_id = work::successor_work_id(&predecessor_id);
+    let mut start = work::WorkEvent::new(work::WorkEventKind::Start, &predecessor_id, now);
+    start.owner = Some("Issue #42".to_string());
+    start.execution_container = Some(work::WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-42".to_string()),
+        worktree_path: Some(repo.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    work::record_workspace_work_event(&repo, start.clone()).unwrap();
+    start.id = "invalid-parentless-start".to_string();
+    start.work_item_id = occupied_id.clone();
+    start.agent_session_id = Some("invalid-member".to_string());
+    work::record_workspace_work_event(&repo, start).unwrap();
+    work::emit_workspace_done_event_if_absent(&repo, &predecessor_id, now).unwrap();
+    work::emit_workspace_done_event_if_absent(&repo, &occupied_id, now).unwrap();
+    let principal = AgentSessionPrincipal::for_test(&repo, "pm-session-live").unwrap();
+    let ordinary = AgentSessionPrincipal::for_test(&repo, "other-session").unwrap();
+    assert!(runtime
+        .close_work_for_agent(&ordinary, &occupied_id, "superseded")
+        .is_err());
+    let mut member = sample_active_agent_session("tab-1", "tab-1::invalid");
+    member.session_id = "invalid-member".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::invalid".to_string(), member);
+    assert!(runtime
+        .close_work_for_agent(&principal, &occupied_id, "superseded")
+        .is_err());
+    runtime.active_agent_sessions.remove("tab-1::invalid");
+    assert!(runtime
+        .close_work_for_agent(&principal, &occupied_id, "superseded")
+        .expect("PM has a real exact-target recovery even for terminal invalid occupancy"));
+    assert!(!runtime
+        .close_work_for_agent(&principal, &occupied_id, "superseded")
+        .unwrap());
+    let items = work::load_workspace_work_items(&repo).unwrap().unwrap();
+    let occupied = items
+        .work_items
+        .iter()
+        .find(|item| item.id == occupied_id)
+        .unwrap();
+    assert_eq!(
+        occupied.status_category,
+        work::WorkspaceStatusCategory::Done
+    );
+    assert_eq!(occupied.completed_at, Some(now));
+    assert_eq!(
+        occupied
+            .events
+            .iter()
+            .filter(|event| event.is_successor_supersession())
+            .count(),
+        1
+    );
+    assert!(occupied
+        .events
+        .iter()
+        .filter(|event| event.is_successor_supersession())
+        .all(|event| event.agent_session_id.is_none()));
+}
+
+#[test]
 fn registered_pm_workspace_close_uses_exact_cached_eligibility_and_current_membership() {
     let _env_lock = env_test_lock()
         .lock()
@@ -2478,6 +2554,20 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         )
         .expect("retired Session");
         assert_eq!(session.status, gwt_agent::AgentStatus::Stopped);
+        let window = runtime
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.workspace.persisted().windows.iter())
+            .find(|window| window.session_id.as_deref() == Some(row.session_id.as_str()))
+            .expect("direct agent window");
+        assert!(
+            window.agent_name.is_some(),
+            "direct presets must be named before spawning"
+        );
+        assert_eq!(
+            session.agent_name, window.agent_name,
+            "replacing the direct preset Session must retain the window name"
+        );
     }
     // `stop_window_runtime` kills without waiting (Issue #3705); Windows
     // TerminateProcess is asynchronous, so the observed children may still be

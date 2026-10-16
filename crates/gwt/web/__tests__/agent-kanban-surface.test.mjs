@@ -161,7 +161,7 @@ test("Agent Kanban uses assigned identity as the primary card label", () => {
   workspace.windows[1].agent_name = "Lumen";
   const surface = createAgentKanbanSurface({
     activeWorkspace: () => workspace,
-    windowDisplayTitle: data => `${data.agent_name || "Naming…"} — ${data.title}`,
+    windowDisplayTitle: data => data.agent_name ? `${data.agent_name} — ${data.title}` : data.title,
     windowRoleBadgeLabel: data => data.agent_id || "Agent",
   });
   surface.mount(fixture.body, workspace.windows[0]);
@@ -170,7 +170,7 @@ test("Agent Kanban uses assigned identity as the primary card label", () => {
   assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /Implement UI/);
   assert.match(card.querySelector(".agent-kanban-card-meta").textContent, /codex/);
   const unnamed = fixture.body.querySelector('[data-window-id="agent-2"]');
-  assert.equal(unnamed.querySelector(".agent-kanban-card-title").textContent, "Naming…");
+  assert.equal(unnamed.querySelector(".agent-kanban-card-title").textContent, workspace.windows[2].title);
 });
 
 test("Agent Kanban drop target hit-test computes lane insertion order", () => {

@@ -55,7 +55,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       import { createWorkspaceStateNotice } from "/workspace-state-notice.js";
       import { createUpdateCtaController } from "/update-cta.js";
       // SPEC-2356 Anshin Addendum (FR-040): the in-app attention toaster ships
-      // alongside the away-only desktop notifier in the same module.
+      // alongside the server-intent desktop notifier in the same module.
       import {
         createAgentCompletionNotifier,
         createAgentAttentionToaster,
@@ -826,7 +826,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         mountProjectIndexSurface,
         indexSearchStateMap,
         pendingIndexOpenTargetsByPreset,
-        indexStatusByProjectRoot,
+        getIndexStatus,
       } = createProjectIndexSearchSurface({
         send,
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
@@ -965,9 +965,9 @@ import { createUiStateStore } from "/ui-state-store.js";
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
-        // Acknowledgements describe this connection's observed revision; a
-        // restarted server may reuse revision numbers. Never queue them.
-        if (message.kind === "project_aggregate_ack") return "unavailable";
+        // Attention and acknowledgements describe this connection; never replay
+        // stale focus, permission, or revisions after reconnect.
+        if (message.kind === "project_aggregate_ack" || message.kind === "project_client_attention") return "unavailable";
         // Retain the origin across reconnects: switching projects must never
         // replay input or actions through another project's connection.
         pendingMessages.push({ projectKey: activeProjectKey(), message });
@@ -1105,7 +1105,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         sendFocusedPaneInput(text);
       }
 
-      const releaseNotesWindow = createReleaseNotesWindow({
+      const { handlePayload: applyReleaseNotesPayload, handleError: applyReleaseNotesError, ...releaseNotesWindow } = createReleaseNotesWindow({
         document,
         send,
         beginUpdateDownloading: (version) =>
@@ -1174,7 +1174,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // sync isolation). Console-only reporting left the user with a silently
       // stale minimap / window list until reload.
       const renderDegradationBanner = createRenderDegradationBanner({ document });
-      const workspaceStateNotice = createWorkspaceStateNotice({ document, send });
+      const { receive: applyWorkspaceStateNoticeReceiveEvent } = createWorkspaceStateNotice({ document, send });
 
       // Issue #3365 — owns renderedWorkspaceWindowsKey's lifecycle: the key is
       // committed only after a fully clean per-window sync, so a degraded
@@ -1290,6 +1290,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         projectPageMetadata.resetConnection();
         setConnectionState(true);
         send({ kind: "frontend_ready" });
+        if (socketProjectKey) projectPageMetadata.reportAttention();
         recoveryCenterController?.reconnect();
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
@@ -1314,13 +1315,13 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
         // Browser chrome must update while background tabs suspend rAF.
         // installSocketEventHandlers already fences the active connection;
-        // keep this control event synchronous and all render traffic deferred.
-        if (typeof event.data === "string" && /"kind"\s*:\s*"project_agent_aggregate"/.test(event.data)) {
+        // keep attention metadata and desktop intents synchronous while render traffic is deferred.
+        if (typeof event.data === "string" && /"kind"\s*:\s*"(?:project_agent_aggregate|project_notification)"/.test(event.data)) {
           let payload;
           try { payload = JSON.parse(event.data); } catch { /* dispatcher reports malformed frames */ }
-          if (payload?.kind === "project_agent_aggregate") {
+          if (payload?.kind === "project_agent_aggregate" || payload?.kind === "project_notification") {
             try { receive(payload); } catch (error) {
-              renderDegradationBanner.report({ source: "receive:project_agent_aggregate", error });
+              renderDegradationBanner.report({ source: `receive:${payload.kind}`, error });
             }
             return;
           }
@@ -1457,7 +1458,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           && socketProjectKey === projectKey) {
           return;
         }
-        agentCompletionNotifier.reset();
         const previousSocket = socket;
         socket = null;
         socketReceiveDispatcherGeneration += 1;
@@ -1693,6 +1693,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           windowData?.dynamic_title,
           windowData?.purpose_title,
           windowData?.title,
+          windowData?.branch,
           windowData?.agent_id,
         ];
         if (windowData?.is_pm) {
@@ -1706,9 +1707,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             : PM_WINDOW_TITLE;
         }
         if (isAgentWindowPreset(windowData?.preset)) {
-          const name = String(windowData?.agent_name || "").trim() || "Naming…";
+          const name = String(windowData?.agent_name || "").trim();
           const purpose = String(windowData?.dynamic_title || windowData?.purpose_title || "").trim();
-          return purpose ? `${name} — ${purpose}` : name;
+          if (name) return purpose ? `${name} — ${purpose}` : name;
         }
         for (const value of candidates) {
           const title = String(value || "").trim();
@@ -2821,19 +2822,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             const effectiveDetail = detailMap.get(windowId) || "";
             // SPEC-2356 Anshin Addendum (FR-040): only agent panes (the presets
             // that carry a waiting state) raise in-app attention toasts.
-            // SPEC #3206 v2 (user ruling 2026-09-04): completion notices take
-            // the same gate. The controller has no preset check of its own, so
-            // ungated it publishes "Agent stopped" for Settings / Board / Logs
-            // windows using that window's own title — noise that v2 would then
-            // persist into the history instead of letting it pass as a toast.
             if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
-              agentCompletionNotifier.handleRuntimeState({
-                windowId,
-                runtimeState,
-                windowData,
-                projectTab: windowContext?.tab || activeProjectTab(),
-                statusDetail: effectiveDetail,
-              });
               agentAttentionToaster.handleRuntimeState({
                 windowId,
                 runtimeState,
@@ -3731,7 +3720,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       // entries, and the window-cleanup call sites, wired through this
       // factory.
       const {
-        profileStateMap,
         ensureProfileState,
         requestProfile,
         renderProfile,
@@ -3742,7 +3730,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         updateProfileStatus,
         profileHasEditableFocus,
         syncProfileDraftFromSelection,
-        clearProfileSaveTimer,
+        disposeProfileWindow,
         mountProfileWindow,
         applyProfileReceiveEvent,
       } = createProfileWindowSurface({
@@ -4033,31 +4021,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         return node;
       }
 
-      // SPEC #3206: away-only agent completion notice, rendered through the
-      // shared bottom-right alerts stack. The away-gating + dedup lives in
-      // createAgentCompletionNotifier; this only renders. Singleton via id; the
-      // whole card jumps to the project tab.
-      function showAgentCompletionToast(notice) {
-        const alert = {
-          id: "agent-completion",
-          level: "neutral",
-          title: notice.title || "Agent notification",
-          message: notice.body || "",
-          dismissible: false,
-          timeoutMs: 12_000,
-          onActivate: () => {
-            if (notice.projectId) {
-              const project = appState.tabs.find((tab) => tab.id === notice.projectId);
-              if (project?.project_key && project.project_key !== routeProjectKey) window.open(projectUrlPath(project.project_key), "_blank", "noopener");
-            }
-          },
-        };
-        // FR-011: the history record is independent of the transient toast
-        // (the center drops id / timeoutMs, so singletons never collapse).
-        notificationCenter.record({ kind: "agent-completion", ...alert });
-        alertsToasts.push(alert);
-      }
-
       // SPEC-2356 Anshin Addendum (FR-040), now on the shared alerts stack
       // (SPEC #3206): in-app attention toast that surfaces even while the
       // operator is present. Activation flies the camera to the window
@@ -4210,7 +4173,7 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // The controller is created before Settings so pm_status may hydrate its
       // shared snapshot before the first Settings window is mounted.
-      const pmSettingsPanel = createPmSettingsPanel({
+      const { applyStatus: applyPmSettingsReceiveEvent, ...pmSettingsPanel } = createPmSettingsPanel({
         document,
         send,
         confirm: (message) => window.confirm(message),
@@ -4726,7 +4689,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         activeProjectTab,
         focusOrSpawnPreset,
         renderUsagePanel,
-        indexStatusByProjectRoot,
+        getIndexStatus,
         pmSettingsPanel,
         mountIssues: (data, host) => {
           mountKnowledgeWindow(data, host);
@@ -4953,7 +4916,6 @@ import { createUiStateStore } from "/ui-state-store.js";
                     detailMap.delete(windowId);
                     windowRuntimeStateMap.delete(windowId);
                     windowRuntimeStateSinceMap.delete(windowId);
-                    agentCompletionNotifier.forgetWindow(windowId);
                     agentAttentionToaster.forgetWindow(windowId);
                     // SPEC #3206: dismiss this window's attention toast from the shared
                     // alerts stack so a sticky error toast never orphans a gone window.
@@ -4971,12 +4933,8 @@ import { createUiStateStore } from "/ui-state-store.js";
                     pendingOutputMap.delete(windowId);
                     pendingSnapshotMap.delete(windowId);
                     terminalOutputBatcher.clear(windowId);
-                    const profileState = profileStateMap.get(windowId);
-                    if (profileState) {
-                      clearProfileSaveTimer(profileState);
-                    }
+                    disposeProfileWindow(windowId);
                     branchListStateMap.delete(windowId);
-                    profileStateMap.delete(windowId);
                     boardStateMap.delete(windowId);
                     logStateMap.delete(windowId);
                     indexSearchStateMap.delete(windowId);
@@ -5055,10 +5013,15 @@ import { createUiStateStore } from "/ui-state-store.js";
       const projectPageMetadata = createProjectPageMetadata({ document, window, send });
 
       const agentCompletionNotifier = createAgentCompletionNotifier({
-        document,
         window,
-        showToast: showAgentCompletionToast,
-        onProjectUnread: () => {},
+        onActivate: (notice) => {
+          if (notice.window_id && workspaceWindowById(notice.window_id)) requestWindowFrame(notice.window_id);
+        },
+      });
+
+      const projectNotificationModel = createUiStateStore(null);
+      projectNotificationModel.subscribe(notice => notice, notice => {
+        if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
@@ -5181,8 +5144,14 @@ import { createUiStateStore } from "/ui-state-store.js";
             projectPageMetadata.update(event.aggregate);
             break;
           }
+          case "project_notification": {
+            if (event.notification?.project_key === routeProjectKey) {
+              projectNotificationModel.update(() => event.notification);
+            }
+            break;
+          }
           case "workspace_state_notice":
-            workspaceStateNotice.receive(event.notice);
+            applyWorkspaceStateNoticeReceiveEvent(event.notice);
             break;
           case "workspace_state": {
             projectError = "";
@@ -5226,10 +5195,10 @@ import { createUiStateStore } from "/ui-state-store.js";
             window.alert(`UI trace error: ${event.message}`);
             break;
           case "release_notes_payload":
-            releaseNotesWindow.handlePayload(event);
+            applyReleaseNotesPayload(event);
             break;
           case "release_notes_error":
-            releaseNotesWindow.handleError(event.message);
+            applyReleaseNotesError(event.message);
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
@@ -5284,7 +5253,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           }
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
-            frontendUnits.pmSettingsPanel.applyStatus(event);
+            applyPmSettingsReceiveEvent(event);
             pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":

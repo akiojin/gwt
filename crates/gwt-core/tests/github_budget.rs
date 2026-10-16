@@ -185,6 +185,61 @@ fn a_stale_probe_never_throttles_on_its_own() {
 }
 
 #[test]
+fn a_graphql_response_cannot_keep_an_expired_core_reserve_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    let mut exhausted = probe(4200, at(0));
+    exhausted.resources.get_mut("core").unwrap().remaining = 0;
+    exhausted.resources.get_mut("core").unwrap().reset_at = at(60);
+    ledger.record_probe(&exhausted);
+    ledger.record_graphql_response(
+        "monitor",
+        &github_budget::GraphQlRateLimit {
+            cost: 1,
+            remaining: 400,
+            reset_at: at(2400),
+            node_count: 1,
+        },
+        at(59),
+    );
+    let policy = ThrottlePolicy::default();
+    assert!(github_budget::throttle_reason(
+        &ledger.snapshot(at(59)),
+        GitHubQuota::Rest,
+        &policy,
+        at(59)
+    )
+    .is_some());
+    let after_reset = ledger.snapshot(at(60));
+    assert!(github_budget::probe_is_stale(&after_reset, &policy));
+    assert_eq!(
+        github_budget::throttle_reason(&after_reset, GitHubQuota::Rest, &policy, at(60)),
+        None,
+        "the core window expired despite a recent GraphQL response"
+    );
+    assert!(
+        github_budget::throttle_reason(&after_reset, GitHubQuota::GraphQl, &policy, at(60))
+            .is_some(),
+        "the unexpired GraphQL reserve remains enforced"
+    );
+}
+
+#[test]
+fn reserve_status_reports_the_resource_reset_as_the_retry_time() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    ledger.record_probe(&probe(0, at(0)));
+    let status = github_budget::status_by_resource(
+        &ledger.snapshot(at(10)),
+        &ThrottlePolicy::default(),
+        at(10),
+    );
+    assert_eq!(status["graphql"].backoff_until, Some(at(2400)));
+    assert_eq!(status["graphql"].retry_after_secs, Some(2390));
+    assert_eq!(status["graphql"].consecutive_refusals, 0);
+}
+
+#[test]
 fn an_active_rate_limit_block_throttles_until_its_reset() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ledger = BudgetLedger::at(dir.path());

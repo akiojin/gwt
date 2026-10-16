@@ -315,6 +315,7 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             number,
             reason,
+            remove_from_queue,
             claim_id,
             delivery_id,
             window_id,
@@ -323,6 +324,7 @@ pub(super) fn run<E: CliEnv>(
             project_root.as_deref(),
             number,
             &reason,
+            remove_from_queue,
             crate::IssueMonitorStopTarget {
                 issue_number: number,
                 claim_id,
@@ -511,14 +513,18 @@ fn issue_monitor_project_root<E: CliEnv>(
 /// machine-local ledger every gwt process on this host writes to. Attached at
 /// the surface rather than in the daemon projection so it is current at read
 /// time and answers with or without a live daemon.
-fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
+pub(crate) fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
     let now = chrono::Utc::now();
     let ledger = gwt_core::github_budget::BudgetLedger::global();
-    status.github_budget = Some(gwt_core::github_budget::status_by_resource(
+    let budget = gwt_core::github_budget::status_by_resource(
         &ledger.snapshot(now),
         &gwt_core::github_budget::ThrottlePolicy::current(),
         now,
-    ));
+    );
+    if let Some(gui_status) = status.gui_status.as_mut() {
+        gui_status.github_budget = Some(budget.clone());
+    }
+    status.github_budget = Some(budget);
 }
 
 /// Issue #4009 AC-4: free space where the worktrees live and where the
@@ -737,6 +743,55 @@ fn degraded_projection_error(error: String) -> String {
     )
 }
 
+fn attach_named_monitor_launches(project_root: &Path, output: &mut serde_json::Value) {
+    let active = output["active_launches"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let Some(rows) = output["inbox"].as_array_mut() else {
+        return;
+    };
+    let mut details = Vec::new();
+    for row in rows {
+        let Some(number) = row["issue_number"]
+            .as_u64()
+            .filter(|number| active.contains(&serde_json::json!(number)))
+        else {
+            continue;
+        };
+        let window_id = row["launched_window_id"].as_str();
+        let Some(session_id) = monitor_target_session(project_root, number, window_id)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let Ok(session) = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        ) else {
+            continue;
+        };
+        let Some(name) = session
+            .agent_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+        else {
+            continue;
+        };
+        if session.linked_issue_number != Some(number) || session.review_dispatch {
+            continue;
+        }
+        details.push(serde_json::json!({
+            "issue_number": number, "kind": "issue", "window_id": window_id,
+            "session_id": session_id, "agent_name": name, "provider": session.display_name,
+        }));
+        row["agent_name"] = serde_json::json!(name);
+    }
+    if !details.is_empty() {
+        output["active_launch_details"] = serde_json::json!(details);
+    }
+}
+
 fn run_monitor_status<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -838,6 +893,7 @@ fn run_monitor_status<E: CliEnv>(
             }
         }
     }
+    attach_named_monitor_launches(&project_root, &mut output);
     out.push_str(
         &serde_json::to_string(&output)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
@@ -2404,6 +2460,7 @@ fn run_monitor_stop<E: CliEnv>(
     project_root: Option<&std::path::Path>,
     number: u64,
     reason: &str,
+    remove_from_queue: bool,
     target: crate::IssueMonitorStopTarget,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -2484,6 +2541,9 @@ fn run_monitor_stop<E: CliEnv>(
             monitor_execution_settlement(&project_root, number),
         );
         if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
+            if remove_from_queue {
+                monitor.terminal_queue_remove(&[number], &now);
+            }
             *prefs = monitor.prefs();
         }
         Ok((outcome, identity))
@@ -2528,6 +2588,7 @@ fn run_monitor_stop<E: CliEnv>(
             "number": number,
             "status": status,
             "reason": reason,
+            "removed_from_queue": remove_from_queue,
             "board_warning": board_warning,
             "stopped_window_id": stopped_window_id,
             // Say what is left to do rather than implying the pane is gone.
@@ -10124,6 +10185,42 @@ mod tests {
     }
 
     #[test]
+    fn monitor_status_names_the_exact_active_window_without_a_pane_read() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+        session.linked_issue_number = Some(42);
+        session.agent_name = Some("ミオ".into());
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut workspace = crate::persistence::empty_workspace_state();
+        let mut window = crate::persistence::default_workspace_state()
+            .windows
+            .remove(0);
+        window.id = "current".into();
+        window.preset = crate::WindowPreset::Agent;
+        window.session_id = Some(session.id.clone());
+        window.linked_issue_number = Some(42);
+        workspace.windows.push(window);
+        crate::persistence::save_workspace_state(
+            &crate::persistence::workspace_state_path(&repo),
+            &workspace,
+        )
+        .unwrap();
+        let mut output = serde_json::json!({"active_launches":[42],"inbox":[
+            {"issue_number":42,"state":"launched","launched_window_id":"tab::current"},
+            {"issue_number":43,"state":"launched","launched_window_id":"tab::absent"}
+        ]});
+        attach_named_monitor_launches(&repo, &mut output);
+        assert_eq!(output["inbox"][0]["agent_name"], "ミオ");
+        assert!(output["inbox"][1]["agent_name"].is_null());
+        assert_eq!(output["active_launch_details"][0]["agent_name"], "ミオ");
+        assert_eq!(output["active_launches"], serde_json::json!([42]));
+    }
+
+    #[test]
     fn issue_monitor_status_reports_ordered_queue_and_active_launches() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
@@ -10515,6 +10612,10 @@ mod tests {
 
         let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
         let graphql = &status["github_budget"]["graphql"];
+        assert_eq!(
+            status["gui_status"]["github_budget"],
+            status["github_budget"]
+        );
         assert_eq!(graphql["throttled"], true, "{status}");
         assert!(
             graphql["reason"]
@@ -11955,6 +12056,12 @@ command = "my-agent-cli"
             },
         )
         .expect("save prefs");
+        let mut seeded = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        );
+        seeded.terminal_queue_push(&[42, 43], "test", "2026-10-16T00:00:00Z");
+        crate::save_issue_monitor_prefs(&prefs_path, &seeded.prefs()).unwrap();
         let mut env = crate::cli::TestEnv::new(repo.clone());
 
         // SPEC #3590 FR-005 / Issue #3578: the PM calls from its own window and
@@ -11967,6 +12074,7 @@ command = "my-agent-cli"
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "provider rate limit".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: None,
@@ -11995,6 +12103,12 @@ command = "my-agent-cli"
             "FR-031: the reason must survive the prefs roundtrip"
         );
 
+        assert_eq!(
+            reloaded.local_terminal_queue_numbers(),
+            vec![43],
+            "a reasoned stop removes only this Issue from the local launch queue"
+        );
+
         // Repeating it is idempotent rather than an error.
         out.clear();
         let code = run(
@@ -12003,6 +12117,7 @@ command = "my-agent-cli"
                 project_root: Some(repo),
                 number: 42,
                 reason: "provider rate limit".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -12012,6 +12127,45 @@ command = "my-agent-cli"
         .expect("stop runs");
         assert_eq!(code, 0);
         assert!(out.contains("\"status\":\"already_stopped\""), "{out}");
+    }
+
+    #[test]
+    fn monitor_stop_can_retain_queue_until_an_idempotent_removal() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42, 43], "test", "2026-10-16T00:00:00Z");
+        monitor.complete_active_launch(42, "tab::agent");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        for (remove_from_queue, expected) in [(false, vec![42, 43]), (true, vec![43])] {
+            let command = crate::cli::json_envelope::parse_operation(
+                "issue.monitor.stop",
+                &serde_json::json!({
+                    "project_root": repo,
+                    "number": 42,
+                    "reason": "delegated to another host",
+                    "remove_from_queue": remove_from_queue,
+                }),
+            )
+            .unwrap();
+            let crate::cli::CliCommand::Issue(command) = command else {
+                panic!("Issue command expected");
+            };
+            assert_eq!(run(&mut env, command, &mut String::new()).unwrap(), 0);
+            let restored = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            );
+            assert_eq!(restored.local_terminal_queue_numbers(), expected);
+            assert_eq!(
+                restored.stop_only_reason(42).as_deref(),
+                Some("delegated to another host")
+            );
+        }
     }
 
     #[test]
@@ -12061,6 +12215,7 @@ command = "my-agent-cli"
                     project_root: Some(repo),
                     number: 42,
                     reason: "recover broken workspace".into(),
+                    remove_from_queue: true,
                     claim_id: None,
                     delivery_id: None,
                     window_id: None,
@@ -12158,6 +12313,7 @@ command = "my-agent-cli"
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "cleanup".into(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: None,
@@ -12238,6 +12394,7 @@ command = "my-agent-cli"
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "cleanup".into(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: None,
@@ -12283,6 +12440,7 @@ command = "my-agent-cli"
                     project_root: Some(repo.clone()),
                     number: 42,
                     reason: "stale read".into(),
+                    remove_from_queue: true,
                     claim_id: None,
                     delivery_id: None,
                     window_id: None,
@@ -12314,6 +12472,7 @@ command = "my-agent-cli"
                     project_root: Some(repo),
                     number: 42,
                     reason: "read and decided".into(),
+                    remove_from_queue: true,
                     claim_id: None,
                     delivery_id: None,
                     window_id: None,
@@ -12404,6 +12563,7 @@ command = "my-agent-cli"
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "codex never got past its directory-trust prompt".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -12440,6 +12600,7 @@ command = "my-agent-cli"
                 project_root: Some(repo),
                 number: 42,
                 reason: "codex never got past its directory-trust prompt".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -13739,6 +13900,7 @@ command = "my-agent-cli"
                         project_root: Some(repo.clone()),
                         number: 42,
                         reason: "collect completed launch".into(),
+                        remove_from_queue: true,
                         claim_id: None,
                         delivery_id: None,
                         window_id: Some("tab-1::completed-agent".into()),

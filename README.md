@@ -451,11 +451,12 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 `Load earlier entries` to retrieve older posts. When browsing older history,
 choose `Back to latest entries` to resume the latest updates.
 
-Each worker Agent chooses a short memorable name when it starts. Its badge,
-window title, Fleet, and Kanban cards use that name; duplicate choices receive
-a numeric suffix. The name stays the same through restore and in-place restart.
-Until naming finishes, the badge reads `Naming…`. The resident PM keeps its own
-fixed identity.
+gwt assigns each worker Agent a random memorable name in the output language
+when it starts. Its badge, window title, Fleet, Kanban, and Board show that
+name, and the PM uses it when reporting work. Names are unique across the
+project's history and survive restore and in-place restart. Issue comments
+record assignments, handovers, PR creation, and completion; PR bodies also
+include the responsible name. The resident PM keeps its own fixed identity.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -527,6 +528,11 @@ Issue rows. Operators can stop a failed launch with `issue.monitor.stop`,
 `params.number`, and `params.reason`, even after its live claim/window identity
 was lost. The saved failed window is used only while it still belongs to that
 Issue; stopping records a persistent hold and returns any pane to close.
+The hold appears with its reason and removes the Issue from this host's launch
+queue by default. Set `params.remove_from_queue` to `false` to keep queue
+membership while holding the Issue. Launch failures show their category and
+the next recovery operation; repeated unchanged failures stop automatic retries
+after the configured attempt limit.
 
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent
@@ -718,8 +724,9 @@ scrollable notification stack so nothing is lost while you are away.
 
 Agent state notices say **stopped**, **error**, or **needs human**; an idle agent
 is not evidence of completed work. Runtime desktop notices require five minutes
-of continuously observed Running and an unfocused/hidden page. A different state
-or reconnection resets that duration. Monitor NeedsHuman uses its existing notice
+of continuously observed Running in the same runtime incarnation. The server
+tracks this duration even while every browser tab is closed; a different runtime
+state or incarnation resets it. Monitor NeedsHuman uses its existing notice
 stream immediately, including issues without an agent window; it does not create
 another notice from inbox snapshots. Session Interrupted is outside this notice
 stream because the resume picker exposes historical snapshots only.
@@ -728,10 +735,19 @@ Native permission adapters distinguish macOS authorization settings, Windows
 notification settings, and Linux's unavailable authorization query. Unknown,
 default, denied, or failed queries do not authorize delivery, and permissions are
 never requested automatically. Linux GetCapabilities describes server features,
-not user consent. These adapters do not yet add zero-tab native delivery: that
-transport remains a separate part of SPEC #3287. Debug-binary tests cover policy
-and browser behavior; signed-bundle macOS permission/delivery and Windows/Linux
-native interaction require separate host verification.
+not user consent. A visible, focused Project tab suppresses desktop delivery.
+Otherwise the server chooses one granted Project tab using its latest received
+attention report. When no Project tab is connected, the last reported browser
+grant can permit native delivery, subject to GWT's own current OS permission.
+Default/denied reports revoke that cached grant; closing the Project or restarting
+GWT clears it. Clicks focus the receiving tab or open the stable Project URL.
+Delivery failure does not retry through another channel; unread/title/favicon/tray
+updates continue independently. macOS requires a granted signed GWT.app; Windows
+requires the installed AUMID shortcut supplied by the MSI (portable ZIPs do not
+register it). Linux native delivery is suppressed because authorization cannot
+be queried. Debug-binary tests cover policy and browser behavior; actual signed
+macOS/installed Windows notification delivery and click interaction require
+separate host verification.
 
 Tunable bounds (attempt cap, stuck/idle timeout, retry backoff, review model)
 persist per project. The human-gated baseline is SPEC

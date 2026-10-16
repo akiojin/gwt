@@ -1746,6 +1746,10 @@ fn issue_monitor_daemon_user_event(
         }
         "toast" => {
             let toast = BackendEvent::IssueMonitorToast {
+                notification_transition_id: payload
+                    .get("notification_transition_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
                 notification_transition: payload
                     .get("notification_transition")
                     .and_then(|value| serde_json::from_value(value.clone()).ok()),
@@ -3265,7 +3269,8 @@ mod tests {
         let typed = super::issue_monitor_daemon_user_event(
             serde_json::json!({"event": "toast", "payload": {
                 "message": "decision required", "issue_number": 42,
-                "notification_transition": "needs_human"
+                "notification_transition": "needs_human",
+                "notification_transition_id": "source-transition"
             }}),
             project_root,
         )
@@ -3275,6 +3280,7 @@ mod tests {
         };
         let wire = serde_json::to_value(&events[0].event).expect("toast wire");
         assert_eq!(wire["notification_transition"], "needs_human");
+        assert_eq!(wire["notification_transition_id"], "source-transition");
         let status = gwt::IssueMonitorStatusView {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
@@ -3303,6 +3309,7 @@ mod tests {
             tier_facts: Vec::new(),
             agent_blackout: None,
             quota_hold: None,
+            github_budget: None,
             update_drain: None,
             update_drain_release: None,
             launch_profile_candidates: Vec::new(),
@@ -4696,6 +4703,7 @@ mod tests {
             project_route: Default::default(),
             project_aggregates: Default::default(),
             next_project_aggregate_revision: 0,
+            notification_coordinator: Default::default(),
             recent_projects: Vec::new(),
             profile_selections: HashMap::new(),
             profile_config_path: Some(temp_root.join("profile-config.toml")),
@@ -11501,7 +11509,8 @@ fn main() -> std::io::Result<()> {
                 app.ensure_runtime_daemons_for_enabled_projects();
             }
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
-                let mut events = app.terminal_convergence_tick_events();
+                let mut events = app.assign_missing_agent_names();
+                events.extend(app.terminal_convergence_tick_events());
                 // Issue #3906 AC-8: the 15 s convergence tick is also the
                 // update drain's clock (two clear ticks = quiescent).
                 events.extend(app.update_drain_tick_events());
@@ -11533,6 +11542,7 @@ fn main() -> std::io::Result<()> {
                         };
                         Some(OutboundEvent::project(context.project_key, BackendEvent::IssueMonitorToast {
                             notification_transition: None,
+                            notification_transition_id: None,
                             level: "error".to_string(),
                             message,
                             issue_number: None,
@@ -11748,6 +11758,7 @@ fn main() -> std::io::Result<()> {
                 clients.dispatch(app.pm_reports_loaded_events(client_id, &window_id, &session_id, reports, current, error));
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
+                app.observe_notification_toasts(&events);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::SupportedAgentCatalogReady {
@@ -12202,7 +12213,32 @@ fn main() -> std::io::Result<()> {
                         projects.insert(context.project_root, app.sessions_dir.clone());
                     }
                 }
-                clients.dispatch(app.refresh_project_aggregates());
+                let (notification_events, native_notifications) = app.collect_project_notifications(&clients);
+                clients.dispatch(notification_events);
+                for pending in native_notifications {
+                    let key = pending.intent.project_key.clone();
+                    let target_url = format!("{}/p/{key}", browser_url.trim_end_matches('/'));
+                    let browser_handle = runtime.handle().clone();
+                    let on_activate = Arc::new(move || {
+                        let url = target_url.clone();
+                        browser_handle.spawn_blocking(move || {
+                            if let Err(error) = gwt::cli::tray::open_browser_for_url(&url) {
+                                tracing::warn!(%error, "native notification browser launch failed");
+                            }
+                        });
+                    });
+                    let live_clients = clients.clone();
+                    let can_deliver = Arc::new(move || pending.validity.load(std::sync::atomic::Ordering::Acquire)
+                        && !live_clients.has_project_browser_clients(&key));
+                    runtime.spawn(async move {
+                        if let Err(error) = gwt::native_notifications::deliver_native_notification(
+                            pending.intent.transition_id, pending.intent.title, pending.intent.body,
+                            on_activate, can_deliver,
+                        ).await {
+                            tracing::warn!(%error, "native notification delivery failed; no fallback retry");
+                        }
+                    });
+                }
                 if let Some(tray_icon) = &tray_icon_handle {
                     let snapshot = app.tray_snapshot();
                     let has_error = snapshot.has_error();

@@ -322,8 +322,42 @@ export function isIssueInTerminalQueue(entry) {
   return Number.isFinite(entry?.queue_position);
 }
 
-export function issueQueueColumn(entry, work = null) {
+function issueStopReason(entry) {
+  const message = String(entry?.error_message || "").trim();
+  return entry?.monitor_state === "needs_human" && message.startsWith("stopped: ")
+    ? message.slice("stopped: ".length) : null;
+}
+
+function issueLaunchAttemptsExhausted(entry) {
+  return entry?.monitor_state === "needs_human" &&
+    /^autonomous launch attempts exhausted \(\d+\/\d+\) with an unchanging failure:/.test(String(entry?.error_message || ""));
+}
+
+function issueLaunchRecovery(entry) {
+  if (!["queued", "launch_failed", "agent_failed", "needs_human"].includes(entry?.monitor_state)) return "";
+  const message = String(entry?.error_message || "");
+  if (/has invalid lineage|unrelated Work lineage/.test(message)) {
+    return "Work lineage · Next: workspace.close (superseded), then issue.monitor.requeue";
+  }
+  if (/owner mismatch|owner or execution container mismatch/.test(message)) {
+    return "Work owner mismatch · Next: workspace.candidates";
+  }
+  if (message.includes("Launch timed out: no window was created within")) {
+    return "Window timeout · Next: issue.monitor.requeue";
+  }
+  if (message.trim() && (["launch_failed", "agent_failed"].includes(entry.monitor_state) || issueLaunchAttemptsExhausted(entry))) {
+    return `${entry.monitor_state === "agent_failed" ? "Agent failure" : "Launch failure"} · Next: issue.monitor.status`;
+  }
+  return "";
+}
+
+export function issueQueueColumn(entry, work = null, liveWindow = null) {
   if (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry.monitor_state)) return "done";
+  if (issueStopReason(entry) !== null) return "backlog";
+  if (liveWindow && ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(liveWindow).status)) return "active";
+  if (["launch_failed", "agent_failed"].includes(entry.monitor_state) ||
+      issueLaunchAttemptsExhausted(entry) ||
+      (entry.monitor_state === "needs_human" && issueLaunchRecovery(entry))) return "backlog";
   if (["launching", "launched"].includes(entry.monitor_state) || Number(work?.active_agents) > 0) return "active";
   return isIssueInTerminalQueue(entry) ? "queued" : "backlog";
 }
@@ -334,6 +368,7 @@ function issueEntryHasLabel(entry, name) {
 }
 
 function issueRowPrimaryView({ entry, attention, inlineWindow, canvasWindow }) {
+  if (issueStopReason(entry) !== null) return { key: "monitor:held", label: "Held", tone: "idle" };
   const live = inlineWindow || canvasWindow;
   if (live) {
     const view = issuePreviewStatusView(live);
@@ -366,12 +401,17 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
     items.push({ kind: "chip", key: "closed", label: "Closed" });
   }
   const exclusion = String(entry?.exclusion_reason || "").trim();
+  const stopReason = issueStopReason(entry);
+  const recovery = stopReason === null ? issueLaunchRecovery(entry) : "";
+  const failureReason = stopReason ?? (["launch_failed", "agent_failed", "needs_human"].includes(entry?.monitor_state) || recovery
+    ? String(entry?.error_message || "").trim() : "");
   const attentionReason =
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
-  const reason = entry?.readiness_diagnosis || exclusion || attentionReason;
+  const reason = stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
+  if (recovery) items.push({ kind: "reason", key: "recovery", label: recovery, title: recovery });
   if (Number.isFinite(entry?.queue_position)) {
     const terminal = String(entry?.queue_terminal || "").trim();
     items.push({
@@ -923,6 +963,7 @@ export function createKnowledgeKanbanSurface({
           "monitor:blocked_by_claim": "Another agent holds the execution claim, so the monitor will not launch duplicate work.",
           "monitor:skipped": "The monitor skipped this issue during its scan.",
           "monitor:needs_human": "This issue needs a human decision before automatic work can continue.",
+          "monitor:held": "The PM deliberately stopped this issue. It stays held until an explicit recovery decision.",
           "agent:running": "The agent is working on this issue.",
           "agent:starting": "The agent session is starting.",
           "agent:idle": "The agent is idle; its session remains available.",
@@ -1035,6 +1076,7 @@ export function createKnowledgeKanbanSurface({
         label_excluded_count: 0,
         label_excluded_issues: [],
         quota_hold: null,
+        github_budget: null,
       }});
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
@@ -1109,6 +1151,7 @@ export function createKnowledgeKanbanSurface({
         if (["disabled", "error", "auth_required"].includes(state)) {
           return state;
         }
+        if (issueMonitorGitHubBudgetText(status)) return "github_budget_hold";
         if (
           quotaHold &&
           ["quota_hold", "active", "launching", "settings_required", "idle"].includes(state)
@@ -1118,10 +1161,22 @@ export function createKnowledgeKanbanSurface({
         return state === "quota_hold" ? "idle" : state;
       }
 
+      function issueMonitorGitHubBudgetText(status) {
+        const budget = status?.github_budget;
+        if (!status?.enabled || !budget || typeof budget !== "object" || Array.isArray(budget)) return "";
+        return Object.entries(budget).filter(([, resource]) => resource?.throttled === true)
+          .map(([name, resource]) => {
+            const reason = typeof resource.reason === "string" ? resource.reason.trim() : "";
+            const resume = typeof resource.backoff_until === "string" ? resource.backoff_until.trim() : "";
+            return `GitHub API reads limited: ${name}: ${reason || "GitHub budget throttled"} | Retry ${resume || "time unavailable"}`;
+          }).join("\n");
+      }
+
       // #5321: current backend failures remain red; history stays in the bell.
       function issueMonitorPillView(state) {
         const status = issueMonitorModel.read().status;
         if (state === "disabled") return { label: "Stopped", tone: "idle" };
+        if (state === "github_budget_hold") return { label: "Limited · GitHub", tone: "idle" };
         if (state === "error") return { label: "⚠ Error", tone: "blocked" };
         if (["quota_hold", "auth_required", "settings_required", "update_drain"].includes(state)) {
           return { label: "Waiting · Hold", tone: "idle" };
@@ -1244,8 +1299,11 @@ export function createKnowledgeKanbanSurface({
           pill.dataset.notificationKey = errorKey;
           pill.disabled = false;
           pill.setAttribute("aria-disabled", String(!errorKey));
-          pill.title = errorKey ? "Details in notifications" : state === "quota_hold"
-            ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "";
+          pill.title = [
+            errorKey ? "Details in notifications" : state === "quota_hold"
+              ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
+            issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
+          ].filter(Boolean).join(" | ");
           if (errorKey) pill.setAttribute("aria-haspopup", "dialog");
           else pill.removeAttribute("aria-haspopup");
           explainIssueControl(pill, `Issue Monitor status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
@@ -1309,6 +1367,7 @@ export function createKnowledgeKanbanSurface({
           max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
           agent_capacity: nextStatus?.agent_capacity ?? null,
           quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
+          github_budget: nextStatus?.github_budget ?? null,
           // Issue #4366 AC-6b: omitted once the hold clears, so it must not
           // survive from the previous status the way merged fields do.
           effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
@@ -2933,9 +2992,17 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderKnowledgeRelatedWorks(detail) {
-        const works = Array.isArray(detail?.related_works)
-          ? detail.related_works
-          : [];
+        // Display labels are derived without changing the cached provider identity.
+        const works = (Array.isArray(detail?.related_works) ? detail.related_works : [])
+          .map(work => ({
+            ...work,
+            agents: (work.agents || []).map(agent => ({
+              ...agent,
+              display_name: agent.agent_name
+                ? `${agent.agent_name} (${agent.display_name || agent.agent_id || "Agent"})`
+                : agent.display_name,
+            })),
+          }));
         if (works.length === 0) {
           return null;
         }
@@ -3084,7 +3151,8 @@ export function createKnowledgeKanbanSurface({
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
         if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state };
         const diagnosis = live?.error_message;
-        entry = { ...entry, readiness_diagnosis: typeof diagnosis === "string" &&
+        entry = { ...entry, error_message: typeof diagnosis === "string" ? diagnosis : null,
+          readiness_diagnosis: typeof diagnosis === "string" &&
           diagnosis.startsWith("SessionStart readiness pending:") ? diagnosis : null };
         if (!Array.isArray(issueMonitorModel.read().status.terminal_queue)) return entry;
         const index = issueMonitorModel.read().status.terminal_queue.findIndex(item => item.number === entry.number);
@@ -3099,8 +3167,12 @@ export function createKnowledgeKanbanSurface({
             ? "queued" : index < 0 && entry.monitor_state === "queued" ? null : entry.monitor_state };
       }
 
-      function issueQueueColumnForEntry(entry) {
-        return issueQueueColumn(entry, issueWorkRowForEntry(getActiveWorkProjection?.(), entry));
+      function issueQueueColumnForEntry(entry, windowId) {
+        const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+        const faces = issueRowFaces(windowId, entry, work);
+        const live = faces.inlineWindow || faces.canvasWindow;
+        const owned = live?.linked_issue_number == null || Number(live.linked_issue_number) === entry.number;
+        return issueQueueColumn(entry, work, owned ? live : null);
       }
 
       function renderIssueQueueBoard(windowId, state, list, entries) {
@@ -3118,7 +3190,7 @@ export function createKnowledgeKanbanSurface({
           column.dataset.queueColumn = phase;
           const label = phase[0].toUpperCase() + phase.slice(1);
           column.setAttribute("aria-label", `${label} column`);
-          const items = entries.filter(entry => issueQueueColumnForEntry(entry) === phase);
+          const items = entries.filter(entry => issueQueueColumnForEntry(entry, windowId) === phase);
           if (phase === "queued") items.sort((a,b) => a.queue_position - b.queue_position);
           const explanations = {
             backlog: "Open issues that are not queued and have no running agent.",
@@ -4518,16 +4590,13 @@ export function createKnowledgeKanbanSurface({
 
       function issueRowFaces(windowId, entry, work) {
         const windows = typeof getWorkspaceWindows === "function" ? getWorkspaceWindows() : [];
-        const inlineWindow = issuePreviewWindowsForIssue(windows, windowId, entry.number)[0] || null;
-        const canvasWindow = inlineWindow
-          ? null
-          : issueCanvasAgentWindowsForIssue(
-              windows,
-              work,
-              windowizedAgentWindowIds,
-              entry.number,
-            )[0] || null;
-        return { inlineWindow, canvasWindow };
+        const inline = issuePreviewWindowsForIssue(windows, windowId, entry.number);
+        const canvas = issueCanvasAgentWindowsForIssue(windows, work, windowizedAgentWindowIds, entry.number);
+        const isLive = candidate => ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(candidate).status);
+        const inlineWindow = inline.find(isLive) || null;
+        const canvasWindow = inlineWindow ? null : canvas.find(isLive) || null;
+        if (inlineWindow || canvasWindow) return { inlineWindow, canvasWindow };
+        return { inlineWindow: inline[0] || null, canvasWindow: inline.length ? null : canvas[0] || null };
       }
 
       function renderIssueRow(windowId, state, entry) {
