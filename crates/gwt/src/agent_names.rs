@@ -134,7 +134,17 @@ fn choose(
     Ok(name)
 }
 
-fn locked_history(path: &Path) -> Result<(std::fs::File, HashSet<String>), String> {
+struct HistoryLock(std::fs::File);
+
+impl Drop for HistoryLock {
+    fn drop(&mut self) {
+        // A fork can retain this open file description until exec. Closing only
+        // the parent's descriptor would leave its completed operation locked.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+fn locked_history(path: &Path) -> Result<(HistoryLock, HashSet<String>), String> {
     let parent = path.parent().ok_or("Agent name history has no parent")?;
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let file = OpenOptions::new()
@@ -145,8 +155,9 @@ fn locked_history(path: &Path) -> Result<(std::fs::File, HashSet<String>), Strin
         .map_err(|error| error.to_string())?;
     file.try_lock_exclusive()
         .map_err(|error| format!("Agent name history is busy: {error}; retry assignment"))?;
+    let file = HistoryLock(file);
     let mut used = HashSet::new();
-    for line in BufReader::new(&file).lines() {
+    for line in BufReader::new(&file.0).lines() {
         let line = line.map_err(|error| error.to_string())?;
         let name: String = serde_json::from_str(&line)
             .map_err(|error| format!("Agent name history is corrupt: {error}"))?;
@@ -179,10 +190,10 @@ pub fn remember(history_path: &Path, names: &HashSet<String>) -> Result<(), Stri
     let (mut file, mut used) = locked_history(history_path)?;
     let mut changed = false;
     for name in names {
-        changed |= reserve(&mut file, &mut used, name)?;
+        changed |= reserve(&mut file.0, &mut used, name)?;
     }
     if changed {
-        file.sync_all().map_err(|error| error.to_string())?;
+        file.0.sync_all().map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -197,17 +208,31 @@ pub fn allocate(
 ) -> Result<String, String> {
     let (mut file, mut used) = locked_history(history_path)?;
     for name in known {
-        reserve(&mut file, &mut used, name)?;
+        reserve(&mut file.0, &mut used, name)?;
     }
     let name = choose(language, &used, active)?;
-    reserve(&mut file, &mut used, &name)?;
-    file.sync_all().map_err(|error| error.to_string())?;
+    reserve(&mut file.0, &mut used, &name)?;
+    file.0.sync_all().map_err(|error| error.to_string())?;
     Ok(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn history_lock_releases_while_an_inherited_descriptor_remains_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let history = temp.path().join("names.jsonl");
+        let (file, _) = locked_history(&history).unwrap();
+        // dup and fork share the open file description until the child execs.
+        let inherited = file.0.try_clone().unwrap();
+        drop(file);
+        let allocation = allocate(&history, "en", &HashSet::new(), &HashSet::new());
+        drop(inherited);
+        assert!(allocation.is_ok(), "{allocation:?}");
+    }
 
     #[test]
     fn localized_names_are_never_reused_and_initials_are_distributed() {

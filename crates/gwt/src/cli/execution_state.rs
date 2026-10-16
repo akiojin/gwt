@@ -33810,6 +33810,14 @@ exit 1
                     review_status: "REVIEW_REQUIRED".to_string(),
                 },
             );
+            env.pr_quarantine_contexts.insert(
+                4122,
+                crate::cli::pr::PrQuarantineContext {
+                    number: 4122,
+                    body: "Inherited PR description".to_string(),
+                    comments: Vec::new(),
+                },
+            );
             let (pr_code, pr_out) = run_collect(
                 &mut env,
                 CliCommand::Pr(crate::cli::PrCommand::EditBody {
