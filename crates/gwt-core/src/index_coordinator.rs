@@ -3319,10 +3319,20 @@ fn sweep_heavy_queue_entry(
 }
 
 fn read_registration(path: &Path) -> Result<Option<Registration>, CoordinatorError> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(err) if registration_is_gone(path, &err) => return Ok(None),
-        Err(err) => return Err(CoordinatorError::Io(err)),
+    // Atomic reservation replacement can briefly reject opens on Windows.
+    // Keep gone entries immediate and range-lock contention nonblocking.
+    let Some(mut file) =
+        crate::atomic_file::retry_on_sharing_violation(|| match File::open(path) {
+            Ok(file) => Ok(Some(file)),
+            Err(err) if registration_is_gone(path, &err) => Ok(None),
+            Err(err) => {
+                #[cfg(all(test, windows))]
+                tests::before_status_retry();
+                Err(err)
+            }
+        })?
+    else {
+        return Ok(None);
     };
     // Preserve nonblocking admission budgets when a concurrent cleanup probe
     // owns this inode. The caller keeps the unreadable arrival for its retry.
@@ -3633,6 +3643,38 @@ mod tests {
                 .expect("a reader must never observe a torn reservation");
         }
         writer.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lease_status_rereads_a_reservation_during_a_sharing_conflict() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        coordinator
+            .reserve_heavy(&key, JobPriority::ManualRebuild, HANG_GUARD, None)
+            .unwrap();
+        let path = coordinator.heavy_reservation_path(&key);
+        let blocker = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        STATUS_RETRY_HOOK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || drop(blocker))));
+
+        let result = coordinator.heavy_lease_status();
+        STATUS_RETRY_HOOK.with(|hook| hook.borrow_mut().take());
+        let queue = result
+            .unwrap_or_else(|error| {
+                panic!(
+                    "reservation open at {} must recover: {error}",
+                    path.display()
+                )
+            })
+            .queue;
+        assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
     }
 
     #[test]

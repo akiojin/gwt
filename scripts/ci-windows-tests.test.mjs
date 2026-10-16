@@ -15,6 +15,14 @@ test("required Windows CI builds and runs the gate lifecycle regressions", () =>
     "node scripts/ci-windows-tests.mjs run-runtime gwt-terminal test pty_start_gate_test -- --test-threads=1"));
 });
 
+test("Windows CI runs the cross-process FIFO reservation contention regression", () => {
+  const workflow = fs.readFileSync(new URL("../.github/workflows/test.yml", import.meta.url), "utf8")
+    .replace(/\r\n/g, "\n");
+  const windowsJob = workflow.split("  test-windows-rust:\n")[1]?.split(/\n  [\w-]+:/)[0];
+  assert.ok(windowsJob?.includes(
+    "node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts verification_lease_cli_test::deferred_fifo_survives_status_read_contention_and_new_processes -- --exact --nocapture"));
+});
+
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-windows-tests-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

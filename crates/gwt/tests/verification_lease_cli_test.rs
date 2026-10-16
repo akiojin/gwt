@@ -545,11 +545,13 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
         panic!("successor fixture must own its target");
     };
     let lease = guard.acquire_heavy(Duration::ZERO).unwrap();
+    // Cargo's builtin help is Light and works with a fresh HOME without
+    // requiring rustup's formatter shim or default toolchain configuration.
     let mixed_request = serde_json::json!({
         "schema_version": 1,
         "operation": "verify.run",
         "params": {
-            "commands": [format!("\"{}\" fmt --version", env!("CARGO")), "git --version".to_string()],
+            "commands": [format!("\"{}\" metadata --help", env!("CARGO")), "git --version".to_string()],
             "max_wait_secs": 0
         }
     }).to_string();

@@ -1,0 +1,5 @@
+[toolchain]
+# Update GitHub workflow toolchain revisions in the same change as this pin.
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

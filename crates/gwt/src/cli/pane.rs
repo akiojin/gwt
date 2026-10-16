@@ -1,7 +1,7 @@
 //! `pane.*` JSON operations for live agent-pane inspection.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::Path,
     time::Duration,
 };
@@ -260,14 +260,6 @@ async fn close_work_async(ws_url: &str, work_id: &str, close_kind: &str) -> Resu
     })
     .await
     .map_err(|_| "Work close outcome unavailable; inspect Work state before retrying".to_string())?
-}
-
-/// Issue #3883 AC-6: the current canvas source used by monitor reconciliation.
-pub(super) fn live_window_ids(default_project_root: &Path) -> Result<BTreeSet<String>, String> {
-    Ok(live_windows(default_project_root)?
-        .into_iter()
-        .map(|window| window.id)
-        .collect())
 }
 
 pub(super) fn live_windows(

@@ -663,7 +663,7 @@ fn admit_inner<E: CliEnv>(
                     "another verification claimant in this worktree owns the target job; \
                      gwtd artifact restoration: skipped (another verification owns the target job)"
                 } else {
-                    "verification reservation is being updated; gwtd artifact restoration: skipped (target admission pending)"
+                    "verification reservation is being updated; next_turn_reserved: unknown; gwtd artifact restoration: skipped (target admission pending)"
                 },
                 None,
             ));
@@ -687,7 +687,7 @@ fn admit_inner<E: CliEnv>(
                         return Err(deferred(
                             started,
                             max_wait,
-                            "verification reservation is being updated",
+                            "verification reservation is being updated; next_turn_reserved: unknown",
                             None,
                         ));
                     }

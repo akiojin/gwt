@@ -598,13 +598,119 @@ pub fn refresh_issue_monitor_execution_observations(
     settlements
 }
 
-/// Recover stuck launches, then classify idle windows using the same live
-/// worktree Session observations (Issue #4862 AC-8).
+/// Issue #4783 AC-R5: prove the producing Session, owner and canonical worktree
+/// before a canvas id can restore launch accounting. Unknown evidence grants nothing.
+pub fn verified_live_launch_owners(
+    project_root: &Path,
+    snapshot: &crate::IssueMonitorWindowSnapshot,
+    now: &str,
+) -> BTreeMap<String, u64> {
+    use crate::cli::execution_state::{
+        execution_binding_authorizes_current_generation, ExecutionOwnerKey, ExecutionOwnerKind,
+    };
+    let mut owners = BTreeMap::new();
+    let mut ambiguous = std::collections::BTreeSet::new();
+    let Some(repo_hash) =
+        crate::index_worker::detect_repo_hash(project_root).map(|hash| hash.to_string())
+    else {
+        return owners;
+    };
+    let fresh = chrono::DateTime::parse_from_rfc3339(&snapshot.observed_at)
+        .ok()
+        .zip(chrono::DateTime::parse_from_rfc3339(now).ok())
+        .is_some_and(|(observed, now)| {
+            now >= observed
+                && now.signed_duration_since(observed).num_seconds()
+                    <= crate::issue_monitor::IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS
+        });
+    if !fresh {
+        return owners;
+    }
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    for window in &snapshot.windows {
+        if window.review_dispatch || !crate::issue_monitor::idle_window_is_alive(window.status) {
+            continue;
+        }
+        let Some((session_id, issue_number)) =
+            window.session_id.as_deref().zip(window.issue_number)
+        else {
+            continue;
+        };
+        if gwt_agent::validate_session_id_path_component(session_id).is_err() {
+            continue;
+        }
+        let Ok(session) =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+        else {
+            continue;
+        };
+        if session.id != session_id
+            || session.linked_issue_number != Some(issue_number)
+            || session.repo_hash.as_deref() != Some(repo_hash.as_str())
+            || session.review_dispatch
+        {
+            continue;
+        }
+        let Ok(worktree) = dunce::canonicalize(&session.worktree_path) else {
+            continue;
+        };
+        let Ok(Some(identity)) = gwt_agent::SessionExecutionIdentity::from_session(&session) else {
+            continue;
+        };
+        let kind = match identity.execution_binding.owner_kind.as_str() {
+            "issue" => ExecutionOwnerKind::Issue,
+            "spec" => ExecutionOwnerKind::Spec,
+            _ => continue,
+        };
+        if !execution_binding_authorizes_current_generation(
+            &worktree,
+            ExecutionOwnerKey {
+                kind,
+                number: issue_number,
+            },
+            session_id,
+            &identity.execution_binding.identity,
+        )
+        .unwrap_or(false)
+        {
+            continue;
+        }
+        if ambiguous.contains(&window.window_id) {
+            continue;
+        }
+        if owners
+            .insert(window.window_id.clone(), issue_number)
+            .is_some()
+        {
+            owners.remove(&window.window_id);
+            ambiguous.insert(window.window_id.clone());
+        }
+    }
+    owners
+}
+
+/// Reapply live-owner proof after a cross-process prefs rebase, preserving the
+/// canvas sample's ordering fence against a newer launch ACK.
+pub fn reconcile_verified_live_launch_bindings(
+    monitor: &mut IssueMonitorState,
+    project_root: &Path,
+    now: &str,
+) -> Vec<u64> {
+    let Some(snapshot) = monitor.fresh_window_snapshot(now) else {
+        return Vec::new();
+    };
+    let observed_at = snapshot.observed_at.clone();
+    let live_launch_owners = verified_live_launch_owners(project_root, snapshot, now);
+    monitor.readopt_live_launch_bindings(&live_launch_owners, &observed_at)
+}
+
+/// Recover stuck launches and classify windows using the same live Session observations.
 pub fn reconcile_issue_monitor_windows(
     monitor: &mut IssueMonitorState,
     project_root: &Path,
     now: &str,
 ) -> crate::IssueMonitorIdleReconciliation {
+    reconcile_verified_live_launch_bindings(monitor, project_root, now);
     let settlements = refresh_issue_monitor_execution_observations(monitor, project_root);
     monitor.recover_stuck_autonomous(now);
     let outcome = monitor.reconcile_idle_windows(&settlements, now);
@@ -2639,6 +2745,213 @@ mod tests {
         UpdatedAt,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn issue_4783_verified_readoption_preserves_takeover_and_rejects_foreign_worktree() {
+        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session_env = [
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV),
+        ];
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 4783,
+        };
+        execution_state::materialize_at_launch(
+            repo.path(),
+            owner.kind,
+            owner.number,
+            "Elvor-old",
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::ensure_generation_ledger(
+            repo.path(),
+            owner,
+            execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let mut session =
+            gwt_agent::Session::new(repo.path(), "work/issue-4783", gwt_agent::AgentId::Codex);
+        session.id = "Elvor-old".into();
+        session.linked_issue_number = Some(4783);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: session.repo_hash.clone().unwrap(),
+            owner_kind: "issue".into(),
+            owner_number: 4783,
+            identity: execution_state::current_execution_binding(repo.path(), owner)
+                .unwrap()
+                .unwrap(),
+            capability_generation: 1,
+        });
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut snapshot = crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: "2026-10-15T00:00:00Z".into(),
+            windows: vec![crate::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: "tab-1::agent-87".into(),
+                issue_number: Some(4783),
+                status: crate::WindowState::Running,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: Some(session.id.clone()),
+            }],
+        };
+        let expected = BTreeMap::from([("tab-1::agent-87".to_string(), 4783)]);
+        assert_eq!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at),
+            expected
+        );
+        let mut future = snapshot.clone();
+        future.observed_at = "2026-10-15T00:10:00Z".into();
+        assert!(
+            verified_live_launch_owners(repo.path(), &future, &snapshot.observed_at).is_empty()
+        );
+
+        let other = repo.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        session.worktree_path = other;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        assert!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at).is_empty()
+        );
+        session.worktree_path = repo.path().into();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+
+        let takeover = execution_state::GenerationTakeoverRequest {
+            operation_id: "readopt-takeover".into(),
+            principal_id: "gwt-host-continuation".into(),
+            work_id: None,
+            source: None,
+            from_session_id: session.id.clone(),
+            to_session_id: "Elvor".into(),
+            reason: "verified dead predecessor".into(),
+            requested_at: chrono::Utc::now(),
+        };
+        execution_state::prepare_generation_takeover(repo.path(), owner, &takeover).unwrap();
+        let binding =
+            execution_state::activate_generation_takeover(repo.path(), owner, &takeover).unwrap();
+        assert!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at).is_empty()
+        );
+        session.id = "Elvor".into();
+        let session_binding = session.execution_binding.as_mut().unwrap();
+        session_binding.session_id = session.id.clone();
+        session_binding.identity = binding;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        snapshot.windows[0].session_id = Some(session.id.clone());
+        assert_eq!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at),
+            expected
+        );
+        let settled = execution_state::settle(
+            repo.path(),
+            &session.id,
+            execution_state::ExecutionSettlement::Blocked {
+                reason: "operator decision".into(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(settled, execution_state::SettleResult::Settled(_)));
+        assert_eq!(
+            verified_live_launch_owners(repo.path(), &snapshot, &snapshot.observed_at),
+            expected,
+            "an authentic same-Session lifecycle prefix remains valid"
+        );
+    }
+
+    #[test]
+    fn issue_4783_readoption_requires_a_readable_session() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        for unreadable in [false, true] {
+            if unreadable {
+                std::fs::create_dir_all(gwt_core::paths::gwt_sessions_dir()).unwrap();
+                std::fs::write(
+                    gwt_core::paths::gwt_sessions_dir().join("missing.toml"),
+                    "broken[",
+                )
+                .unwrap();
+            }
+            let mut monitor = IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::IssueMonitorPrefs {
+                    launch_bindings: BTreeMap::from([("tab-1::agent-87".into(), 5023)]),
+                    ..Default::default()
+                },
+            );
+            monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+                project_tab_id: "tab-1".into(),
+                observed_at: "2026-10-15T00:00:00Z".into(),
+                windows: vec![crate::IssueMonitorWindowObservation {
+                    monitor_owned: true,
+                    window_id: "tab-1::agent-87".into(),
+                    issue_number: Some(5023),
+                    status: crate::WindowState::Running,
+                    review_dispatch: false,
+                    hold_reason: None,
+                    last_output_at: None,
+                    session_id: Some("missing".into()),
+                }],
+            });
+
+            reconcile_issue_monitor_windows(&mut monitor, repo.path(), "2026-10-15T00:00:00Z");
+
+            assert_eq!(
+                monitor.launched_window_id(5023),
+                None,
+                "unreadable={unreadable}"
+            );
+            assert_eq!(
+                monitor.prefs().launch_bindings.get("tab-1::agent-87"),
+                Some(&5023)
+            );
+
+            let mut bound = IssueMonitorState::new(crate::IssueMonitorConfig::default());
+            bound.record_candidate(issue(5023));
+            bound.complete_active_launch_at(5023, "tab-1::old", "2026-10-14T00:00:00Z");
+            let mut snapshot = monitor
+                .fresh_window_snapshot("2026-10-15T00:00:00Z")
+                .unwrap()
+                .clone();
+            snapshot.windows.push(crate::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: "tab-1::old".into(),
+                issue_number: Some(5023),
+                status: crate::WindowState::Stopped,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: None,
+            });
+            bound.record_window_snapshot(snapshot);
+            let outcome =
+                reconcile_issue_monitor_windows(&mut bound, repo.path(), "2026-10-15T00:00:00Z");
+            assert!(
+                outcome.rebound.is_empty(),
+                "an unreadable Session cannot become the replacement binding: {outcome:?}"
+            );
+            assert_ne!(
+                bound.launched_window_id(5023).as_deref(),
+                Some("tab-1::agent-87")
+            );
+        }
+    }
 
     fn issue(number: u64) -> IssueMonitorIssue {
         IssueMonitorIssue {

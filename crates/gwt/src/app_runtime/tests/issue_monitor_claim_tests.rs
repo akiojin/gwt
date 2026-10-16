@@ -3862,6 +3862,9 @@ fn app_runtime_rebase_keeps_equal_marker_disk_only_fresh_failures() {
 
 #[test]
 fn app_runtime_rebase_recovers_malformed_prefs_from_current_state() {
+    // This asserts durable recovery, not filesystem speed under load.
+    let operation_now = gwt_core::operation_deadline::now();
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(operation_now);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
