@@ -1323,28 +1323,49 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
         "a scheduled disappearance must wait for registration"
     );
 
-    // A new observer after the grace boundary must still reclaim a dead slot.
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    let (spawner, tasks) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-
-    runtime.issue_monitor_scheduled_tick_events_at("2026-08-17T09:00:00Z");
-
+    // Each fallback scan reconstructs its observer from persisted preferences.
+    let observe_absence = |now: &str| {
+        let (mut runtime, _) =
+            sample_runtime_with_events(temp.path(), vec![tab.clone()], Some("tab-1"));
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        runtime.issue_monitor_scheduled_tick_events_at(now);
+        assert_eq!(
+            gwt::load_issue_monitor_prefs(&prefs_path)
+                .expect("prefs before worker")
+                .launched_issues
+                .len(),
+            1,
+            "the Tao tick must only snapshot live window ids and enqueue work"
+        );
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+            .expect("queued scheduled worker")();
+        gwt::load_issue_monitor_prefs(&prefs_path).expect("reload")
+    };
+    let first = observe_absence("2026-08-17T09:00:00Z");
     assert_eq!(
-        gwt::load_issue_monitor_prefs(&prefs_path)
-            .expect("prefs before worker")
-            .launched_issues
-            .len(),
+        first.launched_issues.len(),
         1,
-        "the Tao tick must only snapshot live window ids and enqueue work"
+        "the first absence after the registration grace retains the slot"
     );
-    tasks
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pop()
-        .expect("queued scheduled worker")();
-
-    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload");
+    assert_eq!(
+        first
+            .missing_window_observations
+            .get(&42)
+            .map(|(_, observed_at)| observed_at.as_str()),
+        Some("2026-08-17T09:00:00Z"),
+        "the first qualified absence is persisted for the next observer"
+    );
+    let replay = observe_absence("2026-08-17T09:00:00Z");
+    assert_eq!(replay.launched_issues.len(), 1, "a replay retains the slot");
+    assert_eq!(
+        replay.missing_window_observations,
+        first.missing_window_observations
+    );
+    let persisted = observe_absence("2026-08-17T09:00:01Z");
     assert!(
         persisted.launched_issues.is_empty(),
         "a window the canvas no longer has cannot keep holding a slot"

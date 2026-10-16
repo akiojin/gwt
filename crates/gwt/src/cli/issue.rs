@@ -315,6 +315,7 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             number,
             reason,
+            remove_from_queue,
             claim_id,
             delivery_id,
             window_id,
@@ -323,6 +324,7 @@ pub(super) fn run<E: CliEnv>(
             project_root.as_deref(),
             number,
             &reason,
+            remove_from_queue,
             crate::IssueMonitorStopTarget {
                 issue_number: number,
                 claim_id,
@@ -2408,6 +2410,7 @@ fn run_monitor_stop<E: CliEnv>(
     project_root: Option<&std::path::Path>,
     number: u64,
     reason: &str,
+    remove_from_queue: bool,
     target: crate::IssueMonitorStopTarget,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -2488,6 +2491,9 @@ fn run_monitor_stop<E: CliEnv>(
             monitor_execution_settlement(&project_root, number),
         );
         if !matches!(outcome, crate::IssueMonitorStopOutcome::Mismatch(_)) {
+            if remove_from_queue {
+                monitor.terminal_queue_remove(&[number], &now);
+            }
             *prefs = monitor.prefs();
         }
         Ok((outcome, identity))
@@ -2532,6 +2538,7 @@ fn run_monitor_stop<E: CliEnv>(
             "number": number,
             "status": status,
             "reason": reason,
+            "removed_from_queue": remove_from_queue,
             "board_warning": board_warning,
             "stopped_window_id": stopped_window_id,
             // Say what is left to do rather than implying the pane is gone.
@@ -11963,6 +11970,12 @@ command = "my-agent-cli"
             },
         )
         .expect("save prefs");
+        let mut seeded = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        );
+        seeded.terminal_queue_push(&[42, 43], "test", "2026-10-16T00:00:00Z");
+        crate::save_issue_monitor_prefs(&prefs_path, &seeded.prefs()).unwrap();
         let mut env = crate::cli::TestEnv::new(repo.clone());
 
         // SPEC #3590 FR-005 / Issue #3578: the PM calls from its own window and
@@ -11975,6 +11988,7 @@ command = "my-agent-cli"
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "provider rate limit".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: None,
@@ -12003,6 +12017,12 @@ command = "my-agent-cli"
             "FR-031: the reason must survive the prefs roundtrip"
         );
 
+        assert_eq!(
+            reloaded.local_terminal_queue_numbers(),
+            vec![43],
+            "a reasoned stop removes only this Issue from the local launch queue"
+        );
+
         // Repeating it is idempotent rather than an error.
         out.clear();
         let code = run(
@@ -12011,6 +12031,7 @@ command = "my-agent-cli"
                 project_root: Some(repo),
                 number: 42,
                 reason: "provider rate limit".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -12020,6 +12041,45 @@ command = "my-agent-cli"
         .expect("stop runs");
         assert_eq!(code, 0);
         assert!(out.contains("\"status\":\"already_stopped\""), "{out}");
+    }
+
+    #[test]
+    fn monitor_stop_can_retain_queue_until_an_idempotent_removal() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.terminal_queue_push(&[42, 43], "test", "2026-10-16T00:00:00Z");
+        monitor.complete_active_launch(42, "tab::agent");
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        for (remove_from_queue, expected) in [(false, vec![42, 43]), (true, vec![43])] {
+            let command = crate::cli::json_envelope::parse_operation(
+                "issue.monitor.stop",
+                &serde_json::json!({
+                    "project_root": repo,
+                    "number": 42,
+                    "reason": "delegated to another host",
+                    "remove_from_queue": remove_from_queue,
+                }),
+            )
+            .unwrap();
+            let crate::cli::CliCommand::Issue(command) = command else {
+                panic!("Issue command expected");
+            };
+            assert_eq!(run(&mut env, command, &mut String::new()).unwrap(), 0);
+            let restored = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            );
+            assert_eq!(restored.local_terminal_queue_numbers(), expected);
+            assert_eq!(
+                restored.stop_only_reason(42).as_deref(),
+                Some("delegated to another host")
+            );
+        }
     }
 
     #[test]
@@ -12069,6 +12129,7 @@ command = "my-agent-cli"
                     project_root: Some(repo),
                     number: 42,
                     reason: "recover broken workspace".into(),
+                    remove_from_queue: true,
                     claim_id: None,
                     delivery_id: None,
                     window_id: None,
@@ -12166,6 +12227,7 @@ command = "my-agent-cli"
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "cleanup".into(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: None,
@@ -12246,6 +12308,7 @@ command = "my-agent-cli"
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "cleanup".into(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: None,
@@ -12291,6 +12354,7 @@ command = "my-agent-cli"
                     project_root: Some(repo.clone()),
                     number: 42,
                     reason: "stale read".into(),
+                    remove_from_queue: true,
                     claim_id: None,
                     delivery_id: None,
                     window_id: None,
@@ -12322,6 +12386,7 @@ command = "my-agent-cli"
                     project_root: Some(repo),
                     number: 42,
                     reason: "read and decided".into(),
+                    remove_from_queue: true,
                     claim_id: None,
                     delivery_id: None,
                     window_id: None,
@@ -12412,6 +12477,7 @@ command = "my-agent-cli"
                 project_root: Some(repo.clone()),
                 number: 42,
                 reason: "codex never got past its directory-trust prompt".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -12448,6 +12514,7 @@ command = "my-agent-cli"
                 project_root: Some(repo),
                 number: 42,
                 reason: "codex never got past its directory-trust prompt".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -13747,6 +13814,7 @@ command = "my-agent-cli"
                         project_root: Some(repo.clone()),
                         number: 42,
                         reason: "collect completed launch".into(),
+                        remove_from_queue: true,
                         claim_id: None,
                         delivery_id: None,
                         window_id: Some("tab-1::completed-agent".into()),
