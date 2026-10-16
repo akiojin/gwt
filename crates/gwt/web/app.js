@@ -1311,10 +1311,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderRouteNotFound(document);
       }
 
-      function requestSocketSnapshots() {
-        if (socket?.readyState !== WebSocket.OPEN) return;
-        send({ kind: "frontend_ready" });
-        recoveryCenterController?.reconnect();
+      function resyncSocketSurfaces() {
         if (!socketProjectKey) return;
         const ids = (activeWorkspace()?.windows || []).map((entry) => entry.id);
         resyncBoardLogs(ids);
@@ -1323,10 +1320,17 @@ import { createUiStateStore } from "/ui-state-store.js";
         resyncProfile(ids);
         resyncProjectIndexSearch(ids);
         resyncSettings();
-        requestVisiblePmReports();
       }
 
-      function handleSocketOpen() {
+      function requestSocketSnapshots() {
+        if (socket?.readyState !== WebSocket.OPEN) return;
+        send({ kind: "frontend_ready" });
+        recoveryCenterController?.reconnect();
+        resyncSocketSurfaces();
+        if (socketProjectKey) requestVisiblePmReports();
+      }
+
+      function handleSocketOpen(recoverSnapshots = false) {
         socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcherGeneration += 1;
         const ownGeneration = socketReceiveDispatcherGeneration;
@@ -1341,8 +1345,12 @@ import { createUiStateStore } from "/ui-state-store.js";
             traceUi(kind, fields);
           },
           shouldTrace: uiTraceWiring.isTracing,
-          onResync: () => {
-            if (ownGeneration === socketReceiveDispatcherGeneration) requestSocketSnapshots();
+          onResync: (reason) => {
+            if (ownGeneration !== socketReceiveDispatcherGeneration) return;
+            // A native receive backlog precedes snapshots on the old socket.
+            // Replace the project transport on foreground recovery to discard it.
+            if (reason === "visible" && socketProjectKey) connectSocket(true);
+            else requestSocketSnapshots();
           },
           // Issue #3365 — a receive() failure keeps the event stream alive but
           // must not stay console-only: surface it as a degradation notice.
@@ -1369,6 +1377,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
+        if (recoverSnapshots === true) resyncSocketSurfaces();
         syncRunningBranchCleanups();
         requestVisiblePmReports();
         requestSupportedAgentRefresh();
@@ -1443,7 +1452,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         return false;
       }
 
-      function handleSocketClose() {
+      function handleSocketClose(recoverSnapshots = false) {
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher?.dispose?.();
@@ -1452,14 +1461,14 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
         }
-        reconnectTimer = window.setTimeout(connectSocket, 1000);
+        reconnectTimer = window.setTimeout(() => connectSocket(recoverSnapshots === true), 1000);
       }
 
-      function installSocketEventHandlers(activeSocket) {
+      function installSocketEventHandlers(activeSocket, recoverSnapshots = false) {
         for (const [kind, handler] of [
-          ["open", handleSocketOpen],
+          ["open", () => handleSocketOpen(recoverSnapshots)],
           ["message", handleSocketMessage],
-          ["close", handleSocketClose],
+          ["close", () => handleSocketClose(recoverSnapshots)],
         ]) {
           activeSocket.addEventListener(kind, (event) => {
             if (socket === activeSocket) handler(event);
@@ -1516,18 +1525,20 @@ import { createUiStateStore } from "/ui-state-store.js";
         });
       }
 
-      function connectSocket() {
+      function connectSocket(force = false) {
         if (routeProjectMissing) return;
         const projectKey = activeProjectKey();
         connectHubSocket();
-        if (socket && socket.readyState <= WebSocket.OPEN
+        if (force !== true && socket && socket.readyState <= WebSocket.OPEN
           && socketProjectKey === projectKey) {
           return;
         }
         agentCompletionNotifier.reset();
         const previousSocket = socket;
+        if (force === true) closeProjectController.connectionLost();
         socket = null;
         socketReceiveDispatcherGeneration += 1;
+        socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -1535,7 +1546,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         socketProjectKey = projectKey;
         socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;
         setConnectionState(false);
-        if (projectKey) installSocketEventHandlers(socket);
+        if (projectKey) installSocketEventHandlers(socket, force === true);
         else if (socket.readyState === WebSocket.OPEN) handleSocketOpen();
       }
 

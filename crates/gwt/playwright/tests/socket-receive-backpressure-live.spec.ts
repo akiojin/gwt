@@ -45,6 +45,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
     expect(Number.isSafeInteger(browserPid) && browserPid > 0).toBe(true);
     let cover: Page | undefined;
     let evidence: unknown;
+    let trafficTimer: ReturnType<typeof setInterval> | undefined;
     try {
       await installMeasurements(page);
       await page.route("**/socket-receive-dispatcher.js", async route => {
@@ -106,9 +107,15 @@ test.describe("background receive backpressure (Issue #5531)", () => {
       await cdp.send("Browser.setWindowBounds", { windowId: measuredWindow.windowId, bounds: { windowState: "minimized" } });
       // Poll from the controller: both rAF and page timers can stop in a
       // genuinely hidden document after prolonged background throttling.
-      await expect.poll(() => page.evaluate(() => document.visibilityState), { timeout: 10_000 }).toBe("hidden");
+      await expect.poll(() => measuredEvaluate(cdp, () => document.visibilityState), { timeout: 10_000 }).toBe("hidden");
       const backgroundStarted = Date.now();
       fixture.start();
+      const trafficSamples: unknown[] = [];
+      // Observe the sender independently: a throttled renderer must not delay
+      // evidence that native WebSocket traffic kept streaming throughout.
+      trafficTimer = setInterval(() => trafficSamples.push({
+        at_ms: Date.now() - backgroundStarted, ...fixture.counters(),
+      }), 30_000);
       const samples: unknown[] = [];
       let lastBackgroundMetrics: any;
       while (Date.now() - backgroundStarted < durationMs) {
@@ -131,6 +138,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
         console.log(`${label}/${theme}: ${Math.round((Date.now() - backgroundStarted) / 1000)}s background; ${fixture.counters().frames} WS messages`);
       }
       const backgroundElapsedMs = Date.now() - backgroundStarted;
+      clearInterval(trafficTimer);
       fixture.stop();
       // A final hidden burst puts both implementations under the same immediate
       // recovery pressure even if Chromium's native timer policy changed.
@@ -251,7 +259,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
         input_ms: inputMs,
         snapshot_ms: snapshotMs,
         ready_requests_after_resume: fixture.counters().ready_requests - readyBeforeResume,
-        metrics, traffic: fixture.counters(), samples, errors, fixture_errors: fixture.errors,
+        metrics, traffic: fixture.counters(), traffic_samples: trafficSamples, samples, errors, fixture_errors: fixture.errors,
       };
       await attachJson(info, `${label}-${theme}-background-recovery`, evidence);
       if (outcome === "complete") {
@@ -278,6 +286,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
         expect(outcome, "baseline completed or captured a bounded timeout").not.toBe("error");
       }
     } finally {
+      clearInterval(trafficTimer);
       await fixture.close();
       await bounded(cover?.close() ?? Promise.resolve(), 2000).catch(() => {});
       await attachJson(info, `${label}-${theme}-errors`, { errors, fixture: fixture.errors, evidence_recorded: Boolean(evidence) });

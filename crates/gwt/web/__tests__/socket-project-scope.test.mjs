@@ -26,6 +26,7 @@ function fixture({ routeProjectKey = null } = {}) {
   const context = vm.createContext({
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
     pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0,
+    reconnectCallbacks: [],
     socketReceiveDispatcher: null, recoveryCenterController: null,
     closeResetCount: 0, notificationResetCount: 0,
     agentCompletionNotifier: { reset() { context.notificationResetCount += 1; } },
@@ -47,16 +48,20 @@ function fixture({ routeProjectKey = null } = {}) {
     renderAppState(state) { context.appState = context.mergeProjectCatalog(state); context.connectSocket(); },
     window: {
       location: { href: "http://localhost:1234/?token=discard#fragment" },
-      setTimeout: () => 1,
+      setTimeout: (callback) => { context.reconnectCallbacks.push(callback); return context.reconnectCallbacks.length; },
       open: (...args) => { opened.push(args); return null; },
     },
     document: {},
     droppedInputs: 0, connectionOverlay: { reportInputDropped() { context.droppedInputs += 1; } },
     clearTimeout() {}, clearPickerPending() {}, setConnectionState() {}, syncRunningBranchCleanups() {},
     dispatcherOptions: [],
+    disposedDispatchers: 0,
     createSocketReceiveDispatcher: (options) => {
       context.dispatcherOptions.push(options);
-      return { handle(event) { options.receive(JSON.parse(event.data)); } };
+      return {
+        handle(event) { options.receive(JSON.parse(event.data)); },
+        dispose() { context.disposedDispatchers++; },
+      };
     },
     received: [], receive(event) { context.received.push(event); },
     uiTraceWiring: { isTracing: () => false }, traceUi() {},
@@ -70,6 +75,7 @@ function fixture({ routeProjectKey = null } = {}) {
   // Allow the pre-change implementation to reach behavioral assertions.
   if (source.includes("function activeProjectKey(")) vm.runInContext(functionSource("activeProjectKey"), context);
   if (source.includes("function requestSocketSnapshots(")) vm.runInContext(functionSource("requestSocketSnapshots"), context);
+  if (source.includes("function resyncSocketSurfaces(")) vm.runInContext(functionSource("resyncSocketSurfaces"), context);
   const select = (key) => { context.appState = { active_tab_id: key, tabs: [{ id: key, project_key: key }] }; context.connectSocket(); };
   return { context, sockets, select, opened };
 }
@@ -228,6 +234,41 @@ test("native foreground recovery does not require an observed hidden event", () 
   handler({ isTrusted: true });
   assert.equal(resumes, 1, "backgrounding never requests snapshots");
   assert.equal(refreshes, 6);
+});
+
+test("foreground recovery replaces the native backlog without replaying mutations", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  context.connectSocket();
+  const oldSocket = sockets[1];
+  oldSocket.open();
+  const oldDispatcher = context.dispatcherOptions.at(-1);
+  context.send({ kind: "post_board_entry", id: "pane-a", body: "draft" });
+  const sentBeforeResume = oldSocket.sent.length;
+  oldDispatcher.onResync("visible");
+  assert.equal(sockets.length, 3, "fresh snapshots need a transport without native buffered frames");
+  assert.equal(oldSocket.readyState, 3);
+  assert.equal(oldSocket.sent.length, sentBeforeResume, "do not append snapshots behind the native backlog");
+  assert.equal(context.disposedDispatchers, 1);
+  assert.equal(context.closeResetCount, 1, "the lost connection invalidates close preview authority");
+  assert.equal(sockets[0].readyState, 0, "the retained catalog connection is untouched");
+  const failedReplacement = sockets.at(-1);
+  assert.equal(new URL(failedReplacement.url).searchParams.get("repo_hash"), projectA.project_key);
+  oldSocket.handlers.message({ data: JSON.stringify({ kind: "terminal_output", id: "pane-a" }) });
+  oldSocket.handlers.close();
+  assert.deepEqual(context.received, [], "native messages from the old socket stay fenced");
+  assert.equal(context.reconnectTimer, null, "an old close cannot delay the replacement");
+  failedReplacement.close();
+  context.reconnectCallbacks.at(-1)();
+  const replacement = sockets.at(-1);
+  assert.notEqual(replacement, failedReplacement, "retry replaces a connection that failed before OPEN");
+  replacement.open();
+  assert.deepEqual(replacement.sent, [{ kind: "frontend_ready" }], "one full sync and no mutation replay");
+  assert.deepEqual(context.resyncCalls, [
+    ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
+    ["profile", "pane-a"], ["index", "pane-a"], ["settings"],
+  ]);
+  oldDispatcher.onResync("visible");
+  assert.equal(sockets.length, 4, "a stale dispatcher cannot replace the new socket");
 });
 
 
