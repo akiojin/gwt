@@ -1068,6 +1068,34 @@ test("latest inbox launch state moves a cached queued row to Active while retain
     'move uses the full terminal queue including the active row and uncached predecessor');
 });
 
+test("Issue #4862 failed launches leave Active despite stale Work and show the current failure reason", async (t) => {
+  const failures = [[42, "launch_failed", "Launch failed"], [43, "agent_failed", "Agent failed"]];
+  const { body, surface, load } = await makeFixture({
+    getActiveWorkProjection: () => ({ active_works: failures.map(([number]) => ({
+      id: `work-${number}`, active_agents: 1,
+    })) }),
+  });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const cached = { kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue", request_id: load.request_id,
+    entries: failures.map(([number]) => ({ ...knowledgeEntry(number, "launched"), related_work_refs: [{ id: `work-${number}` }] })),
+    refresh_enabled: true };
+  surface.applyKnowledgeReceiveEvent(cached);
+  const inbox = failures.map(([number, state]) => ({ issue: { number }, state, launched_window_id: null,
+    error_message: `Issue ${number}: successor has invalid lineage` }));
+  surface.applyIssueMonitorInbox(inbox);
+  surface.applyKnowledgeReceiveEvent(cached);
+  for (const [number, , badge] of failures) {
+    const row = body.querySelector(`[data-queue-column="backlog"] [data-issue-number="${number}"]`);
+    assert.ok(row, "a failed launch with no window must not inherit stale Work activity");
+    assert.equal(row.querySelector(".knowledge-row-badge").textContent, badge);
+    assert.match(row.querySelector('[data-kind="reason"]').textContent, /successor has invalid lineage/);
+    assert.ok(row.querySelector('[data-action="requeue-issue"]'));
+    assert.equal(body.querySelector(`[data-queue-column="active"] [data-issue-number="${number}"]`), null);
+  }
+  surface.applyIssueMonitorInbox(inbox.map(({ error_message, ...item }) => item));
+  assert.equal(body.querySelector('[data-kind="reason"]'), null, "omitted failure reasons clear the previous diagnosis");
+});
+
 test("queue drag uses terminal positions when a queued issue is not cached", async (t) => {
   const { body, surface, load, sent } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));

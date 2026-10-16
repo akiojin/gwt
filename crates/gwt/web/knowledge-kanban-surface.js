@@ -324,6 +324,7 @@ export function isIssueInTerminalQueue(entry) {
 
 export function issueQueueColumn(entry, work = null) {
   if (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry.monitor_state)) return "done";
+  if (["launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
   if (["launching", "launched"].includes(entry.monitor_state) || Number(work?.active_agents) > 0) return "active";
   return isIssueInTerminalQueue(entry) ? "queued" : "backlog";
 }
@@ -366,9 +367,11 @@ function issueRowSecondaryItems({ entry, work, attention, primary }) {
     items.push({ kind: "chip", key: "closed", label: "Closed" });
   }
   const exclusion = String(entry?.exclusion_reason || "").trim();
+  const failureReason = ["launch_failed", "agent_failed"].includes(entry?.monitor_state)
+    ? String(entry?.error_message || "").trim() : "";
   const attentionReason =
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
-  const reason = entry?.readiness_diagnosis || exclusion || attentionReason;
+  const reason = entry?.readiness_diagnosis || failureReason || exclusion || attentionReason;
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -3103,7 +3106,8 @@ export function createKnowledgeKanbanSurface({
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
         if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state };
         const diagnosis = live?.error_message;
-        entry = { ...entry, readiness_diagnosis: typeof diagnosis === "string" &&
+        entry = { ...entry, error_message: typeof diagnosis === "string" ? diagnosis : null,
+          readiness_diagnosis: typeof diagnosis === "string" &&
           diagnosis.startsWith("SessionStart readiness pending:") ? diagnosis : null };
         if (!Array.isArray(issueMonitorModel.read().status.terminal_queue)) return entry;
         const index = issueMonitorModel.read().status.terminal_queue.findIndex(item => item.number === entry.number);

@@ -20532,6 +20532,59 @@ exit 1
         );
     }
 
+    #[test]
+    fn issue_4862_scan_commit_does_not_resurrect_a_missing_pane() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("issue-monitor-prefs.json");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::gone".into(),
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        monitor.record_attempt(42);
+        let observe = |at: &str| crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: at.into(),
+            windows: Vec::new(),
+        };
+        monitor.record_window_snapshot(observe("2026-10-16T00:00:00Z"));
+        monitor.reconcile_idle_windows(&std::collections::BTreeMap::new(), "2026-10-16T00:00:00Z");
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let epoch = monitor.effect_authority_epoch();
+        let mut scanned = monitor.clone();
+        scanned.record_window_snapshot(observe("2026-10-16T00:01:00Z"));
+        assert_eq!(
+            scanned
+                .reconcile_idle_windows(&std::collections::BTreeMap::new(), "2026-10-16T00:01:00Z")
+                .requeued,
+            vec![42]
+        );
+        assert!(super::commit_issue_monitor_scan_if_current(
+            &path,
+            &mut monitor,
+            scanned,
+            epoch
+        ));
+        let mut restarted = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&path).unwrap(),
+        );
+        restarted.record_candidate(sample_issue_monitor_issue(42));
+        assert_eq!(restarted.launched_window_id(42), None);
+        assert_eq!(restarted.attempt_count(42), 1);
+        assert_eq!(
+            restarted.inbox_item(42).unwrap().state,
+            crate::MonitorInboxState::Queued
+        );
+    }
+
     /// Issue #3757 / SPEC #3165 Scenarios 102-103: `gwtd requeue` updates the
     /// shared preferences while the daemon can still hold the abandoned launch
     /// in memory. Persisting that stale daemon and then restarting must not

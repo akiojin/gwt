@@ -566,6 +566,31 @@ test("Issue #4862 a live delivered slice stays Active while its window binding i
   await expect(column(page, "queued").locator('[data-issue-number="5"]')).toHaveCount(0);
 });
 
+test("Issue #4862 failed launches with no window show their reason outside Active", async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([42, 43].map(number => ({ number, title: `Failed issue ${number}`, state: "open",
+      labels: [], related_work_refs: [{ id: `work-${number}` }] })));
+    fixture.__queueEvent({ kind: "active_work_projection", projection: { id: "stale-projection",
+      agents: [], works: [], unassigned_agents: [], journal_entries: [], active_works: [42, 43].map(number => ({
+        id: `work-${number}`, title: `Stale active Work ${number}`, active_agents: 1, agents: [], works: [],
+      })) } });
+  });
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(2);
+  await page.evaluate(() => (window as any).__queueInbox([42, 43].map((number, index) => ({ issue: { number },
+    state: index ? "agent_failed" : "launch_failed", launched_window_id: null,
+    error_message: `Issue ${number}: successor has invalid lineage` }))));
+  for (const [number, badge] of [[42, "Launch failed"], [43, "Agent failed"]] as const) {
+    const failed = column(page, "backlog").locator(`[data-issue-number="${number}"]`);
+    await expect(failed).toBeVisible();
+    await expect(failed.locator(".knowledge-row-badge")).toHaveText(badge);
+    await expect(failed.locator('[data-kind="reason"]')).toHaveText(`Issue ${number}: successor has invalid lineage`);
+    await expect(failed.locator('[data-action="requeue-issue"]')).toBeVisible();
+    await expect(column(page, "active").locator(`[data-issue-number="${number}"]`)).toHaveCount(0);
+  }
+  await expect(page.locator('[data-queue-column]')).toHaveCount(4);
+});
+
 test("four columns preserve labelled controls, provenance, empty guidance and narrow scrolling", async ({ page }) => {
   await expect(page.locator("[data-queue-column]")).toHaveCount(4);
   await expect(column(page,"backlog")).toContainText("First backlog issue");
