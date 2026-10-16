@@ -193,6 +193,7 @@ export function createAgentKanbanSurface({
   createTerminalRuntime,
   send,
   onLaunchAgent,
+  onUndockAgent,
   visibleBounds,
   windowDisplayTitle,
   windowRoleBadgeLabel,
@@ -343,6 +344,7 @@ export function createAgentKanbanSurface({
       event.preventDefault();
       event.stopPropagation();
       send?.(undockAgentWindowMessage(windowData.id, undockGeometry(windowData)));
+      onUndockAgent?.(windowData.id);
     });
     actions.append(collapse, undock);
     header.append(titleWrap, actions);

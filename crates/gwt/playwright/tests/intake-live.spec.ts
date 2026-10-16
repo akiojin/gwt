@@ -12,7 +12,7 @@ test.describe("Deprecated Intake launch surfaces (live backend)", () => {
   test.setTimeout(120_000);
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("Intake launch surfaces are absent while normal canvas actions remain", async ({
+  test("Intake launch surfaces are absent while fixed surfaces remain", async ({
     page,
   }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
@@ -22,8 +22,8 @@ test.describe("Deprecated Intake launch surfaces (live backend)", () => {
       await expect(page.locator('.op-rail [data-cmd="intake-session"]')).toHaveCount(0);
       await expect(page.locator("#canvas-empty-intake")).toHaveCount(0);
       await expect(page.locator("#op-workspace-overview-entry")).toBeVisible();
-      await expect(page.locator("#canvas-empty-open-workspace")).toBeAttached();
-      await expect(page.locator("#canvas-empty-add-window")).toBeAttached();
+      await expect(page.locator("#split-surfaces")).toBeVisible();
+      await expect(page.locator("#canvas, #canvas-empty-open-workspace, #canvas-empty-add-window")).toHaveCount(0);
     });
   });
 });
