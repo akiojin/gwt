@@ -1425,12 +1425,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn posix_managed_event_command_preserves_existing_binary_block_exit() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("gwtd");
-        fs::write(&bin, "#!/bin/sh\nexit 2\n").unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        // A sibling test's fork must not inherit a writable fixture descriptor (#5310).
+        gwt_core::test_support::write_executable_script(&bin, "#!/bin/sh\nexit 2\n").unwrap();
         let command =
             event_hook_command_with_bin(&bin.display().to_string(), "PreToolUse", HookShell::Posix);
 
@@ -1446,12 +1444,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn posix_managed_event_command_invokes_brace_paths_for_runtime_and_fallback() {
-        use std::os::unix::fs::PermissionsExt;
-
         fn write_hook_bin(path: &Path, marker: &str) {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, format!("#!/bin/sh\nprintf '%s' '{marker}'\n")).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            gwt_core::test_support::write_executable_script(
+                path,
+                &format!("#!/bin/sh\nprintf '%s' '{marker}'\n"),
+            )
+            .unwrap();
         }
 
         let dir = tempfile::tempdir().unwrap();

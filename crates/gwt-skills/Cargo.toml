@@ -28,4 +28,5 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+gwt-core = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
