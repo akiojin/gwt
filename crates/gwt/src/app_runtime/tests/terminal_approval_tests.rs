@@ -281,7 +281,9 @@ fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
     let window_id = combined_window_id("tab-1", "shell-1");
     let captured_events = match &runtime.proxy {
         AppEventProxy::Stub(events) => events.clone(),
-        AppEventProxy::Real(_) | AppEventProxy::Project { .. } => {
+        AppEventProxy::Real(_)
+        | AppEventProxy::Project { .. }
+        | AppEventProxy::Notifying { .. } => {
             panic!("sample runtime must use stub proxy")
         }
     };
@@ -1306,7 +1308,9 @@ fn app_runtime_approval_settle_timer_routes_sanitized_token_event() {
     let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
     let proxy_events = match &runtime.proxy {
         AppEventProxy::Stub(events) => events.clone(),
-        AppEventProxy::Real(_) | AppEventProxy::Project { .. } => {
+        AppEventProxy::Real(_)
+        | AppEventProxy::Project { .. }
+        | AppEventProxy::Notifying { .. } => {
             panic!("sample runtime must use stub proxy")
         }
     };
