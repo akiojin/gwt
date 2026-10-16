@@ -480,7 +480,10 @@ pub(super) fn recover_unfinished_run(
     let Some(mut attempt) = bound_attempt(worktree, record)? else {
         return Ok(false);
     };
-    if attempt.status == AttemptStatus::Running {
+    if matches!(
+        attempt.status,
+        AttemptStatus::Running | AttemptStatus::Waiting
+    ) {
         if interruption::runner_is_alive(
             attempt.runner_pid,
             attempt.runner_started_at,
@@ -969,9 +972,10 @@ mod tests {
         let _home = gwt_core::test_support::ScopedGwtHome::set(runtime.path());
         let coordinator = crate::cli::verification_lease::open_coordinator().unwrap();
         let key = TargetKey::verification("mine", "worktree");
-        // Both the ordinary running record and the final VRR/control write gap
-        // must settle after a restart without relying on the old watchdog.
-        for with_lifecycle in [true, false] {
+        let reused_start = crate::process::host_process_start_time(std::process::id()).unwrap() + 1;
+        // Recover ordinary execution, the final-write gap, and a bound run
+        // waiting for its next command, without relying on the old watchdog.
+        for (with_lifecycle, waiting) in [(true, false), (false, false), (true, true)] {
             let attempt =
                 begin_for_caller(repo.path(), "predecessor", &authority(), &key, &[], "token")
                     .unwrap();
@@ -982,12 +986,17 @@ mod tests {
             }
             let mut document = serde_json::to_value(record).unwrap();
             document["verification_attempt_id"] = attempt.id().into();
+            if with_lifecycle {
+                document["lifecycle"]["runner_started_at"] = reused_start.into();
+            }
             let record = serde_json::from_value(document).unwrap();
             attempt.mark_running("vr-test").unwrap();
+            if waiting {
+                attempt.set_admission_waiting(true).unwrap();
+            }
             let mut control = load(repo.path(), attempt.id()).unwrap().unwrap();
             let mut document = serde_json::to_value(&control).unwrap();
-            document["runner_started_at"] =
-                (crate::process::host_process_start_time(std::process::id()).unwrap() + 1).into();
+            document["runner_started_at"] = reused_start.into();
             control = serde_json::from_value(document).unwrap();
             save(repo.path(), &mut control).unwrap();
             let check = || attempt.cancelled().map_err(Into::into);
