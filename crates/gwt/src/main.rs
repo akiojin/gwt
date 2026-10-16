@@ -2182,7 +2182,9 @@ enum UserEvent {
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     },
     IssueMonitorCapacityChanged {
-        project_root: PathBuf,
+        context: app_runtime::ProjectContext,
+        revision: (u64, u64),
+        update: gwt::agent_capacity::CapacityUpdate,
     },
     IssueMonitorDaemonStatus {
         project_root: PathBuf,
@@ -10589,6 +10591,12 @@ fn main() -> std::io::Result<()> {
     // SPEC-2970: background provider-usage poller. The shared Notify lets the
     // Claude opt-in toggle request an immediate refresh.
     let usage_refresh = std::sync::Arc::new(tokio::sync::Notify::new());
+    let capacity_projects = Arc::new(RwLock::new(Vec::<(
+        app_runtime::ProjectContext,
+        (u64, u64),
+        Option<gwt::agent_capacity::CapacityUpdate>,
+    )>::new()));
+    let usage_projects = Arc::new(RwLock::new(Vec::<PathBuf>::new()));
     // Issue #3616: the poller's account rows also reach AppRuntime, which owns
     // the provider-quota classifier. A dropped send just means this tick did
     // not corroborate; the screen notice remains the trigger.
@@ -10597,6 +10605,7 @@ fn main() -> std::io::Result<()> {
         &runtime,
         clients.clone(),
         usage_refresh.clone(),
+        usage_projects.clone(),
         std::sync::Arc::new(move |accounts| {
             let _ = usage_proxy.send_event(UserEvent::ProviderUsageSnapshot { accounts });
         }),
@@ -10607,28 +10616,63 @@ fn main() -> std::io::Result<()> {
     // Capacity observation belongs to the host, independently of browser clients.
     // Only open projects supply target candidates; registered projects consume
     // nothing unless the machine census finds a live PTY.
-    let capacity_projects = Arc::new(RwLock::new(Vec::<PathBuf>::new()));
     let capacity_roots = capacity_projects.clone();
     let capacity_proxy = proxy.clone();
     if let Err(error) = std::thread::Builder::new()
         .name("gwt-agent-capacity".into())
-        .spawn(move || loop {
-            std::thread::sleep(gwt::agent_capacity::CAPACITY_TICK_INTERVAL);
-            let roots = capacity_roots
-                .read()
-                .map(|projects| projects.clone())
-                .unwrap_or_default();
-            if let Err(error) = gwt::agent_capacity::refresh_machine_capacity_for_projects(&roots) {
-                tracing::warn!(%error, "agent capacity observation failed");
-            }
-            for root in roots {
-                // Failed observations must also publish expiry instead of leaving
-                // an old positive Auto limit on a stopped Monitor.
-                if capacity_proxy
-                    .send_event(UserEvent::IssueMonitorCapacityChanged { project_root: root })
-                    .is_err()
+        .spawn(move || {
+            let mut previous = BTreeMap::new();
+            loop {
+                std::thread::sleep(gwt::agent_capacity::CAPACITY_TICK_INTERVAL);
+                let projects = capacity_roots
+                    .read()
+                    .map(|projects| projects.clone())
+                    .unwrap_or_default();
+                let roots = projects
+                    .iter()
+                    .map(|(context, _, _)| context.project_root.clone())
+                    .collect::<Vec<_>>();
+                if let Err(error) =
+                    gwt::agent_capacity::refresh_machine_capacity_for_projects(&roots)
                 {
-                    return;
+                    tracing::warn!(%error, "agent capacity observation failed");
+                }
+                previous.retain(|root, _| roots.contains(root));
+                for (context, revision, accepted) in projects {
+                    let root = context.project_root.clone();
+                    // Never consume a notification before the initial full
+                    // projection exists: a later ready tick must send it again.
+                    let Some(accepted) = accepted else {
+                        previous.remove(&root);
+                        continue;
+                    };
+                    // Failed observations must also publish expiry instead of leaving
+                    // an old positive Auto limit on a stopped Monitor.
+                    let prior = previous
+                        .get(&root)
+                        .filter(|(old_context, _, _)| old_context == &context);
+                    let update = gwt::agent_capacity::CapacityUpdate::read(&root, Some(&accepted));
+                    let changed = prior
+                        .is_none_or(|(_, (control_revision, _), _)| *control_revision != revision.0)
+                        || update.changed_from(prior.map(|(_, _, update)| update))
+                        // A newer status may have rejected the preceding send.
+                        // Retry against that status, but not after our own
+                        // successful application already accepted this value.
+                        || prior.is_some_and(|(_, (_, status_revision), _)| {
+                            *status_revision != revision.1 && update.changed_from(Some(&accepted))
+                        });
+                    if changed
+                        && capacity_proxy
+                            .send_event(UserEvent::IssueMonitorCapacityChanged {
+                                context: context.clone(),
+                                revision,
+                                update: update.clone(),
+                            })
+                            .is_err()
+                    {
+                        return;
+                    }
+                    previous.insert(root, (context, revision, update));
                 }
             }
         })
@@ -10840,6 +10884,7 @@ fn main() -> std::io::Result<()> {
     let mut gui_shutdown_backstop_armed = false;
     let mut board_refresh_queue = BoardRefreshQueue::default();
     let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
+    let mut last_quota_sweep = std::time::Instant::now();
 
     let mut dispatch_watchdog = dispatch_watchdog::DispatchWatchdog::start();
     let mut dispatch_perf = gwt::perf::dispatch::DispatchCollector::start();
@@ -10929,7 +10974,10 @@ fn main() -> std::io::Result<()> {
                     ready.set_server_url(browser_url.clone());
                     ready.set_usage_refresh(usage_refresh.clone());
                     if let Ok(mut roots) = capacity_projects.write() {
-                        *roots = ready.project_contexts().into_iter().map(|context| context.project_root).collect();
+                        *roots = ready.capacity_observation_contexts();
+                    }
+                    if let Ok(mut roots) = usage_projects.write() {
+                        *roots = ready.provider_usage_project_roots();
                     }
                     if let Ok(mut projects) = monitor_projects.write() {
                         for context in ready.project_contexts() {
@@ -11514,6 +11562,12 @@ fn main() -> std::io::Result<()> {
                 // Issue #3906 AC-8: the 15 s convergence tick is also the
                 // update drain's clock (two clear ticks = quiescent).
                 events.extend(app.update_drain_tick_events());
+                // Account notifications now carry changes only. Pending screen
+                // evidence must still settle when only the clock advances.
+                if last_quota_sweep.elapsed() >= std::time::Duration::from_secs(30) {
+                    last_quota_sweep = std::time::Instant::now();
+                    events.extend(app.sweep_provider_quota_candidates(chrono::Utc::now()));
+                }
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::TerminalConvergenceObserved {
@@ -11566,8 +11620,8 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);
             }
-            Event::UserEvent(UserEvent::IssueMonitorCapacityChanged { project_root }) => {
-                clients.dispatch(app.issue_monitor_capacity_changed_events(&project_root));
+            Event::UserEvent(UserEvent::IssueMonitorCapacityChanged { context, revision, update }) => {
+                clients.dispatch(app.issue_monitor_capacity_changed_events(&context, revision, update));
             }
             Event::UserEvent(UserEvent::IssueMonitorDaemonStatus {
                 project_root,
@@ -12204,7 +12258,10 @@ fn main() -> std::io::Result<()> {
             }
             Event::MainEventsCleared => {
                 if let Ok(mut roots) = capacity_projects.write() {
-                    *roots = app.project_contexts().into_iter().map(|context| context.project_root).collect();
+                    *roots = app.capacity_observation_contexts();
+                }
+                if let Ok(mut roots) = usage_projects.write() {
+                    *roots = app.provider_usage_project_roots();
                 }
                 // Publish project membership even before a Monitor PTY exists.
                 // The worker retains it and needs no GUI round trip per census.
