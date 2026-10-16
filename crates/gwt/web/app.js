@@ -6207,7 +6207,10 @@ import { createUiStateStore } from "/ui-state-store.js";
         // Pane visibility notifications also use this event. Only a native
         // foreground event should discard the receive backlog; a hidden
         // event need not have reached this document before the restore.
-        if (event.isTrusted) socketReceiveDispatcher?.resume?.();
+        if (event.isTrusted) {
+          if (socketReceiveDispatcher) socketReceiveDispatcher.resume();
+          else if (socketProjectKey) connectSocket(true);
+        }
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
         refreshVisibleKnowledgeWindows();

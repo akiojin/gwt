@@ -20,6 +20,10 @@ identity and generation checks fence the abandoned transport. Recovery
 survives a replacement that fails before OPEN, and leaves the retained
 catalog connection in place.
 
+A trusted foreground event also replaces a pending project connection when
+the dispatcher has not been created yet. This covers foreground recovery
+during an overflow reconnect instead of waiting for its native backlog.
+
 While the replacement connects, new terminal and pane input is sent immediately
 through the same project's still-open old connection. Its receive handlers are
 already fenced. Replacement OPEN closes that input handoff; failure before OPEN
@@ -77,6 +81,10 @@ second mutable response state.
   two seconds of the controller's native foreground request. Map that wall
   clock to `performance.timeOrigin`; a delayed visibility handler cannot
   reset the deadline. Compile the native window helper during setup.
+- Passively record project WebSocket constructor times through the existing
+  measurement proxy. Require a project transport born after that physical
+  foreground request. Dispatcher `resume()` counts remain diagnostic: the
+  dispatcher can be absent while a replacement is connecting.
 - Record Long Tasks API maxima for the initial 0–2s and settled 2–4s windows.
   The latter must be below 200ms. Zero means no reported task of at least
   50ms, rather than zero CPU use. Foreground metrics are collected independently
@@ -100,7 +108,8 @@ digests, so an uncommitted measured input cannot be silently substituted.
 The archived multi-key harness is retained for excluded earlier trials.
 Its input/comment differences are checked against the pinned before harness.
 The final harness also uses CDP for the initial hidden observation and adds
-independent sender samples. The eight-pane workload, native visibility,
+independent sender samples and project-transport creation timestamps.
+The eight-pane workload, native visibility,
 two-second recovery deadline and 200ms settled limit are unchanged.
 
 After integrating develop's canvas retirement, the after harness opens the
@@ -116,14 +125,14 @@ updated harness to their exact digests.
 | --- | ---: | ---: | --- | --- |
 | Before, dark | 373,280 | 41,412 | unobserved / unobserved | timeout at 15,018 / unobserved |
 | Before, light | 647,408 | 98,951 | unobserved / unobserved | timeout at 15,008 / unobserved |
-| After, dark | 2,048 | 5,813 | 0 / 0 | 356 / 504 |
-| After, light | 2,048 | 5,864 | 0 / 0 | 285 / 598 |
+| After, dark | 2,048 | 1,976 | 156 / 0 | 368 / 512 |
+| After, light | 2,048 | 1,851 | 0 / 0 | 322 / 458 |
 
-Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,024ms (after-dark), 1,800,053ms (after-light).
-They sent 673,702, 686,642, 689,278, 690,078 frames respectively, including the final foreground-triggering burst.
+Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,013ms (after-dark), 1,800,021ms (after-light).
+They sent 673,702, 686,642, 696,898, 698,877 frames respectively, including the final foreground-triggering burst.
 
 The archived before observer gaps reached 55,033/100,924ms.
-Final after sender observation gaps stayed within 30,036/30,160ms.
+Final after sender observation gaps stayed within 30,074/30,016ms.
 Both final after runs passed, with zero console/page/fixture errors and no
 reported task of at least 50ms in either settled window.
 
@@ -161,12 +170,22 @@ retained as `excluded-dark-target-closed*`; the closure cause is unknown. It is
 excluded from acceptance. That earlier source and its successful diagnostic
 and repeat are preserved in commit `8c646a9929c45b7a9b748fc01ca26a4ef7a946a6`.
 The final accepted runs were collected again after consolidating transport calls
-through the existing send and close paths and integrating the Branches and Index
-shared models; the receiver baseline is unchanged.
+through the existing send and close paths, integrating the Branches and Index
+shared models, and covering foreground during a pending connection replacement;
+the receiver baseline is unchanged.
 The accepted light and dark runs
 partly overlapped on the shared host, with independent browsers and fixtures.
 Each launch's exact input digests, continuing sender counters and physical
 foreground deadline are verified separately.
+
+An excluded short dark run (`excluded-preopen-foreground-*`) recovered its
+snapshots/input in 583/722ms but recorded no dispatcher `resume()` call.
+The native visible event arrived during connection replacement, when the
+dispatcher was absent. The existing unit regression now forces that state
+and requires a new project connection. Accepted browser runs check transport
+creation after the physical restore request as well as fresh snapshots,
+input, queue and long-task bounds. The short failure is diagnostic evidence,
+not a replacement for either final 30-minute run.
 
 Relaunch diagnostics reproduced late snapshots even with normal process
 priority. Passive timing showed native visibility at 146ms and backend

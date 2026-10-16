@@ -224,23 +224,33 @@ test("native foreground recovery does not require an observed hidden event", () 
   const document = { hidden: false };
   let resumes = 0;
   let refreshes = 0;
+  const reconnects = [];
   const refresh = () => { refreshes++; };
   const handlerSource = source.split('document.addEventListener("visibilitychange", ')[1].split("\n      });")[0] + "\n}";
-  const handler = vm.runInNewContext(`(${handlerSource})`, {
+  const context = {
     document,
     socketReceiveDispatcher: { resume() { resumes++; } },
+    socketProjectKey: projectA.project_key,
+    connectSocket: force => reconnects.push(force),
     rearmVisibleTerminalViewportRefreshes: refresh,
     resumeKnowledgeEventRefresh: refresh, refreshVisibleKnowledgeWindows: refresh,
-  });
+  };
+  const handler = vm.runInNewContext(`(${handlerSource})`, context);
   handler({ isTrusted: true });
   assert.equal(resumes, 1, "native restore can arrive without a preceding hidden event");
   handler({ isTrusted: false });
   assert.equal(resumes, 1, "pane visibility notifications must not reset socket recovery");
   assert.equal(refreshes, 6, "both visible notifications retain the existing display refreshes");
+  context.socketReceiveDispatcher = null;
+  handler({ isTrusted: true });
+  assert.deepEqual(reconnects, [true], "native restore also fences a replacement that has not opened yet");
+  handler({ isTrusted: false });
+  assert.deepEqual(reconnects, [true], "synthetic visibility cannot replace the pending connection");
   document.hidden = true;
   handler({ isTrusted: true });
   assert.equal(resumes, 1, "backgrounding never requests snapshots");
-  assert.equal(refreshes, 6);
+  assert.equal(refreshes, 12);
+  assert.deepEqual(reconnects, [true], "backgrounding never replaces the pending connection");
 });
 
 test("foreground recovery replaces the native backlog without replaying mutations", () => {

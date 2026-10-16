@@ -79,7 +79,10 @@ for (const label of ["before", "after"]) {
       assert.ok(Number.isFinite(run.metrics.resume_max_long_task_ms));
       assert.ok(Number.isFinite(run.metrics.settled_max_long_task_ms) && run.metrics.settled_max_long_task_ms < 200);
       assert.ok(run.ready_requests_after_resume > 0);
-      assert.ok(run.metrics.resumes > 0);
+      assert.ok(Array.isArray(run.metrics.project_socket_creations_ms));
+      assert.ok(run.metrics.project_socket_creations_ms.every(at => Number.isFinite(at) && at >= 0));
+      assert.ok(run.metrics.project_socket_creations_ms.some(at => at >= run.controller_restore_start_performance_ms),
+        "after recovery must use a project transport created after the physical restore request");
     } else if (run.outcome === "timeout") {
       assert.ok(run.recovery_timeout_ms > 2000, "negative reference must exceed the acceptance deadline");
       assert.ok(run.recovery_stage && run.recovery_error);

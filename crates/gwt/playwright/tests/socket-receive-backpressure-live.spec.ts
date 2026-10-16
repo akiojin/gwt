@@ -281,7 +281,8 @@ test.describe("background receive backpressure (Issue #5531)", () => {
         expect(fixture.counters().ready_requests - readyBeforeResume, "visible resume requests fresh backend state").toBeGreaterThan(0);
         // Whether native background delivery reaches the cap depends on the
         // browser. Unit tests force overflow; this run measures its real policy.
-        expect(metrics.resumes, "real visible event resumes the dispatcher").toBeGreaterThan(0);
+        expect(metrics.project_socket_creations_ms.some((at: number) => Number.isFinite(at) && at >= restorePerformanceStart),
+          "native foreground obtains a project transport created after the physical restore request").toBe(true);
         expect(metrics.maxQueue, "dispatcher default queue bound").toBeLessThanOrEqual(2048);
         expect(foregroundMetricsComplete, "independent foreground metrics were captured").toBe(true);
         expect(Number.isFinite(metrics.resume_max_long_task_ms), "initial foreground long tasks were measured").toBe(true);
@@ -388,6 +389,7 @@ async function installMeasurements(page: Page) {
   await page.addInitScript(() => {
     (window as any).__gwtPlaywrightTestBridge = true;
     const metrics = { active: false, maxQueue: 0, messages: 0, resyncs: 0, resumes: 0,
+      project_socket_creations_ms: [] as number[],
       resync_reasons: {} as Record<string, number>,
       visible_at: 0, max_long_task_ms: 0,
       long_tasks: [] as Array<{ start_ms: number; duration_ms: number }>, visibility: [] as unknown[] };
@@ -414,6 +416,9 @@ async function installMeasurements(page: Page) {
     const Native = window.WebSocket;
     window.WebSocket = new Proxy(Native, {
       construct(Target, args) {
+        if (new URL(String(args[0]), location.href).searchParams.has("repo_hash")) {
+          metrics.project_socket_creations_ms.push(performance.now());
+        }
         const socket = new Target(...args as ConstructorParameters<typeof WebSocket>);
         socket.addEventListener("message", () => { metrics.messages++; });
         return socket;
