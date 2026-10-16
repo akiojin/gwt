@@ -5450,7 +5450,7 @@ fn leave_fresh_execution_activated_before_projection_commit(
                 .get(&fixture.window_id)
                 .expect("active fresh candidate");
             let live_session_ids = HashSet::from([fixture.candidate_session_id.clone()]);
-            let event = super::workspace::apply_workspace_launch_for_current_work(
+            let events = super::workspace::apply_workspace_launch_for_current_work(
                 &fixture.repo,
                 projection,
                 work_items,
@@ -5465,8 +5465,9 @@ fn leave_fresh_execution_activated_before_projection_commit(
                     live_session_ids: &live_session_ids,
                     now: Utc::now(),
                 },
+                true,
             )?;
-            Ok(((), vec![event]))
+            Ok(((), events))
         },
         || {
             gwt::cli::execution_state::activate_successor(
