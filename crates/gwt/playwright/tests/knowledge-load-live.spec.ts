@@ -18,11 +18,32 @@ type Sample = {
 };
 type Control = { phase: string; sent_at_ms?: number; response_at_ms?: number; wall_ms?: number; pending_loads?: number };
 type PhaseRecord = { window_id: string; request_id: number; stage: string; status: string;
-  elapsed_ms?: number; duration_ms?: number };
+  recorded_at_ms: number; elapsed_ms?: number; duration_ms?: number };
 type RelatedRow = { number: number; works: number; sessions: number };
 type EntryReceipt = { id: string; request_id: number; at_ms: number; entry_count: number;
   related_rows: RelatedRow[] };
 const requiredStages = ["queue", "cache_read", "assembly", "dispatch_enqueue", "dispatch_wait", "send"];
+
+test("phase timings exclude a preceding theme with the same request ID", async ({}, info) => {
+  test.skip(!CHECK_HOME, "requires an isolated diagnostic HOME");
+  const directory = join(CHECK_HOME, ".gwt/logs");
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, `gwt.log.phase-regression-${info.project.name}`);
+  const sample = { id: "phase-regression", request_id: 5543 } as Sample;
+  const record = (timestamp: string, duration_ms: number) => JSON.stringify({
+    timestamp, target: "gwt::knowledge_load", fields: {
+      window_id: sample.id, request_id: sample.request_id,
+      stage: "cache_read", status: "completed", elapsed_ms: duration_ms, duration_ms,
+    },
+  });
+  try {
+    await writeFile(path, [record("2020-01-01T00:00:00Z", 1), record("2020-01-03T00:00:00Z", 2)].join("\n"));
+    const records = await loadPhaseRecords([sample], "diagnostic-only", Date.parse("2020-01-02T00:00:00Z"));
+    expect(records.map(row => row.duration_ms)).toEqual([2]);
+  } finally {
+    await rm(path, { force: true });
+  }
+});
 
 test.describe("Issue cache load (live backend, Issue #5543)", () => {
   test.skip(!BASE || !CHECK_HOME || process.platform !== "win32", "requires the isolated Windows browser-check fixture");
@@ -54,6 +75,7 @@ test.describe("Issue cache load (live backend, Issue #5543)", () => {
       let verified = false;
       let diagnostics: unknown;
       let timeoutLedgerCount: number | null = null;
+      const logStartedAtMs = Date.now();
       const started = performance.now();
       const now = () => performance.now() - started;
       const key = (id: string, request_id: number) => `${id}:${request_id}`;
@@ -289,7 +311,7 @@ test.describe("Issue cache load (live backend, Issue #5543)", () => {
             expect(control.pending_loads, "the control reply precedes pending cache loads").toBeGreaterThan(0);
           }
           await expect.poll(async () => {
-            phaseRecords = await loadPhaseRecords([first], fixture.repo_hash);
+            phaseRecords = await loadPhaseRecords([first], fixture.repo_hash, logStartedAtMs);
             return [first].flatMap(sample => requiredStages.filter(stage => !phaseRecords.some(record =>
               record.window_id === sample.id && record.request_id === sample.request_id &&
               record.stage === stage && record.status === "completed" &&
@@ -308,7 +330,7 @@ test.describe("Issue cache load (live backend, Issue #5543)", () => {
       } finally {
         await writeFile(join(gateDirectory, "release"), "release\n").catch(() => undefined);
         for (const record of pending.values()) clearTimeout(record.timer);
-        if (fixture.label === "after") phaseRecords = await loadPhaseRecords(firstSample ? [firstSample] : [], fixture.repo_hash);
+        if (fixture.label === "after") phaseRecords = await loadPhaseRecords(firstSample ? [firstSample] : [], fixture.repo_hash, logStartedAtMs);
         timeoutLedgerCount = await countTimeoutLedgerRows().catch(() => null);
         diagnostics = await page.evaluate(() => {
           const safeWindow = (item: any) => ({ id: item.id, preset: item.preset, status: item.status });
@@ -337,7 +359,8 @@ test.describe("Issue cache load (live backend, Issue #5543)", () => {
         }
         const evidence = { issue: 5543, label: fixture.label, theme, owned_pid: fixture.pid,
           project: fixture.project, checkout: fixture.checkout, seed: fixture.seed,
-          phase, verified, request_timeout_ms: REQUEST_TIMEOUT_MS, requested_rounds: rounds,
+          phase, verified, log_started_at_ms: logStartedAtMs,
+          request_timeout_ms: REQUEST_TIMEOUT_MS, requested_rounds: rounds,
           requested_observation_seconds: observeSeconds, elapsed_ms: now(),
           effective_theme_observation_seconds: effectiveObserveSeconds,
           workspace_ready_ms: eventKinds.find(event => event.direction === "received" && event.kind === "workspace_state")?.at_ms,
@@ -370,7 +393,7 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
-async function loadPhaseRecords(samples: Sample[], repoHash: string): Promise<PhaseRecord[]> {
+async function loadPhaseRecords(samples: Sample[], repoHash: string, notBeforeMs: number): Promise<PhaseRecord[]> {
   const wanted = new Set(samples.map(sample => `${sample.id}:${sample.request_id}`));
   const records: PhaseRecord[] = [];
   for (const directory of [join(CHECK_HOME, ".gwt/logs"), join(CHECK_HOME, ".gwt/projects", repoHash, "logs")]) {
@@ -382,6 +405,10 @@ async function loadPhaseRecords(samples: Sample[], repoHash: string): Promise<Ph
         let row: any;
         try { row = JSON.parse(line); } catch { continue; }
         if (row.target !== "gwt::knowledge_load") continue;
+        // Browser contexts restart request IDs; the preceding theme shares
+        // this GUI's logs but cannot provide evidence for the current theme.
+        const recorded_at_ms = Date.parse(row.timestamp);
+        if (!(recorded_at_ms >= notBeforeMs)) continue;
         const identity = Object.assign({}, ...(row.spans ?? []), row.span ?? {}, row.fields ?? {});
         // tracing's optional u64 span field may be rendered as Some(N).
         const match = /^(?:Some\()?([0-9]+)\)?$/.exec(String(identity.request_id));
@@ -390,7 +417,7 @@ async function loadPhaseRecords(samples: Sample[], repoHash: string): Promise<Ph
         const window_id = String(identity.window_id ?? "");
         if (!wanted.has(`${window_id}:${request_id}`)) continue;
         const fields = row.fields ?? {};
-        records.push({ window_id, request_id, stage: String(fields.stage ?? ""), status: String(fields.status ?? ""),
+        records.push({ window_id, request_id, recorded_at_ms, stage: String(fields.stage ?? ""), status: String(fields.status ?? ""),
           elapsed_ms: fields.elapsed_ms === undefined ? undefined : Number(fields.elapsed_ms),
           duration_ms: fields.duration_ms === undefined ? undefined : Number(fields.duration_ms) });
       }

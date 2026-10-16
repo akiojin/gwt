@@ -45,11 +45,15 @@ Only the runtime-code directory is shared. The fixture stops its own GUI PID.
 Both headed Chromium themes verify cached rows before the held Work decode,
 the later enrichment's visible update, a warm request, and twelve concurrent
 requests. A `list_windows` response must arrive while those requests are
-pending. Dark mode observes bounded bursts for at least one hour; light mode
-observes at least one minute. Every load must succeed within the real
+pending. With `-ObserveSeconds 3600`, dark mode observes bounded bursts for
+one hour and light mode for one minute. A shorter run covers the controlled
+dependency and responsiveness checks only. Every load must succeed within the real
 60-second budget, with zero console/page errors and zero timeout-ledger rows.
 The first request must have completed timing records for all six initial
-response stages. JSON, screenshots and raw logs remain in the fixture's local
+response stages. Stage records are restricted to the current theme's start
+time because browser contexts can reuse window and request IDs. A regression
+checks that an older matching log cannot satisfy the current run.
+JSON, screenshots and raw logs remain in the fixture's local
 artifact directory; the canonical run records the source fingerprint and
 measured headed results.
 
