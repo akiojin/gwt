@@ -356,9 +356,10 @@ export function issueQueueColumn(entry, work = null, liveWindow = null) {
   if (issueStopReason(entry) !== null) return "backlog";
   if (liveWindow && ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(liveWindow).status)) return "active";
   // Judgment holds are not live launches; Work activity can outlast the agent.
-  if (["needs_human", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state) ||
-      work?.status_category === "blocked") return "backlog";
-  if (["launching", "launched"].includes(entry.monitor_state) || Number(work?.active_agents) > 0) return "active";
+  if (["needs_human", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
+  if (["launching", "launched"].includes(entry.monitor_state)) return "active";
+  if (work?.status_category === "blocked") return "backlog";
+  if (Number(work?.active_agents) > 0) return "active";
   return isIssueInTerminalQueue(entry) ? "queued" : "backlog";
 }
 

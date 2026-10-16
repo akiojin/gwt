@@ -88,6 +88,7 @@ test("Issue #5491 judgment holds outrank stale Work activity but preserve live a
     assert.equal(issueQueueColumn(entry, workRow(), agentWindow("live", 5491)), "active");
   }
   assert.equal(issueQueueColumn(knowledgeEntry(5491), workRow({ status_category: "blocked" })), "backlog");
+  assert.equal(issueQueueColumn(knowledgeEntry(5491, { monitor_state: "launching" }), workRow({ status_category: "blocked" })), "active");
   const model = issueRowStateModel({ entry: knowledgeEntry(5491, { monitor_state: "needs_human", error_message: reason }) });
   assert.equal(model.primary.label, "Needs human");
   assert.equal(model.secondary[0].label, reason);
