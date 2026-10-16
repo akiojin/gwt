@@ -205,7 +205,12 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let repo = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
-    if super::pm::ambient_session_id().is_some() && !super::pm::caller_is_registered_pm(&repo) {
+    // Missing identity never authorizes use of an instruction or stored grant.
+    // Unmanaged revocation remains available to remove permission if the PM stops.
+    if (matches!(&command, PmAuthorizationCommand::Execute { .. })
+        || super::pm::ambient_session_id().is_some())
+        && !super::pm::caller_is_registered_pm(&repo)
+    {
         return Err(super::io_as_api_error(io::Error::new(io::ErrorKind::PermissionDenied,
             "permission_stage=instruction_or_approval: this operation requires the registered repository PM; implementation agents cannot exercise PM authority")));
     }
@@ -595,6 +600,82 @@ mod tests {
     };
     use serde_json::{json, Value};
 
+    fn registered_pm(repo: &std::path::Path) -> ScopedEnvVar {
+        use crate::pm_registry::{self, PmPrefs, PmRegistration};
+        pm_registry::save_pm_prefs(
+            &pm_registry::pm_prefs_path_for_repo_path(repo),
+            &PmPrefs {
+                registration: Some(PmRegistration {
+                    session_id: "pm-settings-test".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: repo.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..PmPrefs::default()
+            },
+        )
+        .unwrap();
+        ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-settings-test")
+    }
+
+    #[test]
+    fn standing_permission_requires_a_registered_executor_but_can_be_revoked_without_a_pm() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let _pm = registered_pm(&repo);
+        let intent = OperationIntent {
+            operation: "update.settings.set".into(),
+            params: json!({"auto_apply_updates":true}),
+        };
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Enable updates",
+            "Disable updates",
+            true,
+        )
+        .unwrap();
+        let audit_path = pm_authorization::audit_path(&repo);
+        let audit_before = std::fs::read(&audit_path).ok();
+        let approvals_before =
+            serde_json::to_value(pm_authorization::approvals(&repo).unwrap()).unwrap();
+        for caller in [None, Some("  "), Some("implementation-agent")] {
+            let _session = match caller {
+                Some(id) => ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, id),
+                None => ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            };
+            let mut env = crate::cli::TestEnv::new(repo.clone());
+            env.stdin = json!({"operation":intent.operation,"params":intent.params}).to_string();
+            assert_ne!(
+                crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
+                0,
+                "{caller:?}"
+            );
+            assert!(String::from_utf8_lossy(&env.stderr).contains("registered repository PM"));
+            assert!(!gwt_core::paths::gwt_config_path().exists());
+            assert_eq!(
+                serde_json::to_value(pm_authorization::approvals(&repo).unwrap()).unwrap(),
+                approvals_before
+            );
+            assert_eq!(std::fs::read(&audit_path).ok(), audit_before);
+        }
+        // Removing authority remains available when no PM is running.
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.stdin =
+            json!({"operation":"pm.approval.revoke","params":{"id":approval.id}}).to_string();
+        assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 0);
+        assert!(pm_authorization::approvals(&repo).unwrap()[0].revoked);
+        assert!(!gwt_core::paths::gwt_config_path().exists());
+    }
+
     #[test]
     fn additional_repository_operations_accept_only_bounded_effect_parameters() {
         for (operation, params) in [
@@ -668,10 +749,10 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
         let repo = home.path().join("repo");
         let work = gwt_core::paths::gwt_repo_local_work_dir(&repo);
         std::fs::create_dir_all(&work).unwrap();
+        let _session = registered_pm(&repo);
         std::fs::write(
             work.join("board.toml"),
             "provider = 'teams'\nchannel = 'existing'\n",
@@ -725,9 +806,9 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        let _session = registered_pm(&repo);
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let intent = OperationIntent {
             operation: "discussion.create".into(),
@@ -775,9 +856,9 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        let _session = registered_pm(&repo);
         let mut env = crate::cli::TestEnv::new(repo.clone());
         env.required_checks = json!({"strict":false,"checks":[{"context":"Rust","app_id":7},{"context":"Old","app_id":null}]});
         let intent = OperationIntent {
@@ -908,9 +989,9 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        let _session = registered_pm(&repo);
         let intent = OperationIntent {
             operation: "update.settings.set".into(),
             params: json!({"auto_apply_updates":true}),

@@ -23,6 +23,8 @@ const defaultTargets = [
 export function targets(group) {
   if (group === "default") return defaultTargets;
   if (group === "warm") return [["gwt", "lib", "gwt"]];
+  // Cargo discovers all integration targets; do not maintain a second list.
+  if (group === "core") return [["gwt-core", "lib", "gwt_core"]];
   throw new Error(`Unknown Windows test feature set: ${group}`);
 }
 
@@ -36,8 +38,8 @@ export function build(group, repo = root, spawn = spawnSync) {
   const packages = [...new Set(selected.map(([pkg]) => pkg))];
   const selectors = [...new Map(selected.map(([, kind, name]) =>
     [kind === "lib" ? kind : `${kind}|${name}`, kind === "lib" ? ["--lib"] : [`--${kind}`, name]])).values()].flat();
-  const args = ["test", ...packages.flatMap((pkg) => ["-p", pkg]), ...selectors,
-    ...(group === "warm" ? ["--all-features"] : []), "--no-run", "--message-format=json"];
+  const args = ["test", ...packages.flatMap((pkg) => ["-p", pkg]), ...(group === "core" ? [] : selectors),
+    ...(group !== "default" ? ["--all-features"] : []), "--no-run", "--message-format=json"];
   console.log(`cargo ${args.join(" ")}`);
   const result = spawn("cargo", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 64 * 1024 * 1024 });
   if (result.error) throw result.error;
@@ -52,7 +54,8 @@ export function build(group, repo = root, spawn = spawnSync) {
     if (message.reason !== "compiler-artifact" || !message.profile.test || !message.executable) continue;
     const pkg = packages.find((candidate) => path.resolve(message.manifest_path) === path.join(repo, "crates", candidate, "Cargo.toml"));
     if (!pkg) continue;
-    const target = selected.find(([p, kind, name]) => p === pkg && message.target.kind.includes(kind) && message.target.name === name);
+    const target = group === "core" ? [pkg, message.target.kind[0], message.target.name]
+      : selected.find(([p, kind, name]) => p === pkg && message.target.kind.includes(kind) && message.target.name === name);
     if (!target) continue;
     if (artifacts[key(target)]) throw new Error(`Duplicate test artifact: ${key(target)}`);
     artifacts[key(target)] = { package_id: message.package_id, executable: message.executable, cwd: path.dirname(message.manifest_path) };
@@ -81,12 +84,24 @@ export function run(group, argv, repo = root, spawn = spawnSync) {
   return result.status ?? 1;
 }
 
+export function runCore(repo = root, spawn = spawnSync, args = []) {
+  const artifacts = JSON.parse(fs.readFileSync(manifestFile(repo, "core"), "utf8"));
+  if (!artifacts["gwt-core|lib|gwt_core"]) throw new Error("Missing complete core suite");
+  for (const target of Object.keys(artifacts)) {
+    const status = run("core", [...target.split("|"), ...args], repo, spawn);
+    if (status !== 0) return status;
+  }
+  return 0;
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [operation, ...args] = process.argv.slice(2);
     if (operation === "build") process.exitCode = build(args[0]);
+    else if (operation === "run-core") process.exitCode = runCore(root, spawnSync, args);
+    else if (operation === "run-core-index") process.exitCode = run("core", ["gwt-core", "test", "index_coordinator"]);
     else if (operation === "run" || operation === "run-warm") process.exitCode = run(operation === "run" ? "default" : "warm", args);
-    else throw new Error("Usage: ci-windows-tests.mjs build <default|warm> | <run|run-warm> <package> <kind> <target> [filter] -- [libtest args]");
+    else throw new Error("Usage: ci-windows-tests.mjs build <default|warm|core> | <run|run-warm> <package> <kind> <target> [filter] -- [libtest args] | run-core [libtest args] | run-core-index");
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

@@ -3551,6 +3551,14 @@ fn execute_command_cancellable(
     )
 }
 
+fn command_timeout(
+    command: &str,
+    progress: Option<&CommandProgress>,
+) -> Option<std::time::Duration> {
+    crate::cli::verification_lease::short_non_cargo_timeout(command)
+        .or_else(|| progress.and_then(CommandProgress::timeout))
+}
+
 #[cfg(test)]
 fn execute_command_with_artifact_guard(
     worktree: &Path,
@@ -3707,7 +3715,7 @@ fn execute_command_with_artifact_guard_cancellable(
                 &mut process,
                 temp.path(),
                 command,
-                crate::cli::verification_lease::short_non_cargo_timeout(command),
+                command_timeout(command, progress),
                 progress,
                 output_worktree,
                 std::time::Instant::now,
@@ -4061,7 +4069,7 @@ fn execute_command_on_daemon(
         endpoint,
         request,
         |pid| progress.map(|progress| progress.start(pid)),
-        crate::cli::verification_lease::short_non_cargo_timeout(command),
+        command_timeout(command, progress),
         check,
     );
     let (exit_code, signal, mut tail, mut output_streams) = match delegated {
@@ -8131,6 +8139,26 @@ pub(crate) mod tests {
         }
         if let Some(grandchild) = &mut grandchild {
             grandchild.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn command_timeout_bounds_unknown_exclusive_work_and_preserves_short_gates() {
+        use std::time::Duration;
+
+        let shared = CommandProgress::default();
+        let exclusive = CommandProgress::with_exclusive_timeout();
+        assert_eq!(command_timeout("python runner.py", None), None);
+        assert_eq!(command_timeout("python runner.py", Some(&shared)), None);
+        assert_eq!(
+            command_timeout("python runner.py", Some(&exclusive)),
+            Some(Duration::from_secs(20 * 60))
+        );
+        for progress in [None, Some(&shared), Some(&exclusive)] {
+            assert_eq!(
+                command_timeout("git diff --check", progress),
+                Some(Duration::from_secs(60))
+            );
         }
     }
 
