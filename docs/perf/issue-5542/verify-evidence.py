@@ -23,6 +23,7 @@ for label in ("baseline-paired", "after-paired"):
     print(label, summary["modes"])
 
 profile_rows = [json.loads(line) for line in (root / "after-profile.jsonl").read_text().splitlines()]
+assert len(profile_rows) >= 12 and all(row["ok"] for row in profile_rows)
 phases = {phase["handler"] for row in profile_rows for phase in row["phases"]}
 assert {"hook-live/resolve", "hook-live/connect", "hook-live/send", "hook-live/ack"} <= phases
 assert "hook-live/client-init" not in phases, "local HTTP must not initialize a cold client"

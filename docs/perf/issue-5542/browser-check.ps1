@@ -57,8 +57,9 @@ try {
     $childVariables.GWT_HOOK_BIN = $hookBinary
     # Settings verification does not exercise automatic repository indexing.
     $childVariables.GWT_DISABLE_BACKGROUND_INDEX = '1'
-    # Codex's inherited RUST_LOG filters out gwt timing warnings by default.
-    $childVariables.RUST_LOG = 'warn'
+    # The responsiveness suite counts every dispatch, including fast DEBUG
+    # records; WARN-only logging silently omits those samples.
+    $childVariables.RUST_LOG = 'warn,gwt.frontend.timing=debug'
     $childVariables.GIT_TERMINAL_PROMPT = '0'
     $childVariables.GH_PROMPT_DISABLED = '1'
     foreach ($key in $childVariables.Keys) {
@@ -88,7 +89,7 @@ try {
         $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key)
         [Environment]::SetEnvironmentVariable($key, $testVariables[$key])
     }
-    & node "$deps/node_modules/@playwright/test/cli.js" test --config crates/gwt/playwright/playwright.config.ts --workers=1 session-start-responsiveness-live.spec.ts @PlaywrightArguments
+    & node "$deps/node_modules/@playwright/test/cli.js" test --config crates/gwt/playwright/playwright.config.ts --workers=1 hook-live-transport-live.spec.ts @PlaywrightArguments
     if ($LASTEXITCODE -ne 0) { throw "Playwright failed with exit $LASTEXITCODE" }
 } finally {
     if ($keeper) { $keeper.Dispose() }
