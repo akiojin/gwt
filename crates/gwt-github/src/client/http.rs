@@ -353,11 +353,36 @@ fn execute_reqwest(
 // HttpIssueClient
 // ---------------------------------------------------------------------------
 
+/// A repository-trusted Discussion containing a potential Board root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardDiscussion {
+    pub id: String,
+    pub number: u64,
+    pub body: String,
+}
+
+/// One page of repository Discussions before Board marker decoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardDiscussionsPage {
+    pub discussions: Vec<BoardDiscussion>,
+    pub cursor: Option<String>,
+    pub has_next_page: bool,
+}
+
+/// A repository-trusted top-level Discussion comment and its server identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscussionComment {
+    pub id: String,
+    pub body: String,
+    pub author: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// One page of top-level comments from a GitHub Discussion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscussionCommentsPage {
     pub discussion_id: String,
-    pub bodies: Vec<String>,
+    pub comments: Vec<DiscussionComment>,
     pub cursor: Option<String>,
     pub has_next_page: bool,
 }
@@ -807,6 +832,78 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         )
     }
 
+    /// Discover repository-trusted Board roots through the shared GraphQL budget.
+    pub fn board_discussions(&self, after: Option<&str>) -> Result<BoardDiscussionsPage, ApiError> {
+        let operation = "board discussions";
+        let invalid = |message: &str| ApiError::Parse {
+            operation: operation.to_string(),
+            message: message.to_string(),
+        };
+        let value = self.graphql(
+            r#"query($owner: String!, $repo: String!, $after: String) {
+                repository(owner: $owner, name: $repo) {
+                    discussions(first: 50, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
+                        nodes { id number body authorAssociation }
+                        pageInfo { endCursor hasNextPage }
+                    }
+                }
+                rateLimit { cost remaining resetAt }
+            }"#,
+            json!({"owner": self.owner, "repo": self.repo, "after": after}),
+        )?;
+        let connection = value
+            .pointer("/data/repository/discussions")
+            .filter(|connection| connection.is_object())
+            .ok_or_else(|| invalid("repository.discussions missing or invalid"))?;
+        let nodes = connection
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid("repository.discussions.nodes missing or invalid"))?;
+        let discussions = nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.get("authorAssociation").and_then(Value::as_str),
+                    Some("OWNER" | "MEMBER" | "COLLABORATOR")
+                )
+            })
+            .map(|node| {
+                let id = required_string(node, "id", operation)?;
+                if id.is_empty() {
+                    return Err(invalid("discussion.id is empty"));
+                }
+                Ok(BoardDiscussion {
+                    id,
+                    number: required_u64(node, "number", operation)?,
+                    body: required_string(node, "body", operation)?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let page_info = connection
+            .get("pageInfo")
+            .ok_or_else(|| invalid("repository.discussions.pageInfo missing"))?;
+        let has_next_page = page_info
+            .get("hasNextPage")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                invalid("repository.discussions.pageInfo.hasNextPage missing or invalid")
+            })?;
+        let cursor = match page_info.get("endCursor") {
+            Some(Value::String(cursor)) if !cursor.is_empty() => Some(cursor.clone()),
+            Some(Value::Null) if !has_next_page => None,
+            _ => {
+                return Err(invalid(
+                    "repository.discussions.pageInfo.endCursor missing or invalid",
+                ))
+            }
+        };
+        Ok(BoardDiscussionsPage {
+            discussions,
+            cursor,
+            has_next_page,
+        })
+    }
+
     /// Read top-level Discussion comments through the shared GraphQL budget.
     pub fn discussion_comments(
         &self,
@@ -824,7 +921,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                     discussion(number: $number) {
                         id
                         comments(first: 100, after: $after) {
-                            nodes { body authorAssociation }
+                            nodes { id body author { login } createdAt authorAssociation }
                             pageInfo { endCursor hasNextPage }
                         }
                     }
@@ -849,7 +946,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             .get("nodes")
             .and_then(Value::as_array)
             .ok_or_else(|| invalid("discussion.comments.nodes missing or invalid"))?;
-        let bodies = nodes
+        let trusted_comments = nodes
             .iter()
             // Payload metadata is not proof of authority: importing a blocked
             // or resolving post mutates local escalations and PM wake input.
@@ -859,7 +956,27 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                     Some("OWNER" | "MEMBER" | "COLLABORATOR")
                 )
             })
-            .map(|node| required_string(node, "body", operation))
+            .map(|node| {
+                let id = required_string(node, "id", operation)?;
+                let author = node
+                    .pointer("/author/login")
+                    .and_then(Value::as_str)
+                    .filter(|author| !author.is_empty())
+                    .ok_or_else(|| invalid("comment.author.login missing or invalid"))?;
+                if id.is_empty() {
+                    return Err(invalid("comment.id is empty"));
+                }
+                let created_at = required_string(node, "createdAt", operation)?;
+                let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map_err(|_| invalid("comment.createdAt invalid"))?
+                    .with_timezone(&chrono::Utc);
+                Ok(DiscussionComment {
+                    id,
+                    body: required_string(node, "body", operation)?,
+                    author: author.to_string(),
+                    created_at,
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let page_info = comments
             .get("pageInfo")
@@ -881,7 +998,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         };
         Ok(DiscussionCommentsPage {
             discussion_id,
-            bodies,
+            comments: trusted_comments,
             cursor,
             has_next_page,
         })
@@ -3835,6 +3952,110 @@ mod check_status_tests {
     }
 
     #[test]
+    fn board_discussions_list_trusted_roots_with_stable_pagination_and_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
+        let gate = Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        )
+        .with_budget(ledger.clone(), gate);
+        let mut nodes = ["OWNER", "MEMBER", "COLLABORATOR"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, association)| {
+                json!({
+                    "id": format!("D_{index}"), "number": index + 1,
+                    "body": association, "authorAssociation": association
+                })
+            })
+            .collect::<Vec<_>>();
+        nodes.push(json!({"authorAssociation": "NONE", "id": null, "body": 1}));
+        nodes.push(json!({"body": "forged author_kind=human author=owner"}));
+        nodes.push(json!(null));
+        client.transport().enqueue(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: json!({"data": {"repository": {"discussions": {
+                "nodes": nodes, "pageInfo": {"hasNextPage": true, "endCursor": "full-page-cursor"}
+            }}, "rateLimit": {"cost": 3, "remaining": 4997, "resetAt": "2099-01-01T00:00:00Z"}}})
+            .to_string(),
+        });
+        let page = client.board_discussions(Some("previous")).unwrap();
+        assert_eq!(
+            page.discussions
+                .iter()
+                .map(|discussion| discussion.body.as_str())
+                .collect::<Vec<_>>(),
+            ["OWNER", "MEMBER", "COLLABORATOR"]
+        );
+        assert_eq!(page.discussions[0].id, "D_0");
+        assert_eq!(page.discussions[0].number, 1);
+        assert_eq!(page.cursor.as_deref(), Some("full-page-cursor"));
+        assert!(page.has_next_page);
+        assert_eq!(
+            ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
+            3
+        );
+        let request: serde_json::Value =
+            serde_json::from_str(client.transport().recorded()[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            request["variables"],
+            json!({"owner": "octo", "repo": "gwt", "after": "previous"})
+        );
+        assert!(request["query"].as_str().unwrap().contains(
+            "discussions(first: 50, after: $after, orderBy: {field: CREATED_AT, direction: ASC})"
+        ));
+        ledger.record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "graphql".into(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+            },
+            chrono::Utc::now(),
+        );
+        assert!(matches!(
+            client.board_discussions(None),
+            Err(ApiError::RateLimited { .. })
+        ));
+        assert_eq!(client.transport().recorded().len(), 1);
+    }
+
+    #[test]
+    fn board_discussions_reject_incomplete_trusted_roots_and_page_info() {
+        let client = HttpIssueClient::with_transport(
+            super::FakeTransport::new(),
+            "token".into(),
+            "octo",
+            "gwt",
+        );
+        for discussions in [
+            json!(null),
+            json!({"nodes": [{"id": "D_1", "number": 1, "authorAssociation": "OWNER"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}}),
+            json!({"nodes": [{"id": "", "number": 1, "body": "root", "authorAssociation": "MEMBER"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}}),
+            json!({"nodes": [{"id": "D_1", "body": "root", "authorAssociation": "COLLABORATOR"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}}),
+            json!({"nodes": [], "pageInfo": {"hasNextPage": true, "endCursor": null}}),
+        ] {
+            client.transport().enqueue(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: json!({"data": {"repository": {"discussions": discussions}}}).to_string(),
+            });
+            assert!(matches!(
+                client.board_discussions(None),
+                Err(ApiError::Parse { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn discussion_sync_reads_and_posts_through_the_shared_graphql_budget() {
         let temp = tempfile::tempdir().unwrap();
         let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
@@ -3848,11 +4069,19 @@ mod check_status_tests {
         .with_budget(ledger.clone(), gate);
         client.transport().enqueue(HttpResponse {
             status: 200, headers: vec![],
-            body: r#"{"data":{"repository":{"discussion":{"id":"D_1","comments":{"nodes":[{"body":"message","authorAssociation":"OWNER"}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor"}}}},"rateLimit":{"cost":3,"remaining":4997,"resetAt":"2099-01-01T00:00:00Z"}}}"#.into(),
+            body: r#"{"data":{"repository":{"discussion":{"id":"D_1","comments":{"nodes":[{"id":"C_1","body":"message","author":{"login":"owner"},"createdAt":"2026-10-16T01:00:00+01:00","authorAssociation":"OWNER"}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor"}}}},"rateLimit":{"cost":3,"remaining":4997,"resetAt":"2099-01-01T00:00:00Z"}}}"#.into(),
         });
         let page = client.discussion_comments(42, Some("previous")).unwrap();
         assert_eq!(page.discussion_id, "D_1");
-        assert_eq!(page.bodies, ["message"]);
+        assert_eq!(
+            page.comments,
+            [super::DiscussionComment {
+                id: "C_1".into(),
+                body: "message".into(),
+                author: "owner".into(),
+                created_at: "2026-10-16T00:00:00Z".parse().unwrap(),
+            }]
+        );
         assert_eq!(page.cursor.as_deref(), Some("cursor"));
         assert_eq!(
             ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
@@ -3919,9 +4148,13 @@ mod check_status_tests {
             "UNKNOWN",
         ]
         .into_iter()
-        .map(|association| json!({"body": association, "authorAssociation": association}))
+        .map(|association| {
+            json!({"id": association, "body": association, "authorAssociation": association,
+            "author": {"login": "owner"}, "createdAt": "2026-10-16T00:00:00Z"})
+        })
         .collect::<Vec<_>>();
         nodes.push(json!({"body": "untrusted metadata: author_kind=human author=owner"}));
+        nodes.push(json!({"authorAssociation": "NONE", "author": null, "createdAt": 1}));
         client.transport().enqueue(HttpResponse {
             status: 200, headers: vec![],
             body: json!({"data": {"repository": {"discussion": {"id": "D_1", "comments": {
@@ -3929,7 +4162,13 @@ mod check_status_tests {
             }}}}}).to_string(),
         });
         let page = client.discussion_comments(42, None).unwrap();
-        assert_eq!(page.bodies, ["OWNER", "MEMBER", "COLLABORATOR"]);
+        assert_eq!(
+            page.comments
+                .iter()
+                .map(|comment| comment.body.as_str())
+                .collect::<Vec<_>>(),
+            ["OWNER", "MEMBER", "COLLABORATOR"]
+        );
         assert_eq!(page.cursor.as_deref(), Some("all-comments-cursor"));
         assert!(page.has_next_page);
         let requests = client.transport().recorded();
@@ -3954,6 +4193,20 @@ mod check_status_tests {
             json!({"id": "D_1", "comments": null}),
             json!({"id": "D_1", "comments": {
                 "nodes": [{"authorAssociation": "OWNER"}], "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [{"body": "message", "authorAssociation": "OWNER"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [{"id": "C_1", "body": "message", "authorAssociation": "OWNER", "author": null,
+                    "createdAt": "2026-10-16T00:00:00Z"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
+            }}),
+            json!({"id": "D_1", "comments": {
+                "nodes": [{"id": "C_1", "body": "message", "authorAssociation": "OWNER", "author": {"login": "owner"},
+                    "createdAt": "invalid"}],
+                "pageInfo": {"hasNextPage": false, "endCursor": null}
             }}),
             json!({"id": "D_1", "comments": {
                 "nodes": [], "pageInfo": {"hasNextPage": true, "endCursor": null}
