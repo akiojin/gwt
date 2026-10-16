@@ -1360,8 +1360,11 @@ fn successor_placeholder_cannot_take_over_related_foreign_or_live_work() {
 
 /// SPEC #3165 T-226 / FR-102: provider ownership is a fail-closed preflight;
 /// only a present rollout owned by the selected worktree may exact Resume.
-#[test]
-fn app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation() {
+fn assert_monitor_resume_if_safe_provider_conversation(
+    case_name: &str,
+    availability: MonitorProviderConversationFixture,
+    exact_resume_expected: bool,
+) {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1376,69 +1379,90 @@ fn app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation
     let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
     let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
 
-    for (case_name, availability, exact_resume_expected) in [
-        ("present", MonitorProviderConversationFixture::Present, true),
-        (
-            "missing",
-            MonitorProviderConversationFixture::Missing,
-            false,
-        ),
-        (
-            "foreign",
-            MonitorProviderConversationFixture::Foreign,
-            false,
-        ),
-        (
-            "unknown",
-            MonitorProviderConversationFixture::Unknown,
-            false,
-        ),
-        (
-            "corrupt",
-            MonitorProviderConversationFixture::Corrupt,
-            false,
-        ),
-    ] {
-        let mut fixture = monitor_relaunch_fixture(
-            temp.path(),
-            case_name,
-            availability,
-            MonitorNativeHolderFixture::None,
-            false,
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        case_name,
+        availability,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    let previous_spawner = fixture.runtime.blocking_tasks.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    let project_root = fixture.runtime.test_context().project_root;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
-        let previous_spawner = fixture.runtime.blocking_tasks.clone();
-        let (spawner, queued) = BlockingTaskSpawner::queued();
-        fixture.runtime.blocking_tasks = spawner;
-        let project_root = fixture.runtime.test_context().project_root;
-        fixture
-            .runtime
-            .auto_launch_issue_monitor_delivery_events_for_project(
-                &project_root,
-                3165,
-                LinkedIssueKind::Spec,
-                None,
-                gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
-            );
-        drain_queued_blocking_tasks(&queued);
-        fixture.runtime.blocking_tasks = previous_spawner;
-        let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
-        let started = Instant::now();
-        fixture
-            .runtime
-            .handle_issue_monitor_launch_prepared(prepared);
-        eprintln!("monitor completion {case_name}: {:?}", started.elapsed());
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "{case_name} completion blocked the GUI: {:?}",
-            started.elapsed()
-        );
-        let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
-        if exact_resume_expected {
-            assert_monitor_exact_resume(result, &fixture);
-        } else {
-            assert_monitor_fresh_successor(result, &fixture);
-        }
+    drain_queued_blocking_tasks(&queued);
+    fixture.runtime.blocking_tasks = previous_spawner;
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let started = Instant::now();
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared);
+    eprintln!("monitor completion {case_name}: {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "{case_name} completion blocked the GUI: {:?}",
+        started.elapsed()
+    );
+    let result = take_monitor_launch_complete(case_name, &fixture.recorded_events);
+    if exact_resume_expected {
+        assert_monitor_exact_resume(result, &fixture);
+    } else {
+        assert_monitor_fresh_successor(result, &fixture);
     }
+}
+
+#[test]
+fn app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation_present() {
+    assert_monitor_resume_if_safe_provider_conversation(
+        "present",
+        MonitorProviderConversationFixture::Present,
+        true,
+    );
+}
+
+#[test]
+fn app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation_missing() {
+    assert_monitor_resume_if_safe_provider_conversation(
+        "missing",
+        MonitorProviderConversationFixture::Missing,
+        false,
+    );
+}
+
+#[test]
+fn app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation_foreign() {
+    assert_monitor_resume_if_safe_provider_conversation(
+        "foreign",
+        MonitorProviderConversationFixture::Foreign,
+        false,
+    );
+}
+
+#[test]
+fn app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation_unknown() {
+    assert_monitor_resume_if_safe_provider_conversation(
+        "unknown",
+        MonitorProviderConversationFixture::Unknown,
+        false,
+    );
+}
+
+#[test]
+fn app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation_corrupt() {
+    assert_monitor_resume_if_safe_provider_conversation(
+        "corrupt",
+        MonitorProviderConversationFixture::Corrupt,
+        false,
+    );
 }
 
 /// SPEC #3165 T-226 / FR-102: writer exclusion keys on the exact native
