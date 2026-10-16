@@ -1151,7 +1151,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         sendFocusedPaneInput(text);
       }
 
-      const releaseNotesWindow = createReleaseNotesWindow({
+      const { handlePayload: applyReleaseNotesPayload, handleError: applyReleaseNotesError, ...releaseNotesWindow } = createReleaseNotesWindow({
         document,
         send,
         beginUpdateDownloading: (version) =>
@@ -6340,10 +6340,10 @@ import { createUiStateStore } from "/ui-state-store.js";
             window.alert(`UI trace error: ${event.message}`);
             break;
           case "release_notes_payload":
-            releaseNotesWindow.handlePayload(event);
+            applyReleaseNotesPayload(event);
             break;
           case "release_notes_error":
-            releaseNotesWindow.handleError(event.message);
+            applyReleaseNotesError(event.message);
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
