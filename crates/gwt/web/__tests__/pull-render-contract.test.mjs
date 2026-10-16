@@ -149,6 +149,18 @@ test("Index health receiver resolves only shared model updates", () => {
     .some(finding => finding.kind.startsWith('dom-')));
 });
 
+test("Index search receivers resolve only shared model updates", () => {
+  const file = 'crates/gwt/web/project-index-search-surface.js';
+  const source = readFileSync(new URL('../project-index-search-surface.js', import.meta.url), 'utf8');
+  for (const name of ['handleProjectIndexSearchResults', 'handleProjectIndexSearchError']) {
+    assert.deepEqual(scanModule(source, file, { rootName: name }), []);
+    const bypass = source.replace(`function ${name}(event) {`,
+      `function ${name}(event) { renderProjectIndexSearch(event.id);`);
+    assert.notEqual(bypass, source);
+    assert.ok(scanModule(bypass, file, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
 test("Release notes receivers resolve only shared model updates", () => {
   const appFile = 'crates/gwt/web/app.js';
   const surfaceFile = 'crates/gwt/web/release-notes-window.js';
