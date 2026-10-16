@@ -101,10 +101,7 @@ fn main() {
             record_workspace_work_event(worktree, invalid.clone()).unwrap();
             // Issue #5288: local detach receipts also remove the container
             // carried by a later supersession audit. Preserve that real shape.
-            let works_path =
-                gwt_core::workspace_projection::gwt_workspace_work_items_path_for_repo_path(
-                    worktree,
-                );
+            let works_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(worktree);
             std::fs::write(
                 works_path.with_extension("detachments.json"),
                 serde_json::to_vec(&std::collections::BTreeMap::from([(
