@@ -320,18 +320,13 @@ body::after {
 
 /* SPEC-2041 Phase 19 — Post-click update modal. */
 
-.update-modal {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.modal-backdrop.update-modal {
   padding: var(--space-4);
   background: var(--color-scrim);
   z-index: var(--z-system-modal);
 }
 
-.update-modal__panel {
+.modal-shell.update-modal__panel {
   width: min(420px, calc(100vw - 32px));
   max-height: calc(100vh - 32px);
   overflow: auto;
@@ -346,7 +341,7 @@ body::after {
   line-height: 1.5;
 }
 
-.update-modal__panel h2 {
+.update-modal__panel .modal-header h2 {
   margin: 0 0 var(--space-4);
   color: var(--color-text-strong);
   font-family: var(--font-body);
@@ -415,12 +410,13 @@ body::after {
   overflow-wrap: anywhere;
 }
 
-.update-modal__actions {
+.modal-footer.update-modal__actions {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   justify-content: flex-end;
   margin-top: var(--space-5);
+  flex-wrap: wrap;
 }
 
 .update-modal__btn {
@@ -442,6 +438,11 @@ body::after {
 
 .update-modal__btn:hover {
   background: color-mix(in oklab, var(--color-text) 8%, transparent);
+}
+
+.update-modal__btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
 }
 
 .update-modal__btn:focus-visible {

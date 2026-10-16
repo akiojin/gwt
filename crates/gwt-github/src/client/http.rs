@@ -424,7 +424,7 @@ pub fn validate_pm_settings(operation: &str, params: &Value) -> Result<(), ApiEr
         "pr.reopen"
             if fields.len() == 1 && params["number"].as_u64().is_some_and(|number| number > 0) => {}
         "pr.review.submit" => {
-            if !params["number"].as_u64().is_some_and(|number| number > 0)
+            if params["number"].as_u64().is_none_or(|number| number == 0)
                 || !matches!(
                     params["event"].as_str(),
                     Some("COMMENT" | "APPROVE" | "REQUEST_CHANGES")
@@ -434,9 +434,9 @@ pub fn validate_pm_settings(operation: &str, params: &Value) -> Result<(), ApiEr
                         || key == "body" && !value.is_string()
                 })
                 || params["event"] != "APPROVE"
-                    && !params["body"]
+                    && params["body"]
                         .as_str()
-                        .is_some_and(|body| !body.trim().is_empty())
+                        .is_none_or(|body| body.trim().is_empty())
             {
                 return Err(invalid());
             }
@@ -1263,7 +1263,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                 _ => "COMMENTED",
             };
             let path = format!("{root}/pulls/{}", params["number"]);
-            if !value["id"].as_u64().is_some_and(|id| id > 0)
+            if value["id"].as_u64().is_none_or(|id| id == 0)
                 || value["state"] != expected_state
                 || !value["pull_request_url"].as_str().is_some_and(|url| {
                     [
@@ -1370,9 +1370,9 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                 .any(|expected| expected.eq_ignore_ascii_case(url))
                     || value["tag_name"] != params["tag"]
                     || !value["draft"].is_boolean()
-                    || !value["target_commitish"]
+                    || value["target_commitish"]
                         .as_str()
-                        .is_some_and(|target| !target.is_empty())
+                        .is_none_or(|target| target.is_empty())
                 {
                     return Err(invalid());
                 }
@@ -1388,7 +1388,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                 if !value["full_name"]
                     .as_str()
                     .is_some_and(|repo| repo.eq_ignore_ascii_case(&repository))
-                    || !value["id"].as_u64().is_some_and(|id| id > 0)
+                    || value["id"].as_u64().is_none_or(|id| id == 0)
                 {
                     return Err(invalid());
                 }
@@ -1783,13 +1783,13 @@ fn validate_status_checks_patch(settings: &Value) -> Result<(), ApiError> {
             if check
                 .keys()
                 .any(|key| !matches!(key.as_str(), "context" | "app_id"))
-                || !check
+                || check
                     .get("context")
                     .and_then(Value::as_str)
-                    .is_some_and(|value| !value.trim().is_empty())
+                    .is_none_or(|value| value.trim().is_empty())
                 || check
                     .get("app_id")
-                    .is_some_and(|value| !value.as_i64().is_some_and(|id| id >= -1))
+                    .is_some_and(|value| value.as_i64().is_none_or(|id| id < -1))
             {
                 return Err(invalid());
             }

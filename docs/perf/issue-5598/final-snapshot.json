@@ -1,0 +1,33 @@
+{
+  "source_home": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home",
+  "destination_home": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home",
+  "scope": "issues",
+  "document_count": 1622,
+  "boundary": "Copy of previously successful published source/generation/meta/manifest tuple; later repair failure and runtime process state are retained only in the original HOME",
+  "ttl_metadata_unchanged": true,
+  "meta": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\index\\99a8660247f5bc49\\issues\\meta.json",
+    "sha256": "2fa90d2361630c89ddd6a192f4f2c075c4e83d43f987268b9488861a60383aea",
+    "bytes": 364
+  },
+  "pointer": {
+    "schema_version": 1,
+    "generation": "gen-1792121126541-50828",
+    "scope": "issues",
+    "document_count": 1622,
+    "published_at": "2026-10-16T03:25:26.544017+00:00"
+  },
+  "manifest": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home\\.gwt\\index\\99a8660247f5bc49\\manifest-issues.json",
+    "sha256": "3443fa0eb9a699c0c4f3dba798dd9c9ba82065e984ea137d787991376e67cd53",
+    "bytes": 207660
+  },
+  "not_transferred": [
+    "issues/repair.json",
+    "coordinator",
+    "worker endpoints",
+    "sessions",
+    "other index scopes"
+  ],
+  "source_cache_tree_sha256": "05f16c59e2a15083e7278f843f1f6b1d827d1bc4f4e3d438e9e214041b7a2220"
+}
