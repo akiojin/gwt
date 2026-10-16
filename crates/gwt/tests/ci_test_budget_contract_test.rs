@@ -288,6 +288,55 @@ fn startup_git_budget_is_required_on_linux_and_windows() {
     assert!(!step.contains("if:"));
 }
 
+/// Issue #5564: slices must stay independent and their union must remain required.
+#[test]
+fn workspace_shards_preserve_the_complete_serial_test_selection() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(TEST_WORKFLOW)).expect("test workflow");
+    let job = &workflow["jobs"]["test"];
+    assert_eq!(job["strategy"]["fail-fast"].as_bool(), Some(false));
+    let shards: Vec<_> = job["strategy"]["matrix"]["shard"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_u64().unwrap())
+        .collect();
+    assert_eq!(shards, vec![1, 2, 3, 4, 5, 6]);
+    assert!(job["concurrency"]["group"]
+        .as_str()
+        .unwrap()
+        .contains("matrix.shard"));
+    let steps = job["steps"].as_sequence().unwrap();
+    let step = |name| {
+        steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    assert!(step("Build and inventory workspace tests")["run"]
+        .as_str()
+        .unwrap()
+        .contains("cargo nextest list --workspace --all-features --message-format json"));
+    assert_eq!(step(RUN_TESTS_STEP)["run"].as_str(), Some(
+        "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6"));
+    for name in [
+        "Run doctests",
+        "Run real-binary front-door tests (Xvfb)",
+        "Voice accuracy regression (optional local dataset)",
+    ] {
+        assert_eq!(step(name)["if"].as_str(), Some("matrix.shard == 1"));
+    }
+    let upload = step("Upload workspace test inventory and results");
+    assert_eq!(upload["if"].as_str(), Some("${{ always() }}"));
+    assert_eq!(upload["with"]["if-no-files-found"].as_str(), Some("error"));
+    let raw = read(TEST_WORKFLOW);
+    let required = job_body(&raw, "  test-rust-required:");
+    assert!(required.contains("pattern: workspace-tests-*"));
+    assert!(required
+        .contains("python3 scripts/ci_workspace_tests.py target/workspace-shards --shards 6"));
+    assert!(!required.contains("continue-on-error"));
+}
+
 #[test]
 fn native_tray_measurement_runs_only_on_nightly_by_exact_name() {
     let nightly = read(NIGHTLY_WORKFLOW);

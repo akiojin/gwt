@@ -642,15 +642,34 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
                 == Some("${{ needs.test.result }}"),
         "Test (Rust) workspace failure propagation",
     )?;
+    let workspace = &test["jobs"]["test"];
+    // Issue #5564: every slice must run, and the protected check verifies the
+    // disjoint JUnit union against the original unpartitioned inventory.
+    let shards: Vec<_> = workspace["strategy"]["matrix"]["shard"]
+        .as_sequence()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect();
     require(
-        contains(
-            &test["jobs"]["test"],
-            "cargo nextest run --workspace --all-features --test-threads=1",
-        ) && contains(
-            &test["jobs"]["test"],
-            "cargo test --workspace --all-features --doc",
-        ),
-        "required workspace tests/doctests",
+        shards == [1, 2, 3, 4, 5, 6]
+            && contains(workspace,
+                "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6")
+            && contains(rust_gate,
+                "python3 scripts/ci_workspace_tests.py target/workspace-shards --shards 6"),
+        "required workspace test slices and inventory union",
+    )?;
+    require(
+        workspace["steps"]
+            .as_sequence()
+            .into_iter()
+            .flatten()
+            .any(|step| {
+                step["if"].as_str() == Some("matrix.shard == 1")
+                    && step.get("continue-on-error").is_none()
+                    && step["run"].as_str() == Some("cargo test --workspace --all-features --doc")
+            }),
+        "required workspace doctests",
     )?;
     let lint_gate = &lint["jobs"]["lint"];
     require(
@@ -724,7 +743,14 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
                                 && s.get("if").is_none_or(|_| {
                                     s["name"].as_str().is_some_and(|n| {
                                         n == "Check for processes the suite failed to reap"
-                                            || n == "Generate lcov"
+                                        || n == "Generate lcov"
+                                        || ([
+                                            "Run doctests",
+                                            "Run real-binary front-door tests (Xvfb)",
+                                            "Voice accuracy regression (optional local dataset)",
+                                        ]
+                                        .contains(&n)
+                                            && s["if"].as_str() == Some("matrix.shard == 1"))
                                     })
                                 })
                         })
@@ -1103,7 +1129,8 @@ mod tests {
         ];
         let original =
             std::fs::read_to_string(dir.path().join(".github/workflows/test.yml")).unwrap();
-        let guarded = "  test:\n    name: Test (Rust workspace)\n    if: ${{ !cancelled() }}\n";
+        let job_header = "  test:\n    name: Test (Rust workspace ${{ matrix.shard }}/6)\n";
+        let guarded = format!("{job_header}    if: ${{{{ !cancelled() }}}}\n");
         for (condition, accepted) in [
             ("", true),
             ("    if: ${{ !cancelled() }}\n", true),
@@ -1113,12 +1140,12 @@ mod tests {
                 false,
             ),
         ] {
-            let replacement = format!("  test:\n    name: Test (Rust workspace)\n{condition}");
-            assert!(original.contains(guarded));
+            let replacement = format!("{job_header}{condition}");
+            assert!(original.contains(&guarded));
             write(
                 dir.path(),
                 ".github/workflows/test.yml",
-                &original.replace(guarded, &replacement),
+                &original.replace(&guarded, &replacement),
             );
             let result = validate_pre_pr_ci(dir.path(), &required);
             assert_eq!(result.is_ok(), accepted, "{condition:?}: {result:?}");
@@ -1174,6 +1201,41 @@ mod tests {
             .is_err(),
             "a display name must not permit skipping the required coverage threshold"
         );
+    }
+
+    #[test]
+    fn pre_pr_refuses_incomplete_workspace_shards_or_missing_union_check() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let original =
+            std::fs::read_to_string(dir.path().join(".github/workflows/test.yml")).unwrap();
+        for (before, after) in [
+            ("shard: [1, 2, 3, 4, 5, 6]", "shard: [1, 2, 3, 4, 5]"),
+            (
+                "python3 scripts/ci_workspace_tests.py target/workspace-shards --shards 6",
+                "echo no inventory check",
+            ),
+            ("if: matrix.shard == 1", "if: matrix.shard == 0"),
+        ] {
+            let changed = original.replace(before, after);
+            assert_ne!(changed, original);
+            write(dir.path(), ".github/workflows/test.yml", &changed);
+            assert!(
+                derive_pre_pr_for_host(
+                    dir.path(),
+                    VerificationHost::Other,
+                    &[
+                        "Test (Rust)".into(),
+                        "Clippy & Rustfmt".into(),
+                        "coverage / Rust Coverage".into()
+                    ],
+                    &["cargo test -p gwt --test ci_contracts".into()],
+                    &[],
+                )
+                .is_err(),
+                "incomplete CI must not permit delegation: {before}"
+            );
+        }
     }
 
     #[test]
@@ -1985,7 +2047,7 @@ mod tests {
         assert_eq!(
             workflow_cargo_tests("test.yml", "test"),
             vec![
-                "cargo nextest run --workspace --all-features --test-threads=1".to_string(),
+                "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6".to_string(),
                 "cargo test --workspace --all-features --doc".to_string(),
                 // The xvfb `--ignored` real-binary family stays CI-owned:
                 // it needs a display server, so it is deliberately outside
