@@ -723,7 +723,7 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
             && coverage_job["name"].as_str() == Some("Rust Coverage"),
         "coverage / Rust Coverage check name",
     )?;
-    for command in ["node scripts/coverage-summary.mjs --output-path target/coverage-summary.json -- --workspace --all-features", "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope \"crates/(gwt-core|gwt)/\"", "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude \"crates/(gwt-core|gwt)/\""] {
+    for command in ["node scripts/coverage-summary.mjs --output-path target/coverage-summary.json --nextest -- --workspace --all-features", "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope \"crates/(gwt-core|gwt)/\"", "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude \"crates/(gwt-core|gwt)/\""] {
         require(contains(coverage_job, command), &format!("required coverage command {command}"))?;
     }
     for job in [&test["jobs"]["test"], rust_gate, lint_gate, coverage_job] {
