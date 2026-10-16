@@ -49,6 +49,17 @@ fn coverage_measures_the_requested_source_without_cancelling_its_caller() {
     let steps = coverage["jobs"]["rust-coverage"]["steps"]
         .as_sequence()
         .unwrap();
+    assert!(
+        steps.iter().any(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("dtolnay/rust-toolchain@"))
+                && step["with"]["components"]
+                    .as_str()
+                    .is_some_and(|components| components.split(',').any(|c| c.trim() == "rustfmt"))
+        }),
+        "coverage verification fixtures execute cargo fmt"
+    );
     let checkout = steps
         .iter()
         .find(|s| {
