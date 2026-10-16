@@ -1071,6 +1071,8 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
     monitor.record_candidate(issue);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("persist excluded state");
 
+    // Assert fenced state transitions independently of host fsync latency.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     assert_eq!(
         super::super::commit_local_issue_monitor_effect_result(
             &prefs_path,
