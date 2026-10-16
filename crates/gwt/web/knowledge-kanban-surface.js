@@ -2993,9 +2993,17 @@ export function createKnowledgeKanbanSurface({
       }
 
       function renderKnowledgeRelatedWorks(detail) {
-        const works = Array.isArray(detail?.related_works)
-          ? detail.related_works
-          : [];
+        // Display labels are derived without changing the cached provider identity.
+        const works = (Array.isArray(detail?.related_works) ? detail.related_works : [])
+          .map(work => ({
+            ...work,
+            agents: (work.agents || []).map(agent => ({
+              ...agent,
+              display_name: agent.agent_name
+                ? `${agent.agent_name} (${agent.display_name || agent.agent_id || "Agent"})`
+                : agent.display_name,
+            })),
+          }));
         if (works.length === 0) {
           return null;
         }

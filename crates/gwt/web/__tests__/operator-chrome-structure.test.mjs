@@ -1114,7 +1114,10 @@ test("Agent window title starts with assigned identity before its current purpos
   const agentPreset = preset => ["agent", "claude", "codex"].includes(preset);
   const data = { preset: "agent", agent_id: "codex", title: "Codex", purpose_title: "Initial task", dynamic_title: "Fix cache" };
   assert.equal(displayTitle({ ...data, agent_name: "Lumen" }, agentPreset, "Project Manager"), "Lumen — Fix cache");
-  assert.equal(displayTitle(data, agentPreset, "Project Manager"), "Naming… — Fix cache");
+  assert.equal(displayTitle(data, agentPreset, "Project Manager"), "Fix cache");
+  assert.equal(displayTitle({ ...data, dynamic_title: null }, agentPreset, "Project Manager"), "Initial task");
+  assert.equal(displayTitle({ preset: "agent", title: "Restore cache" }, agentPreset, "Project Manager"), "Restore cache");
+  assert.equal(displayTitle({ preset: "agent", branch: "work/task" }, agentPreset, "Project Manager"), "work/task");
   assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager — Fix cache");
   assert.equal(displayTitle({ preset: "shell", title: "Shell" }, agentPreset, "Project Manager"), "Shell");
 });
