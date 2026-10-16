@@ -2715,6 +2715,8 @@ pub struct IssueMonitorExecutionObservation {
     pub process_held: bool,
     /// Exact holder runtime evidence proves its previous GUI host has exited.
     pub holder_host_dead: bool,
+    /// Exact dead holder host incarnations, observed outside the prefs lock.
+    pub dead_holder_hosts: BTreeSet<(u32, u64)>,
     /// Current ECR holder identity while its exact runtime is live or uncertain.
     pub held_holder_session_id: Option<String>,
 }
@@ -21027,17 +21029,16 @@ impl IssueMonitorState {
                 }
             }
             for census in self.monitor_runtime_counts.values_mut() {
-                let before = census.windows.len();
-                census.windows.retain(|window, owner| {
-                    *owner != number
-                        || issue_monitor_qualified_window_id(&idle.window_id).is_none()
-                        || *window != idle.window_id
-                });
-                if let Some(count) = census.counts.get_mut(&number) {
-                    *count = count.saturating_sub(before - census.windows.len());
+                if !settlements[&number]
+                    .dead_holder_hosts
+                    .contains(&(census.host_pid, census.host_started_at))
+                {
+                    continue;
                 }
-                if before != census.windows.len() {
-                    census.counts.retain(|_, count| *count > 0);
+                let count_removed = census.counts.remove(&number).is_some();
+                let before = census.windows.len();
+                census.windows.retain(|_, owner| *owner != number);
+                if count_removed || before != census.windows.len() {
                     // Rebase rejects equal/older observations. Publish this
                     // correction after the old census, even within one tick.
                     if let Some(previous) = parse_rfc3339_utc(&census.observed_at) {
@@ -42617,6 +42618,7 @@ mod tests {
                     settlement,
                     process_held,
                     holder_host_dead,
+                    dead_holder_hosts: Default::default(),
                     held_holder_session_id: None,
                 },
             )]);
@@ -42680,6 +42682,7 @@ mod tests {
                         settlement: *settlement,
                         process_held: false,
                         holder_host_dead: false,
+                        dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
                     },
                 )
@@ -42797,6 +42800,7 @@ mod tests {
                 settlement: IssueMonitorExecutionSettlement::Completed,
                 process_held: true,
                 holder_host_dead: false,
+                dead_holder_hosts: Default::default(),
                 held_holder_session_id: None,
             },
         )]);

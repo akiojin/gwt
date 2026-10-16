@@ -496,6 +496,67 @@ pub fn read_execution_observations(
     }
 }
 
+/// Read only exact dead holder host incarnations; never infer another host's absence.
+fn dead_holder_hosts(
+    sessions_dir: &Path,
+    diagnosis: &crate::cli::execution_state::OwnerExecutionDiagnosis,
+) -> std::collections::BTreeSet<(u32, u64)> {
+    let mut dead = std::collections::BTreeSet::new();
+    let Some(session_id) = diagnosis.holder_session_id.as_deref() else {
+        return dead;
+    };
+    let Ok(session) = gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+    else {
+        return dead;
+    };
+    let Ok(Some(identity)) = gwt_agent::SessionExecutionIdentity::from_session(&session) else {
+        return dead;
+    };
+    if identity.session_id != session_id
+        || identity.linked_issue_number != Some(diagnosis.owner_number)
+        || identity.execution_binding.owner_number != diagnosis.owner_number
+        || identity.execution_binding.owner_kind != diagnosis.owner_kind.as_str()
+        || Some(identity.execution_binding.identity.generation_id.as_str())
+            != diagnosis.generation_id.as_deref()
+    {
+        return dead;
+    }
+    let Ok(namespaces) = std::fs::read_dir(sessions_dir.join("runtime")) else {
+        return dead;
+    };
+    for namespace in namespaces.flatten() {
+        if gwt_core::operation_deadline::ensure_remaining("dead holder host observations").is_err()
+        {
+            return std::collections::BTreeSet::new();
+        }
+        let Some(pid) = namespace
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+            .filter(|pid| *pid > 0)
+        else {
+            continue;
+        };
+        let path = gwt_agent::runtime_state_path_for_pid(sessions_dir, pid, session_id);
+        let Ok(runtime) = gwt_agent::SessionRuntimeState::load(&path) else {
+            continue;
+        };
+        if runtime.execution_identity.as_ref() != Some(&identity) {
+            continue;
+        }
+        let Some(started_at) = runtime.host_started_at.filter(|started_at| *started_at > 0) else {
+            continue;
+        };
+        if !crate::process::is_host_process_alive(pid)
+            || crate::process::host_process_start_time(pid)
+                .is_some_and(|current| current != started_at)
+        {
+            dead.insert((pid, started_at));
+        }
+    }
+    dead
+}
+
 pub(crate) fn read_execution_observations_from_inventory(
     project_root: &Path,
     issue_numbers: &[u64],
@@ -519,6 +580,7 @@ pub(crate) fn read_execution_observations_from_inventory(
                         settlement: IssueMonitorExecutionSettlement::Unknown,
                         process_held: true,
                         holder_host_dead: false,
+                        dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
                     },
                 );
@@ -604,12 +666,24 @@ pub(crate) fn read_execution_observations_from_inventory(
             } else {
                 settlement
             };
+            let dead_holder_hosts = if !process_held
+                && diagnosis.holder_runtime.as_deref() == Some("host_dead")
+                && matches!(
+                    settlement,
+                    IssueMonitorExecutionSettlement::Completed
+                        | IssueMonitorExecutionSettlement::Blocked
+                ) {
+                dead_holder_hosts(&sessions_dir, &diagnosis)
+            } else {
+                Default::default()
+            };
             (
                 *issue_number,
                 crate::issue_monitor::IssueMonitorExecutionObservation {
                     settlement,
                     process_held,
                     holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead"),
+                    dead_holder_hosts,
                     held_holder_session_id: diagnosis.holder_session_id.clone().filter(|holder| {
                         matches!(
                             diagnosis.holder_runtime.as_deref(),
@@ -745,12 +819,26 @@ pub fn reconcile_verified_live_launch_bindings(
     project_root: &Path,
     now: &str,
 ) -> Vec<u64> {
-    let Some(snapshot) = monitor.fresh_window_snapshot(now) else {
-        return Vec::new();
-    };
-    let observed_at = snapshot.observed_at.clone();
-    let live_launch_owners = verified_live_launch_owners(project_root, snapshot, now);
+    let (live_launch_owners, observed_at) =
+        read_verified_live_launch_owners(monitor, project_root, now);
     monitor.readopt_live_launch_bindings(&live_launch_owners, &observed_at)
+}
+
+/// Read producing-owner proof once, retaining the exact canvas ordering fence.
+pub fn read_verified_live_launch_owners(
+    monitor: &IssueMonitorState,
+    project_root: &Path,
+    now: &str,
+) -> (BTreeMap<String, u64>, String) {
+    monitor.fresh_window_snapshot(now).map_or_else(
+        || (BTreeMap::new(), now.to_string()),
+        |snapshot| {
+            (
+                verified_live_launch_owners(project_root, snapshot, now),
+                snapshot.observed_at.clone(),
+            )
+        },
+    )
 }
 
 /// Recover stuck launches and classify windows using the same live Session observations.
@@ -763,9 +851,37 @@ pub fn reconcile_issue_monitor_windows(
     // Dead terminal predecessors must retire before verified duplicate repair
     // can interpret their displaced binding as unfinished work.
     let terminal = monitor.reconcile_dead_terminal_launches(&settlements, now);
-    reconcile_verified_live_launch_bindings(monitor, project_root, now);
+    let (live_launch_owners, observed_at) =
+        read_verified_live_launch_owners(monitor, project_root, now);
+    reconcile_issue_monitor_windows_with_observations(
+        monitor,
+        &settlements,
+        &live_launch_owners,
+        &observed_at,
+        now,
+        terminal,
+    )
+}
+
+/// Finish a caller-owned reconciliation without repeating runtime I/O.
+/// `terminal` is the dead-holder pass run before candidate or binding repair.
+pub fn reconcile_issue_monitor_windows_with_observations(
+    monitor: &mut IssueMonitorState,
+    settlements: &BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation>,
+    live_launch_owners: &BTreeMap<String, u64>,
+    observed_at: &str,
+    now: &str,
+    terminal: crate::IssueMonitorIdleReconciliation,
+) -> crate::IssueMonitorIdleReconciliation {
+    monitor.set_process_held_issues(
+        settlements
+            .iter()
+            .filter_map(|(issue, observation)| observation.process_held.then_some(*issue))
+            .collect(),
+    );
+    monitor.readopt_live_launch_bindings(live_launch_owners, observed_at);
     monitor.recover_stuck_autonomous(now);
-    let mut outcome = monitor.reconcile_idle_windows(&settlements, now);
+    let mut outcome = monitor.reconcile_idle_windows(settlements, now);
     outcome.released.extend(terminal.released);
     outcome.idle_windows.extend(terminal.idle_windows);
     if !outcome.released.is_empty() || !outcome.rebound.is_empty() {
@@ -1363,9 +1479,6 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
     expected_project_tab_id: Option<&str>,
     now: &str,
 ) -> IssueMonitorScanSummary {
-    // Candidate repair may requeue displaced bindings. First retire exact
-    // dead terminal holders using the existing execution-aware release path.
-    reconcile_issue_monitor_windows(monitor, repo_path, now);
     // Reconcile local credentials before this scan plans claims. No network
     // request is made here; Claude credential access remains opt-in.
     let usage_config = gwt_config::Settings::load().unwrap_or_default().usage;
@@ -4730,6 +4843,10 @@ mod tests {
             IssueMonitorExecutionSettlement::Blocked
         );
         assert!(!observations[&owner.number].process_held);
+        assert_eq!(
+            observations[&owner.number].dead_holder_hosts,
+            std::collections::BTreeSet::from([(dead_host_pid, 1)])
+        );
 
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
@@ -4747,7 +4864,7 @@ mod tests {
             1,
             BTreeMap::from([(owner.number, 1)]),
             BTreeMap::from([("tab-1::dead".to_string(), owner.number)]),
-            now,
+            "2026-10-13T00:00:00Z",
         );
         monitor.record_autonomous_heartbeat(owner.number, "2026-10-13T00:00:00Z");
         let base = monitor.clone();
@@ -4825,8 +4942,27 @@ mod tests {
             );
         }
 
+        // The same PID with a different start token is another host incarnation.
+        let mut other_host = base.clone();
+        assert!(other_host.record_monitor_runtime_counts(
+            dead_host_pid,
+            2,
+            BTreeMap::from([(owner.number, 1)]),
+            now,
+        ));
+        let outcome = reconcile_issue_monitor_windows(&mut other_host, worktree.path(), now);
+        assert_eq!(outcome.released, vec![owner.number]);
+        assert_eq!(other_host.active_count(), 1);
+        assert_eq!(
+            other_host.prefs().monitor_runtime_counts[&format!("{dead_host_pid}:2")]
+                .counts
+                .get(&owner.number),
+            Some(&1)
+        );
+
         for (case, snapshot) in [
             ("no canvas", None),
+            ("count-only census", None),
             (
                 "stale Running canvas",
                 Some(crate::IssueMonitorWindowSnapshot {
@@ -4837,6 +4973,14 @@ mod tests {
             ("fresh Running canvas", Some(running_snapshot.clone())),
         ] {
             let mut candidate = base.clone();
+            if case == "count-only census" {
+                assert!(candidate.record_monitor_runtime_counts(
+                    dead_host_pid,
+                    1,
+                    BTreeMap::from([(owner.number, 1)]),
+                    now,
+                ));
+            }
             if let Some(snapshot) = snapshot {
                 candidate.record_window_snapshot_from_host(
                     snapshot,
@@ -4985,6 +5129,7 @@ mod tests {
                 urgent_assignments: BTreeMap::new(),
             };
             let mut scanned = reused.clone();
+            reconcile_issue_monitor_windows(&mut scanned, worktree.path(), now);
             scan_loaded_issue_monitor_candidates_for_project_tab(
                 &mut scanned,
                 &loaded,

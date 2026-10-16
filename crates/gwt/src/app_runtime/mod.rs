@@ -3976,6 +3976,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         }
     }
     let mut loaded_for_commit = None;
+    let mut idle_settlements = None;
     let mut merge_reconciliation_error = None;
     let mut completion_probe_error = None;
     let mut local_repo_identity = None;
@@ -4003,6 +4004,13 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 &repo,
             ) {
                 Ok(loaded) => {
+                    let observations =
+                        gwt::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+                            &mut monitor,
+                            project_root,
+                        );
+                    monitor.reconcile_dead_terminal_launches(&observations, now);
+                    idle_settlements = Some(observations);
                     gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                         &mut monitor,
                         &loaded,
@@ -4040,10 +4048,12 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // Issue #4084: read every launched Issue's execution record before taking
     // the prefs lock. The classification itself is pure; only this read is
     // I/O, and an unreadable record fails closed to `stuck_unknown`.
-    let idle_settlements = gwt::issue_monitor_worker::read_execution_observations(
-        project_root,
-        &monitor.execution_settlement_issue_numbers(),
-    );
+    let idle_settlements = idle_settlements.unwrap_or_else(|| {
+        gwt::issue_monitor_worker::read_execution_observations(
+            project_root,
+            &monitor.execution_settlement_issue_numbers(),
+        )
+    });
     let live_launch_owners = window_snapshot
         .map(|snapshot| {
             gwt::issue_monitor_worker::verified_live_launch_owners(project_root, snapshot, now)
@@ -9049,6 +9059,7 @@ impl AppRuntime {
             std::time::Instant::now() + ISSUE_MONITOR_SCAN_BUDGET,
         );
         let mut loaded_for_commit = None;
+        let mut window_observations = None;
         let mut merge_reconciliation_error = None;
         #[cfg(not(unix))]
         let mut completion_probe_error = None;
@@ -9073,6 +9084,27 @@ impl AppRuntime {
                     &repo,
                 ) {
                     Ok(loaded) => {
+                        let executions =
+                            gwt::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+                                &mut monitor,
+                                &project_root,
+                            );
+                        let terminal = monitor.reconcile_dead_terminal_launches(&executions, &now);
+                        let (live_launch_owners, observed_at) =
+                            gwt::issue_monitor_worker::read_verified_live_launch_owners(
+                                &monitor,
+                                &project_root,
+                                &now,
+                            );
+                        gwt::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+                            &mut monitor,
+                            &executions,
+                            &live_launch_owners,
+                            &observed_at,
+                            &now,
+                            terminal,
+                        );
+                        window_observations = Some((executions, live_launch_owners, observed_at));
                         gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                             &mut monitor,
                             &loaded,
@@ -9122,6 +9154,19 @@ impl AppRuntime {
         );
         let persisted =
             rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
+                // Reapply the proposal to the latest prefs using the same
+                // runtime evidence; the short commit budget owns no observation I/O.
+                if let Some((executions, live_launch_owners, observed_at)) = &window_observations {
+                    let terminal = monitor.reconcile_dead_terminal_launches(executions, &now);
+                    gwt::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+                        monitor,
+                        executions,
+                        live_launch_owners,
+                        observed_at,
+                        &now,
+                        terminal,
+                    );
+                }
                 if let Some(loaded) = &loaded_for_commit {
                     gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                         monitor,
