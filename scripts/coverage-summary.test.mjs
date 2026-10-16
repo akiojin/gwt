@@ -74,8 +74,10 @@ function sandbox(
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-coverage-summary-"));
   const fixtureDir = path.join(root, "fixtures");
   const targetDir = path.join(root, "llvm-cov-target");
+  const workspaceRoot = path.join(root, "workspace");
   fs.mkdirSync(fixtureDir);
   fs.mkdirSync(targetDir);
+  fs.mkdirSync(workspaceRoot);
   for (const [name, bytes] of Object.entries(fixtures)) {
     fs.writeFileSync(path.join(fixtureDir, name), bytes);
   }
@@ -137,7 +139,7 @@ if (args[0] === "test" && args.includes("--no-run")) {
   process.exit(0);
 }
 if (args[0] === "metadata") {
-  console.log(JSON.stringify({ workspace_root: process.cwd(), target_directory: target }));
+  console.log(JSON.stringify({ workspace_root: ${JSON.stringify(workspaceRoot)}, target_directory: target }));
   process.exit(0);
 }
 if (args[0] === "nextest" && args[1] === "list") {
@@ -153,9 +155,12 @@ if (args.includes("--no-report")) {
   for (const name of fs.readdirSync(${JSON.stringify(fixtureDir)})) {
     fs.copyFileSync(path.join(${JSON.stringify(fixtureDir)}, name), path.join(target, name));
   }
-  const junit = path.join(target, "nextest", process.env.NEXTEST_PROFILE || "default", "junit.xml");
-  fs.mkdirSync(path.dirname(junit), { recursive: true });
-  fs.writeFileSync(junit, '<testsuites><testsuite name="gwt"><testcase name="unit" time="1"/></testsuite></testsuites>');
+  // Nextest's default store is workspace-relative, independent of Cargo's target.
+  if (!fs.existsSync(${JSON.stringify(path.join(root, "omit-junit"))})) {
+    const junit = path.join(${JSON.stringify(workspaceRoot)}, "target", "nextest", process.env.NEXTEST_PROFILE || "default", "junit.xml");
+    fs.mkdirSync(path.dirname(junit), { recursive: true });
+    fs.writeFileSync(junit, '<testsuites><testsuite name="gwt"><testcase name="unit" time="1"/></testsuite></testsuites>');
+  }
   process.exit(${testExit});
 }
 if (args[1] === "report") {
@@ -189,7 +194,7 @@ process.exit(2);`,
   );
   const output = path.join(root, "coverage-summary.json");
   after(() => fs.rmSync(root, { recursive: true, force: true }));
-  return { root, targetDir, profdata, cargo, output, currentObject };
+  return { root, targetDir, workspaceRoot, profdata, cargo, output, currentObject };
 }
 
 function run(box, extraArgs = ["--workspace", "--all-features"], ownArgs = []) {
@@ -269,6 +274,9 @@ test("coverage shards export only current objects and report the merged profiles
   assert.ok(!fs.existsSync(path.join(second, "objects")));
   assert.ok(fs.existsSync(path.join(first, "workspace-test-evidence/inventory.json")));
   assert.ok(fs.existsSync(path.join(first, "nextest/ci/junit.xml")));
+  const canonicalJunit = path.join(box.workspaceRoot, "target/nextest/coverage/junit.xml");
+  assert.ok(fs.existsSync(canonicalJunit));
+  assert.ok(!fs.existsSync(path.join(box.targetDir, "nextest/coverage/junit.xml")));
   const lcov = path.join(box.root, "lcov.info");
   const result = run(box, [], ["--report-from", root, "--shards", "2", "--lcov-output-path", lcov]);
   assert.equal(result.status, 0, result.text);
@@ -276,6 +284,14 @@ test("coverage shards export only current objects and report the merged profiles
   assert.ok(result.calls.every((args) => args[1] === "report" || args[0] === "metadata"));
   assert.equal(JSON.parse(fs.readFileSync(box.output)).data[0].files[0].summary.lines.count, 100);
   assert.match(fs.readFileSync(lcov, "utf8"), /TN:roundtrip/);
+  // A successful nextest exit without a fresh report cannot reuse old evidence.
+  fs.writeFileSync(path.join(box.root, "omit-junit"), "");
+  const stale = run(box, ["--workspace", "--all-features"], [
+    "--nextest", "--partition", "slice:1/2", "--export-dir", first,
+  ]);
+  assert.equal(stale.status, 4, stale.text);
+  assert.ok(!fs.existsSync(canonicalJunit));
+  assert.ok(!fs.existsSync(path.join(first, "manifest.json")));
 });
 
 test("coverage shard aggregation rejects mismatched, missing and changed artifacts and removes stale reports", () => {

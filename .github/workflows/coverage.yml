@@ -61,7 +61,7 @@ jobs:
           node-version: 20
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: llvm-tools-preview
+          components: llvm-tools-preview, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           # llvm-cov builds into its own instrumented target, not target/debug.

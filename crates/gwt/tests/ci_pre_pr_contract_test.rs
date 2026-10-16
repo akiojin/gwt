@@ -94,6 +94,19 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
     assert_eq!(coverage["env"]["CARGO_PROFILE_DEV_DEBUG"], "0");
     assert_eq!(coverage["env"]["CARGO_PROFILE_TEST_DEBUG"], "0");
     let steps = shard["steps"].as_sequence().unwrap();
+    assert!(
+        steps.iter().any(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("dtolnay/rust-toolchain@"))
+                && step["with"]["components"]
+                    .as_str()
+                    .is_some_and(|components| {
+                        components.split(',').any(|part| part.trim() == "rustfmt")
+                    })
+        }),
+        "coverage workspace tests invoke cargo fmt --version"
+    );
     let cache = steps
         .iter()
         .find(|s| {

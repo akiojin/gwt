@@ -469,6 +469,11 @@ async function exportShard(cargo, profileDir, runArgs, partition, destination) {
   ], { encoding: "utf8", env, maxBuffer: 64 * 1024 * 1024 });
   if (inventory.status !== 0) throw new Error("could not inventory coverage tests");
   writeJson(path.join(destination, "workspace-test-evidence/inventory.json"), JSON.parse(inventory.stdout));
+  // Nextest's default store is workspace-relative even when llvm-cov redirects
+  // Cargo's build artifacts into a separate instrumented target directory.
+  const workspace = JSON.parse(commandOutput(cargo, ["metadata", "--format-version", "1", "--no-deps"]));
+  const sourceJunit = path.join(workspace.workspace_root, "target/nextest", process.env.NEXTEST_PROFILE || "default", "junit.xml");
+  fs.rmSync(sourceJunit, { force: true });
   const testExit = cargoLlvmCov(cargo, [
     "nextest", "--no-report", "--retries", "0", "--partition", partition, ...runArgs,
   ]);
@@ -478,7 +483,7 @@ async function exportShard(cargo, profileDir, runArgs, partition, destination) {
   }
   const junit = path.join(destination, "nextest/ci/junit.xml");
   fs.mkdirSync(path.dirname(junit), { recursive: true });
-  fs.copyFileSync(path.join(profileDir, "nextest", process.env.NEXTEST_PROFILE || "default", "junit.xml"), junit);
+  fs.copyFileSync(sourceJunit, junit);
   const health = await checkedProfiles(profileDir);
   if (!health) return PROFILE_DAMAGE_EXIT;
   const profile = path.join(destination, "profiles.profdata");
