@@ -3315,12 +3315,14 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
     // The verification driver is pinned outside Cargo's artifacts on Windows,
     // so restoring the operational executable is safe there too (Issue #5480).
     if !commands.iter().any(|command| {
-        split_command_line(command).is_ok_and(|args| {
-            args.first().map(String::as_str) == Some("cargo")
-                && (args.get(1).map(String::as_str) == Some("test")
-                    || (args.get(1).map(String::as_str) == Some("nextest")
-                        && args.get(2).map(String::as_str) == Some("run")))
-        })
+        split_command_line(command)
+            .and_then(take_env_assignments)
+            .is_ok_and(|(_, args)| {
+                args.first().map(String::as_str) == Some("cargo")
+                    && (args.get(1).map(String::as_str) == Some("test")
+                        || (args.get(1).map(String::as_str) == Some("nextest")
+                            && args.get(2).map(String::as_str) == Some("run")))
+            })
     }) {
         return None;
     }
@@ -8817,6 +8819,13 @@ mod tests {
             Some("cargo build -p gwt --bin gwtd")
         );
         assert_eq!(
+            gwtd_artifact_restoration(
+                dir.path(),
+                &[r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string()]
+            ),
+            Some("cargo build -p gwt --bin gwtd")
+        );
+        assert_eq!(
             gwtd_artifact_restoration(dir.path(), &["cargo nextest list".to_string()]),
             None
         );
@@ -8868,7 +8877,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             "sess-artifact-default",
             &[
                 "cargo clippy -p gwt --all-features --all-targets -- -D warnings".to_string(),
-                "cargo test -p gwt --test artifact_state".to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state"#.to_string(),
             ],
         )
         .unwrap();
