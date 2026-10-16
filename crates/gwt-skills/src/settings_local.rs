@@ -353,12 +353,10 @@ fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> 
 
 /// Publish a fully written staging file as `destination` in one step.
 ///
-/// `fs::rename` replaces an existing destination atomically on every
-/// supported platform (Windows uses `MOVEFILE_REPLACE_EXISTING` /
-/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS`), so the destination is never
-/// missing between two writes. A former Windows-only remove-then-rename left
-/// exactly that window, and the in-process lock that guarded it could not see
-/// writers in other processes (PR #3520 review).
+/// The asset publisher uses POSIX replacement semantics, including on Windows,
+/// so existing handles remain valid and new readers always open a complete file.
+/// A former remove-then-rename left a missing-file window (PR #3520 review);
+/// Windows' legacy replacement also raced path opens (Issue #5609).
 fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
     Ok(crate::asset_io::rename(staging_path, destination)?)
 }
@@ -1142,9 +1140,9 @@ mod tests {
     /// PR #3520 review (PRRT_kwDOPLof2M6YcffP): the in-process mutex cannot
     /// protect writers running in independent processes, and a Windows-only
     /// remove-then-rename left a window in which the destination did not
-    /// exist. `fs::rename` replaces an existing destination atomically on
-    /// every supported platform, so concurrent processes must never observe a
-    /// missing or partially written file.
+    /// exist. Publication must preserve uninterrupted reads on every supported
+    /// platform, including Windows replacement (Issue #5609), so concurrent
+    /// processes must never observe a missing or partially written file.
     #[test]
     fn concurrent_codex_hook_regeneration_from_independent_processes_never_drops_the_destination() {
         const CHILD_ENV: &str = "GWT_SETTINGS_LOCAL_CHILD_WORKTREE";

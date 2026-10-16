@@ -9,8 +9,8 @@
 //! to wrap it ("failed to distribute gwt managed assets: …"). That is enough
 //! to know something broke and not enough to know what to fix.
 //!
-//! These helpers are deliberately thin: they do exactly what the `std::fs`
-//! call does and attach the route and the path when it fails.
+//! These helpers attach the route and path when an operation fails. Publication
+//! uses POSIX replacement on Windows so concurrent readers keep a valid name.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -124,8 +124,77 @@ pub fn backup(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<u64, Asset
 /// Move a file into place, tagging failure as [`AssetRoute::Write`].
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<(), AssetIoError> {
     let to = to.as_ref();
-    std::fs::rename(from.as_ref(), to)
-        .map_err(|source| AssetIoError::new(AssetRoute::Write, to, source))
+    #[cfg(windows)]
+    let result = rename_with_posix_semantics(from.as_ref(), to);
+    #[cfg(not(windows))]
+    let result = std::fs::rename(from.as_ref(), to);
+    result.map_err(|source| AssetIoError::new(AssetRoute::Write, to, source))
+}
+
+#[cfg(windows)]
+fn rename_with_posix_semantics(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            FileRenameInfoEx, SetFileInformationByHandle, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO,
+        },
+        System::WindowsProgramming::{
+            FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+        },
+    };
+
+    let destination = std::path::absolute(to)?;
+    let mut name: Vec<u16> = destination.as_os_str().encode_wide().collect();
+    if name.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "asset destination contains a null character",
+        ));
+    }
+    let name_bytes = u32::try_from(name.len() * size_of::<u16>()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "asset path too long")
+    })?;
+    name.push(0);
+    let buffer_bytes =
+        std::mem::offset_of!(FILE_RENAME_INFO, FileName) + name.len() * size_of::<u16>();
+    let buffer_size = u32::try_from(buffer_bytes).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "asset path too long")
+    })?;
+    // The typed allocation provides both alignment and space for the trailing
+    // UTF-16 name, which extends beyond FILE_RENAME_INFO's one-element field.
+    let mut buffer =
+        vec![FILE_RENAME_INFO::default(); buffer_bytes.div_ceil(size_of::<FILE_RENAME_INFO>())];
+    let info = buffer.as_mut_ptr();
+    let source = std::fs::OpenOptions::new()
+        .access_mode(DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0 | FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(from)?;
+
+    // SAFETY: info is aligned, holds buffer_size bytes, and remains alive for
+    // the synchronous call. The file owns the handle throughout the call.
+    unsafe {
+        (*info).Anonymous.Flags =
+            FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+        (*info).FileNameLength = name_bytes;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+        // Unlike MoveFileExW, POSIX replacement keeps old reader handles valid
+        // while subsequent opens see the new file, without a delete-pending gap.
+        // Do not fall back to the legacy operation on unsupported filesystems.
+        SetFileInformationByHandle(
+            HANDLE(source.as_raw_handle()),
+            FileRenameInfoEx,
+            info.cast(),
+            buffer_size,
+        )
+        // This BOOL API returns HRESULT_FROM_WIN32; retain the native error kind.
+        .map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xffff))
+    }
 }
 
 /// Read a directory listing, tagging failure as [`AssetRoute::Read`].
