@@ -84,6 +84,11 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
         })
         .unwrap();
     assert_eq!(cache["with"]["workspaces"], ". -> target/llvm-cov-target");
+    assert_eq!(
+        cache["with"]["cache-workspace-crates"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(cache["with"]["key"], "coverage-instrumented-workspace-v1");
     let saves = cache["with"]["save-if"].as_str().unwrap();
     assert!(saves.contains("github.ref == 'refs/heads/develop'"));
     assert!(saves.contains("github.event_name == 'schedule'"));

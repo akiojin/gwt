@@ -119,6 +119,9 @@ if kind == "test":
             sources = {}
         modules = set()
         for name in changed:
+            if name.startswith("crates/gwt/src/"):
+                modules.clear()
+                break
             if not name.startswith("crates/gwt/tests/"):
                 continue
             source = sources.get(name)

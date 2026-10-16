@@ -57,7 +57,10 @@ jobs:
           # llvm-cov builds into its own instrumented target, not target/debug.
           # Develop writes the base-branch cache every PR can restore; reports
           # retain their existing save path. A miss still builds from source.
+          # Separate this from earlier default-target/dependency-only caches.
+          key: coverage-instrumented-workspace-v1
           workspaces: . -> target/llvm-cov-target
+          cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         continue-on-error: true
       - name: Install cargo-llvm-cov

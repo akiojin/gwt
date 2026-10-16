@@ -149,6 +149,7 @@ class ChangedTestSelectionTests(unittest.TestCase):
                 if changed[name] is None:
                     path.unlink()
                 else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(changed[name])
             subprocess.run(git + ["add", "."], cwd=root, check=True, capture_output=True)
             subprocess.run(git + ["commit", "--quiet", "-m", "change"], cwd=root, check=True, capture_output=True)
@@ -179,6 +180,7 @@ class ChangedTestSelectionTests(unittest.TestCase):
         for changed in (
             {"suites/ci_contracts.rs": "// changed wrapper\n"},
             {"changed.rs": "fn first() {} // changed\n", "helper.rs": "fn helper() {}\n"},
+            {"changed.rs": "fn first() {} // changed\n", "../src/lib.rs": "fn changed() {}\n"},
             {"changed.rs": None},
         ):
             with self.subTest(changed=changed):
