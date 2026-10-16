@@ -678,6 +678,18 @@ fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
         );
     drain_queued_blocking_tasks(&queued);
     fixture.runtime.blocking_tasks = previous_spawner;
+    // Admission must reserve the name on its worker. Holding the real history
+    // file makes any GUI-side reallocation fail immediately and causally.
+    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    fs::create_dir_all(history_path.parent().unwrap()).expect("name history directory");
+    let history = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&history_path)
+        .expect("open name history");
+    fs2::FileExt::lock_exclusive(&history).expect("hold name history after admission");
     let before = gwt_core::process::thread_git_spawn_count();
     fixture
         .runtime
@@ -685,13 +697,133 @@ fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
             &fixture.recorded_events,
         ));
     let git_spawns = gwt_core::process::thread_git_spawn_count() - before;
-    // Reap the fixture launch before asserting, including on the RED path.
-    let result = take_monitor_launch_complete("prepared-fresh", &fixture.recorded_events);
-    assert!(result.is_ok(), "fresh launch: {result:?}");
+    let named_pane = fixture
+        .runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .any(|window| {
+            window.linked_issue_number == Some(3165)
+                && window
+                    .agent_name
+                    .as_ref()
+                    .is_some_and(|name| !name.is_empty())
+        });
+    fs2::FileExt::unlock(&history).expect("release name history");
+    // A busy history refusal creates no pane or LaunchComplete. Reap only an
+    // actual launch before asserting, including on the RED path.
+    let result = named_pane
+        .then(|| take_monitor_launch_complete("prepared-fresh", &fixture.recorded_events));
+    assert!(
+        named_pane,
+        "prepared completion must publish its worker-reserved name while history is locked"
+    );
+    assert!(result.as_ref().unwrap().is_ok(), "fresh launch: {result:?}");
     assert_eq!(
         git_spawns, 0,
         "prepared completion spawned Git on the GUI thread"
     );
+}
+
+#[test]
+fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "prepared-name-collision",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    let other = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    tab.workspace.set_linked_issue_number(&other.id, Some(3166));
+    tab.workspace
+        .set_status(&other.id, WindowProcessStatus::Running);
+    fixture.runtime.register_window("tab-1", &other.id);
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            prefs.max_active_agents = 3;
+            Ok(())
+        },
+    )
+    .expect("capacity for both issues");
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    let history = fs::read_to_string(&history_path).expect("worker-reserved name history");
+    let reserved: String = serde_json::from_str(history.lines().last().unwrap()).unwrap();
+    // The existing pane and proposed window ID stay the same. Only its name
+    // changes after capture, so the initial collision must trigger the retry.
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    assert!(tab
+        .workspace
+        .set_agent_name(&other.id, Some(reserved.clone())));
+    let before = gwt_core::process::thread_git_spawn_count();
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
+    assert_eq!(
+        fixture
+            .runtime
+            .tab("tab-1")
+            .unwrap()
+            .workspace
+            .persisted()
+            .windows
+            .len(),
+        1,
+        "a conflicting reserved initial must not publish a pane"
+    );
+    assert_eq!(queued.lock().unwrap().len(), 1, "reprepare on a worker");
+    drain_queued_blocking_tasks(&queued);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    let windows = &fixture
+        .runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows;
+    let launched_name = windows
+        .iter()
+        .find(|window| window.linked_issue_number == Some(3165))
+        .and_then(|window| window.agent_name.as_ref())
+        .expect("reprepared pane has a reserved name");
+    assert_ne!(launched_name.chars().next(), reserved.chars().next());
+    assert_eq!(windows.len(), 2);
 }
 
 #[test]
@@ -973,6 +1105,10 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
     tab.workspace.set_linked_issue_number(&other.id, Some(3165));
     tab.workspace
         .set_status(&other.id, WindowProcessStatus::Running);
+    let holder_raw_id = tab.workspace.persisted().windows[0].id.clone();
+    assert!(tab
+        .workspace
+        .set_agent_name(&holder_raw_id, Some("ExistingExactHolder".to_string())));
     let mut persisted = tab.workspace.persisted().clone();
     persisted.windows.swap(0, 1);
     tab.workspace = WindowCanvasState::from_persisted(persisted);
@@ -986,6 +1122,18 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
     );
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
+    // Both answer workers encounter a busy canonical history. Their unused
+    // name result must not prevent delivery to the existing named holder.
+    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    fs::create_dir_all(history_path.parent().unwrap()).expect("name history directory");
+    let history = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&history_path)
+        .expect("open name history");
+    fs2::FileExt::lock_exclusive(&history).expect("hold name history before answer admission");
     fixture
         .runtime
         .auto_launch_issue_monitor_delivery_events_for_project(
@@ -1003,6 +1151,25 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
                 &fixture.recorded_events,
             ));
     }
+    fs2::FileExt::unlock(&history).expect("release name history");
+    let windows = &fixture
+        .runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows;
+    assert_eq!(windows.len(), 2, "an answer must keep the existing panes");
+    assert_eq!(
+        windows
+            .iter()
+            .find(|window| combined_window_id("tab-1", &window.id) == holder_window_id)
+            .unwrap()
+            .agent_name
+            .as_deref(),
+        Some("ExistingExactHolder"),
+        "an answer must preserve its holder's name despite a busy history"
+    );
     assert!(
         matches!(
             fixture.runtime.issue_monitor_launch_deliveries.get(

@@ -3283,6 +3283,8 @@ pub(super) struct IssueMonitorSpawnAdmissionInput {
     pub(super) issue_number: u64,
     pub(super) target_branch: String,
     pub(super) issue_link_cache_dir: PathBuf,
+    pub(super) known_agent_names: std::collections::HashSet<String>,
+    pub(super) active_agent_names: std::collections::HashSet<String>,
 }
 
 pub(super) const ISSUE_MONITOR_SPAWN_ADMISSION_STALE: &str =
@@ -3329,6 +3331,9 @@ pub(super) struct PreparedIssueMonitorSpawnAdmission {
     pub(super) monitor: gwt::IssueMonitorState,
     pub(super) host_started_at: Option<u64>,
     pub(super) purpose_title: Option<String>,
+    // Existing-pane adoption and answers do not need a new name and must not
+    // fail just because the history could not reserve an unused candidate.
+    reserved_agent_name: Result<String, String>,
     host_project_roots: std::collections::BTreeSet<PathBuf>,
     dependencies: Vec<IssueMonitorAdmissionFileStamp>,
     capacity_expires_at: Option<u64>,
@@ -3424,12 +3429,32 @@ impl IssueMonitorSpawnAdmissionInput {
             thread = "worker",
             "Issue Monitor launch phase"
         );
+        phase_started = std::time::Instant::now();
+        let language = gwt_config::Settings::load()
+            .map(|settings| settings.ai.effective_language())
+            .unwrap_or("en");
+        let history = gwt_core::paths::gwt_project_dir_for_repo_path(&self.project_root)
+            .join("agent-names.jsonl");
+        let reserved_agent_name = gwt::agent_names::allocate(
+            &history,
+            language,
+            &self.active_agent_names,
+            &self.known_agent_names,
+        );
+        tracing::info!(
+            target: "gwt.launch.timing",
+            phase = "monitor_agent_name",
+            elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
+            thread = "worker",
+            "Issue Monitor launch phase"
+        );
         let prepared = PreparedIssueMonitorSpawnAdmission {
             project_root: self.project_root.clone(),
             issue_number: self.issue_number,
             monitor,
             host_started_at: gwt::process::host_process_start_time(std::process::id()),
             purpose_title,
+            reserved_agent_name,
             host_project_roots: self.host_project_roots.iter().cloned().collect(),
             dependencies,
             capacity_expires_at,
@@ -6414,6 +6439,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
@@ -6559,6 +6585,7 @@ impl AppRuntime {
         issue_number: u64,
         target_branch: &str,
     ) -> IssueMonitorSpawnAdmissionInput {
+        let (known_agent_names, active_agent_names) = self.agent_name_reservations(None);
         IssueMonitorSpawnAdmissionInput {
             project_root: project_root.to_path_buf(),
             host_project_roots: self
@@ -6569,6 +6596,8 @@ impl AppRuntime {
             issue_number,
             target_branch: target_branch.to_string(),
             issue_link_cache_dir: self.issue_link_cache_dir.clone(),
+            known_agent_names,
+            active_agent_names,
         }
     }
 
@@ -6607,6 +6636,9 @@ impl AppRuntime {
         let prepared_purpose_title = prepared_monitor_admission
             .as_ref()
             .map(|prepared| prepared.purpose_title.clone());
+        let prepared_agent_name = prepared_monitor_admission
+            .as_ref()
+            .map(|prepared| prepared.reserved_agent_name.clone());
         let is_review = config
             .env_vars
             .get("GWT_REVIEW_DISPATCH")
@@ -6841,7 +6873,16 @@ impl AppRuntime {
             config.env_vars.remove("GWT_AGENT_NAME");
             None
         } else {
-            let name = self.allocate_agent_name(&project_root_path, inherited_agent_name)?;
+            let name = match prepared_agent_name {
+                Some(reserved) => {
+                    let name = reserved?;
+                    let (_, active) = self.agent_name_reservations(None);
+                    gwt::agent_names::ensure_available_initial(&name, &active)
+                        .map_err(|_| ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string())?;
+                    name
+                }
+                None => self.allocate_agent_name(&project_root_path, inherited_agent_name)?,
+            };
             config
                 .env_vars
                 .insert("GWT_AGENT_NAME".into(), name.clone());
