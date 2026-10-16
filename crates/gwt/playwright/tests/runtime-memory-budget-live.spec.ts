@@ -2,10 +2,11 @@
  * This bounds GUI memory under deterministic output producers; provider
  * inference, provider hooks and real implementation builds are not simulated.
  */
-import { execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { createInterface } from "node:readline";
 import { expect, test, type Page } from "@playwright/test";
 import {
   clearLiveLaunchWizard, gotoLiveGwt, sendLiveGwtEvent,
@@ -51,6 +52,8 @@ test.describe("runtime memory budget (live backend)", () => {
     let observationClock = 0;
     const startedAt = new Date().toISOString();
     let passed = false;
+    let failure: { message: string; stack?: string } | null = null;
+    const sampler = createProcessSampler();
     try {
       const projects: Array<{ path: string; project_key: string; branch: string }> = JSON.parse(await readFile(join(HOME, "workload-projects.json"), "utf8"));
       expect(projects).toHaveLength(PANE_COUNT);
@@ -70,17 +73,17 @@ test.describe("runtime memory budget (live backend)", () => {
         // A materialized pane can precede its cold host process. Use the
         // launch wizard's startup budget here; steady observations stay short.
         await assertOutput([surfaces.at(-1)!], 90_000);
-        samples.push(sampleRss(0));
+        samples.push(await sampleRss(sampler, 0));
       }
-      initial = await liveReceipts();
+      initial = await liveReceipts(sampler);
       expect(initial, "all real workload processes").toHaveLength(PANE_COUNT);
       await assertOutput(surfaces);
       observationStarted = Date.now();
       observationClock = performance.now();
       do {
-        samples.push(sampleRss(performance.now() - observationClock));
+        samples.push(await sampleRss(sampler, performance.now() - observationClock));
         expect(samples.at(-1)!.rss_bytes, "owned GUI RSS budget").toBeLessThanOrEqual(BUDGET);
-        final = await liveReceipts();
+        final = await liveReceipts(sampler);
         expect(final.map(receipt => receipt.pid).sort(), "all producers survive")
           .toEqual(initial.map(receipt => receipt.pid).sort());
         await assertOutput(surfaces);
@@ -88,8 +91,8 @@ test.describe("runtime memory budget (live backend)", () => {
         const remaining = duration * 1000 - (performance.now() - observationClock);
         if (remaining > 0) await page.waitForTimeout(Math.min(5_000, remaining));
       } while (performance.now() - observationClock < duration * 1000);
-      samples.push(sampleRss(performance.now() - observationClock));
-      final = await liveReceipts();
+      samples.push(await sampleRss(sampler, performance.now() - observationClock));
+      final = await liveReceipts(sampler);
       expect(samples.every(sample => sample.rss_bytes <= BUDGET), "every RSS sample, including launch").toBe(true);
       expect(samples.at(-1)!.elapsed_ms, "full observation interval").toBeGreaterThanOrEqual(duration * 1000);
       for (const receipt of initial) {
@@ -102,39 +105,141 @@ test.describe("runtime memory budget (live backend)", () => {
       await writeFile(join(HOME, `runtime-memory-${theme}.png`), screenshot);
       await info.attach(`workload-pane-${theme}`, { body: screenshot, contentType: "image/png" });
       passed = true;
+    } catch (error) {
+      failure = error instanceof Error
+        ? { message: error.message, stack: error.stack }
+        : { message: String(error) };
+      console.error(`runtime memory ${theme}: ${failure.message}`);
+      throw error;
     } finally {
-      const evidence = {
-        issue: Number(process.env.GWT_PLAYWRIGHT_MEMORY_ISSUE || "5381"), theme, passed, gui_pid: PID,
-        checkout_sha: process.env.GWT_PLAYWRIGHT_MEMORY_SHA,
-        checkout: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT,
-        checkout_binary: join(process.env.GWT_PLAYWRIGHT_PROJECT_ROOT!, "target", "debug", "gwt.exe"),
-        checkout_branch: BRANCH,
-        source_worktree_count: Number(process.env.GWT_PLAYWRIGHT_MEMORY_WORKTREES),
-        isolated_home: HOME, started_at: startedAt, ended_at: new Date().toISOString(),
-        observation_started_at: observationStarted ? new Date(observationStarted).toISOString() : null,
-        requested_duration_seconds: duration, budget_bytes: BUDGET, pane_ids: panes,
-        workload: `${PANE_COUNT} custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls`,
-        limitations: `${PANE_COUNT} deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project. Provider inference, provider hooks and implementation builds are not covered. This is not same-condition real model-agent fleet evidence.`,
-        user_verification_result: "n/a (autonomous)", agent_visual_check: passed ? "pass" : "fail",
-        initial_producers: initial, final_producers: final, rss_samples: samples, browser_errors: errors,
-      };
-      const body = JSON.stringify(evidence, null, 2);
-      await writeFile(join(HOME, `runtime-memory-${theme}.json`), body);
-      await info.attach(`runtime-memory-${theme}`, { body, contentType: "application/json" });
-      for (const surface of surfaces) await sendLiveGwtEvent(surface.page, { kind: "close_window", id: surface.id }).catch(() => undefined);
-      await expect.poll(async () => (await liveReceipts()).length,
-        { message: "owned workload processes stop before the next theme", timeout: 60_000 }).toBe(0);
-      for (const surface of surfaces) if (surface.page !== page) await surface.page.close();
+      try {
+        const evidence = {
+          issue: Number(process.env.GWT_PLAYWRIGHT_MEMORY_ISSUE || "5381"), theme, passed, failure, gui_pid: PID,
+          checkout_sha: process.env.GWT_PLAYWRIGHT_MEMORY_SHA,
+          checkout: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT,
+          checkout_binary: join(process.env.GWT_PLAYWRIGHT_PROJECT_ROOT!, "target", "debug", "gwt.exe"),
+          checkout_branch: BRANCH,
+          source_worktree_count: Number(process.env.GWT_PLAYWRIGHT_MEMORY_WORKTREES),
+          isolated_home: HOME, started_at: startedAt, ended_at: new Date().toISOString(),
+          observation_started_at: observationStarted ? new Date(observationStarted).toISOString() : null,
+          requested_duration_seconds: duration, budget_bytes: BUDGET, pane_ids: panes,
+          workload: `${PANE_COUNT} custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls`,
+          limitations: `${PANE_COUNT} deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project. Provider inference, provider hooks and implementation builds are not covered. This is not same-condition real model-agent fleet evidence.`,
+          user_verification_result: "n/a (autonomous)", agent_visual_check: passed ? "pass" : "fail",
+          initial_producers: initial, final_producers: final, rss_samples: samples, browser_errors: errors,
+        };
+        const body = JSON.stringify(evidence, null, 2);
+        await writeFile(join(HOME, `runtime-memory-${theme}.json`), body);
+        await info.attach(`runtime-memory-${theme}`, { body, contentType: "application/json" });
+        for (const surface of surfaces) await sendLiveGwtEvent(surface.page, { kind: "close_window", id: surface.id }).catch(() => undefined);
+        await expect.poll(async () => (await liveReceipts(sampler)).length,
+          { message: "owned workload processes stop before the next theme", timeout: 60_000 }).toBe(0);
+        for (const surface of surfaces) if (surface.page !== page) await surface.page.close();
+      } finally {
+        await sampler.dispose();
+      }
     }
   });
 });
 
-function sampleRss(elapsed_ms: number): Sample {
-  const command = `$p=Get-Process -Id ${PID} -ErrorAction Stop; [pscustomobject]@{timestamp=[DateTime]::UtcNow.ToString('o');rss_bytes=$p.WorkingSet64;private_bytes=$p.PrivateMemorySize64;cpu_seconds=$p.TotalProcessorTime.TotalSeconds}|ConvertTo-Json -Compress`;
-  return { ...JSON.parse(execFileSync("pwsh", ["-NoProfile", "-Command", command], { encoding: "utf8", timeout: 30_000 })), elapsed_ms };
+type ProcessSnapshot = {
+  request_id: number;
+  sample: Omit<Sample, "elapsed_ms"> | null;
+  processes: Array<{ Id: number; started_at: number }>;
+};
+type ProcessSampler = ReturnType<typeof createProcessSampler>;
+
+function createProcessSampler() {
+  // A single warm process avoids thousands of cold pwsh starts under build load.
+  const command = `
+$ErrorActionPreference = 'Stop'
+while ($null -ne ($line = [Console]::ReadLine())) {
+  try {
+    $query = $line | ConvertFrom-Json
+    $sample = $null
+    if ($null -ne $query.gui_pid) {
+      $process = [Diagnostics.Process]::GetProcessById([int]$query.gui_pid)
+      try {
+        $process.Refresh()
+        $sample = @{timestamp=[DateTime]::UtcNow.ToString('o');rss_bytes=$process.WorkingSet64;private_bytes=$process.PrivateMemorySize64;cpu_seconds=$process.TotalProcessorTime.TotalSeconds}
+      } finally { $process.Dispose() }
+    }
+    $processes = @(foreach ($targetId in $query.ids) {
+      try { $process = [Diagnostics.Process]::GetProcessById([int]$targetId) }
+      catch [ArgumentException] { continue }
+      try { @{Id=$process.Id;started_at=([DateTimeOffset]$process.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()} }
+      finally { $process.Dispose() }
+    })
+    [Console]::WriteLine((@{request_id=$query.request_id;sample=$sample;processes=$processes} | ConvertTo-Json -Depth 4 -Compress))
+    [Console]::Out.Flush()
+  } catch { [Console]::Error.WriteLine($_.ToString()); exit 1 }
+}`;
+  const child = spawn("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true });
+  const lines = createInterface({ input: child.stdout });
+  let stderr = "";
+  let sequence = 0;
+  let failure: Error | null = null;
+  let pending: { id: number; resolve: (snapshot: ProcessSnapshot) => void; reject: (error: Error) => void } | null = null;
+  let disposed = false;
+  let closed = false;
+  const exited = new Promise<void>(resolve => child.once("close", () => { closed = true; resolve(); }));
+  const fail = (error: Error) => {
+    failure ??= error;
+    pending?.reject(failure);
+    pending = null;
+    child.kill();
+  };
+  child.stderr.setEncoding("utf8").on("data", (data: string) => { stderr = (stderr + data).slice(-8192); });
+  child.on("error", fail);
+  child.stdin.on("error", fail);
+  child.on("close", code => { if (!disposed) fail(new Error(`process sampler exited ${code}: ${stderr}`)); });
+  lines.on("line", line => {
+    try {
+      const snapshot = JSON.parse(line) as ProcessSnapshot;
+      if (!pending || snapshot.request_id !== pending.id || !Array.isArray(snapshot.processes)) {
+        throw new Error("process sampler returned an unexpected or stale response");
+      }
+      pending.resolve(snapshot);
+      pending = null;
+    } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
+  });
+  return {
+    async query(gui_pid: number | null, ids: number[]): Promise<ProcessSnapshot> {
+      if (failure) throw failure;
+      if (disposed || pending) throw new Error("process sampler unavailable or already sampling");
+      const request_id = ++sequence;
+      let timer: ReturnType<typeof setTimeout>;
+      try {
+        return await new Promise<ProcessSnapshot>((resolve, reject) => {
+          pending = { id: request_id, resolve, reject };
+          // Only the cold startup uses the existing launch budget.
+          timer = setTimeout(() => fail(new Error(`process sampler request ${request_id} timed out`)), request_id === 1 ? 90_000 : 30_000);
+          child.stdin.write(JSON.stringify({ request_id, gui_pid, ids }) + "\n");
+        });
+      } finally { clearTimeout(timer!); }
+    },
+    async dispose(): Promise<void> {
+      disposed = true;
+      lines.close();
+      if (closed) return;
+      child.stdin.end();
+      let timer: ReturnType<typeof setTimeout>;
+      try {
+        await Promise.race([exited, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => { child.kill(); reject(new Error("process sampler did not exit")); }, 10_000);
+        })]);
+      } finally { clearTimeout(timer!); }
+    },
+  };
 }
 
-async function liveReceipts(): Promise<Receipt[]> {
+async function sampleRss(sampler: ProcessSampler, elapsed_ms: number): Promise<Sample> {
+  const { sample } = await sampler.query(PID, []);
+  if (!sample || !Number.isFinite(sample.rss_bytes)) throw new Error("process sampler returned no GUI RSS");
+  return { ...sample, elapsed_ms };
+}
+
+async function liveReceipts(sampler: ProcessSampler): Promise<Receipt[]> {
   const directory = join(HOME, "workload");
   const receipts = await Promise.all((await readdir(directory)).filter(name => name.endsWith(".json"))
     .map(async name => {
@@ -147,9 +252,7 @@ async function liveReceipts(): Promise<Receipt[]> {
   const ids = [...new Set(receipts.map(receipt => receipt.pid))];
   if (ids.length === 0) return [];
   expect(ids.every(id => Number.isInteger(id) && id > 0), "owned workload PID receipts").toBe(true);
-  const command = `Get-Process -Id ${ids.join(",")} -ErrorAction SilentlyContinue | Select-Object Id,@{Name='started_at';Expression={([DateTimeOffset]$_.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()}} | ConvertTo-Json -AsArray -Compress; exit 0`;
-  const processes: Array<{ Id: number; started_at: number }> = JSON.parse(execFileSync("pwsh",
-    ["-NoProfile", "-Command", command], { encoding: "utf8", timeout: 30_000 }).trim() || "[]");
+  const { processes } = await sampler.query(null, ids);
   // Windows eagerly recycles PIDs. Old theme receipts remain as evidence and
   // must not count a later unrelated process as a surviving workload.
   return receipts.filter(receipt => processes.some(process => process.Id === receipt.pid

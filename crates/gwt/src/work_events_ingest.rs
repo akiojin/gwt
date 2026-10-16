@@ -362,45 +362,37 @@ fn work_event_source_kind_for_ref_path(path: &str) -> gwt_core::Result<WorkEvent
 }
 
 fn load_pending_sources_for_rebuild(
-    pending_sources: &[PendingWorkEventsSource],
+    pending_sources: Vec<PendingWorkEventsSource>,
     worktree_entries: &[gwt::worktree_inventory::WorktreeEntry],
 ) -> gwt_core::Result<ReloadedWorkEventsSources> {
     let mut contents = Vec::with_capacity(pending_sources.len());
     let mut fingerprints = Vec::with_capacity(pending_sources.len());
+    let mut prelock_reads = HashMap::new();
+    let mut shared_content = HashMap::new();
     for source in pending_sources {
+        // Reserve by distinct payloads, not the many source aliases in a fleet.
+        shared_content
+            .entry(content_fingerprint(&source.content))
+            .or_insert_with(|| Arc::clone(&source.content));
         if source.reload_from_worktree {
+            prelock_reads.insert(source.key, (source.fingerprint, source.content));
             continue;
         }
         contents.push(SharedWorkEventsSource::with_shared_container(
-            Arc::clone(&source.content),
-            source.container.clone(),
+            source.content,
+            source.container,
         ));
-        fingerprints.push((source.key.clone(), source.fingerprint.clone()));
+        fingerprints.push((source.key, source.fingerprint));
     }
 
     // Issue #5208: reuse the discovery pass's validated content whenever the
     // lock-free re-scan observes the same
     // key and size/mtime/container fingerprint — the same identity the
     // incremental poll already trusts — and read only new or changed sources.
-    let prelock_reads = pending_sources
-        .iter()
-        .filter(|source| source.reload_from_worktree)
-        .map(|source| (source.key.as_str(), source))
-        .collect::<HashMap<_, _>>();
-
     // Re-scan the already enumerated worktree roots after the authoritative
     // snapshot is captured. This catches an immutable shard published between
     // the initial source scan and intake without paying for a second
     // `git worktree list` process.
-    let mut shared_content = pending_sources
-        .iter()
-        .map(|source| {
-            (
-                content_fingerprint(&source.content),
-                Arc::clone(&source.content),
-            )
-        })
-        .collect::<HashMap<_, _>>();
     for group in worktree_group_scans(worktree_entries) {
         for (source, _) in group?.sources {
             // The scan took metadata before this content read: a write racing
@@ -408,9 +400,13 @@ fn load_pending_sources_for_rebuild(
             // reads the source again.
             let fingerprint = source_fingerprint(&source.metadata, source.container.as_deref());
             let key = source.key();
-            let content = match prelock_reads.get(key.as_str()) {
-                Some(prelock) if prelock.fingerprint == fingerprint => Arc::clone(&prelock.content),
-                _ => read_shared_work_event_source(
+            let cached = prelock_reads
+                .remove(&key)
+                .filter(|(previous, _)| previous == &fingerprint)
+                .map(|(_, content)| content);
+            let content = match cached {
+                Some(content) => content,
+                None => read_shared_work_event_source(
                     &source.events_path,
                     source.kind,
                     &mut shared_content,
@@ -942,8 +938,20 @@ where
         rebuild_work_events_with_shared_loader(
             work_items_path,
             || {
-                let loaded = load_pending_sources_for_rebuild(&pending_sources, worktree_entries)?;
-                if let Some(error) = summary.load_error.as_ref() {
+                // Only malformed recovery needs both generations for comparison.
+                let expected_sources = summary.load_error.as_ref().map(|_| {
+                    pending_sources
+                        .iter()
+                        .map(|source| (source.key.clone(), source.fingerprint.clone()))
+                        .collect::<SourceFingerprints>()
+                });
+                let loaded = load_pending_sources_for_rebuild(
+                    std::mem::take(&mut pending_sources),
+                    worktree_entries,
+                )?;
+                if let Some((error, expected_sources)) =
+                    summary.load_error.as_ref().zip(expected_sources.as_ref())
+                {
                     // Discovery preceded the authoritative snapshot. Refuse
                     // recovery if that source set became incomplete before prepare.
                     let available = loaded
@@ -951,9 +959,10 @@ where
                         .iter()
                         .map(|(key, value)| (key, value))
                         .collect::<HashMap<_, _>>();
-                    if pending_sources.iter().any(|source| {
-                        available.get(&source.key).copied() != Some(&source.fingerprint)
-                    }) {
+                    if expected_sources
+                        .iter()
+                        .any(|(key, fingerprint)| available.get(key).copied() != Some(fingerprint))
+                    {
                         let mut error = error.clone();
                         error.message.push_str(
                             "; recovery refused: an event source disappeared or changed before intake",
@@ -978,9 +987,6 @@ where
                         }
                     }
                 }
-                // The authoritative re-scan and recovery checks are complete.
-                // Release the discovery generation before decode/fold begins.
-                drop(std::mem::take(&mut pending_sources));
                 Ok(loaded)
             },
             close_path.as_deref(),
@@ -1618,6 +1624,28 @@ fn immutable_metadata_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rebuild_loader_transfers_ref_source_allocations() {
+        let key = "ref:refs/remotes/origin/main:.gwt/work/events.jsonl".to_string();
+        let fingerprint = "validated-ref-fingerprint".to_string();
+        let key_allocation = key.as_ptr();
+        let fingerprint_allocation = fingerprint.as_ptr();
+        let pending = vec![PendingWorkEventsSource {
+            key,
+            fingerprint,
+            content: Arc::from("ref content"),
+            container: None,
+            reload_from_worktree: false,
+        }];
+
+        let (contents, fingerprints) = load_pending_sources_for_rebuild(pending, &[]).unwrap();
+
+        assert_eq!(contents.len(), 1);
+        assert_eq!(fingerprints.len(), 1);
+        assert_eq!(fingerprints[0].0.as_ptr(), key_allocation);
+        assert_eq!(fingerprints[0].1.as_ptr(), fingerprint_allocation);
+    }
 
     #[test]
     fn scanned_source_fingerprints_do_not_retain_source_paths() {

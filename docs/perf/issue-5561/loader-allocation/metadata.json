@@ -1,0 +1,25 @@
+{
+  "rust_toolchain": "1.99.1",
+  "source_count": 200000,
+  "old_head": "109b7c5b74e8754218be886869421f391bcc1fbd",
+  "build": "rustc --edition 2024 -O",
+  "limitations": "Exact loader function excerpts with no-filesystem stubs for the empty worktree path and a fixed 64-byte digest for one shared content. Synthetic metadata-only allocation comparison, not full GUI/fold/persistence or real model-agent AC-2 evidence.",
+  "input_live_bytes": 65600056,
+  "input_kind": "synthetic preloaded ref-only metadata; no worktree entries; prior payload validation assumed outside this slice",
+  "key_pattern": "ref:origin/fixture-{8-digit index}:.gwt/work/events/ab/{64 b characters}.jsonl",
+  "measurement": "GlobalAlloc wrapper delegates unchanged to System and counts successful allocation/deallocation/reallocation requests",
+  "fingerprint_bytes": 64,
+  "unique_payload_count": 1,
+  "loader_function_sha256": {
+    "old": "b8a5195fd2d3db25c5dfd371c5a12225fff030a64e2aed6c0168ef75ba4f4b69",
+    "new": "9b48bf0d7b9a01eb307d4fe38883dfc4a4a930c80c3291b92cb618c583e83c23"
+  },
+  "new_product_source_sha256": "c82f6fc89686ed17303d4c3e657d5363fadd064831a8af9d4128bf230a929cf7",
+  "reproduce": [
+    "rustc --edition 2024 -O issue-5561-loader-probe-old.rs -o old.exe",
+    "rustc --edition 2024 -O issue-5561-loader-probe-new.rs -o new.exe",
+    "./old.exe",
+    "./new.exe"
+  ],
+  "platform": "Windows x86_64"
+}

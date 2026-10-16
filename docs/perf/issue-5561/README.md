@@ -74,6 +74,26 @@ installed の[30分ごとのサンプル](before-installed/process-samples.jsonl
 
 実モデル Agent 10〜12窓・同条件4時間で WS が1.5GB以下で頭打ちになる Issue #5561 AC-2 は、deterministic PTY で代用しない。provider inference、provider hooks、実装ビルド、PM/Issue Monitor の稼働はこの fixture の対象外である。1.5GB は1,500,000,000 bytesとして判定する。
 
+再開後の4時間試験も2回失敗した。最初の dark は観測約54分で定常出力の30秒predicate待機がタイムアウトした。最大WSは601,468,928 B、browser errorは0、12 producerは存続していた。[結果](trace-failed/runtime-memory-dark.json)、[traceのエラー要約](trace-failed/failure.json)、[識別](trace-failed/metadata.json)、[終了処理](trace-failed/shutdown.json)。失敗後のtrace保存は約7.6GBのresourceを処理しており、その間のGUI生存やWS減少は観測成功に数えない。所有runnerを停止し、wrapperのGUI/producer cleanup完了を確認した。巨大なraw traceはリポジトリに含めない。
+
+連続traceを無効にした次の dark は観測1,634.624秒まで進んだが、producerのPID/開始時刻を照合する `execFileSync("pwsh")` が30秒でタイムアウトした。最大WSは610,729,984 Bで、予算超過ではない。lightは60秒を完了したが試行全体はFAILである。[dark](sampler-failed/runtime-memory-dark.json)、[light](sampler-failed/runtime-memory-light.json)、[識別](sampler-failed/metadata.json)、[終了処理](sampler-failed/shutdown.json)。このfixtureは各loopで新しいPowerShellを2回起動していた。繰り返しのcold process起動を避ける常駐samplerへ変更し、同じPIDと開始時刻の照合、応答期限、観測時間、予算のassertionを維持して再試験する。
+
+常駐samplerでは起動timeoutを越えて観測できたが、11,982.794秒でWSが1,556,852,736 Bとなり、同じ1.5GB予算で失敗した。直前7秒のWSは1,174,196,224 Bで、増加段差を記録した。browser errorは0。rootのintake index保存は未確認である。[dark](cold-shared-failed/runtime-memory-dark.json)、[light](cold-shared-failed/runtime-memory-light.json)、[識別](cold-shared-failed/metadata.json)、[終了処理](cold-shared-failed/shutdown.json)。この試行も4時間完了・頭打ちの証拠にはしない。
+
+再構築loaderは元のpending入力を保持しながら、返却するkey/fingerprintの文字列を全件複製していた。さらに同じpayloadを多数含むexact-size iteratorをHashMapへcollectし、unique件数より大きなbucket容量を予約する。loader完了後のpending解放では、この途中の重複を防げない。loaderが入力Vecを消費し、ref metadataをmove、local metadataを所有mapから取り出す方式へ変更する。再走査時のmetadataを正本にし、破損復旧で必要な期待値だけは従来どおり保持・照合する。payload cacheはunique contentだけを順に追加する。
+
+loaderだけの追加比較では、同一payloadを参照する20万件の合成ref sourceを使用した。実loaderの関数本文を抜き出し、空のworktree経路は未到達stub、共有payloadのdigestは同じ64 bytesとしてSystem allocatorへの成功要求を集計した。GUI、decode/fold、永続化、実履歴全体は含まない。[入力・限界](loader-allocation/metadata.json)、[旧](loader-allocation/old.jsonl)、[新](loader-allocation/new.jsonl)、[再実行可能なRustソース](loader-allocation/probes.zip)。
+
+| loaderの計測値 | 旧借用方式 | 所有権移譲後 |
+| --- | ---: | ---: |
+| 入力構築後のlive heap | 65,600,056 B | 65,600,056 B |
+| peak live heap | 127,149,128 B | 80,001,388 B |
+| payload cache件数 / capacity | 1 / 229,376 | 1 / 3 |
+| 返却後のlive heap | 50,801,080 B | 64,001,080 B |
+| 全入力・出力解放後のlive heap | 1,024 B | 1,024 B |
+
+peakは約37.08%減った。返却後の値は、元のString capacityを移譲するため増えている。旧方式のcloneはcapacityを文字列長へ縮めていたが、loader途中では元と複製が併存する。ここで改善したのは途中ピークであり、あらゆる段階の保持量が下がるという比較ではない。最終1,024 Bは標準出力のbufferを含む。実GUIの約380MB段差すべてをこの小さい合成比較に帰属させない。
+
 所有 Issue は未証明の条件を残して OPEN を維持する。配信スライスは source-map の保持量削減と、その回帰・計測証跡である。schema migration は不要で、rollback はこの変更の revert。実 fleet の追加観測は既存 Issue #5561 で追跡する。
 
 User Verification Result: n/a (autonomous)
