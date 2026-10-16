@@ -138,7 +138,14 @@ profile every request, so the 804ms outlier cannot be assigned to an individual
 phase. The saved raw rows retain it. Do not infer zero latency outliers from
 zero reported transport failures.
 
-The driver command for each recorded sender binary was:
+For a fresh Windows checkout, prepare the current sender and native receiver
+with `python docs/perf/issue-5542/prepare.py`. This uses the documented Rust
+1.99.1 toolchain and Cargo's selected artifact graph, including native linker
+paths decoded as UTF-8. Then build the checkout GUI/CLI with
+`cargo +1.99.1 build -p gwt --bin gwt --bin gwtd` before running
+`docs/perf/issue-5542/browser-check.ps1`.
+
+The historical sixty-minute runs used these commands:
 
 ```powershell
 python docs/perf/issue-5542/measure.py --binary target/issue-5542-baseline.exe --receiver target/issue-5542-receiver.exe --output docs/perf/issue-5542/baseline-paired.jsonl --seconds 3600 --interval 5
