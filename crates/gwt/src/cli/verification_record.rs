@@ -8261,8 +8261,10 @@ pub(crate) mod tests {
                     return started;
                 }
                 if clock_calls == 2 {
+                    // test-hygiene: allow-wall-clock-deadline Bounds OS child readiness; the execution deadline uses the injected clock.
                     let safety = Instant::now() + Duration::from_secs(30);
                     while !root.join("ready").exists() {
+                        // test-hygiene: allow-wall-clock-deadline This safety assertion guards OS startup, not the injected 299/301s budget.
                         assert!(Instant::now() < safety, "the fixture did not start");
                         std::thread::sleep(Duration::from_millis(100));
                     }
@@ -8286,7 +8288,9 @@ pub(crate) mod tests {
             .trim()
             .parse::<u32>()
             .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bounds real process reaping after timeout; the 300s budget uses the injected clock.
         let safety = Instant::now() + Duration::from_secs(30);
+        // test-hygiene: allow-wall-clock-deadline This OS reap watchdog prevents a hung test; cleanup is asserted separately below.
         while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
             std::thread::sleep(Duration::from_millis(100));
         }

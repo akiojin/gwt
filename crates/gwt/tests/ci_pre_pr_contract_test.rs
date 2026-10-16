@@ -186,7 +186,7 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
         toml::from_str(include_str!("../../../.config/nextest.toml")).unwrap();
     assert_eq!(
         nextest["profile"]["coverage"]["test-threads"].as_integer(),
-        Some(4)
+        Some(16)
     );
     assert_eq!(
         nextest["profile"]["coverage"]["junit"]["path"].as_str(),
