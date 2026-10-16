@@ -5,6 +5,8 @@
 // `failed` (Stage / Reason / Log + Open log / Retry / Close). The CTA itself
 // has four observable statuses: `available` | `applying` | `ready` | `error`.
 
+import { createFocusTrap } from "./focus-trap.js";
+
 export function createUpdateCtaController({
   document,
   send,
@@ -32,6 +34,10 @@ export function createUpdateCtaController({
   // Issue #4376 AC-5: what the drain is waiting for, as last reported by
   // issue_monitor_status, so the CTA title and the draining modal can name it.
   let drainBlockers = [];
+  let restartPreview = null;
+  let restartRequestSequence = 0;
+  let releaseModalFocus = null;
+  let modalReturnFocus = null;
 
   function removeLegacyUpdateSurfaces() {
     document.querySelectorAll(".update-toast, .update-button").forEach((node) => {
@@ -419,10 +425,11 @@ export function createUpdateCtaController({
     if (!modal) {
       modal = document.createElement("div");
       modal.id = modalId;
-      modal.className = "update-modal";
-      modal.setAttribute("role", "dialog");
-      modal.setAttribute("aria-modal", "true");
-      modal.setAttribute("aria-labelledby", "update-modal-title");
+      modal.className = "modal-backdrop open update-modal";
+      modalReturnFocus = document.activeElement;
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal && restartPreview) onCancelRestart();
+      });
       document.body.appendChild(modal);
     }
     return modal;
@@ -464,13 +471,47 @@ export function createUpdateCtaController({
   }
 
   function closeModal() {
+    restartPreview = null;
+    releaseModalFocus?.();
+    releaseModalFocus = null;
     const modal = document.getElementById(modalId);
     if (modal) {
       modal.remove();
     }
+    const returnTo = modalReturnFocus;
+    modalReturnFocus = null;
+    if (returnTo?.isConnected) returnTo.focus?.({ preventScroll: true });
+  }
+
+  function mountModalPanel(modal, panel, initialFocus = null) {
+    releaseModalFocus?.();
+    panel.classList.add("modal-shell");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-labelledby", "update-modal-title");
+    panel.setAttribute("tabindex", "-1");
+    const title = panel.querySelector("h2");
+    const actions = panel.querySelector(".update-modal__actions");
+    title.remove();
+    actions.remove();
+    const body = el("div", { className: "modal-body" }, [...panel.childNodes]);
+    panel.appendChild(el("div", { className: "modal-header" }, [title]));
+    panel.appendChild(body);
+    actions.classList.add("modal-footer");
+    panel.appendChild(actions);
+    panel.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && restartPreview) {
+        event.preventDefault();
+        onCancelRestart();
+      }
+    });
+    modal.appendChild(panel);
+    releaseModalFocus = createFocusTrap(panel, { document });
+    (initialFocus || panel.querySelector("button:not([disabled])"))?.focus?.({ preventScroll: true });
   }
 
   function renderModalDownloading(version) {
+    restartPreview = null;
     const modal = ensureModal();
     // SPEC-2041 Phase 19 (Playwright `update-modal.spec.ts` follow-up): keep
     // renderModal* idempotent. Repeated identical events (live backend
@@ -529,7 +570,7 @@ export function createUpdateCtaController({
         el("div", { className: "update-modal__actions" }, [cancel]),
       ],
     );
-    modal.appendChild(panel);
+    mountModalPanel(modal, panel);
 
     if (lastProgress) {
       updateProgressDisplay(lastProgress);
@@ -538,6 +579,8 @@ export function createUpdateCtaController({
 
   function renderModalReady(version, { anyway = false } = {}) {
     const modal = ensureModal();
+    if (restartPreview?.version === version) return;
+    restartPreview = null;
     // See renderModalDownloading: idempotency guard for repeated events.
     const variant = anyway ? "anyway" : "ready";
     if (
@@ -611,10 +654,11 @@ export function createUpdateCtaController({
       { className: "update-modal__panel", data: { state: "ready" } },
       panelChildren,
     );
-    modal.appendChild(panel);
+    mountModalPanel(modal, panel);
   }
 
   function renderModalFailed({ stage, reason, log_path, message }) {
+    restartPreview = null;
     const modal = ensureModal();
     modal.dataset.state = "failed";
     delete modal.dataset.version;
@@ -679,7 +723,7 @@ export function createUpdateCtaController({
         el("div", { className: "update-modal__actions" }, [openLog, retry, closeBtn]),
       ],
     );
-    modal.appendChild(panel);
+    mountModalPanel(modal, panel);
   }
 
   function updateProgressDisplay({ downloaded, total }) {
@@ -720,8 +764,116 @@ export function createUpdateCtaController({
   }
 
   function onApplyRestartNow() {
-    send({ kind: "apply_update_restart_now" });
-    // Modal is intentionally left in place; the parent process will exit.
+    const modal = document.getElementById(modalId);
+    if (!modal || modal.dataset.state !== "ready") return;
+    restartPreview = {
+      requestId: `update-restart-${++restartRequestSequence}`,
+      version: modal.dataset.version,
+      impact: null,
+      submitted: false,
+    };
+    renderRestartConfirmation();
+    send({ kind: "get_update_restart_impact", request_id: restartPreview.requestId });
+  }
+
+  function handleUpdateRestartImpact(event) {
+    if (!restartPreview || event?.request_id !== restartPreview.requestId) return;
+    const modal = document.getElementById(modalId);
+    if (!modal || modal.dataset.state !== "restart-preview") return;
+    if (event.error) {
+      showError(event.error);
+      renderModalFailed({ stage: "Check restart impact", reason: event.error });
+      return;
+    }
+    if (!Array.isArray(event.blocking) || !Array.isArray(event.issue_numbers)) return;
+    restartPreview.impact = event;
+    renderRestartConfirmation();
+  }
+
+  function onCancelRestart() {
+    const version = restartPreview?.version;
+    closeModal();
+    if (version) showReadyPending(version);
+  }
+
+  function renderRestartConfirmation() {
+    const modal = ensureModal();
+    const preview = restartPreview;
+    const impact = preview.impact;
+    const busy = Boolean(impact?.blocking.length);
+    modal.dataset.state = impact ? "restart-confirm" : "restart-preview";
+    modal.dataset.version = preview.version;
+    clearChildren(modal);
+    const cancel = el("button", {
+      type: "button",
+      className: "update-modal__btn update-modal__btn--secondary",
+      text: "Cancel",
+      data: { updateModalCancelRestart: "true" },
+      onClick: onCancelRestart,
+    });
+    const wait = el("button", {
+      type: "button",
+      className: `update-modal__btn update-modal__btn--${busy ? "primary" : "secondary"}`,
+      text: "Apply after all agents finish",
+      data: { updateModalWaitForIdle: "true" },
+      onClick: () => submitRestart("apply_update_when_idle"),
+    });
+    const restart = el("button", {
+      type: "button",
+      className: `update-modal__btn update-modal__btn--${busy ? "secondary" : "primary"}`,
+      text: "Restart now",
+      data: { updateModalConfirmRestart: "true" },
+      onClick: () => submitRestart("apply_update_restart_now"),
+    });
+    wait.disabled = !impact;
+    restart.disabled = !impact;
+    const body = [el("p", {
+      className: "update-modal__version",
+      text: `gwt v${preview.version} is ready to install.`,
+    })];
+    if (impact) {
+      const count = (kind) => impact.blocking.filter((item) => item.kind === kind).length;
+      body.push(el("p", {
+        className: "update-modal__hint",
+        text: `Running / Starting agents: ${count("active_pane")}. Pending claims: ${count("pending_acquire_claim")}. Verification leases: ${count("held_verification_lease")}. Active executions: ${count("active_execution")}.`,
+      }));
+      body.push(el("p", {
+        className: "update-modal__hint",
+        text: impact.issue_numbers.length
+          ? `Affected Issues: ${impact.issue_numbers.map((number) => `#${number}`).join(", ")}.`
+          : "Affected Issues: none.",
+      }));
+      body.push(el("p", {
+        className: "update-modal__hint",
+        text: busy
+          ? "Restart now stops these agents and interrupts pending claims and verification. Apply after all agents finish waits for the host to be quiet."
+          : "No active agents, pending claims or verification leases were found. Restart now installs the update and restarts gwt.",
+      }));
+    } else {
+      body.push(el("p", {
+        className: "update-modal__hint",
+        text: "Checking which agents and Issues would be interrupted…",
+        attrs: { role: "status" },
+      }));
+    }
+    const panel = el("div", { className: "update-modal__panel" }, [
+      el("h2", { id: "update-modal-title", text: busy ? "Restart gwt and stop active work?" : "Restart gwt?" }),
+      ...body,
+      el("div", { className: "update-modal__actions" }, [cancel, wait, restart]),
+    ]);
+    mountModalPanel(modal, panel, busy ? wait : cancel);
+  }
+
+  function submitRestart(kind) {
+    if (!restartPreview?.impact || restartPreview.submitted) return;
+    restartPreview.submitted = true;
+    document.querySelectorAll("#update-modal button").forEach((button) => { button.disabled = true; });
+    send({ kind });
+    if (kind === "apply_update_when_idle") {
+      const version = restartPreview.version;
+      closeModal();
+      showReadyPending(version);
+    }
   }
 
   // Issue #4376 AC-5 / AC-6: stop waiting for the agents. The backend
@@ -780,6 +932,7 @@ export function createUpdateCtaController({
     handleUpdateApplyPendingPersisted,
     handleIssueMonitorStatus,
     handleUpdateAutoApply,
+    handleUpdateRestartImpact,
     showAvailable,
     showReadyPending,
     showError,

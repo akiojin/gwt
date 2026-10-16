@@ -5538,6 +5538,9 @@ import { createUiStateStore } from "/ui-state-store.js";
               version: event.version,
             });
             break;
+          case "update_restart_impact":
+            updateCtaController.handleUpdateRestartImpact(event);
+            break;
           case "update_auto_apply":
             // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
             updateCtaController.handleUpdateAutoApply({

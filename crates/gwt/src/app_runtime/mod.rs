@@ -10743,6 +10743,27 @@ impl AppRuntime {
             }
             return vec![update_notice("warn", refusal.notice(version))];
         }
+        self.begin_update_drain_for_project(context, version, prefs, automatic)
+    }
+
+    fn begin_update_drain_for_project(
+        &mut self,
+        context: &ProjectContext,
+        version: &str,
+        prefs: gwt::IssueMonitorPrefs,
+        automatic: bool,
+    ) -> Vec<OutboundEvent> {
+        let project_root = context.project_root.clone();
+        let observe = |stage: &str, reason: &str| {
+            record_pending_update_observation(
+                version,
+                Some(&project_root),
+                stage,
+                reason,
+                chrono::Utc::now(),
+                None,
+            );
+        };
         tracing::info!(
             target: "gwt::update",
             version,
@@ -11640,6 +11661,10 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)
             }
+            FrontendEvent::GetUpdateRestartImpact { request_id } => {
+                self.get_update_restart_impact_events(&client_id, &request_id)
+            }
+            FrontendEvent::ApplyUpdateWhenIdle => self.apply_update_when_idle_events(&client_id),
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
             FrontendEvent::SetAutoApplyUpdates { enabled } => {
                 self.set_global_auto_apply_updates_events(&client_id, enabled)
@@ -12766,6 +12791,10 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)
             }
+            FrontendEvent::GetUpdateRestartImpact { request_id } => {
+                self.get_update_restart_impact_events(&client_id, &request_id)
+            }
+            FrontendEvent::ApplyUpdateWhenIdle => self.apply_update_when_idle_events(&client_id),
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
             FrontendEvent::OpenUpdateLog { log_path } => {
                 self.open_update_log_events(&client_id, log_path)

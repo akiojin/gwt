@@ -417,6 +417,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   PM に `update.settings.set` の `auto_apply_updates` で変更を依頼できます。
   `update.settings.status` で状態を読み取れます。
   この設定は Issue Monitor の設定から除外されています。
+  `Restart now` では稼働中 agent の件数、pending claim、verification lease、
+  関連 Issue を確認してから適用します。作業中は `Apply after all agents finish`
+  が既定の選択肢となり、新規起動を保留して既存作業の終了まで待ちます。
+  代わりに `Restart now` を明示確認すると、稼働中 agent を停止して直ちに再起動します。
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
 Agent が status、decision、handoff、request を外部化する coordination surface です。
