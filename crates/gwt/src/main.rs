@@ -2639,6 +2639,7 @@ mod tests {
             knowledge_wire_metadata: None,
             terminal_stream_seq: None,
             error_origin: None,
+            knowledge_load_timing: None,
         }
     }
 

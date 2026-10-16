@@ -22,7 +22,7 @@ type PhaseRecord = { window_id: string; request_id: number; stage: string; statu
 type RelatedRow = { number: number; works: number; sessions: number };
 type EntryReceipt = { id: string; request_id: number; at_ms: number; entry_count: number;
   related_rows: RelatedRow[] };
-const requiredStages = ["queue", "cache_read", "assembly", "dispatch_enqueue", "send"];
+const requiredStages = ["queue", "cache_read", "assembly", "dispatch_enqueue", "dispatch_wait", "send"];
 
 test.describe("Issue cache load (live backend, Issue #5543)", () => {
   test.skip(!BASE || !CHECK_HOME || process.platform !== "win32", "requires the isolated Windows browser-check fixture");
@@ -293,9 +293,9 @@ test.describe("Issue cache load (live backend, Issue #5543)", () => {
             return [first].flatMap(sample => requiredStages.filter(stage => !phaseRecords.some(record =>
               record.window_id === sample.id && record.request_id === sample.request_id &&
               record.stage === stage && record.status === "completed" &&
-              [record.elapsed_ms, record.duration_ms].some(value => typeof value === "number" && Number.isFinite(value) && value >= 0)))
+              [record.elapsed_ms, record.duration_ms].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)))
               .map(stage => `${sample.id}:${sample.request_id}:${stage}`));
-          }, { timeout: 10_000, intervals: [100, 500], message: "the first real request has completed timing evidence for all five backend stages" }).toEqual([]);
+          }, { timeout: 10_000, intervals: [100, 500], message: "the first real request has elapsed and duration evidence for all six backend stages" }).toEqual([]);
           await expect(issueWindow.locator(".knowledge-row").first()).toBeVisible();
           await expect(issueWindow.getByRole("button", { name: /^Issue load failed/ })).toHaveCount(0);
           timeoutLedgerCount = await countTimeoutLedgerRows();

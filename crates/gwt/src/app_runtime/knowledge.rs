@@ -1727,7 +1727,7 @@ impl AppRuntime {
                     // associations until the complete snapshot arrives below.
                     // Uncorrelated legacy callers retain their single reply.
                     if request_id.is_some() {
-                        let events = knowledge_load_phase("assembly", queued_at, || {
+                        let mut events = knowledge_load_phase("assembly", queued_at, || {
                             let mut cached = view.clone();
                             apply_latest_knowledge_bridge_related_works(
                                 &project_root, &mut cached, &related_snapshot,
@@ -1737,6 +1737,10 @@ impl AppRuntime {
                             );
                             knowledge_view_events(client_id.clone(), id.clone(), kind,
                                 request_id, cached, cache_revision.clone())
+                        });
+                        events[0].knowledge_load_timing = Some(gwt::project_transport::KnowledgeLoadTiming {
+                            queued_at,
+                            dispatch_enqueued_at: Instant::now(),
                         });
                         knowledge_load_phase("dispatch_enqueue", queued_at, || {
                             proxy.send(UserEvent::Dispatch(events));

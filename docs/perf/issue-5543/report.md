@@ -19,9 +19,10 @@ unchanged. This reuses the existing snapshots and worker instead of adding a
 cache layer or extending the timeout.
 
 Telemetry uses target `gwt::knowledge_load`, keyed by window and request IDs:
-`queue`, `cache_read`, `assembly`, `dispatch_enqueue`, `related_assembly`, and
-`send`. The first-response stages record elapsed and duration values and mark
-deadline overruns. `send` measures serialization and socket-queue enqueue,
+`queue`, `cache_read`, `assembly`, `dispatch_enqueue`, `dispatch_wait`,
+`related_assembly`, and `send`. The first-response stages record elapsed and
+duration values and mark deadline overruns, including the wait between worker
+dispatch and transport processing. `send` measures serialization and socket-queue enqueue,
 not socket-write completion; the browser measures actual receipt. Worker logs
 can be project-scoped, while transport logs can be in the global log directory.
 
@@ -47,7 +48,7 @@ requests. A `list_windows` response must arrive while those requests are
 pending. Dark mode observes bounded bursts for at least one hour; light mode
 observes at least one minute. Every load must succeed within the real
 60-second budget, with zero console/page errors and zero timeout-ledger rows.
-The first request must have completed timing records for all five initial
+The first request must have completed timing records for all six initial
 response stages. JSON, screenshots and raw logs remain in the fixture's local
 artifact directory; the canonical run records the source fingerprint and
 measured headed results.
@@ -58,6 +59,10 @@ concurrent reads, not a repeat of the installed v9.123.2 GUI with twelve live
 agent panes. The baseline and fixed-source runs share input data; their host
 load and OS filesystem-cache state are not controlled. Do not attribute all
 wall-time differences to CPU savings or claim production-fleet coverage.
+The controlled run supports the root-cause fix and responsiveness evidence;
+it does not complete AC-2's original twelve-live-agent operating condition.
+Keep that criterion and the owner Issue open until deployed-fleet evidence
+exists. Deliver this independently usable source slice without a closing keyword.
 
 User Verification Result: n/a (autonomous). The separate Agent Visual Check
 is established by the fresh canonical headed run, not by this document.
