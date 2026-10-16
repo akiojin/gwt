@@ -5628,6 +5628,8 @@ pub enum MonitorNotificationTransition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutonomousNotice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_transition_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification_transition: Option<MonitorNotificationTransition>,
     /// Toast level: `info` | `warn` | `error` | `done`.
     pub level: String,
@@ -16439,6 +16441,8 @@ impl IssueMonitorState {
         }
         self.pending_autonomous_notices.push_back(AutonomousNotice {
             notification_transition,
+            notification_transition_id: notification_transition
+                .map(|_| uuid::Uuid::new_v4().to_string()),
             level: level.to_string(),
             issue_number,
             message: message.into(),
@@ -16464,6 +16468,7 @@ impl IssueMonitorState {
         }
         self.pending_autonomous_notices.push_back(AutonomousNotice {
             notification_transition: None,
+            notification_transition_id: None,
             level: level.to_string(),
             issue_number,
             message,

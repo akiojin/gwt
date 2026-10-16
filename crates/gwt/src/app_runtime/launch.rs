@@ -5751,7 +5751,7 @@ impl AppRuntime {
         Ok(())
     }
 
-    fn install_process_window(
+    pub(crate) fn install_process_window(
         &mut self,
         id: &str,
         incarnation: u64,
@@ -5785,6 +5785,11 @@ impl AppRuntime {
         // status event exposes the pane. The registry owns only a cloned Arc;
         // the process owner remains WindowRuntime.
         self.runtimes.insert(id.to_string(), runtime);
+        // PTY liveness alone is not Agent Running. Use the same composed state
+        // as later hooks/status events, with the installed runtime incarnation.
+        if let Some(status) = self.window_status(id) {
+            self.observe_notification_transition_at(id, status, std::time::Instant::now());
+        }
         self.register_pty_writer(id, session_snapshot);
         // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
         // the pre-PTY failure guard.

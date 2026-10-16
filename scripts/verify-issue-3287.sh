@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Issue #3287: isolated checkout UI verification. Build gwt/gwtd first.
+# Issue #3287: isolated checkout notification verification. Build gwt/gwtd first.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -35,12 +35,20 @@ fi
 # This shell-only check needs the runtime input above; GitHub authentication
 # is forwarded below. Provider and SSH credential trees are unnecessary.
 jq -n --arg root "$REPO_ROOT" \
-  '{tabs:[{id:"issue-3287",title:"Issue 3287",project_root:$root,kind:"git"}],recent_projects:[]}' \
+  '{tabs:[{id:"issue-3287",title:"Issue 4540 Check",project_root:$root,kind:"git"}],recent_projects:[]}' \
   > "$CHECK_HOME/.gwt/session.json"
 CHECK_REPO_HASH="$(
   printf '%s\n' '{"schema_version":1,"operation":"issue.monitor.status","params":{}}' \
     | "$CHECKOUT_GWTD" | jq -er 'select(.ok == true) | .project_store.hash'
 )"
+
+# The existing metadata live regression requires one restored stopped Agent.
+# This fixture has no Session/command and never starts a provider process.
+mkdir -p "$CHECK_HOME/.gwt/projects/$CHECK_REPO_HASH"
+jq -n '{viewport:{x:0,y:0,zoom:1},windows:[{
+  id:"metadata-agent",title:"Metadata fixture",preset:"agent",
+  geometry:{x:40,y:40,width:640,height:420},z_index:1,status:"stopped"
+}],next_z_index:2}' > "$CHECK_HOME/.gwt/projects/$CHECK_REPO_HASH/workspace.json"
 
 # browser-check-agent-seed-begin
 CHECK_PROJECT_STATE="$CHECK_HOME/.gwt/projects/${CHECK_REPO_HASH:?Resolve project_store.hash first}/project-state"
@@ -242,11 +250,21 @@ fi
 # Keep the runner on the real HOME so its pinned browser cache is available.
 # Only the owned checkout process receives CHECK_HOME. Extra arguments include
 # canonical verify.run's --headed and embedded reporter.
+if [ -n "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" ]; then
+  CHECK_SPECS=("$GWT_PLAYWRIGHT_LIVE_SPEC")
+else
+  CHECK_SPECS=(
+    crates/gwt/playwright/tests/agent-state-notifications.spec.ts
+    crates/gwt/playwright/tests/project-notifications.spec.ts
+    crates/gwt/playwright/tests/project-page-metadata.spec.ts
+  )
+fi
 GWT_PLAYWRIGHT_BASE_URL="$CHECK_URL" GWT_PLAYWRIGHT_CHECK_HOME="$CHECK_HOME" \
   GWT_PLAYWRIGHT_PROJECT_ROOT="$REPO_ROOT" \
   GWT_PLAYWRIGHT_GWTD="$CHECKOUT_GWTD" GWT_PLAYWRIGHT_PROJECT_HASH="$CHECK_REPO_HASH" \
+  GWT_PLAYWRIGHT_PROJECT_KEY="$CHECK_REPO_HASH" \
   bash "$REPO_ROOT/scripts/run-visual-tests.sh" \
-    --workers=1 "${GWT_PLAYWRIGHT_LIVE_SPEC:-crates/gwt/playwright/tests/project-hub.spec.ts}" "$@"
+    --workers=1 "${CHECK_SPECS[@]}" "$@"
 
 if ! kill -0 "$CHECK_KEEPALIVE_PID" 2>/dev/null; then
   cat "$CHECK_HOME/keepalive.log" >&2

@@ -8,6 +8,7 @@ export function createProjectPageMetadata({
   let name = "Project";
   let aggregate = { running_count: 0, block_count: 0, error_count: 0, unread: false };
   let latestRevision = -1;
+  let attentionSyncPending = false;
   function render() {
     if (!project) {
       documentRef.title = "gwt — Hub";
@@ -37,6 +38,15 @@ export function createProjectPageMetadata({
     } catch { /* Favicon support is optional; title and acknowledgement continue. */ }
   }
   function setProjectName(value) { name = String(value || "Project"); render(); }
+  function reportAttention() {
+    if (!project) return;
+    send({
+      kind: "project_client_attention",
+      visible: documentRef.visibilityState === "visible",
+      focused: documentRef.hasFocus?.() === true,
+      notification_permission: windowRef.Notification?.permission || "unsupported",
+    });
+  }
   function acknowledge() {
     const visible = documentRef.visibilityState === "visible";
     const focused = documentRef.hasFocus?.() === true;
@@ -49,19 +59,37 @@ export function createProjectPageMetadata({
     latestRevision = value.revision;
     aggregate = value;
     render();
+    if (attentionSyncPending) {
+      attentionSyncPending = false;
+      reportAttention();
+    }
     acknowledge();
   }
   function resetConnection() {
     latestRevision = -1;
     aggregate = { ...aggregate, unread: false };
+    // A Recent Project may materialize after the initial socket-open report.
+    attentionSyncPending = true;
   }
-  documentRef.addEventListener("visibilitychange", acknowledge);
-  windowRef.addEventListener("focus", acknowledge);
+  function attentionChanged() {
+    reportAttention();
+    acknowledge();
+  }
+  documentRef.addEventListener("visibilitychange", attentionChanged);
+  windowRef.addEventListener("focus", attentionChanged);
+  windowRef.addEventListener("blur", reportAttention);
+  try {
+    if (project && windowRef.navigator?.permissions?.query) {
+      windowRef.navigator.permissions.query({ name: "notifications" })
+        .then((status) => status.addEventListener("change", reportAttention))
+        .catch(() => {});
+    }
+  } catch { /* Permission observation is optional and must never prompt. */ }
   if (windowRef.MutationObserver) {
     new windowRef.MutationObserver(render).observe(documentRef.documentElement, {
       attributes: true, attributeFilter: ["data-theme"],
     });
   }
   render();
-  return { setProjectName, update, resetConnection };
+  return { setProjectName, update, resetConnection, reportAttention };
 }
