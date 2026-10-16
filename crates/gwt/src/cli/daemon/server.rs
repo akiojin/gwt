@@ -155,6 +155,22 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     endpoint_path: PathBuf,
     writer: &mut W,
 ) -> Result<i32, SpecOpsError> {
+    // The daemon is a separate process from the GUI, so it needs its own
+    // subscriber and writer guard for scan diagnostics to reach disk.
+    let _log_handles = match gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(
+        gwt_core::paths::gwt_logs_dir(),
+    )) {
+        Ok(mut handles) => {
+            // No GUI consumes this channel in the daemon. Close it instead of
+            // retaining every forwarded log event for the process lifetime.
+            drop(handles.take_ui_rx());
+            Some(handles)
+        }
+        Err(error) => {
+            eprintln!("gwtd daemon: persistent logging unavailable: {error}");
+            None
+        }
+    };
     // Resolve before anything is persisted or announced: a runtime root
     // longer than `sun_path` must surface as a diagnosis here rather than
     // as a bare bind failure after the endpoint file already advertised an
@@ -1289,19 +1305,23 @@ fn spawn_issue_monitor_worker_with_lease(
                     in_flight_scan = None;
                     match scan_result {
                         Ok(Ok(scanned_monitor)) => {
-                            crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
-                                &mut monitor,
-                                &scope.project_root,
-                            );
-                            if accept_completed_issue_monitor_scan(
-                                &prefs_path,
-                                &mut monitor,
-                                scanned_monitor,
-                                captured_revision,
-                                revision,
-                                captured_authority_epoch,
-                                captured_deadline,
-                            ) {
+                            let accepted = {
+                                let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(captured_deadline);
+                                crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+                                    &mut monitor,
+                                    &scope.project_root,
+                                );
+                                accept_completed_issue_monitor_scan(
+                                    &prefs_path,
+                                    &mut monitor,
+                                    scanned_monitor,
+                                    captured_revision,
+                                    revision,
+                                    captured_authority_epoch,
+                                    captured_deadline,
+                                )
+                            };
+                            if accepted {
                                 let Some(next_revision) = revision.checked_add(1) else {
                                     tracing::error!("issue monitor revision exhausted; stopping worker");
                                     break;
@@ -1467,7 +1487,7 @@ fn spawn_issue_monitor_worker_with_lease(
                 }
                 _ = claim_heartbeat_interval.tick() => {
                     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
+                        gwt_core::operation_deadline::now() + ISSUE_MONITOR_ADMISSION_TIMEOUT,
                     );
                     let now = chrono::Utc::now()
                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1479,6 +1499,9 @@ fn spawn_issue_monitor_worker_with_lease(
                         .any(|effect| matches!(effect.payload,
                             crate::IssueMonitorEffectPayload::RenewClaim { .. }));
                     if !active_generations.is_empty() {
+                        let _prefs_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                            gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
+                        );
                         let recovery_baseline = monitor.prefs();
                         let mut candidate = monitor.clone();
                         let prepared = crate::mutate_issue_monitor_prefs_recovering(
@@ -1531,6 +1554,9 @@ fn spawn_issue_monitor_worker_with_lease(
                             publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                         }
                         scan_requested = true;
+                        // A timed-out blocking scan retains single-flight ownership.
+                        // Reuse bounded admission to refill without a GUI ScanNow.
+                        admission_requested |= in_flight_scan.as_ref().is_some_and(|scan| scan.watchdog_fired);
                     }
                     effect_execution_requested = !monitor.pending_effects().is_empty();
                     if in_flight_scan.is_some() {
@@ -4267,6 +4293,9 @@ fn expire_daemon_windowless_launches(
     monitor: &mut crate::IssueMonitorState,
     project_root: &Path,
 ) -> bool {
+    let _observation_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + ISSUE_MONITOR_SCAN_TIMEOUT,
+    );
     crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
         monitor,
         project_root,
@@ -4362,6 +4391,7 @@ fn commit_issue_monitor_scan_if_current(
     mut scanned: crate::IssueMonitorState,
     captured_authority_epoch: u64,
 ) -> bool {
+    let _timing = crate::issue_monitor_worker::IssueMonitorScanTiming::start("durable-commit");
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
     );
@@ -4682,6 +4712,12 @@ fn spawn_issue_monitor_effect(
     let receipt = effect.clone();
     let handle = tokio::task::spawn_blocking(move || {
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        let _timing =
+            crate::issue_monitor_worker::IssueMonitorScanTiming::start(match &effect.payload {
+                crate::IssueMonitorEffectPayload::AcquireClaim { .. } => "claim-acquisition",
+                crate::IssueMonitorEffectPayload::RenewClaim { .. } => "claim-renewal",
+                _ => "remote-effect",
+            });
         #[cfg(all(test, unix))]
         if let (Some(started), Some(release)) = (
             std::env::var_os("GWT_TEST_EFFECT_BEFORE_PERMIT_STARTED"),
