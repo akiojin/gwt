@@ -55,7 +55,7 @@ test.describe.serial("Release Notes window (live backend)", () => {
 
   test("clicking #app-version opens the Release Notes window with the label target focused", async ({
     page,
-  }) => {
+  }, info) => {
     const label = page.locator("#app-version");
     await expect(label).toBeVisible();
     const labelText = (await label.textContent())?.trim() ?? "";
@@ -88,6 +88,7 @@ test.describe.serial("Release Notes window (live backend)", () => {
     await expect(
       window.locator(".release-notes-content h2"),
     ).toHaveText(`v${expectedVersion}`);
+    await page.screenshot({ path: info.outputPath("release-notes.png") });
   });
 
   test("selecting a different version in the sidebar updates the content pane", async ({
@@ -113,16 +114,27 @@ test.describe.serial("Release Notes window (live backend)", () => {
     ).toHaveText(`v${target}`);
   });
 
-  test("rendered notes omit merge and develop-sync noise", async ({ page }) => {
+  test("rendered notes recover from an error without merge or develop-sync noise", async ({ page }) => {
     await page.locator("#app-version").click();
     const window = page.locator("#release-notes-window");
     await expect(window).toBeVisible();
     await expect(window.locator(".release-notes-content")).not.toContainText(
       /Merge .*develop|develop sync|sync develop|develop.*(sync|同期)|Developを同期/i,
     );
+    await page.evaluate(() => {
+      globalThis.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "release_notes_error", message: "Release notes fixture unavailable" },
+      }));
+    });
+    await expect(window.locator(".release-notes-empty")).toContainText("Release notes fixture unavailable");
+    await expect(window.locator(".release-notes-sidebar-item")).toHaveCount(0);
+    await page.locator("#app-version").click();
+    await expect(window.locator(".release-notes-empty")).toHaveCount(0);
+    await expect(window.locator(".release-notes-sidebar-item.is-selected")).toHaveCount(1);
+    await expect(window.locator(".release-notes-content h2")).toHaveText(`v${CURRENT_VERSION}`);
   });
 
-  test("close button removes the window and isOpen reflects that", async ({
+  test("close and Escape release the window and allow the same controller to reopen", async ({
     page,
   }) => {
     await page.locator("#app-version").click();
@@ -132,6 +144,14 @@ test.describe.serial("Release Notes window (live backend)", () => {
     });
     await window.locator(".release-notes-close").click();
     await expect(window).toHaveCount(0);
+    await page.locator("#app-version").click();
+    await expect(window).toBeVisible();
+    await window.press("Escape");
+    await expect(window).toHaveCount(0);
+    await expect(page.locator("#app-version")).toBeFocused();
+    await page.locator("#app-version").press("Enter");
+    await expect(window).toHaveCount(1);
+    await expect(window.locator(".release-notes-content h2")).toHaveText(`v${CURRENT_VERSION}`);
   });
 
   test("keyboard activation (Enter on #app-version) opens the window", async ({

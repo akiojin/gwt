@@ -2,6 +2,33 @@ use super::{AppEventQueue, ProjectContext, UserEvent};
 use gwt::{FrontendEvent, KnowledgeKind, WindowGeometry};
 
 #[test]
+fn perf_pending_count_counts_actual_queued_events_and_never_waits_for_a_writer() {
+    let mut queue = AppEventQueue::default();
+    queue.push_back(UserEvent::RuntimeDaemonEnsureTick).unwrap();
+    queue
+        .push_back(frontend(FrontendEvent::FrontendReady))
+        .unwrap();
+    queue
+        .push_back(grid("client", "window", 80, std::time::Instant::now()))
+        .unwrap();
+    assert_eq!(queue.len(), 3);
+    queue.pop_front();
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.close().len(), 2);
+    assert_eq!(queue.len(), 0);
+
+    let (proxy, events) = super::AppEventProxy::stub();
+    proxy
+        .send_event(UserEvent::RuntimeDaemonEnsureTick)
+        .unwrap();
+    assert_eq!(proxy.pending_count(), Some(1));
+    let held = events.lock().unwrap();
+    assert_eq!(proxy.pending_count(), None);
+    drop(held);
+    assert_eq!(proxy.pending_count(), Some(1));
+}
+
+#[test]
 fn explicit_update_handoff_overtakes_eight_panes_output_backlog() {
     let mut queue = AppEventQueue::default();
     for pane in 0..8 {

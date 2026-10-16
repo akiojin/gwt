@@ -728,12 +728,37 @@ impl From<&gwt_config::GitHubBudgetConfig> for ThrottlePolicy {
     }
 }
 
-/// Whether the snapshot's probe is missing or older than the policy allows —
+/// Whether the probe is missing, older than policy allows, or spans a reset —
 /// the caller should take a fresh (free) probe before deciding.
 pub fn probe_is_stale(snapshot: &BudgetSnapshot, policy: &ThrottlePolicy) -> bool {
     snapshot
         .probe_age_secs
         .is_none_or(|age| age > policy.probe_max_age_secs)
+        || snapshot.probe.as_ref().is_some_and(|probe| {
+            probe
+                .resources
+                .values()
+                .any(|window| window.reset_at <= snapshot.taken_at)
+        })
+}
+
+fn fresh_resource_window<'a>(
+    snapshot: &'a BudgetSnapshot,
+    resource: &str,
+    policy: &ThrottlePolicy,
+    now: DateTime<Utc>,
+) -> Option<&'a ResourceWindow> {
+    snapshot
+        .probe
+        .as_ref()?
+        .resources
+        .get(resource)
+        .filter(|window| {
+            window.reset_at > now
+                && snapshot
+                    .probe_age_secs
+                    .is_some_and(|age| age <= policy.probe_max_age_secs)
+        })
 }
 
 /// Why a non-essential call against `quota` should be skipped right now, or
@@ -760,21 +785,15 @@ pub fn throttle_reason(
             (block.reset_at - now).num_seconds().max(0)
         ));
     }
-    if !probe_is_stale(snapshot, policy) {
-        if let Some(window) = snapshot
-            .probe
-            .as_ref()
-            .and_then(|probe| probe.resources.get(resource))
-        {
-            let reserve = policy.reserve_for(window.limit);
-            if window.remaining < reserve {
-                return Some(format!(
+    if let Some(window) = fresh_resource_window(snapshot, resource, policy, now) {
+        let reserve = policy.reserve_for(window.limit);
+        if window.remaining < reserve {
+            return Some(format!(
                     "budget_reserve: resource={resource} remaining={} reserve={reserve} limit={} reset_at={}",
                     window.remaining,
                     window.limit,
                     window.reset_at.to_rfc3339_opts(SecondsFormat::Secs, true)
                 ));
-            }
         }
     }
     if let Some(local) = snapshot.local.get(resource) {
@@ -844,7 +863,7 @@ pub struct ResourceBudgetStatus {
     /// The [`throttle_reason`], when throttled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// End of the persisted refusal window, when one is open.
+    /// End of the active refusal or reserve window, when one is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff_until: Option<DateTime<Utc>>,
     /// Seconds until that window ends.
@@ -885,15 +904,19 @@ pub fn status_by_resource(
                 .blocks
                 .get(resource)
                 .filter(|block| block.reset_at > now);
+            let backoff_until = window.map(|block| block.reset_at).or_else(|| {
+                fresh_resource_window(snapshot, resource, policy, now)
+                    .filter(|window| window.remaining < policy.reserve_for(window.limit))
+                    .map(|window| window.reset_at)
+            });
             let local = snapshot.local.get(resource).cloned().unwrap_or_default();
             Some((
                 resource.to_string(),
                 ResourceBudgetStatus {
                     throttled: reason.is_some(),
                     reason,
-                    backoff_until: window.map(|block| block.reset_at),
-                    retry_after_secs: window
-                        .map(|block| (block.reset_at - now).num_seconds().max(0)),
+                    backoff_until,
+                    retry_after_secs: backoff_until.map(|until| (until - now).num_seconds().max(0)),
                     consecutive_refusals: window
                         .map(|block| block.consecutive_refusals)
                         .unwrap_or(0),

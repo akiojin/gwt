@@ -475,7 +475,13 @@ fn monitor_config_omits_removed_trigger_label_but_reads_legacy_values() {
     });
     let restored: IssueMonitorConfig =
         serde_json::from_value(legacy).expect("legacy config remains readable");
-    assert_eq!(restored, IssueMonitorConfig::default());
+    assert_eq!(
+        restored,
+        IssueMonitorConfig {
+            poll_interval_secs: 300,
+            ..IssueMonitorConfig::default()
+        }
+    );
 }
 
 #[test]

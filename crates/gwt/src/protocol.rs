@@ -388,6 +388,11 @@ impl AgentResourceSettings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    ProjectClientAttention {
+        visible: bool,
+        focused: bool,
+        notification_permission: crate::project_notifications::NotificationPermission,
+    },
     RetryWorkspaceStateLoad,
     ProjectAggregateAck {
         revision: u64,
@@ -541,8 +546,9 @@ pub enum FrontendEvent {
         rows: u16,
     },
     ListWindows,
-    /// Authenticated Agent-only self-naming; the principal supplies all scope.
+    /// Fetch the gwt-assigned identity; the principal supplies all scope.
     PaneName {
+        #[serde(default)]
         candidate: String,
         request_id: String,
     },
@@ -1271,8 +1277,7 @@ pub enum FrontendEvent {
     /// for agent-session Works); `close_kind` is `"done"` or `"discarded"`.
     /// Done records a terminal completion, Discarded a terminal discard; both
     /// remove the Work from the active surface. The backend blocks the close
-    /// when the owning agent session is still live (the worktree is only
-    /// removed for Paused Works that have no running agent).
+    /// when the owning agent session is still live. Worktree and branch remain.
     CloseWork {
         work_id: String,
         close_kind: String,
@@ -1991,6 +1996,9 @@ pub enum BackendEvent {
     ProjectAgentAggregate {
         aggregate: ProjectAgentAggregate,
     },
+    ProjectNotification {
+        notification: crate::project_notifications::NotificationIntent,
+    },
     HubState {
         hub: HubStateView,
     },
@@ -2134,6 +2142,15 @@ pub enum BackendEvent {
         window_id: String,
         reason: Option<String>,
     },
+    WorkCloseResult {
+        work_id: String,
+        close_kind: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        changed: Option<bool>,
+        retryable: bool,
+        error: Option<String>,
+    },
     /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
     /// active project tab.
     ///
@@ -2200,6 +2217,8 @@ pub enum BackendEvent {
         message: String,
     },
     IssueMonitorToast {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notification_transition_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         notification_transition: Option<MonitorNotificationTransition>,
         level: String,
@@ -2883,6 +2902,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "project_notification",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
         "hub_state",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -2979,6 +3003,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "pane_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "work_close_result",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
@@ -3403,6 +3432,7 @@ impl BackendEvent {
             BackendEvent::CloseProjectError { .. } => "close_project_error",
             BackendEvent::ProjectClosed { .. } => "project_closed",
             BackendEvent::ProjectAgentAggregate { .. } => "project_agent_aggregate",
+            BackendEvent::ProjectNotification { .. } => "project_notification",
             BackendEvent::HubState { .. } => "hub_state",
             BackendEvent::ProjectNotFound { .. } => "project_not_found",
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
@@ -3428,6 +3458,7 @@ impl BackendEvent {
             }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
+            BackendEvent::WorkCloseResult { .. } => "work_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
@@ -3570,6 +3601,18 @@ pub enum KnowledgePhaseUpdateResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_client_attention_accepts_only_known_permissions() {
+        let wire = serde_json::json!({
+            "kind": "project_client_attention", "visible": false, "focused": true,
+            "notification_permission": "granted"
+        });
+        assert!(serde_json::from_value::<super::FrontendEvent>(wire.clone()).is_ok());
+        let mut invalid = wire;
+        invalid["notification_permission"] = serde_json::json!("allow");
+        assert!(serde_json::from_value::<super::FrontendEvent>(invalid).is_err());
+    }
+
     use gwt_core::{
         coordination::{
             AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
@@ -3933,6 +3976,28 @@ mod tests {
         assert_eq!(event.event_kind(), "pane_send_result");
 
         let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    /// Issue #4249 AC-19: the close result reaches its origin client reliably.
+    #[test]
+    fn work_close_result_has_client_scoped_snapshot_policy() {
+        let event = BackendEvent::WorkCloseResult {
+            work_id: "work-1".into(),
+            close_kind: "done".into(),
+            ok: false,
+            changed: None,
+            retryable: true,
+            error: Some("refresh and retry".into()),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "work_close_result");
+        assert!(value.get("changed").is_none());
+        let policy = event.delivery_policy();
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
         assert_eq!(
             policy.backpressure,

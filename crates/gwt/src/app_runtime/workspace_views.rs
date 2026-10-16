@@ -291,6 +291,7 @@ struct ActiveWorkProjectionProjectRefresh {
     running_generation: Option<u64>,
     pending: Option<(u64, ActiveWorkProjectionPrepareInput)>,
     memo: Option<Arc<ActiveWorkProjectionMemo>>,
+    close_cache_current: bool,
 }
 
 #[derive(Default)]
@@ -4236,6 +4237,7 @@ impl AppRuntime {
             broker.next_generation = broker.next_generation.wrapping_add(1).max(1);
             let generation = broker.next_generation;
             let project = broker.projects.entry(key).or_default();
+            project.close_cache_current = false;
             if input.profile_context.is_none() {
                 // A normal refresh may supersede a pending RuntimeHook build,
                 // but it must not erase the profile attribution before that
@@ -4312,6 +4314,7 @@ impl AppRuntime {
         };
 
         if accept {
+            let close_cache_current = prepared.load_error.is_none() && prepared.result.is_ok();
             if let Some(error) = prepared.load_error {
                 self.proxy.for_project(prepared.context.clone()).send(
                     UserEvent::WorkspaceStateLoadFailed {
@@ -4362,6 +4365,14 @@ impl AppRuntime {
                     );
                 }
             }
+            if let Some(project) = self
+                .active_work_projection_refresh
+                .borrow_mut()
+                .projects
+                .get_mut(&key)
+            {
+                project.close_cache_current = close_cache_current;
+            }
         }
 
         if let Some((generation, mut input)) = next {
@@ -4388,6 +4399,12 @@ impl AppRuntime {
                 .flatten()?;
         let view = prepared.projection;
         self.invalidate_workspace_projection_patch(&tab.id);
+        {
+            let mut broker = self.active_work_projection_refresh.borrow_mut();
+            let project = broker.projects.entry(tab.project_root.clone()).or_default();
+            project.close_cache_current = prepared.memo.is_some();
+            project.memo = prepared.memo;
+        }
         self.project_state_for_tab(&tab.id)
             .expect("open project state")
             .active_work_projection_payload_cache
@@ -4399,6 +4416,93 @@ impl AppRuntime {
             .borrow_mut()
             .insert(tab.id.clone(), view.clone());
         Some(view)
+    }
+
+    /// Use the accepted exact child decision; never build a disk projection on
+    /// the Host event loop to authorize a close.
+    pub(super) fn cached_work_close_target(
+        &self,
+        context: &super::ProjectContext,
+        work_id: &str,
+    ) -> Result<gwt::ActiveWorkspaceWorkView, (String, bool)> {
+        let state = self
+            .project_state(context)
+            .ok_or_else(|| ("project is no longer current".into(), false))?;
+        let fresh = state.workspace_state_notice.is_none() && {
+            let broker = self.active_work_projection_refresh.borrow();
+            !broker
+                .pending_cache_evictions
+                .contains(&context.project_root)
+                && broker
+                    .projects
+                    .get(&context.project_root)
+                    .is_some_and(|project| {
+                        project.close_cache_current
+                            && project.running_generation.is_none()
+                            && project.pending.is_none()
+                            && project.memo.as_ref().is_some_and(|memo| {
+                                let works =
+                                    gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(
+                                        &context.project_root,
+                                    );
+                                [works.with_extension("detachments.json"), works]
+                                    .iter()
+                                    .all(|path| {
+                                        memo.fingerprint
+                                            .files
+                                            .iter()
+                                            .find(|(cached, _)| cached == path)
+                                            .is_some_and(|(_, stamp)| {
+                                                projection_dependency_stamp(path).ok().as_ref()
+                                                    == Some(stamp)
+                                            })
+                                    })
+                            })
+                    })
+        };
+        let target = fresh
+            .then(|| {
+                state
+                    .active_work_projection_cache
+                    .borrow()
+                    .get(&context.tab_id)
+                    .and_then(|view| {
+                        let mut matches = view
+                            .active_works
+                            .iter()
+                            .flat_map(|row| &row.works)
+                            .filter(|work| work.id == work_id);
+                        let target = matches.next()?.clone();
+                        matches.next().is_none().then_some(target)
+                    })
+            })
+            .flatten();
+        if !fresh
+            || !state
+                .active_work_projection_cache
+                .borrow()
+                .contains_key(&context.tab_id)
+        {
+            self.schedule_active_work_projection_refresh(&context.project_root, None);
+            return Err(("Work close eligibility is unavailable or stale; refresh scheduled, retry after the Active Work view refreshes".into(), true));
+        }
+        let target = target.ok_or_else(|| {
+            (
+                "exact Work is not present in the current project Active Work view".into(),
+                false,
+            )
+        })?;
+        if !target.manual_close_allowed
+            || target.agents.iter().any(|agent| {
+                matches!(
+                    agent.status_category.as_str(),
+                    "active" | "running" | "blocked"
+                )
+            })
+        {
+            return Err((format!("Work close refused: manual_close_allowed must be true and active_agents must be zero ({})", target.close_blocked_reason.as_deref().unwrap_or("not eligible")), false));
+        }
+        Ok(target)
     }
 
     /// Apply the accepted in-memory stop to the already materialized Work view
@@ -5026,6 +5130,7 @@ impl AppRuntime {
                 .get_mut(&tab.project_root)
             {
                 project.memo = None;
+                project.close_cache_current = false;
             }
         }
         if let Some(state) = self.project_state_for_tab(tab_id) {

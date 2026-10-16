@@ -162,10 +162,10 @@ process.exit(2);`,
   return { root, targetDir, profdata, cargo, output, currentObject };
 }
 
-function run(box, extraArgs = ["--workspace", "--all-features"]) {
+function run(box, extraArgs = ["--workspace", "--all-features"], ownArgs = []) {
   const result = spawnSync(
     process.execPath,
-    [SCRIPT, "--output-path", box.output, "--", ...extraArgs],
+    [SCRIPT, "--output-path", box.output, ...ownArgs, "--", ...extraArgs],
     {
       encoding: "utf8",
       env: {
@@ -188,6 +188,21 @@ function run(box, extraArgs = ["--workspace", "--all-features"]) {
 
 const reportCalls = (calls) => calls.filter((args) => args[1] === "report");
 
+test("nextest covers the same workspace without forwarding runner flags to artifact enumeration", () => {
+  const box = sandbox({ "gwt-1-111_0.profraw": profile(4096) });
+  const result = run(box, ["--workspace", "--all-features"], ["--nextest"]);
+  assert.equal(result.status, 0, result.text);
+  assert.deepEqual(
+    result.calls.find((args) => args.includes("--no-report")),
+    ["llvm-cov", "nextest", "--no-report", "--retries", "0", "--workspace", "--all-features"],
+  );
+  const build = result.calls.find((args) => args[0] === "test");
+  assert.ok(build.includes("--workspace") && build.includes("--all-features"));
+  assert.ok(!build.includes("--nextest") && !build.includes("--retries"));
+  assert.deepEqual(result.calls[0], ["llvm-cov", "clean", "--workspace", "--profraw-only"]);
+  assert.equal(reportCalls(result.calls).length, 1);
+});
+
 test("inspectProfiles classifies healthy, truncated, empty, malformed, and corrupt profiles", async () => {
   const box = sandbox({});
   const write = (name, bytes) =>
@@ -200,6 +215,8 @@ test("inspectProfiles classifies healthy, truncated, empty, malformed, and corru
     profile(4096, { magic: Buffer.from("notaprof") }),
   );
   write("gwt-104-333_0.profraw", profile(4096, { readable: false }));
+  write("gwt-777_0.profraw", profile(4096));
+  write("gwt-777_1.profraw", profile(1024, { readable: false }));
 
   const report = await inspectProfiles(box.targetDir, box.profdata);
   const kinds = Object.fromEntries(
@@ -214,6 +231,8 @@ test("inspectProfiles classifies healthy, truncated, empty, malformed, and corru
     // Unreadable with a valid header, but no readable profile of the same
     // module proves the full length: not claimed as truncation.
     "gwt-104-333_0.profraw": "corrupt",
+    "gwt-777_0.profraw": "healthy",
+    "gwt-777_1.profraw": "truncated",
   });
 });
 
@@ -294,8 +313,8 @@ test("artifact enumeration failure never falls back to the old target inventory"
 
 test("(b) a truncated profile is reported apart from tests and re-aggregated once", () => {
   const box = sandbox({
-    "gwt-1-111_0.profraw": profile(4096),
-    "gwt-2-111_0.profraw": profile(1024, { readable: false }),
+    "gwt-111_0.profraw": profile(4096),
+    "gwt-111_1.profraw": profile(1024, { readable: false }),
   });
   const result = run(box, ["-p", "gwt-core", "-p", "gwt", "--all-features"]);
 
@@ -320,7 +339,7 @@ test("(b) a truncated profile is reported apart from tests and re-aggregated onc
   );
   assert.match(result.text, /RECOVERED \[profile-truncated\]/);
   assert.match(result.text, /tests passed/);
-  assert.match(result.text, /gwt-2-111_0\.profraw/);
+  assert.match(result.text, /gwt-111_1\.profraw/);
   const health = JSON.parse(
     fs.readFileSync(`${box.output}.profiles.json`, "utf8"),
   );
@@ -328,10 +347,10 @@ test("(b) a truncated profile is reported apart from tests and re-aggregated onc
   assert.equal(health.recovered, true);
   assert.deepEqual(
     health.damaged.map((entry) => entry.name),
-    ["gwt-2-111_0.profraw"],
+    ["gwt-111_1.profraw"],
   );
   assert.ok(
-    fs.existsSync(path.join(box.targetDir, "gwt-2-111_0.profraw")),
+    fs.existsSync(path.join(box.targetDir, "gwt-111_1.profraw")),
     "the damaged profile is kept as evidence",
   );
 });
@@ -350,12 +369,12 @@ test("(c) a malformed profile fails as profile damage without aggregating", () =
   assert.ok(!fs.existsSync(box.output));
 });
 
-test("a test failure is reported as a test failure and never aggregated", () => {
+test("a nextest failure is reported as a test failure and never aggregated", () => {
   const box = sandbox(
     { "gwt-1-111_0.profraw": profile(4096) },
     { testExit: 101 },
   );
-  const result = run(box);
+  const result = run(box, ["--workspace", "--all-features"], ["--nextest"]);
 
   assert.equal(result.status, 101, result.text);
   assert.equal(reportCalls(result.calls).length, 0);

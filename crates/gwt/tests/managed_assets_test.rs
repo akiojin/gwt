@@ -275,9 +275,8 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         "Claude and Codex must receive byte-identical coordination contracts"
     );
     assert!(
-        coordination_body
-            .contains(r#""operation":"pane.name","params":{"candidate":"<your candidate>"}"#),
-        "materialized guidance must require the Agent's own AI-generated candidate"
+        coordination_body.contains(r#""operation":"pane.name","params":{}"#),
+        "materialized guidance must read gwt's assigned name without an AI-generated candidate"
     );
     assert!(
         coordination_body.contains("\"operation\":\"workspace.update\""),
@@ -1006,7 +1005,9 @@ fn pm_guidance_mirrors_match_the_canonical_nonblocking_loop() {
             "Do not await or synchronously poll it",
             "outer wall-clock deadline of 5 seconds",
             "Never run `pane.send`",
-            "Do not call `pm.message.send`, `pane.send`, or any other input operation to select an option; only the human may resolve it in that pane",
+            "Provider approval prompts may be forwarded or answered only with explicit applicable instruction or approval scoped to the actual target and action",
+            "Without applicable authority, do not call `pm.message.send` or any other input operation to select an option; only the human may resolve that prompt in the pane",
+            "For an authorized response, use `pm.operation.execute` with `operation:\"pm.message.send\"` and the exact target `id` and response `text` in `params`. `pane.send` remains forbidden",
         ] {
             assert!(
                 normalized.contains(phrase),

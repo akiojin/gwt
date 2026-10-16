@@ -888,6 +888,7 @@ impl AppRuntime {
         };
         (vec![OutboundEvent::project(context.project_key, BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "error".to_string(),
             message: format!(
                 "Issue Monitor could not confirm the exact answered-session submit{durable_note}: {detail}"

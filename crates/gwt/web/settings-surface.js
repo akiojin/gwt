@@ -20,7 +20,7 @@
 //   function created by createProviderUsageSurface in app.js (its usage
 //   snapshot state lives there), so it must be injected rather than
 //   imported as a sibling module.
-// - indexStatusByProjectRoot: per-project index status Map owned by the
+// - getIndexStatus: per-project shared index status snapshot owned by the
 //   Project Index surface instance created in app.js (E3).
 import { createInteractionGuard } from "/interaction-guard.js";
 import { renderIndexSettingsPanel } from "/index-settings-panel.js";
@@ -539,6 +539,7 @@ export function switchSettingsTab(body, target, focus = false) {
 export function installSettingsOpenHandler(options) {
   const {
     document,
+    send,
     settingsWindowBodies,
     focusOrSpawnPreset,
     setPendingTarget,
@@ -559,6 +560,7 @@ export function installSettingsOpenHandler(options) {
     if (existingBody) {
       switchSettingsTab(existingBody, target, true);
       focusOrSpawnPreset("settings", { surfaceOwner });
+      if (target === "system") send({ kind: "get_update_settings" });
       return;
     }
     setPendingTarget(target, surfaceOwner);
@@ -573,7 +575,7 @@ export function createSettingsSurface({
   activeProjectTab,
   focusOrSpawnPreset,
   renderUsagePanel,
-  indexStatusByProjectRoot,
+  getIndexStatus,
   pmSettingsPanel,
   mountIssues,
 }) {
@@ -779,6 +781,19 @@ export function createSettingsSurface({
         statusKind: "",
       };
       const settingsWindowBodies = new Set();
+      const systemSettingsModel = createUiStateStore(systemSettingsState);
+      systemSettingsModel.subscribe(state => state, () => {
+        for (const body of Array.from(settingsWindowBodies)) {
+          if (!body.isConnected) {
+            settingsWindowBodies.delete(body);
+            continue;
+          }
+          const panel = body.querySelector(
+            "[data-system-settings-content]",
+          );
+          if (panel) renderSystemPanel(panel);
+        }
+      });
       let nextProfilesRequest = 0;
       const issueSettingsModel = createUiStateStore({});
       const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} });
@@ -1221,7 +1236,7 @@ export function createSettingsSurface({
       function renderIndexPanel(panel) {
         const activeProjectRoot = activeProjectTab()?.project_root || "";
         const status =
-          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+          getIndexStatus(activeProjectRoot);
         renderIndexSettingsPanel({
           panel,
           status,
@@ -1326,6 +1341,7 @@ export function createSettingsSurface({
 
       installSettingsOpenHandler({
         document,
+        send,
         settingsWindowBodies,
         focusOrSpawnPreset,
         activeProjectTab,
@@ -2105,16 +2121,7 @@ export function createSettingsSurface({
       }
 
       function renderSystemPanelInAllSettingsWindows() {
-        for (const body of Array.from(settingsWindowBodies)) {
-          if (!body.isConnected) {
-            settingsWindowBodies.delete(body);
-            continue;
-          }
-          const panel = body.querySelector(
-            "[data-system-settings-content]",
-          );
-          if (panel) renderSystemPanel(panel);
-        }
+        systemSettingsModel.update(() => systemSettingsState);
       }
 
       function renderSettingsAgentList() {

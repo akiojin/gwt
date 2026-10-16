@@ -26,7 +26,8 @@ use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::pr_status::{
-    run_gh_command, GhCliOutput, MergedPrDeliveries, MergedPrDelivery, MergedPrRow,
+    run_cached_list_command, run_gh_command, GhCliOutput, MergedPrDeliveries, MergedPrDelivery,
+    MergedPrRow,
 };
 
 /// Rows per REST page (GitHub's maximum).
@@ -93,6 +94,12 @@ pub fn store_path_for_repo_path(repo_path: &Path) -> PathBuf {
 pub fn sync_merged_pr_deliveries(repo_path: &Path) -> Result<MergedPrDeliveries> {
     let store_path = store_path_for_repo_path(repo_path);
     sync_with(&store_path, repo_path, run_gh_command).map(|outcome| outcome.deliveries)
+}
+
+/// Short-lived inventory cache for non-destructive Monitor reconciliation.
+pub fn sync_merged_pr_deliveries_for_monitor(repo_path: &Path) -> Result<MergedPrDeliveries> {
+    let store_path = store_path_for_repo_path(repo_path);
+    sync_with(&store_path, repo_path, run_cached_list_command).map(|outcome| outcome.deliveries)
 }
 
 /// Injectable core of [`sync_merged_pr_deliveries`].

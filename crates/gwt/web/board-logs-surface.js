@@ -29,6 +29,7 @@
 import {
   applyBoardMentionNotificationFocus,
   boardEntryAudienceLabels,
+  boardEntryAuthorLabel,
   boardEntryMentionsSelf,
   boardEntryOriginActionLabel,
   boardEntryOriginLabel,
@@ -51,6 +52,7 @@ export function createBoardLogsSurface({
   pushAlertToast,
   sendWindowFocus,
   focusOrSpawnPreset,
+  onOpenOriginAgent,
   activeWorkspace,
   activeProjectTab,
   projectWindowContextById,
@@ -627,6 +629,7 @@ export function createBoardLogsSurface({
           origin_session_id: originSessionId,
           bounds: visibleBounds(),
         });
+        onOpenOriginAgent?.(originSessionId);
       }
 
       function logMatchesQuery(entry, query) {
@@ -1252,7 +1255,7 @@ export function createBoardLogsSurface({
           }
           meta.appendChild(
             document.createTextNode(
-              `${entry.author || "Unknown"} · ${boardTimestampLabel(
+              `${boardEntryAuthorLabel(entry)} · ${boardTimestampLabel(
                 entry.updated_at || entry.created_at,
               )}`,
             ),
@@ -1275,7 +1278,7 @@ export function createBoardLogsSurface({
               "button",
               "board-reply-quote",
               parent
-                ? `Reply to ${parent.author || "Unknown"}: ${boardEntryPreview(parent)}`
+                ? `Reply to ${boardEntryAuthorLabel(parent)}: ${boardEntryPreview(parent)}`
                 : "Reply to earlier Board entry",
             );
             quote.type = "button";
@@ -1471,7 +1474,7 @@ export function createBoardLogsSurface({
               "span",
               "board-reply-banner-text",
               parent
-                ? `Replying to ${parent.author || "Unknown"} - ${boardEntryPreview(parent)}`
+                ? `Replying to ${boardEntryAuthorLabel(parent)} - ${boardEntryPreview(parent)}`
                 : "Replying to earlier Board entry",
             ),
           );

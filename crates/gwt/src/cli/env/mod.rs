@@ -134,6 +134,30 @@ pub trait CliEnv {
     /// Issue #3515: re-run a failed run or job. Returns the outcome line.
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
     fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String>;
+    fn github_repository(&self) -> io::Result<(String, String)>;
+    fn pm_settings_snapshot(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value>;
+    fn pm_settings_mutate(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+        before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value>;
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion>;
+    fn required_status_checks(&mut self, branch: &str) -> io::Result<serde_json::Value>;
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value>;
     /// Issue #4188: cancel an active run in the current repository.
     fn cancel_actions(&mut self, run_id: u64) -> io::Result<String>;
     /// Issue #4188: list queued runs, including runs without jobs.

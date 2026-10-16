@@ -23,8 +23,8 @@ test.describe("Launch entry points", () => {
     await expect(page.locator('.op-rail [data-cmd="intake-session"]')).toHaveCount(0);
     await expect(page.locator("#canvas-empty-intake")).toHaveCount(0);
     await expect(page.locator("#op-workspace-overview-entry")).toBeVisible();
-    await expect(page.locator("#canvas-empty-open-workspace")).toBeVisible();
-    await expect(page.locator("#canvas-empty-add-window")).toBeVisible();
+    await expect(page.locator("#split-surfaces")).toBeVisible();
+    await expect(page.locator("#canvas, #canvas-empty-open-workspace, #canvas-empty-add-window")).toHaveCount(0);
     expect(pageErrors).toEqual([]);
   });
 

@@ -136,6 +136,28 @@ pub fn fetch_issue_monitor_listing(owner: &str, repo: &str) -> Result<IssueListi
 }
 
 fn fetch_issue_page(path: &str) -> std::result::Result<String, String> {
+    fetch_issue_page_with_cache(
+        &gwt_core::paths::gwt_cache_dir().join("rest-list-pages"),
+        path,
+        chrono::Utc::now(),
+        || fetch_issue_page_uncached(path),
+    )
+}
+
+fn fetch_issue_page_with_cache(
+    cache_dir: &Path,
+    path: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    fetch: impl FnOnce() -> std::result::Result<String, String>,
+) -> std::result::Result<String, String> {
+    // Queue membership and payloads remain authoritative on every scan.
+    if path.contains("labels=gwt-queued") {
+        return fetch();
+    }
+    crate::gh_rest::cached_list_response_with(cache_dir, path, now, fetch)
+}
+
+fn fetch_issue_page_uncached(path: &str) -> std::result::Result<String, String> {
     let hub = gwt_core::process_console::global();
     let output = gwt_core::process_console::spawn_logged_blocking(
         &hub,
@@ -385,6 +407,49 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_5603_cached_general_listing_keeps_queue_payload_live() {
+        let cache = tempfile::tempdir().unwrap();
+        let start = chrono::Utc::now();
+        let mut general_calls = 0;
+        let mut queued_calls = 0;
+        for tick in 0..2 {
+            let listing = fetch_issue_monitor_listing_with("acme", "widgets", |path| {
+                fetch_issue_page_with_cache(
+                    cache.path(),
+                    path,
+                    start + chrono::Duration::seconds(tick * 30),
+                    || {
+                        let body = if path.contains("labels=gwt-queued") {
+                            queued_calls += 1;
+                            format!("queue revision {tick}")
+                        } else {
+                            general_calls += 1;
+                            "general revision".to_string()
+                        };
+                        Ok(format!(
+                            "HTTP/2.0 200 OK\n\r\n{}",
+                            serde_json::json!([{
+                                "number": 42, "title": "queued", "state": "open", "body": body,
+                                "labels": [{"name": "gwt-queued"}]
+                            }])
+                        ))
+                    },
+                )
+            })
+            .unwrap();
+            assert_eq!(
+                listing.issues[0].body.as_deref(),
+                Some(format!("queue revision {tick}").as_str())
+            );
+        }
+        assert_eq!(general_calls, 1);
+        assert_eq!(
+            queued_calls, 2,
+            "queue payloads bypass the general-list cache"
+        );
+    }
 
     #[test]
     fn parse_gh_issues_json_valid() {

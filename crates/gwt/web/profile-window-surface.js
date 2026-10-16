@@ -1,19 +1,13 @@
-// SPEC-3064 Phase 3 (E6e) — Profile window surface extracted from app.js.
-// Owns the per-window profile state map (config snapshot, draft editing
-// with debounced save, env var grid rows), the Profile window rendering,
-// the Profile window mount, and the profile_snapshot / profile_error
-// receive() bodies. Pure movement from app.js: behavior, DOM output, and
-// WS protocol are unchanged; the moved code keeps its original app.js
-// indentation. Textual changes are limited to: in-module self-references
-// through `*` became direct local calls
-// (hasEditableFocus → profileHasEditableFocus) and the mount's
-// focus_window send goes through sendWindowFocus.
+// Profiles share canonical snapshots and status through one data model.
+// Drafts, selection, focus, timers, and in-flight save control stay local.
 //
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
 // - createNode(tag, className, textContent): shared DOM helper.
 // - windowMap: workspace window element map owned by app.js.
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
+import { createUiStateStore } from "/ui-state-store.js";
+
 export function createProfileWindowSurface({
   send,
   createNode,
@@ -22,14 +16,31 @@ export function createProfileWindowSurface({
   sendWindowFocus,
 }) {
       const profileStateMap = new Map();
+      const profileModel = createUiStateStore({});
+      const profileSubscriptions = new Map();
+      const emptyProfileData = {
+        snapshot: null,
+        loading: false,
+        saving: false,
+        error: "",
+        reply: null,
+      };
+
+      function profileData(windowId) {
+        return profileModel.read()[windowId] || emptyProfileData;
+      }
+
+      function updateProfileData(windowId, changes) {
+        profileModel.update((current) => ({
+          ...current,
+          [windowId]: { ...emptyProfileData, ...current[windowId], ...changes },
+        }));
+      }
 
       function ensureProfileState(windowId) {
         if (!profileStateMap.has(windowId)) {
           profileStateMap.set(windowId, {
-            snapshot: null,
-            loading: false,
-            saving: false,
-            error: "",
+            windowId,
             selectedProfile: null,
             draft: null,
             saveTimer: null,
@@ -40,12 +51,11 @@ export function createProfileWindowSurface({
       }
 
       function requestProfile(windowId) {
-        const state = ensureProfileState(windowId);
-        if (state.loading) {
+        ensureProfileState(windowId);
+        if (profileData(windowId).loading) {
           return;
         }
-        state.loading = true;
-        state.error = "";
+        updateProfileData(windowId, { loading: true, error: "" });
         send({
           kind: "load_profile",
           id: windowId,
@@ -56,7 +66,7 @@ export function createProfileWindowSurface({
         for (const windowId of windowIds) {
           const state = profileStateMap.get(windowId);
           if (!state) continue;
-          state.loading = false;
+          updateProfileData(windowId, { loading: false });
           requestProfile(windowId);
         }
       }
@@ -275,7 +285,7 @@ export function createProfileWindowSurface({
       }
 
       function selectedProfileEntry(state) {
-        const profiles = state.snapshot?.profiles || [];
+        const profiles = profileData(state.windowId).snapshot?.profiles || [];
         if (!state.selectedProfile) {
           return null;
         }
@@ -312,22 +322,22 @@ export function createProfileWindowSurface({
         if (!status) {
           return;
         }
-        const state = ensureProfileState(windowId);
-        const profileCount = state.snapshot?.profiles?.length || 0;
-        const activeProfile = state.snapshot?.active_profile || "default";
-        status.textContent = state.error
-          ? state.error
-          : state.loading
-            ? state.saving
+        const data = profileData(windowId);
+        const profileCount = data.snapshot?.profiles?.length || 0;
+        const activeProfile = data.snapshot?.active_profile || "default";
+        status.textContent = data.error
+          ? data.error
+          : data.loading
+            ? data.saving
               ? "Saving profile..."
               : "Loading profiles..."
-            : state.saving
+            : data.saving
               ? "Saving profile..."
               : `Active ${activeProfile} · ${profileCount} profile${profileCount === 1 ? "" : "s"}`;
         status.className = "profile-status";
-        if (state.error) {
+        if (data.error) {
           status.classList.add("error");
-        } else if (state.loading || state.saving) {
+        } else if (data.loading || data.saving) {
           status.classList.add("info");
         }
       }
@@ -347,20 +357,15 @@ export function createProfileWindowSurface({
         const state = ensureProfileState(windowId);
         clearProfileSaveTimer(state);
         if (!state.draft) {
-          state.saving = false;
-          updateProfileStatus(windowId);
+          updateProfileData(windowId, { saving: false });
           return;
         }
         if (!profileDraftIsDirty(state)) {
-          state.saving = false;
-          updateProfileStatus(windowId);
+          updateProfileData(windowId, { saving: false });
           return;
         }
-        state.loading = true;
-        state.saving = true;
         state.saveInFlight = true;
-        state.error = "";
-        updateProfileStatus(windowId);
+        updateProfileData(windowId, { loading: true, saving: true, error: "" });
         const payload = profileDraftPayload(state.draft);
         send({
           kind: "save_profile",
@@ -376,8 +381,7 @@ export function createProfileWindowSurface({
       function scheduleProfileSave(windowId) {
         const state = ensureProfileState(windowId);
         clearProfileSaveTimer(state);
-        state.saving = true;
-        updateProfileStatus(windowId);
+        updateProfileData(windowId, { saving: true });
         state.saveTimer = setTimeout(() => {
           state.saveTimer = null;
           flushProfileSave(windowId);
@@ -394,9 +398,7 @@ export function createProfileWindowSurface({
         } else {
           clearProfileSaveTimer(state);
         }
-        state.loading = true;
-        state.error = "";
-        updateProfileStatus(windowId);
+        updateProfileData(windowId, { loading: true, error: "" });
         send({
           kind: "select_profile",
           id: windowId,
@@ -415,9 +417,7 @@ export function createProfileWindowSurface({
         if (!name) {
           return;
         }
-        state.loading = true;
-        state.error = "";
-        updateProfileStatus(windowId);
+        updateProfileData(windowId, { loading: true, error: "" });
         send({
           kind: "create_profile",
           id: windowId,
@@ -430,9 +430,7 @@ export function createProfileWindowSurface({
         if (!state.selectedProfile) {
           return;
         }
-        state.loading = true;
-        state.error = "";
-        updateProfileStatus(windowId);
+        updateProfileData(windowId, { loading: true, error: "" });
         send({
           kind: "set_active_profile",
           id: windowId,
@@ -449,10 +447,7 @@ export function createProfileWindowSurface({
           return;
         }
         clearProfileSaveTimer(state);
-        state.loading = true;
-        state.saving = false;
-        state.error = "";
-        updateProfileStatus(windowId);
+        updateProfileData(windowId, { loading: true, saving: false, error: "" });
         send({
           kind: "delete_profile",
           id: windowId,
@@ -470,7 +465,8 @@ export function createProfileWindowSurface({
           return;
         }
         const state = ensureProfileState(windowId);
-        const snapshot = state.snapshot || {
+        const data = profileData(windowId);
+        const snapshot = data.snapshot || {
           active_profile: "default",
           selected_profile: "default",
           profiles: [],
@@ -503,7 +499,7 @@ export function createProfileWindowSurface({
 
         updateProfileStatus(windowId);
         list.innerHTML = "";
-        if (!state.loading && profiles.length === 0) {
+        if (!data.loading && profiles.length === 0) {
           const empty = createNode("div", "profile-empty workspace-empty-state");
           empty.appendChild(createNode("div", "mock-label", "No profiles yet"));
           empty.appendChild(
@@ -577,13 +573,13 @@ export function createProfileWindowSurface({
         const actions = createNode("div", "profile-inline-actions");
         const activeButton = createNode("button", "wizard-button", "Set active");
         activeButton.type = "button";
-        activeButton.disabled = selected.is_active || state.loading;
+        activeButton.disabled = selected.is_active || data.loading;
         activeButton.addEventListener("click", () => setActiveProfile(windowId));
         actions.appendChild(activeButton);
 
         const deleteButton = createNode("button", "wizard-button", "Delete");
         deleteButton.type = "button";
-        deleteButton.disabled = selected.is_default || state.loading;
+        deleteButton.disabled = selected.is_default || data.loading;
         deleteButton.addEventListener("click", () => deleteProfile(windowId));
         actions.appendChild(deleteButton);
         editor.appendChild(actions);
@@ -754,8 +750,61 @@ export function createProfileWindowSurface({
 
         updateProfileStatus(windowId);
       }
-      // SPEC-3064 Phase 3 (E6e): Profile window mount moved verbatim from
-      // app.js mountWindowBody (surface === "profile" branch).
+
+      function subscribeProfileWindow(windowId) {
+        profileSubscriptions.get(windowId)?.();
+        // Mount renders current data below; do not replay a previous save ACK.
+        let previousReply = profileData(windowId).reply;
+        const unsubscribeView = profileModel.subscribe(
+          (current) => current[windowId]?.reply,
+          (reply) => {
+            if (!reply || reply === previousReply) return;
+            previousReply = reply;
+            const state = ensureProfileState(windowId);
+            const previousProfile = state.selectedProfile;
+            const wasSaveInFlight = state.saveInFlight;
+            state.saveInFlight = false;
+            if (reply.kind === "snapshot") {
+              state.selectedProfile = profileData(windowId).snapshot?.selected_profile || null;
+              const selectedProfileUnchanged =
+                !previousProfile || previousProfile === state.selectedProfile;
+              const hasNewerDraft =
+                selectedProfileUnchanged && state.draft && profileDraftIsDirty(state);
+              if (selectedProfileUnchanged &&
+                  ((wasSaveInFlight && profileHasEditableFocus(windowId)) || hasNewerDraft)) {
+                return;
+              }
+              renderProfile(windowId);
+            } else {
+              renderProfile(windowId, true);
+            }
+          },
+        );
+        const unsubscribeStatus = profileModel.subscribe(
+          (current) => current[windowId],
+          () => updateProfileStatus(windowId),
+        );
+        profileSubscriptions.set(windowId, () => {
+          unsubscribeView();
+          unsubscribeStatus();
+        });
+      }
+
+      function disposeProfileWindow(windowId) {
+        const state = profileStateMap.get(windowId);
+        if (!state && !profileSubscriptions.has(windowId) && !profileModel.read()[windowId]) return;
+        if (state) clearProfileSaveTimer(state);
+        profileSubscriptions.get(windowId)?.();
+        profileSubscriptions.delete(windowId);
+        profileStateMap.delete(windowId);
+        profileModel.update((current) => {
+          const next = { ...current };
+          delete next[windowId];
+          return next;
+        });
+      }
+
+      // Mount owns the subscriptions; receivers never register renderers.
       function mountProfileWindow(windowData, body) {
           body.innerHTML = `
             <div class="profile-root">
@@ -785,8 +834,7 @@ export function createProfileWindowSurface({
             .querySelector("[data-action='refresh-profile']")
             .addEventListener("click", (event) => {
               event.stopPropagation();
-              const state = ensureProfileState(windowData.id);
-              state.error = "";
+              updateProfileData(windowData.id, { error: "" });
               requestProfile(windowData.id);
               renderProfile(windowData.id, true);
             });
@@ -796,49 +844,37 @@ export function createProfileWindowSurface({
               event.stopPropagation();
               createProfile(windowData.id);
             });
-          const state = ensureProfileState(windowData.id);
-          if (!state.snapshot && !state.loading && !state.error) {
+          ensureProfileState(windowData.id);
+          subscribeProfileWindow(windowData.id);
+          const data = profileData(windowData.id);
+          if (!data.snapshot && !data.loading && !data.error) {
             requestProfile(windowData.id);
           }
           renderProfile(windowData.id);
           return;
       }
 
-      // SPEC-3064 Phase 3 (E6e): receive() bodies for profile_* events
-      // moved verbatim from app.js; the case arms in app.js delegate here.
+      // Receivers publish data only. Mounted view/status subscriptions share it.
       function applyProfileReceiveEvent(event) {
+        if (!windowMap.has(event.id)) return;
         switch (event.kind) {
           case "profile_snapshot": {
-            const state = ensureProfileState(event.id);
-            const previousProfile = state.selectedProfile;
-            const wasSaveInFlight = state.saveInFlight;
-            state.snapshot = event.snapshot || null;
-            state.loading = false;
-            state.saving = Boolean(state.saveTimer);
-            state.saveInFlight = false;
-            state.error = "";
-            state.selectedProfile = event.snapshot?.selected_profile || null;
-            const selectedProfileUnchanged =
-              !previousProfile || previousProfile === state.selectedProfile;
-            const hasNewerDraft =
-              selectedProfileUnchanged && state.draft && profileDraftIsDirty(state);
-            if (
-              selectedProfileUnchanged &&
-              ((wasSaveInFlight && profileHasEditableFocus(event.id)) || hasNewerDraft)
-            ) {
-              updateProfileStatus(event.id);
-              break;
-            }
-            renderProfile(event.id);
+            updateProfileData(event.id, {
+              snapshot: event.snapshot || null,
+              loading: false,
+              saving: Boolean(profileStateMap.get(event.id)?.saveTimer),
+              error: "",
+              reply: { kind: "snapshot" },
+            });
             break;
           }
           case "profile_error": {
-            const state = ensureProfileState(event.id);
-            state.loading = false;
-            state.saving = Boolean(state.saveTimer);
-            state.saveInFlight = false;
-            state.error = event.message;
-            renderProfile(event.id, true);
+            updateProfileData(event.id, {
+              loading: false,
+              saving: Boolean(profileStateMap.get(event.id)?.saveTimer),
+              error: event.message,
+              reply: { kind: "error" },
+            });
             break;
           }
           default:
@@ -862,5 +898,6 @@ export function createProfileWindowSurface({
         clearProfileSaveTimer,
         mountProfileWindow,
         applyProfileReceiveEvent,
+        disposeProfileWindow,
       };
 }
