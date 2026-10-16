@@ -266,8 +266,16 @@ fn the_flake_detector_repeats_the_agreed_number_of_times() {
     );
     assert!(
         script.contains("GWT_FLAKE_BUDGET_SECS:-600"),
-        "Issue #5171 AC-1: compile-excluded test budget defaults to 600 seconds"
+        "standalone detector budget defaults to 600 seconds"
     );
+    let flake = job(&test_workflow(), FLAKE_JOB);
+    let detector = flake["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["run"].as_str() == Some(FLAKE_SCRIPT))
+        .unwrap();
+    assert_eq!(detector["env"]["GWT_FLAKE_BUDGET_SECS"], "220");
 }
 
 /// A gate that cannot be reproduced outside CI gets disabled instead of fixed.
