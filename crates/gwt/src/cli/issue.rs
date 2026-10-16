@@ -713,7 +713,7 @@ pub(crate) fn merge_board_escalations_into_needs_human(
         "monitor": monitor_needs_human,
         "board_escalations": board_escalations,
         "runtime_fields": ["inbox", "active_launches"],
-        "guidance": "needs_human combines Monitor handoffs and unresolved Board requests. A Board escalation does not override the runtime state in inbox and active_launches. Do not requeue an active launch to clear a Board request; resolve its escalation.",
+        "guidance": "needs_human combines Monitor handoffs and unresolved Board requests. A Board escalation does not override the runtime state in inbox and active_launches. Clear Monitor handoffs with issue.monitor.requeue. Do not requeue an active launch to clear a Board request; resolve its escalation with board.post and params.resolves naming the blocked entry.",
     })
 }
 
@@ -9261,9 +9261,12 @@ mod tests {
             authority["runtime_fields"],
             serde_json::json!(["inbox", "active_launches"])
         );
-        assert!(authority["guidance"]
-            .as_str()
-            .is_some_and(|text| text.contains("does not override") && text.contains("requeue")));
+        assert!(authority["guidance"].as_str().is_some_and(|text| {
+            text.contains("does not override")
+                && text.contains("issue.monitor.requeue")
+                && text.contains("board.post")
+                && text.contains("params.resolves")
+        }));
     }
 
     /// Issue #5399: unknown measurements preserve the saved Auto limit in
