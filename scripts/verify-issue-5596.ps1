@@ -189,7 +189,7 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $streams.guiOut = $gui.StandardOutput.ReadToEndAsync()
   $streams.guiErr = $gui.StandardError.ReadToEndAsync()
   $sourceRevision = (& $realGit -C $repoRoot rev-parse HEAD).Trim()
-  $sourceSnapshot = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt-config/src/home.rs','crates/gwt/src/perf/dispatch.rs',
+  $sourceSnapshot = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt/src/issue_monitor_worker.rs','crates/gwt-config/src/home.rs','crates/gwt/src/perf/dispatch.rs',
     'scripts/verify-issue-5596.ps1','crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts','crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs') | ForEach-Object {
     $fromCommit = $Phase -eq 'baseline' -and $_.StartsWith('crates/gwt/src/')
     $blobSha = if ($fromCommit) { (& $realGit -C $repoRoot rev-parse "${sourceRevision}:$_").Trim() } else { (& $realGit -C $repoRoot hash-object -- $_).Trim() }

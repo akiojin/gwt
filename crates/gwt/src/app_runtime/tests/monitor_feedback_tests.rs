@@ -518,7 +518,7 @@ fn issue4803_monitor_preparation_rechecks_deleted_resume_session() {
 }
 
 #[test]
-fn issue5596_same_project_launch_preparation_waits_for_the_previous_materialization() {
+fn issue5596_same_project_preparation_overlaps_only_after_materialization() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -551,7 +551,7 @@ fn issue5596_same_project_launch_preparation_waits_for_the_previous_materializat
     assert_eq!(
         queued.lock().expect("preparation workers").len(),
         1,
-        "sibling launches must not invalidate each other's preparation or race Git config writes"
+        "sibling facts workers must not invalidate each other's preparation"
     );
     drain_queued_blocking_tasks(&queued);
     fixture
@@ -560,16 +560,62 @@ fn issue5596_same_project_launch_preparation_waits_for_the_previous_materializat
             &fixture.recorded_events,
         ));
     fixture.runtime.advance_issue_monitor_launch_queue_events();
-    assert!(
-        queued.lock().expect("materialization wait").is_empty(),
-        "creating the first pane must not release its Git materialization lane"
-    );
+    let next_preparation_count = queued.lock().expect("next preparation").len();
+    let first_pane_inflight = fixture
+        .runtime
+        .inflight_launches
+        .values()
+        .any(|(window_id, _)| {
+            fixture
+                .runtime
+                .pending_launch_feedback_contexts
+                .get(window_id)
+                .is_some_and(|feedback| feedback.issue_monitor_issue_number == Some(3165))
+        });
+    let second_preparation_started = fixture
+        .runtime
+        .issue_monitor_launch_preparations
+        .iter()
+        .any(|key| key.2 == 3166);
     let (window_id, result) =
         take_monitor_launch_complete_event("serial-preparation", &fixture.recorded_events);
     assert!(result.is_ok(), "first launch: {result:?}");
+    assert_eq!(
+        next_preparation_count, 0,
+        "the next facts preparation must wait for the worktree materialization worker"
+    );
+    assert!(
+        first_pane_inflight,
+        "the first pane must remain inflight until its completion is applied"
+    );
+    assert!(
+        !second_preparation_started,
+        "the second launch must not prepare while the first materialization is running"
+    );
     fixture
         .runtime
         .handle_launch_complete(window_id.clone(), result);
+    assert_eq!(
+        queued.lock().expect("PTY and facts preparation").len(),
+        2,
+        "the first PTY preparation and next launch facts must overlap after materialization"
+    );
+    assert!(
+        fixture
+            .runtime
+            .issue_monitor_launch_preparations
+            .iter()
+            .any(|key| key.2 == 3166),
+        "the second launch must prepare while the first completion awaits PTY preparation"
+    );
+    assert!(
+        fixture
+            .runtime
+            .inflight_launches
+            .values()
+            .any(|(id, _)| id == &window_id),
+        "the first pane must remain inflight while its PTY preparation is queued"
+    );
     drain_queued_blocking_tasks(&queued);
     let prepared = take_prepared_agent_launch(&fixture.recorded_events);
     // A newer Session supersedes this completion without closing the pane.
@@ -899,6 +945,74 @@ fn issue5596_answer_packet_pref_stale_settles_unsubmitted_attempt() {
 #[test]
 fn issue5596_answer_packet_project_closed_settles_unsubmitted_attempt() {
     assert_issue5596_unsubmitted_answer_packet_retries(true);
+}
+
+#[test]
+fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_first() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "answer-exact-holder",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveSameConversation,
+        true,
+    );
+    seed_resumed_autonomous_handoff(&fixture, "Continue the asking conversation");
+    let holder_window_id = fixture.holder_window_id.clone().expect("exact holder");
+    insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    let other = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    tab.workspace.set_linked_issue_number(&other.id, Some(3165));
+    tab.workspace
+        .set_status(&other.id, WindowProcessStatus::Running);
+    let mut persisted = tab.workspace.persisted().clone();
+    persisted.windows.swap(0, 1);
+    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    fixture.runtime.register_window("tab-1", &other.id);
+    assert_eq!(
+        fixture
+            .runtime
+            .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
+        Some(combined_window_id("tab-1", &other.id)),
+        "generic Issue lookup must differ from the exact native holder"
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+    for _ in 0..2 {
+        drain_queued_blocking_tasks(&queued);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    assert!(
+        matches!(
+            fixture.runtime.issue_monitor_launch_deliveries.get(
+                fixture.delivery_id.as_deref().expect("durable delivery")
+            ),
+            Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+                if window_id == &holder_window_id
+        ),
+        "the prepared answer must reach its exact holder instead of retrying against the generic Issue pane"
+    );
 }
 
 #[test]

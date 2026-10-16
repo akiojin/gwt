@@ -3195,15 +3195,18 @@ impl AppRuntime {
                 current.generation == key.1 && current.project_key == context.project_key
             })
         }) || self.inflight_launches.values().any(|(window_id, _)| {
-            self.window_lookup
-                .get(window_id)
-                .and_then(|address| self.project_context(&address.tab_id))
-                .is_some_and(|current| current.project_key == context.project_key)
+            !self.pending_launch_completions.contains_key(window_id)
+                && self
+                    .window_lookup
+                    .get(window_id)
+                    .and_then(|address| self.project_context(&address.tab_id))
+                    .is_some_and(|current| current.project_key == context.project_key)
         })
     }
 
-    /// Capture each sibling's inputs only after the preceding launch worker
-    /// finishes. Its claim/config writes would otherwise invalidate all siblings.
+    /// Capture the next sibling after worktree/assets/Session materialization.
+    /// Its final validation/PTY preparation may overlap; the Git writer lane
+    /// remains serial and pane registration has already advanced the preview.
     pub(super) fn advance_issue_monitor_launch_queue_events(&mut self) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
         for pending in std::mem::take(&mut self.issue_monitor_launch_queue) {
@@ -4641,17 +4644,33 @@ impl AppRuntime {
         if let Some(delivery_id) = delivery_id.as_deref() {
             // Claim the existing pane when adopting it: a proposed new ID
             // would incorrectly ask for another slot at a saturated cap.
-            let claim_window_id = review_prompt
-                .is_none()
-                .then(|| {
-                    self.live_issue_agent_window(
-                        &tab_id,
-                        issue_number,
-                        &knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
-                    )
-                })
-                .flatten()
-                .unwrap_or_else(|| proposed_window_id.clone());
+            let prepared_answer = prepared.as_ref().and_then(|prepared| {
+                let resume = match prepared.result.as_ref().ok()? {
+                    IssueMonitorLaunchPreparation::Answer(resume) => resume.as_ref(),
+                    IssueMonitorLaunchPreparation::Launch(facts) => {
+                        facts.resume.as_ref().ok()?.as_ref()?
+                    }
+                };
+                (resume.autonomous_handoff.is_some() && resume.handoff_delivery.is_some())
+                    .then_some(resume)
+            });
+            // An answer must follow its asking conversation even when another
+            // pane linked to the Issue appears first in the canvas.
+            let claim_window_id = if let Some(resume) = prepared_answer {
+                self.issue_monitor_native_conversation_holder(&resume.session)
+            } else {
+                review_prompt
+                    .is_none()
+                    .then(|| {
+                        self.live_issue_agent_window(
+                            &tab_id,
+                            issue_number,
+                            &knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
+                        )
+                    })
+                    .flatten()
+            }
+            .unwrap_or_else(|| proposed_window_id.clone());
             let claim = match prepared_claim.as_ref() {
                 Some((window_id, result)) if window_id == &claim_window_id => result.clone(),
                 Some(_) => {
