@@ -617,6 +617,8 @@ fn admit_inner<E: CliEnv>(
         .transpose()
         .map_err(unexpected)?
         .flatten();
+    let short_slot_gate = command.is_some_and(verification_lease::is_short_non_cargo_slot_gate);
+    let shared = target.is_some() || short_slot_gate;
     let budgets = match command {
         Some(command) => {
             let temporary = verification_lease::command_temporary_base(worktree, command)
@@ -759,7 +761,7 @@ fn admit_inner<E: CliEnv>(
     let lease = loop {
         check_cancellation(attempt)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let acquired = match (target.is_some(), attempt) {
+        let acquired = match (shared, attempt) {
             (true, Some(attempt)) => guard.acquire_heavy_with_disk_budgets_for_attempt(
                 remaining.min(POLL),
                 LEASE_TTL,
@@ -887,7 +889,9 @@ fn admit_inner<E: CliEnv>(
     lease.record_spawn_host(spawn_host);
     // Reuse the lease's exact runner context so status can distinguish a current
     // exclusive command from an older binary holding the compatibility lock.
-    let resource_reason = if target.is_some() {
+    let resource_reason = if short_slot_gate {
+        "known bounded Node test uses one shared slot; execution limited to 60s"
+    } else if target.is_some() {
         "resolved build directory uses one shared slot (Cargo metadata or inline CARGO_TARGET_DIR)"
     } else {
         "no resolved build directory; exclusive command execution limited to 1200s"
@@ -896,7 +900,7 @@ fn admit_inner<E: CliEnv>(
     let lease_id = lease.id().to_string();
     let queue_wait_ms = lease.queue_wait_ms();
     let lease = Arc::new(Mutex::new(lease));
-    let commands = Arc::new(if target.is_some() {
+    let commands = Arc::new(if shared {
         super::CommandProgress::default()
     } else {
         super::CommandProgress::with_exclusive_timeout()
@@ -1697,6 +1701,74 @@ mod tests {
                 .unwrap()
                 .as_str(),
         )
+    }
+
+    #[test]
+    fn known_node_test_uses_one_slot_and_unknown_node_stays_exclusive() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
+        let _home = ScopedGwtHome::set(home.path());
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\nslots=2\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
+        let coordinator = verification_lease::open_coordinator().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let key = verification_key_for(first.path());
+        let JobAdmission::Owner(holder) = coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::ZERO)
+            .unwrap()
+        else {
+            panic!("private target must be free");
+        };
+        // A canonical holder publishes its budget ledger even when it is empty.
+        let lease = holder
+            .acquire_heavy_with_disk_budgets(Duration::ZERO, Duration::from_secs(60), &[])
+            .unwrap();
+        let mut env = crate::cli::TestEnv::new(second.path().to_path_buf());
+        let command = "node --test \"scripts/coverage-summary.test.mjs\"";
+        let admission = super::admit(
+            &mut env,
+            second.path(),
+            Some(command),
+            Duration::ZERO,
+            |_| String::new(),
+        )
+        .expect("known bounded Node gate must use the spare slot");
+        let pool = coordinator.heavy_pool_status().unwrap();
+        assert_eq!(pool.used, 2);
+        assert!(pool
+            .slots
+            .iter()
+            .filter(|slot| slot.status.held)
+            .all(|slot| slot.slot.is_some()));
+        assert_eq!(admission.command_progress().timeout(), None);
+        assert_eq!(
+            verification_lease::short_non_cargo_timeout(command),
+            Some(Duration::from_secs(60))
+        );
+        drop(admission);
+        assert!(
+            super::admit(
+                &mut env,
+                second.path(),
+                Some("node --test arbitrary.test.mjs"),
+                Duration::ZERO,
+                |_| String::new(),
+            )
+            .is_err(),
+            "an unknown Node test must still exclude the live shared holder"
+        );
+        drop(lease);
+        holder.complete(JobOutcome::Completed).unwrap();
     }
 
     #[test]
