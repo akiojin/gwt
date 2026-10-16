@@ -103,7 +103,13 @@ test.describe("Agent title role and worktree badges", () => {
       .toContainText("Review cache");
     await page.locator("#window-list-button").click();
     await expect(page.locator(".window-list-title", { hasText: "Lumen — Fix cache" })).toBeVisible();
-    await page.locator("#window-list-button").click();
+    await page.locator(".window-list-row")
+      .filter({ has: page.locator(".window-list-title", { hasText: "Agent Kanban" }) }).click();
+    const kanban = page.locator(".workspace-window[data-id='kanban-1']");
+    await expect(kanban.locator(".agent-kanban-card-title")).toHaveText("Lyra");
+    const screenshot = info.outputPath("kanban-agent-names.png");
+    await kanban.screenshot({ path: screenshot });
+    await info.attach("Kanban agent names", { path: screenshot, contentType: "image/png" });
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
     await expect(page.locator(".agent-tile[data-agent-id='agent-1'] h3")).toHaveText("Lumen — Fix cache");
     await expect(page.locator(".agent-tile[data-agent-id='agent-2'] h3")).toHaveText("Intake Agent");
