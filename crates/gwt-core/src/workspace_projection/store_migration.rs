@@ -217,18 +217,15 @@ pub fn split_project_store_paths(project_root: &Path) -> Vec<PathBuf> {
     let Some(identity) = detect_repo_identity(project_root) else {
         return Vec::new();
     };
-    let canonical_store = gwt_project_dir(&identity.hash);
     let mut seen = HashSet::new();
     split_candidate_roots(project_root)
         .into_iter()
         .filter_map(|root| {
             let hash = compute_path_hash(&root);
             let store = gwt_project_dir(&hash);
-            (hash != identity.hash
-                && seen.insert(hash.as_str().to_string())
-                && store.is_dir()
-                && !quarantine_manifest_path(&canonical_store, hash.as_str()).is_file())
-            .then_some(store)
+            // A past quarantine does not cover a store an old writer recreated.
+            (hash != identity.hash && seen.insert(hash.as_str().to_string()) && store.is_dir())
+                .then_some(store)
         })
         .collect()
 }

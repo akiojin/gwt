@@ -1993,17 +1993,11 @@ pub(super) fn ensure_workspace_for_agent(
     repo_path: &std::path::Path,
     input: WorkspaceEnsureInput,
 ) -> Result<WorkspaceEnsureResult, SpecOpsError> {
-    let started = std::time::Instant::now();
     let recovery = crate::agent_project_state::validated_workspace_recovery_session(
         repo_path,
         &input.agent_session,
     );
     let probe = probe_workspace_ensure_with_recovery(&input, &recovery);
-    tracing::debug!(
-        elapsed_ms = started.elapsed().as_millis(),
-        phase = "probe",
-        "workspace.ensure timing"
-    );
     if !probe.executable() {
         let reason = probe.reason.as_deref().unwrap_or("unavailable");
         let refusal = crate::cli::execution_state::terminal_recovery_refusal(
@@ -2029,11 +2023,6 @@ pub(super) fn ensure_workspace_for_agent(
         input.issue,
     )
     .map_err(core_error)?;
-    tracing::debug!(
-        elapsed_ms = started.elapsed().as_millis(),
-        phase = "session",
-        "workspace.ensure timing"
-    );
     let (result, publish_root) = match recovery {
         Some(crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(recovery)) => {
             let exact_session =
@@ -2076,11 +2065,6 @@ pub(super) fn ensure_workspace_for_agent(
                                 &input.agent_session,
                                 &canonical_id,
                             )?;
-                            tracing::debug!(
-                                elapsed_ms = started.elapsed().as_millis(),
-                                phase = "heal",
-                                "workspace.ensure timing"
-                            );
                             if !healed.is_empty() {
                                 tracing::info!(
                                     session_id = %input.agent_session,
@@ -2111,11 +2095,6 @@ pub(super) fn ensure_workspace_for_agent(
                                 &repairable_work_ids,
                                 |container| workspace_execution_container_matches_recovery(container, &recovery),
                             )?;
-                            tracing::debug!(
-                                elapsed_ms = started.elapsed().as_millis(),
-                                phase = "detach",
-                                "workspace.ensure timing"
-                            );
                             if !detached.is_empty() {
                                 tracing::info!(
                                     session_id = %input.agent_session,
@@ -2225,17 +2204,7 @@ pub(super) fn ensure_workspace_for_agent(
             ))));
         }
     };
-    tracing::debug!(
-        elapsed_ms = started.elapsed().as_millis(),
-        phase = "transaction",
-        "workspace.ensure timing"
-    );
     publish_workspace_change(&publish_root);
-    tracing::debug!(
-        elapsed_ms = started.elapsed().as_millis(),
-        phase = "publish",
-        "workspace.ensure timing"
-    );
     Ok(result)
 }
 
@@ -10669,6 +10638,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn workspace_ensure_preserves_bound_session_invocation_scope() {
+        let _guard = env_guard();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedHome::set(&temp.path().join("home"));
+        let project_root = temp.path().join("project");
+        let worktree = project_root.join("work/issue-4854");
+        let session_id = "session-bound-recovery-scope";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 4854);
+        let nested = worktree.join("nested");
+        let sibling = project_root.join("sibling");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let nested_repo = worktree.join("nested-repository");
+        initialize_session_git_layout(&nested_repo, &nested_repo);
+
+        for invocation in [&project_root, &worktree, &nested] {
+            assert!(
+                crate::agent_project_state::validated_workspace_recovery_session(
+                    invocation, session_id,
+                )
+                .expect("the exact bound Session permits its project root and worktree scope")
+                .is_some(),
+                "{}",
+                invocation.display(),
+            );
+        }
+        for invocation in [&sibling, &nested_repo] {
+            let error = crate::agent_project_state::validated_workspace_recovery_session(
+                invocation, session_id,
+            )
+            .err()
+            .expect("a bound Session must not authorize another worktree or repository");
+            assert!(error.to_string().contains("mismatch"), "{error}");
+        }
+        assert!(!gwt_workspace_projection_path_for_repo_path(&project_root).exists());
+        assert!(!gwt_workspace_work_items_path_for_repo_path(&project_root).exists());
+    }
+
+    #[test]
     fn workspace_ensure_returns_with_828_work_items_and_five_pending_transactions() {
         let _guard = env_guard();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -10703,14 +10711,23 @@ pub(crate) mod tests {
         let coordinator =
             gwt_core::paths::gwt_home().join(".gwt-pending-workspace-state-transactions");
         std::fs::create_dir_all(&coordinator).unwrap();
+        let current_path = gwt_workspace_projection_path_for_repo_path(&project_root);
+        let marker = current_path.with_file_name("pending-state-transaction.json");
         for index in 0..5 {
             let transaction_id = uuid::Uuid::new_v4().to_string();
             let foreign = temp.path().join(format!("foreign-{index}"));
+            // One matching transaction and its marker copy exercise the full
+            // 828-Work comparison; the other four exercise coordinator routing.
+            let (pending_current, pending_works) = if index == 0 {
+                (current_path.clone(), works_path.clone())
+            } else {
+                (foreign.join("current.json"), foreign.join("works.json"))
+            };
             let transaction = serde_json::json!({
                 "version": 2,
                 "transaction_id": transaction_id,
-                "current_path": foreign.join("current.json"),
-                "work_items_path": foreign.join("works.json"),
+                "current_path": pending_current,
+                "work_items_path": pending_works,
                 "current_precondition": "missing",
                 "work_items_precondition": "missing",
                 "projection": WorkspaceProjection::default_for_project(&foreign),
@@ -10718,24 +10735,23 @@ pub(crate) mod tests {
                 "events": [],
                 "journal_entries": [],
             });
-            std::fs::write(
-                coordinator.join(format!("{transaction_id}.json")),
-                serde_json::to_vec(&transaction).unwrap(),
-            )
-            .unwrap();
+            let bytes = serde_json::to_vec(&transaction).unwrap();
+            if index == 0 {
+                // The existing snapshots supersede the marker's missing-file
+                // preconditions, so recovery compares and removes both copies
+                // without replacing the live Session/Work snapshots.
+                std::fs::write(&marker, &bytes).unwrap();
+            }
+            std::fs::write(coordinator.join(format!("{transaction_id}.json")), bytes).unwrap();
         }
 
-        let trace = tracing_subscriber::fmt()
-            .with_env_filter("gwt::cli::workspace=debug")
-            .with_test_writer()
-            .finish();
         let started = std::time::Instant::now();
-        let result = tracing::subscriber::with_default(trace, || {
+        let result =
             ensure_workspace_for_agent(&worktree, workspace_ensure_status_candidate(session_id))
-        })
-        .expect("ensure with large Work history and foreign pending transactions");
+                .expect("ensure with large Work history and pending transactions");
 
         let elapsed = started.elapsed();
+        println!("workspace.ensure completed in {elapsed:?}");
         assert_eq!(result.workspace_id, work_id);
         // test-hygiene: allow-wall-clock-deadline AC-3 requires the real workspace.ensure call to return within five seconds without sleeps.
         assert!(
@@ -10747,6 +10763,11 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(saved.work_items.len(), 828);
         assert!(saved.work_items.iter().any(|item| item.id == work_id));
+        assert!(
+            !marker.exists(),
+            "the matching transaction must be recovered"
+        );
+        assert_eq!(std::fs::read_dir(&coordinator).unwrap().count(), 4);
     }
 
     #[test]

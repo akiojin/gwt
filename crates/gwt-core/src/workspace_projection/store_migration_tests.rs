@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn split_diagnostic_reports_a_store_recreated_after_quarantine() {
+    let temp = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::ScopedGwtHome::set(temp.path().join("home"));
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::write(
+        repo.join(".git/config"),
+        "[remote \"origin\"]\nurl = https://github.com/example/recreated-store.git\n",
+    )
+    .unwrap();
+    let identity = detect_repo_identity(&repo).unwrap();
+    let legacy_hash = compute_path_hash(&repo);
+    let manifest = quarantine_manifest_path(&gwt_project_dir(&identity.hash), legacy_hash.as_str());
+    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    fs::write(manifest, "{}").unwrap();
+    assert!(split_project_store_paths(&repo).is_empty());
+
+    let legacy_store = gwt_project_dir(&legacy_hash);
+    fs::create_dir_all(&legacy_store).unwrap();
+    assert_eq!(split_project_store_paths(&repo), vec![legacy_store]);
+}
+
+#[test]
 fn transaction_temp_cleanup_retains_live_uncertain_and_nonempty_files() {
     let temp = tempfile::tempdir().expect("tempdir");
     let _home = crate::test_support::ScopedGwtHome::set(temp.path().join("home"));
