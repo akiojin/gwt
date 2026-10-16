@@ -3553,8 +3553,8 @@ test("Other remote rows deduplicate Issue-linked branches and use the Issue lane
 
 
 test("Work detail keeps named windows distinct even when their provider matches", () => {
-  const projection = sampleProjection();
-  const work = projection.works[0];
+  const projection = continuationProjection();
+  const work = projection.active_works[0].works[0];
   work.agents = ["ミオ", "ハヤテ"].map((name, index) => ({
     session_id: `window-${index}`, agent_id: "codex", display_name: "Codex", agent_name: name,
     sessions: [{ agent_session_id: `conversation-${index}`, is_active: true }],
@@ -3564,4 +3564,18 @@ test("Work detail keeps named windows distinct even when their provider matches"
   assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
   assert.match(fixture.body.textContent, /ミオ \(Codex\)/);
   assert.match(fixture.body.textContent, /ハヤテ \(Codex\)/);
+});
+
+test("Work detail retains separate sessions and Resume actions with the same assigned name", () => {
+  const projection = continuationProjection();
+  projection.active_works[0].works[0].agents = ["first", "second"].map(id => ({
+    session_id: id, agent_id: "codex", display_name: "Codex", agent_name: "ミオ",
+    status_category: "idle",
+    sessions: [{ agent_session_id: `conversation-${id}`, is_active: true }],
+  }));
+  const fixture = createFixture();
+  createSurface(fixture, projection).renderInto(fixture.body, fixture.windowData.id);
+  const resumes = Array.from(fixture.body.querySelectorAll("[data-action='resume-session']"));
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  assert.deepEqual(resumes.map(button => button.dataset.sessionId), ["first", "second"]);
 });

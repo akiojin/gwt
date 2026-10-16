@@ -816,10 +816,15 @@ pub(super) fn run<E: CliEnv>(
                         false,
                     )?;
                     if let Some(session) = author_session.as_ref() {
-                        crate::session_launch::record_named_issue_activity(
+                        if let Err(error) = crate::session_launch::record_named_issue_activity(
                             env.client(), session,
                             crate::session_launch::NamedIssueActivity::PrCreated { number: pr.number },
-                        ).map_err(|error| std::io::Error::other(format!("PR #{} was created, but its named Issue history could not be recorded: {error}", pr.number)))?;
+                        ) {
+                            crate::cli::operation_warnings::push(
+                                "named_issue_history_recording_skipped",
+                                format!("PR #{} was created, but its named Issue history could not be recorded: {error}", pr.number),
+                            );
+                        }
                     }
                     Ok(Some(pr))
                 },
@@ -2328,6 +2333,11 @@ mod tests {
         let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
         persist_pr_generation_session(&fixture.repo, session_id, identity);
         enable_autonomous_pr_session(&fixture.repo, session_id);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut named =
+            gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+        named.agent_name = Some("ミオ".into());
+        named.save(&sessions).unwrap();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
         let (failed, _) = crate::cli::verification_record::run_verification(
             &fixture.repo,
@@ -2346,6 +2356,17 @@ mod tests {
         )
         .unwrap();
         let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(42),
+            title: "delivery".into(),
+            body: String::new(),
+            labels: vec![],
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-10-16T00:00:00Z"),
+            comments: vec![],
+        });
+        env.client.fail_create_comment_after(0);
+        crate::cli::operation_warnings::take();
         let request = ci_request_for(&fixture.repo);
         seed_ci_delivery(&mut env, &request);
         crate::cli::action_obligation::mark_from_prompt(
@@ -2427,6 +2448,15 @@ mod tests {
             Some(request.head.as_str())
         );
         assert!(out.contains("CI delivery audit"), "{out}");
+        assert!(out.contains("https://example.com/pr/7"), "{out}");
+        assert!(
+            out.contains("warning:") && out.contains("injected create_comment failure"),
+            "{out}"
+        );
+        let warnings = crate::cli::operation_warnings::take();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].code, "named_issue_history_recording_skipped");
+        assert!(warnings[0].message.contains("PR #7"));
         assert!(crate::cli::action_obligation::open_kinds(&fixture.repo, session_id).is_empty());
         assert_eq!(
             protected
@@ -2956,6 +2986,10 @@ mod tests {
         crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
         let identity = initialize_pr_generation_authority(worktree.path(), "session-current");
         persist_pr_generation_session(worktree.path(), "session-current", identity.clone());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut named = gwt_agent::Session::load(&sessions.join("session-current.toml")).unwrap();
+        named.agent_name = Some("ミオ".into());
+        named.save(&sessions).unwrap();
         seed_pr_generation_work(worktree.path(), "session-current");
         let _session = gwt_core::test_support::ScopedEnvVar::set(
             gwt_agent::GWT_SESSION_ID_ENV,
@@ -2965,6 +2999,23 @@ mod tests {
         env.seed_pr(7, seeded_pr());
         seed_readable_pr_body(&mut env);
         env.seed_created_pr(seeded_pr());
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(42),
+            title: "delivery".into(),
+            body: String::new(),
+            labels: vec![],
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-10-16T00:00:00Z"),
+            comments: vec![],
+        });
+        env.client.fail_create_comment_after(0);
+        crate::cli::operation_warnings::take();
+        crate::cli::action_obligation::mark_from_prompt(
+            worktree.path(),
+            "session-current",
+            "PRを作成してください",
+        )
+        .unwrap();
 
         let mut out = String::new();
         assert_eq!(
@@ -2983,6 +3034,23 @@ mod tests {
             .expect("create draft as exact current Session"),
             0,
             "{out}",
+        );
+        assert_eq!(env.pr_create_call_log.len(), 1);
+        assert!(
+            out.contains("created pull request") && out.contains("https://example.com/pr/7"),
+            "{out}"
+        );
+        assert!(
+            out.contains("warning:") && out.contains("injected create_comment failure"),
+            "{out}"
+        );
+        let warnings = crate::cli::operation_warnings::take();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].code, "named_issue_history_recording_skipped");
+        assert!(warnings[0].message.contains("PR #7"));
+        assert!(
+            crate::cli::action_obligation::open_kinds(worktree.path(), "session-current")
+                .is_empty()
         );
         out.clear();
         assert_eq!(

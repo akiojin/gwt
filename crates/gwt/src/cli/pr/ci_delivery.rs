@@ -560,6 +560,9 @@ pub(super) fn run<E: crate::cli::CliEnv>(
             out.push_str(&format!(
                 "CI delivery audit: {audit}; execution and local verification unchanged\n"
             ));
+            for warning in crate::cli::operation_warnings::snapshot() {
+                out.push_str(&format!("warning: {}\n", warning.message));
+            }
             Ok(0)
         }
         Err(error) => {
@@ -655,17 +658,19 @@ fn create<E: crate::cli::CliEnv>(
         return Err(refused(format!("PR {} was created but its exact head could not be confirmed; inspect it before delivery", pr.url)));
     }
     if let Some(session) = producing_session.as_ref() {
-        crate::session_launch::record_named_issue_activity(
+        if let Err(error) = crate::session_launch::record_named_issue_activity(
             env.client(),
             session,
             crate::session_launch::NamedIssueActivity::PrCreated { number: pr.number },
-        )
-        .map_err(|error| {
-            io::Error::other(format!(
-                "PR #{} was created, but its named Issue history could not be recorded: {error}",
-                pr.number
-            ))
-        })?;
+        ) {
+            crate::cli::operation_warnings::push(
+                "named_issue_history_recording_skipped",
+                format!(
+                    "PR #{} was created, but its named Issue history could not be recorded: {error}",
+                    pr.number
+                ),
+            );
+        }
     }
     if matches!(authority, Actor::Owner(_)) {
         crate::cli::action_obligation::settle_kinds_best_effort(

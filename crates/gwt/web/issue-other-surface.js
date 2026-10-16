@@ -1283,7 +1283,9 @@ export function createIssueOtherSurface({
   }
 
   function displayedWorkAgentIdentity(agent, index) {
-    if (agent?.agent_name) return `name:${agent.agent_name}`;
+    if (agent?.agent_name) {
+      return agent.session_id ? `session:${agent.session_id}` : `name:${agent.agent_name}`;
+    }
     const raw = String(agent?.agent_id || agent?.display_name || "").trim();
     if (!raw) return `session:${agent?.session_id || index}`;
 
