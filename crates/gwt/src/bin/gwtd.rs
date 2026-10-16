@@ -1086,7 +1086,9 @@ mod tests {
         use gwt::cli::CliEnv;
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
-        let _env_lock = gwt_core::test_support::env_lock().lock().unwrap();
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let _repo = ScopedEnvVar::set("GWT_GITHUB_REPO", "fixture/local-search");
@@ -1110,7 +1112,9 @@ mod tests {
         use gwt::cli::CliEnv;
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
-        let _env_lock = gwt_core::test_support::env_lock().lock().unwrap();
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let _repo = ScopedEnvVar::unset("GWT_GITHUB_REPO");

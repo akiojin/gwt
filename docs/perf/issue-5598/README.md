@@ -2,6 +2,8 @@
 
 The corrected native warm-worker workload **passes: 12/12 distinct searches, p95 1,993.92 ms**, against the fixed 1,622-Issue corpus and real model. The comparable baseline delivered 2/12 at p95 13,552.08 ms. Earlier corrected-source attempts missed the target and are retained, together with cold-worker failures. Fresh canonical verification and delivery status belong to the PR's Verification Run Record.
 
+The CI follow-up relocates the provided-input regression into the existing JSON-envelope test module to keep `cli.rs` below its 1,000-line limit, and makes two test environment-lock acquisitions recover from poisoning. These edits affect only existing `cfg(test)` modules. The [source audit](ci-test-only-source-audit.json) records the reference commit, current file hashes, and identical normalized production prefixes for all three affected Rust files. Canonical verification checks that equivalence against Git and preserves the original measured full-source hashes; it does not relabel the existing latency measurement as a new run.
+
 ## Delivery review: retain only immutable Issue readers
 
 Delivery review found that generation directory names alone do not prove immutability. The generic repo-scope incremental indexer updates its active generation in place. With Chroma 1.5.5, a retained reader observed the updated document text while its vector ranking remained stale; closing and reopening the client restored the correct ranking. The dedicated Issue indexer always stages and publishes a replacement generation, including incremental builds.
