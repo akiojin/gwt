@@ -62,7 +62,11 @@ fn disk_pressure_reclaims_idle_merged_and_unmerged_caches_from_project_container
 
     let mut targets = Vec::new();
     // Enumeration puts the unmerged names first; priority must reorder them.
-    for name in ["z-merged", "a-unmerged", "b-unmerged"] {
+    for (name, bytes) in [
+        ("z-merged", 4096),
+        ("a-unmerged", 8192),
+        ("b-unmerged", 16384),
+    ] {
         let worktree = project_root.join("work").join(name);
         let branch = format!("work/{name}");
         git(
@@ -81,7 +85,7 @@ fn disk_pressure_reclaims_idle_merged_and_unmerged_caches_from_project_container
         }
         let target = worktree.join("target");
         std::fs::create_dir_all(&target).expect("target dir");
-        std::fs::write(target.join("cache.bin"), [7u8; 4096]).expect("cache");
+        std::fs::write(target.join("cache.bin"), vec![7u8; bytes]).expect("cache");
         targets.push(target);
 
         // A live non-Host PID used to make an abandoned runtime namespace
@@ -124,8 +128,17 @@ fn disk_pressure_reclaims_idle_merged_and_unmerged_caches_from_project_container
     assert_eq!(record.trigger, trigger);
     assert_eq!(record.candidates, 3, "{record:?}");
     assert_eq!(record.removed.len(), 3, "{record:?}");
-    assert_eq!(record.reclaimable_bytes, 3 * 4096, "{record:?}");
-    assert_eq!(record.reclaimed_bytes, 3 * 4096, "{record:?}");
+    assert_eq!(record.reclaimable_bytes, 28672, "{record:?}");
+    assert_eq!(record.reclaimed_bytes, 28672, "{record:?}");
+    assert_eq!(
+        record
+            .removed
+            .iter()
+            .map(|entry| entry.bytes)
+            .collect::<Vec<_>>(),
+        vec![4096, 16384, 8192],
+        "merged first, then largest idle cache first"
+    );
     for target in &targets {
         let expected = dunce::canonicalize(target.parent().expect("worktree"))
             .expect("worktree remains")
