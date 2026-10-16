@@ -6,7 +6,7 @@ installed v9.123.2 の GUI（PID 36240、2026-10-15T14:11:46Z 起動）で priva
 
 実データは495 worktree、1,232 fingerprint group、2,430,572 source、group file 約484MBだった。[規模](before-installed/source-counts.json)。変更前の Work ingest は、変更グループの全 source map と、比較のために読み込んだ旧 map を処理終了まで保持し、最終確認でさらに旧 map を2回複製していた。
 
-製品コードの変更は既存の2ファイルに限定する。まず `ScannedGroup` を件数と length-delimited SHA-256 に変え、比較済みの正常な旧 map を解放した。dirty な移行データと読込失敗は保持し、最終確認は追加なしで複製0回、追加ありで1回とした。
+製品コードの変更は Work ingest、intake、Git blob batch の既存3ファイルを対象とする。まず `ScannedGroup` を件数と length-delimited SHA-256 に変え、比較済みの正常な旧 map を解放した。dirty な移行データと読込失敗は保持し、最終確認は追加なしで複製0回、追加ありで1回とした。
 
 ## 同一実データの割当量比較
 
@@ -94,6 +94,26 @@ loaderだけの追加比較では、同一payloadを参照する20万件の合�
 
 peakは約37.08%減った。返却後の値は、元のString capacityを移譲するため増えている。旧方式のcloneはcapacityを文字列長へ縮めていたが、loader途中では元と複製が併存する。ここで改善したのは途中ピークであり、あらゆる段階の保持量が下がるという比較ではない。最終1,024 Bは標準出力のbufferを含む。実GUIの約380MB段差すべてをこの小さい合成比較に帰属させない。
 
-所有 Issue は未証明の条件を残して OPEN を維持する。配信スライスは source-map の保持量削減と、その回帰・計測証跡である。schema migration は不要で、rollback はこの変更の revert。実 fleet の追加観測は既存 Issue #5561 で追跡する。
+loader の所有権移譲を含む `815fcff09d93fb3e88229445cf2239ed5bf98369` を正確にビルドした次の試行も、dark の観測13,182.808秒で WS が1,559,937,024 Bとなり失敗した。直前の WS 約1.17GBから増える同じ段差が残った。light も1,572,171,776 Bで失敗した。browser error は両テーマ0、所有GUIとproducerのcleanupは完了した。[dark](owned-loader-failed/runtime-memory-dark.json)、[light](owned-loader-failed/runtime-memory-light.json)、[識別](owned-loader-failed/metadata.json)、[外部45秒サンプル](owned-loader-failed/monitor.jsonl)、[終了処理](owned-loader-failed/shutdown.json)。dark の最初から最後までの WS は117.223→1,559.937 MB、+393.980 MB/時、private は+406.527 MB/時で、処理中の増加を含む失敗試験の値である。4時間完了や定常状態の傾きとはしない。root intake index 保存前に失敗しており、loader単体の改善からGUI全体の改善を推定できない。
+
+次に実Git履歴の batch API を単独で計測した。749 refs、589 unique commits、873,959 matrix descriptors、8,514 unique payload OIDsで、descriptor cache完成時のlive heap 194,950,932 Bが、input-order matrix複製後350,509,140 B、payload読込後407,967,244 B、返却値複製後594,173,124 Bとなった。約399MBの段階増加はGUIの段差と量的に整合するが、同じGUI内のallocation stackを採取した結果ではない。公開APIと完全matrix selectorを維持し、同じcommitの最後の入力出現でVecを移譲し、返却時もpath/OIDのStringをmoveする最小修正を選んだ。全refのchunk分割はOID一度readの契約に影響し、公開fieldをArcへ変える案は不要なAPI変更になるため採用しない。
+
+この749 refsのcommit一覧を固定し、旧・新を同じ入力readerで取り直した。計測器は実 `blob.rs` のコピーへphase captureを加え、System allocatorへ委譲した成功要求を集計する。selectorは全OIDを選択し、callerのfingerprint構築、worktree scan、fold、永続化、GUI RSSは含まない。
+
+| Git batch の計測値 | 旧複製方式 | 所有権移譲後 |
+| --- | ---: | ---: |
+| descriptor cache完成時のlive heap | 194,807,198 B | 194,832,814 B |
+| input-order matrix完成時 | 350,365,406 B | 214,140,176 B |
+| payload読込後 | 407,823,510 B | 271,598,280 B |
+| output完成時 | 594,029,390 B | 290,338,712 B |
+| peak live heap | 594,029,390 B | 290,731,928 B |
+| API返却後 | 242,069,839 B | 242,063,239 B |
+| 累積割当要求 | 1,036,785,871 B | 786,944,945 B |
+| API wall time | 10.018 s | 9.571 s |
+| output解放後 | 168,351 B | 168,351 B |
+
+peakは約51.06%減り、返却後の保持量はほぼ同じだった。必要な重複入力alias分のdescriptor複製は残す。raw tree cacheへの追加変更は、この2点のmoveで十分な削減が得られたため行わない。実行順とhost負荷を固定しておらず、約0.45秒の時間差を速度改善とはしない。この測定もGUI全体の4時間予算の代わりにはしない。
+
+所有 Issue は未証明の条件を残して OPEN を維持する。配信スライスは source metadata の保持量と複製ピークの削減、およびその回帰・計測証跡である。schema migration は不要で、rollback はこの変更の revert。実 fleet の追加観測は既存 Issue #5561 で追跡する。
 
 User Verification Result: n/a (autonomous)

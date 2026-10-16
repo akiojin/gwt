@@ -13,6 +13,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PlaywrightArgs = @($PlaywrightArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 $checkout = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$sources = @('crates/gwt/src/work_events_ingest.rs', 'crates/gwt-core/src/work_events_intake.rs', 'crates/gwt-git/src/blob.rs')
 function Get-ProductSourceHash([string]$Relative) {
   $text = [IO.File]::ReadAllText((Join-Path $checkout $Relative)).Replace("`r`n", "`n")
   # Exclude only the exact temporary measurement hook removed before delivery.
@@ -25,7 +26,10 @@ if ($PSCmdlet.ParameterSetName -eq 'Check') {
     throw 'The measured workload or its owned-process cleanup failed.'
   }
   $metadata = Get-Content -LiteralPath (Join-Path $EvidenceDirectory 'after/metadata.json') -Raw | ConvertFrom-Json
-  if (@($metadata.source_sha256.PSObject.Properties).Count -ne 2) { throw 'Missing measured product source hashes.' }
+  if (@($metadata.source_sha256.PSObject.Properties).Count -ne $sources.Count -or
+      @($sources | Where-Object { $_ -notin $metadata.source_sha256.PSObject.Properties.Name }).Count) {
+    throw 'Missing measured product source hashes.'
+  }
   foreach ($source in $metadata.source_sha256.PSObject.Properties) {
     if ((Get-ProductSourceHash $source.Name) -ne $source.Value) { throw "Measured product source changed: $($source.Name)" }
   }
@@ -53,7 +57,6 @@ if ($PSCmdlet.ParameterSetName -eq 'Check') {
 }
 $runDirectory = Join-Path $checkout ('target/issue-5561/' + $Label + '-' + [guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $runDirectory -Force)
-$sources = @('crates/gwt/src/work_events_ingest.rs', 'crates/gwt-core/src/work_events_intake.rs')
 $hashes = @{}
 foreach ($relative in $sources) {
   $hashes[$relative] = Get-ProductSourceHash $relative
