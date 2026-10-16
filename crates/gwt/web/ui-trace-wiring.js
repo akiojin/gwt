@@ -1,3 +1,5 @@
+import { createUiStateStore } from "./ui-state-store.js";
+
 export const UI_TRACE_EVENT = Object.freeze({
   applyStatus: "apply_status",
   applyViewport: "apply_viewport",
@@ -62,6 +64,31 @@ export function createUiTraceWiring({
     throw new TypeError("createUiTraceWiring requires a send callback");
   }
 
+  // Keep only the latest save response. Each response is a new snapshot so
+  // identical consecutive results still notify once per backend response.
+  const saveResultModel = createUiStateStore(null);
+  saveResultModel.subscribe(result => result, result => {
+    if (!result) return;
+    if (result.kind === "ui_trace_saved") {
+      alert(`UI trace saved\n${result.path}\nentries: ${result.entries}`);
+    } else {
+      alert(`UI trace error: ${result.message}`);
+    }
+  });
+
+  function receive(event) {
+    switch (event.kind) {
+      case "ui_trace_saved":
+        saveResultModel.update(() => ({ kind: event.kind, path: event.path, entries: event.entries }));
+        return true;
+      case "ui_trace_error":
+        saveResultModel.update(() => ({ kind: event.kind, message: event.message }));
+        return true;
+      default:
+        return false;
+    }
+  }
+
   function traceUi(kind, fields = {}) {
     profiler.record(kind, fields);
   }
@@ -115,6 +142,7 @@ export function createUiTraceWiring({
 
   return {
     isTracing,
+    receive,
     registerPalette,
     start,
     stop,

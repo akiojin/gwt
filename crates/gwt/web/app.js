@@ -991,7 +991,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       }
 
-      const uiTraceWiring = createUiTraceWiring({
+      const { receive: applyUiTraceReceiveEvent, ...uiTraceWiring } = createUiTraceWiring({
         profiler: uiTraceProfiler,
         send,
         alert: (message) => window.alert(message),
@@ -5191,12 +5191,8 @@ import { createUiStateStore } from "/ui-state-store.js";
             );
             break;
           case "ui_trace_saved":
-            window.alert(
-              `UI trace saved\n${event.path}\nentries: ${event.entries}`,
-            );
-            break;
           case "ui_trace_error":
-            window.alert(`UI trace error: ${event.message}`);
+            applyUiTraceReceiveEvent(event);
             break;
           case "release_notes_payload":
             applyReleaseNotesPayload(event);
