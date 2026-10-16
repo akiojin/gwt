@@ -1743,21 +1743,62 @@ impl AppRuntime {
         // nobody asked for, so a terminal predecessor generation is left
         // alone instead of being continued into a new Active generation.
         config.automatic_restore = origin == RestoreOrigin::Automatic;
-        let agent_name = self.tab(tab_id).and_then(|tab| {
-            tab.workspace
-                .persisted()
-                .windows
-                .iter()
-                .find(|window| {
-                    crate::runtime_support::window_is_agent_pane(window)
-                        && matches!(
-                            window.status,
-                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
-                        )
-                        && window.session_id.as_deref() == Some(session.id.as_str())
-                })
-                .and_then(|window| window.agent_name.clone())
-        });
+        let agent_name = self
+            .tab(tab_id)
+            .and_then(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .find(|window| {
+                        crate::runtime_support::window_is_agent_pane(window)
+                            && matches!(
+                                window.status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                            && window.session_id.as_deref() == Some(session.id.as_str())
+                    })
+                    .and_then(|window| window.agent_name.clone())
+            })
+            .or_else(|| session.agent_name.clone());
+        if let Some(name) = &agent_name {
+            let (_, active) = self.agent_name_reservations(Some(&session.id));
+            if let Err(error) = gwt::agent_names::ensure_available_initial(name, &active) {
+                let placeholder = self.tab(tab_id).and_then(|tab| {
+                    tab.workspace
+                        .persisted()
+                        .windows
+                        .iter()
+                        .find(|window| {
+                            window.session_id.as_deref() == Some(session.id.as_str())
+                                && matches!(
+                                    window.status,
+                                    WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                                )
+                        })
+                        .map(|window| window.id.clone())
+                });
+                if let Some(raw_id) = placeholder {
+                    let window_id = combined_window_id(tab_id, &raw_id);
+                    self.set_window_status(tab_id, &raw_id, WindowProcessStatus::Error);
+                    self.window_details.insert(window_id.clone(), error.clone());
+                    let _ = self.persist();
+                    return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
+                }
+                return self
+                    .project_context(tab_id)
+                    .map(|context| {
+                        vec![OutboundEvent::project(
+                            context.project_key,
+                            gwt::BackendEvent::LaunchWizardOpenError {
+                                title: "Agent restore".into(),
+                                message: error,
+                            },
+                        )]
+                    })
+                    .unwrap_or_default();
+            }
+        }
         let geometry = self
             .remove_stale_paused_agent_window(tab_id, &session.id, None)
             .unwrap_or(fallback_geometry);
@@ -1775,6 +1816,7 @@ impl AppRuntime {
             config,
             geometry,
             workspace_resume_context,
+            agent_name.clone(),
         ) {
             Ok(mut events) => {
                 if let Some(window_id) = self

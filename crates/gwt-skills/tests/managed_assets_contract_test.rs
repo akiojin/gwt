@@ -1181,7 +1181,7 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
 }
 
 #[test]
-fn generated_coordination_requires_ai_self_naming_before_work() {
+fn generated_coordination_reads_gwt_assigned_name_before_work() {
     let dir = tempfile::tempdir().expect("tempdir");
     generate_coordination_guidance(dir.path()).expect("generate guidance");
     for (provider, target) in [
@@ -1208,19 +1208,18 @@ fn generated_coordination_requires_ai_self_naming_before_work() {
         }
         for required in [
             "non-PM Agent",
-            "one-word ASCII English proper-name candidate",
-            "task, Issue, branch, pane id, or provider",
+            "gwt assigns",
+            "project's output language",
             "before responding to the user or starting normal work",
-            r#""operation":"pane.name","params":{"candidate":"<your candidate>"}"#,
+            r#""operation":"pane.name","params":{}"#,
             "exact assigned name",
             "already assigned",
-            "invalid candidate",
-            "static name vocabulary",
-            "second LLM request",
+            "Do not invent",
             "PM is exempt",
         ] {
             assert!(contract.contains(required), "missing {required:?}");
         }
+        assert!(!contract.contains("proper-name candidate"));
         assert!(
             contract.find(r#""operation":"pane.name""#)
                 < contract.find(r#""operation":"workspace.update""#),

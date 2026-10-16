@@ -10,6 +10,7 @@ import {
   buildIndexHealthSummary,
   renderIndexSettingsPanel,
 } from "/index-settings-panel.js";
+import { createUiStateStore } from "/ui-state-store.js";
 
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
@@ -41,7 +42,21 @@ export function createProjectIndexSearchSurface({
 }) {
       const indexSearchStateMap = new Map();
       const pendingIndexOpenTargetsByPreset = new Map();
-      const indexStatusByProjectRoot = new Map();
+      const indexStatusModel = createUiStateStore({ byProjectRoot: {}, lastChangedProjectRoot: null });
+      function getIndexStatus(projectRoot) {
+        const statuses = indexStatusModel.read().byProjectRoot;
+        return Object.hasOwn(statuses, projectRoot) ? statuses[projectRoot] : null;
+      }
+      // Independent subscriptions keep both surfaces on the committed snapshot,
+      // even if one renderer fails. Initial null avoids late-bound Settings calls.
+      const selectActiveIndexStatus = snapshot => snapshot.lastChangedProjectRoot === activeProjectTab()?.project_root
+        ? snapshot.byProjectRoot[snapshot.lastChangedProjectRoot] : null;
+      indexStatusModel.subscribe(selectActiveIndexStatus, status => {
+        if (status) renderIndexPanelInAllSettingsWindows();
+      });
+      indexStatusModel.subscribe(selectActiveIndexStatus, status => {
+        if (status) renderProjectIndexWindows();
+      });
 
       // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The
       // aggregated payload now feeds only the Index Health tab and the
@@ -52,16 +67,17 @@ export function createProjectIndexSearchSurface({
         if (!projectRoot) {
           return;
         }
-        indexStatusByProjectRoot.set(projectRoot, {
-          state: status?.state || "",
-          detail: status?.detail || "",
-          repair_started_at: status?.repair_started_at || null,
-          progress: status?.progress || null,
-          scopes: status?.scopes || {},
-          worktrees: status?.worktrees || {},
-        });
-        renderIndexPanelInAllSettingsWindows();
-        renderProjectIndexWindows();
+        indexStatusModel.update(snapshot => ({
+          lastChangedProjectRoot: projectRoot,
+          byProjectRoot: { ...snapshot.byProjectRoot, [projectRoot]: {
+            state: status?.state || "",
+            detail: status?.detail || "",
+            repair_started_at: status?.repair_started_at || null,
+            progress: status?.progress || null,
+            scopes: status?.scopes || {},
+            worktrees: status?.worktrees || {},
+          } },
+        }));
       }
 
       const INDEX_SEARCH_SCOPES = Object.freeze([
@@ -135,7 +151,7 @@ export function createProjectIndexSearchSurface({
 
       function activeIndexStatus() {
         const activeProjectRoot = activeProjectTab()?.project_root || "";
-        return (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+        return getIndexStatus(activeProjectRoot);
       }
 
       function ensureIndexStatusRefresh(state, status) {
@@ -833,6 +849,6 @@ export function createProjectIndexSearchSurface({
         mountProjectIndexSurface,
         indexSearchStateMap,
         pendingIndexOpenTargetsByPreset,
-        indexStatusByProjectRoot,
+        getIndexStatus,
       };
 }

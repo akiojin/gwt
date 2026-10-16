@@ -227,6 +227,7 @@ fn authority() -> RecoveryDeliveryAuthority {
         "session-1",
         "Codex",
         "codex",
+        None,
         Some("work/issue-1921".to_string()),
         BoardWorktreeForm::BranchBacked,
     )
@@ -445,12 +446,24 @@ fn append_response_loss_stays_pending_then_exact_replay_acknowledges() {
         "intent-loss",
         "response loss",
     );
-    let retry = deliver(
+    let retry = deliver_with(
         temp.path(),
-        &store_root,
-        provider,
         "intent-loss",
-        "response loss",
+        input("response loss"),
+        |_| RecoveryDeliveryRoute::new(RecoveryProvider::Local, Box::new(provider)),
+        |_| {
+            Ok(RecoveryDeliveryAuthority::new(
+                "project-1",
+                "session-1",
+                "Codex",
+                "codex",
+                Some("ミオ".into()),
+                Some("work/issue-1921".into()),
+                BoardWorktreeForm::BranchBacked,
+            )
+            .unwrap())
+        },
+        |_, authority| RecoveryStore::new(&store_root, authority.authority().clone()),
     );
 
     assert_eq!(first.state, RecoveryDeliveryState::Pending);
@@ -760,13 +773,29 @@ fn worktree_form_comes_from_attached_or_detached_head_not_path_prefix() {
         &branch_path,
         "https://github.com/example/recovery-form-branch.git",
     );
-    durable_session(&branch_path, "session-branch")
-        .save(&sessions)
-        .expect("save branch Session");
+    let mut named_session = durable_session(&branch_path, "session-branch");
+    named_session.agent_name = Some("ミオ".into());
+    named_session.save(&sessions).expect("save branch Session");
     let branch =
         resolve_delivery_authority(&branch_path, Some("session-branch")).expect("branch authority");
     assert_eq!(branch.worktree_form(), BoardWorktreeForm::BranchBacked);
     assert_eq!(branch.origin_branch(), Some("work/authority"));
+    let report = deliver_with(
+        &branch_path,
+        "named-author",
+        input("named recovery post"),
+        |_| RecoveryDeliveryRoute::new(RecoveryProvider::Local, Box::new(LocalProvider)),
+        |_| Ok(branch.clone()),
+        |_, authority| {
+            RecoveryStore::new(branch_path.join("recovery"), authority.authority().clone())
+        },
+    );
+    assert_eq!(report.state, RecoveryDeliveryState::Acknowledged);
+    let snapshot = LocalProvider.load_snapshot(&branch_path).unwrap();
+    assert_eq!(
+        snapshot.board.entries[0].origin_agent_name.as_deref(),
+        Some("ミオ")
+    );
 
     let detached = tempfile::tempdir().expect("detached repo");
     git_repo(

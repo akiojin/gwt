@@ -617,6 +617,8 @@ fn admit_inner<E: CliEnv>(
         .transpose()
         .map_err(unexpected)?
         .flatten();
+    let short_slot_gate = command.is_some_and(verification_lease::is_short_non_cargo_slot_gate);
+    let shared = target.is_some() || short_slot_gate;
     let budgets = match command {
         Some(command) => {
             let temporary = verification_lease::command_temporary_base(worktree, command)
@@ -661,7 +663,7 @@ fn admit_inner<E: CliEnv>(
                     "another verification claimant in this worktree owns the target job; \
                      gwtd artifact restoration: skipped (another verification owns the target job)"
                 } else {
-                    "verification reservation is being updated; gwtd artifact restoration: skipped (target admission pending)"
+                    "verification reservation is being updated; next_turn_reserved: unknown; gwtd artifact restoration: skipped (target admission pending)"
                 },
                 None,
             ));
@@ -685,7 +687,7 @@ fn admit_inner<E: CliEnv>(
                         return Err(deferred(
                             started,
                             max_wait,
-                            "verification reservation is being updated",
+                            "verification reservation is being updated; next_turn_reserved: unknown",
                             None,
                         ));
                     }
@@ -759,7 +761,7 @@ fn admit_inner<E: CliEnv>(
     let lease = loop {
         check_cancellation(attempt)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let acquired = match (target.is_some(), attempt) {
+        let acquired = match (shared, attempt) {
             (true, Some(attempt)) => guard.acquire_heavy_with_disk_budgets_for_attempt(
                 remaining.min(POLL),
                 LEASE_TTL,
@@ -887,7 +889,9 @@ fn admit_inner<E: CliEnv>(
     lease.record_spawn_host(spawn_host);
     // Reuse the lease's exact runner context so status can distinguish a current
     // exclusive command from an older binary holding the compatibility lock.
-    let resource_reason = if target.is_some() {
+    let resource_reason = if short_slot_gate {
+        "known bounded Node test uses one shared slot; execution limited to 60s"
+    } else if target.is_some() {
         "resolved build directory uses one shared slot (Cargo metadata or inline CARGO_TARGET_DIR)"
     } else {
         "no resolved build directory; exclusive command execution limited to 1200s"
@@ -896,7 +900,7 @@ fn admit_inner<E: CliEnv>(
     let lease_id = lease.id().to_string();
     let queue_wait_ms = lease.queue_wait_ms();
     let lease = Arc::new(Mutex::new(lease));
-    let commands = Arc::new(if target.is_some() {
+    let commands = Arc::new(if shared {
         super::CommandProgress::default()
     } else {
         super::CommandProgress::with_exclusive_timeout()
@@ -1301,6 +1305,10 @@ mod tests {
         let notice = describe_holder_with_activity(&root.coordinator, |status| {
             assert!(status.held);
             drop(lease);
+            root.assert_locks_free(
+                &[root.coordinator.heavy_lock_path()],
+                "the released heavy lease must become observable",
+            );
             Some(sampled_activity())
         });
         assert!(
@@ -1340,6 +1348,48 @@ mod tests {
         verification_lease::observe_holder_activity_with(&mut snapshot, |status| {
             assert!(status.held);
             drop(lease);
+            root.assert_locks_free(
+                &[root.coordinator.heavy_lock_path()],
+                "the released heavy lease must become observable",
+            );
+            Some(sampled_activity())
+        })
+        .unwrap();
+        assert!(!snapshot.held);
+        assert!(snapshot.holder_state.is_none());
+        assert!(snapshot.holder_cpu_percent.is_none());
+    }
+
+    /// Issue #5613: fork/dup keeps a lock alive after the original FD drops.
+    #[cfg(unix)]
+    #[test]
+    fn lease_observation_refreshes_after_a_cloned_heavy_lock_releases() {
+        let root = IsolatedLeaseRoot::new();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.coordinator.heavy_lock_path())
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&holder).unwrap();
+        // A cloned FD shares the flock's open file description, just like a
+        // fork child, without inheriting locks from other parallel tests.
+        let retained = holder.try_clone().unwrap();
+        let mut snapshot = verification_lease::status().unwrap();
+        verification_lease::observe_holder_activity_with(&mut snapshot, |_| {
+            Some(sampled_activity())
+        })
+        .unwrap();
+        assert_eq!(snapshot.holder_cpu_percent, Some(0.0));
+
+        verification_lease::observe_holder_activity_with(&mut snapshot, |status| {
+            assert!(status.held);
+            drop(holder);
+            assert!(root.status().held, "the clone must retain the heavy lock");
+            root.assert_locks_free_with(
+                &[root.coordinator.heavy_lock_path()],
+                "the retained heavy lock must become free",
+                || drop(retained),
+            );
             Some(sampled_activity())
         })
         .unwrap();
@@ -1367,6 +1417,10 @@ mod tests {
         let notice = describe_holder_with_activity(&root.coordinator, |status| {
             assert_eq!(status.lease_id.as_deref(), Some(lease.id()));
             drop(lease);
+            root.assert_locks_free(
+                &[root.coordinator.heavy_lock_path()],
+                "the released heavy lease must become observable before reacquisition",
+            );
             replacement = Some(
                 guard
                     .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
@@ -1607,10 +1661,26 @@ mod tests {
         }
 
         fn assert_locks_free(&self, paths: &[PathBuf], context: &str) {
+            self.assert_locks_free_with(paths, context, || {});
+        }
+
+        fn assert_locks_free_with(
+            &self,
+            paths: &[PathBuf],
+            context: &str,
+            on_contended: impl FnOnce(),
+        ) {
             let deadline = Instant::now() + RELEASE_OBSERVATION_BUDGET;
+            let mut on_contended = Some(on_contended);
             loop {
                 if self.locks_are_free(paths) {
                     return;
+                }
+                // Release the regression's retained FD only after a real
+                // contended probe, so scheduling cannot hide the retention.
+                if let Some(on_contended) = on_contended.take() {
+                    on_contended();
+                    continue;
                 }
                 assert!(
                     Instant::now() < deadline,
@@ -1700,6 +1770,74 @@ mod tests {
     }
 
     #[test]
+    fn known_node_test_uses_one_slot_and_unknown_node_stays_exclusive() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile_env = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
+        let _home = ScopedGwtHome::set(home.path());
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\nslots=2\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
+        let coordinator = verification_lease::open_coordinator().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let key = verification_key_for(first.path());
+        let JobAdmission::Owner(holder) = coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::ZERO)
+            .unwrap()
+        else {
+            panic!("private target must be free");
+        };
+        // A canonical holder publishes its budget ledger even when it is empty.
+        let lease = holder
+            .acquire_heavy_with_disk_budgets(Duration::ZERO, Duration::from_secs(60), &[])
+            .unwrap();
+        let mut env = crate::cli::TestEnv::new(second.path().to_path_buf());
+        let command = "node --test \"scripts/coverage-summary.test.mjs\"";
+        let admission = super::admit(
+            &mut env,
+            second.path(),
+            Some(command),
+            Duration::ZERO,
+            |_| String::new(),
+        )
+        .expect("known bounded Node gate must use the spare slot");
+        let pool = coordinator.heavy_pool_status().unwrap();
+        assert_eq!(pool.used, 2);
+        assert!(pool
+            .slots
+            .iter()
+            .filter(|slot| slot.status.held)
+            .all(|slot| slot.slot.is_some()));
+        assert_eq!(admission.command_progress().timeout(), None);
+        assert_eq!(
+            verification_lease::short_non_cargo_timeout(command),
+            Some(Duration::from_secs(60))
+        );
+        drop(admission);
+        assert!(
+            super::admit(
+                &mut env,
+                second.path(),
+                Some("node --test arbitrary.test.mjs"),
+                Duration::ZERO,
+                |_| String::new(),
+            )
+            .is_err(),
+            "an unknown Node test must still exclude the live shared holder"
+        );
+        drop(lease);
+        holder.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
     fn declared_wrapper_and_other_project_use_two_slots_but_shared_artifacts_wait() {
         let _lock = gwt_core::test_support::env_lock()
             .lock()
@@ -1785,6 +1923,10 @@ mod tests {
                 message: "host admission deferred".into(),
             })
             .unwrap();
+        lease_root.assert_target_free(
+            &key,
+            "the previous attempt must release its target before readmission",
+        );
         let reservation_path = lease_root.coordinator.heavy_reservation_path(&key);
         let original: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&reservation_path).unwrap()).unwrap();
@@ -2358,6 +2500,13 @@ mod tests {
                 Some("later arrival"),
             )
             .unwrap();
+        // Make this claimant later even if CLOCK_REALTIME moves backwards.
+        // This fixture checks rank preservation, not the host's clock order.
+        let later_path = lease_root.coordinator.heavy_reservation_path(&later);
+        let mut later_entry: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&later_path).unwrap()).unwrap();
+        later_entry["queued_at_ms"] = before[0].queued_at_ms.saturating_add(1).into();
+        std::fs::write(&later_path, serde_json::to_vec(&later_entry).unwrap()).unwrap();
         lease_root.assert_target_free(&key, "a deferred run must release its caller target");
         let again = super::admit(&mut env, worktree.path(), None, Duration::ZERO, recover)
             .unwrap_err()
@@ -2371,7 +2520,11 @@ mod tests {
         assert!(again.contains("next_turn_reserved: yes"), "{again}");
         let after = lease_root.coordinator.heavy_lease_status().unwrap().queue;
         assert_eq!(after.len(), 2);
-        assert_eq!(after[0].target.as_deref(), Some(key.file_stem().as_str()));
+        assert_eq!(
+            after[0].target.as_deref(),
+            Some(key.file_stem().as_str()),
+            "FIFO position must be preserved: before={before:?}; after={after:?}"
+        );
         assert_eq!(after[0].queued_at_ms, before[0].queued_at_ms);
         assert_eq!(after[1].target.as_deref(), Some(later.file_stem().as_str()));
         drop(_lease);

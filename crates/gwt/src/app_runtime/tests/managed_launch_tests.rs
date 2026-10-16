@@ -2554,6 +2554,20 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         )
         .expect("retired Session");
         assert_eq!(session.status, gwt_agent::AgentStatus::Stopped);
+        let window = runtime
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.workspace.persisted().windows.iter())
+            .find(|window| window.session_id.as_deref() == Some(row.session_id.as_str()))
+            .expect("direct agent window");
+        assert!(
+            window.agent_name.is_some(),
+            "direct presets must be named before spawning"
+        );
+        assert_eq!(
+            session.agent_name, window.agent_name,
+            "replacing the direct preset Session must retain the window name"
+        );
     }
     // `stop_window_runtime` kills without waiting (Issue #3705); Windows
     // TerminateProcess is asynchronous, so the observed children may still be

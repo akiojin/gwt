@@ -564,6 +564,22 @@ pub(crate) fn read_execution_observations_from_inventory(
                 crate::issue_monitor::IssueMonitorExecutionObservation {
                     settlement,
                     process_held,
+                    holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead"),
+                    held_holder_session_id: diagnosis.holder_session_id.clone().filter(|holder| {
+                        matches!(
+                            diagnosis.holder_runtime.as_deref(),
+                            Some("live" | "unknown" | "not_evaluated")
+                        ) || inventory
+                            .sessions
+                            .iter()
+                            .any(|session| &session.session_id == holder)
+                            || inventory.uncertainties.iter().any(|uncertainty| {
+                                uncertainty
+                                    .session_id
+                                    .as_ref()
+                                    .is_none_or(|id| id == holder)
+                            })
+                    }),
                 },
             )
         })
@@ -4191,8 +4207,24 @@ mod tests {
             Some(IssueMonitorExecutionSettlement::Interrupted),
             "the reaper blocked it on the holder's behalf; the work is unfinished"
         );
+        for phase in ["first qualified absence", "replayed canvas"] {
+            let outcome = reconcile_issue_monitor_windows(
+                &mut monitor,
+                worktree.path(),
+                "2026-09-07T04:10:00Z",
+            );
+            assert!(outcome.released.is_empty(), "{phase}");
+            assert!(outcome.requeued.is_empty(), "{phase}");
+            assert_eq!(monitor.active_issue_numbers(), vec![42], "{phase}");
+        }
+        monitor.record_window_snapshot(crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".to_string(),
+            observed_at: "2026-09-07T04:10:01Z".to_string(),
+            windows: Vec::new(),
+        });
         let outcome =
-            reconcile_issue_monitor_windows(&mut monitor, worktree.path(), "2026-09-07T04:10:00Z");
+            reconcile_issue_monitor_windows(&mut monitor, worktree.path(), "2026-09-07T04:10:01Z");
+        assert_eq!(outcome.released, vec![42]);
         assert_eq!(outcome.requeued, vec![42]);
         assert!(monitor
             .autonomous_record(42)

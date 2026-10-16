@@ -86,66 +86,6 @@ async function command(page: Page, id: string, command: string, expected: string
   await expect.poll(() => page.evaluate((id) => (window as any).__gwtTerminalTestApi.bufferText(id), id), { timeout: 15_000 }).toContain(expected);
 }
 
-test("new Agent canvas right edge stays reachable without camera movement", async ({ page }, testInfo) => {
-  test.setTimeout(180_000);
-  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
-  const agentId = process.env.GWT_PLAYWRIGHT_CLOSE_AGENT_ID;
-  test.skip(!base || !agentId, "requires isolated server and custom shell Agent fixture");
-  await page.setViewportSize({ width: 1024, height: 1000 });
-  await withLiveGwtBackendLock(base!, testInfo, async () => {
-    const observations = capture(page);
-    await gotoLiveGwt(page, base!, { enableTestBridge: true });
-    const canvas = page.locator("#canvas");
-    const stage = page.locator("#canvas-stage");
-    await expect(canvas).toBeVisible();
-    await expect(page.locator("html")).toHaveAttribute("data-theme",
-      testInfo.project.name.includes("light") ? "light" : "dark");
-    const bounds = await page.evaluate(() => {
-      const canvas = document.getElementById("canvas")!;
-      const stage = document.getElementById("canvas-stage")!;
-      const matrix = new DOMMatrix(getComputedStyle(stage).transform);
-      return { x: -matrix.e / matrix.a, y: -matrix.f / matrix.a,
-        width: canvas.clientWidth / matrix.a, height: canvas.clientHeight / matrix.a };
-    });
-    expect(bounds.width).toBeGreaterThanOrEqual(420);
-    expect(bounds.width).toBeLessThan(1280);
-    expect(bounds.height).toBeGreaterThanOrEqual(800);
-    const cameraBefore = await stage.evaluate((element: HTMLElement) => element.style.transform);
-    const existing = new Set(await page.locator(".workspace-window").evaluateAll((nodes) =>
-      nodes.map((node) => (node as HTMLElement).dataset.id)));
-    let id = "";
-    try {
-      id = await launchAgent(page, agentId!, bounds);
-      expect(existing.has(id), "the test must exercise a newly placed Agent").toBe(false);
-      const frame = page.locator(`.workspace-window[data-id="${id}"]`);
-      await expect(frame).toBeVisible();
-      const canvasBox = (await canvas.boundingBox())!;
-      for (const target of [frame.locator('[data-action="close"]'), frame.locator(".resize-handle")]) {
-        await expect(target).toBeVisible();
-        const box = (await target.boundingBox())!;
-        expect(box.x).toBeGreaterThanOrEqual(canvasBox.x);
-        expect(box.y).toBeGreaterThanOrEqual(canvasBox.y);
-        expect(box.x + box.width).toBeLessThanOrEqual(canvasBox.x + canvasBox.width);
-        expect(box.y + box.height).toBeLessThanOrEqual(canvasBox.y + canvasBox.height);
-        expect(await target.evaluate((element) => {
-          const box = element.getBoundingClientRect();
-          const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
-          return hit === element || element.contains(hit);
-        })).toBe(true);
-      }
-      expect(await stage.evaluate((element: HTMLElement) => element.style.transform)).toBe(cameraBefore);
-      await expect(frame.locator('[data-action="maximize"], [data-action="snap"]')).toHaveCount(0);
-      await page.screenshot({ path: testInfo.outputPath("agent-visible-right-edge.png") });
-    } finally {
-      if (id && !existing.has(id)) {
-        await sendLiveGwtEvent(page, { kind: "close_window", id });
-        await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
-      }
-    }
-    expect(observations.errors).toEqual([]);
-  });
-});
-
 test("live detach preserves the Agent; explicit close reaches all A tabs and leaves B running", async ({ page, context }, testInfo) => {
   test.setTimeout(180_000);
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;

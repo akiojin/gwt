@@ -1186,7 +1186,7 @@ mod tests {
                 text.contains(r#""operation":"pane.name""#),
                 "{event}: {text}"
             );
-            assert!(text.contains("one-word ASCII English proper-name candidate"));
+            assert!(text.contains("gwt assigns"));
             assert!(text.contains("already assigned"));
             assert!(text
                 .contains(gwt_skills::coordination_guidance::PANE_NAME_FIRST_ACTION_GUIDANCE_EN));

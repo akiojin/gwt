@@ -54,7 +54,9 @@ export function shouldShowWindowWorktreeBadge(windowData) {
 export function windowWorktreeBadgeView(windowData) {
   const view = WORKTREE_FORM_VIEWS[windowWorktreeForm(windowData)] ||
     WORKTREE_FORM_VIEWS.unknown;
-  const name = String(windowData?.agent_name || "").trim() || "Naming…";
+  const name = [windowData?.agent_name, windowData?.dynamic_title, windowData?.purpose_title,
+    windowData?.title, windowData?.branch, windowData?.agent_id]
+    .map(value => String(value || "").trim()).find(Boolean) || "Agent";
   return {
     ...view,
     shortLabel: name,

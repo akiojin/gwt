@@ -16,8 +16,9 @@
 #
 #   GWT_FLAKE_TARGETS      space-separated `<crate>|test|<name>` / `<crate>|lib|`
 #                          tokens naming the cargo test targets to exercise
-#   GWT_FLAKE_BASE_SHA     PR / merge-group base for changed-file test selection
+#   GWT_FLAKE_BASE_SHA     PR / merge-group / push base for changed-file selection
 #                          (unset keeps full targets for standalone use)
+#   GWT_FLAKE_HEAD_SHA     Owner source head (defaults to HEAD for local callers)
 #   GWT_FLAKE_RUNS         integration run ceiling (default 20); libraries use 2
 #   GWT_FLAKE_BUDGET_SECS  test execution budget, excluding compile (default 600)
 #   GWT_FLAKE_MIN_FREE_MB  stop repeating below this much free disk (default 2048)
@@ -84,6 +85,7 @@ selector_for() {
 select_changed_tests() {
   python3 - "$1" "$2" "$GWT_FLAKE_BASE_SHA" <<'PY'
 # changed-test-selection-begin
+import os
 import pathlib
 import re
 import subprocess
@@ -94,16 +96,50 @@ entry, listing, base = sys.argv[1:]
 if not base:
     raise SystemExit("Changed-test selection requires a base commit")
 crate, kind, target = entry.split("|")
+# CI may test a synthetic merge containing newer base commits. Select only
+# the owner's changes, while retaining the merged checkout for test execution.
+head = os.environ.get("GWT_FLAKE_HEAD_SHA") or "HEAD"
 changed = subprocess.check_output(
-    ["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+    ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"],
     text=True,
 ).split("\0")
 tests = sorted({line.removesuffix(": test") for line in
                 pathlib.Path(listing).read_text().splitlines()
                 if line.endswith(": test")})
 if kind == "test":
-    # A direct integration target is already one changed test file.
     selected = tests
+    if crate == "gwt":
+        # Consolidated targets contain several original test files. Reuse the
+        # classifier's Cargo/source map to retain only their changed modules.
+        sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
+        from test_layout import integration_sources
+        try:
+            sources = integration_sources(pathlib.Path.cwd())
+        except (OSError, ValueError):
+            sources = {}
+        modules = set()
+        for name in changed:
+            if name.startswith("crates/gwt/src/"):
+                modules.clear()
+                break
+            if not name.startswith("crates/gwt/tests/"):
+                continue
+            source = sources.get(name)
+            if source is None:
+                modules.clear()
+                break
+            source_target, module = source
+            if source_target != target:
+                continue
+            if (module is None or not pathlib.Path(name).is_file()
+                    or not any(test.startswith(f"{module}::") for test in tests)):
+                # A changed harness, deleted file, or missing module cannot
+                # safely narrow the target, even if another file is mapped.
+                modules.clear()
+                break
+            modules.add(module)
+        if modules:
+            selected = [test for test in tests if test.partition("::")[0] in modules]
 elif kind == "lib":
     functions = set()
     for name in changed:

@@ -1884,6 +1884,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
 #[derive(Debug, Clone)]
 pub struct AgentLaunchRuntimeContext {
     pub(crate) agent_project_root: String,
+    pub(crate) predecessor_session_id: Option<String>,
     pub(crate) expected_execution_identity: Option<gwt_agent::SessionExecutionIdentity>,
     pub(crate) active_launch_handshake: Option<gwt_agent::SessionActiveLaunchHandshake>,
 }
@@ -1892,6 +1893,7 @@ impl From<String> for AgentLaunchRuntimeContext {
     fn from(agent_project_root: String) -> Self {
         Self {
             agent_project_root,
+            predecessor_session_id: None,
             expected_execution_identity: None,
             active_launch_handshake: None,
         }
@@ -2116,6 +2118,7 @@ struct PreparedAgentLaunchSuccess {
     )>,
     cached_session: Option<gwt_agent::Session>,
     session_snapshot: Option<gwt_agent::Session>,
+    predecessor_session_id: Option<String>,
     materialized_genesis: Option<MaterializedGenesisLaunch>,
 }
 
@@ -2437,6 +2440,7 @@ fn prepare_agent_launch_inner(
     ) = launch;
     let AgentLaunchRuntimeContext {
         agent_project_root,
+        predecessor_session_id,
         expected_execution_identity,
         active_launch_handshake,
     } = runtime_context;
@@ -2875,6 +2879,7 @@ fn prepare_agent_launch_inner(
         pm_registration,
         cached_session,
         session_snapshot,
+        predecessor_session_id,
         materialized_genesis: genesis,
     })
 }
@@ -3483,6 +3488,7 @@ fn prepare_host_update_drain_launch_hold(
 
 #[derive(Debug, Clone)]
 struct AgentWindowSpawnOptions {
+    inherited_agent_name: Option<String>,
     placement: AgentWindowPlacement,
     workspace_resume_context: Option<WorkspaceResumeContext>,
     launch_feedback_context: Option<LaunchFeedbackContext>,
@@ -5621,6 +5627,16 @@ impl AppRuntime {
             .project_root
             .clone();
         let is_fresh = success.pending_fresh_execution.is_some();
+        let named_assignment = success
+            .session_snapshot
+            .clone()
+            .or_else(|| success.cached_session.clone());
+        let assignment_predecessor = success
+            .pending_continue_work
+            .as_ref()
+            .map(|pending| pending.predecessor_session_id.clone())
+            .or_else(|| success.predecessor_session_id.clone())
+            .or_else(|| pending.prior_session_id.clone());
         if let Some(token) = success.capability_token {
             if let Some(previous) = self
                 .agent_capability_tokens
@@ -5655,6 +5671,7 @@ impl AppRuntime {
             success.initial_prompt_file,
             success.session_snapshot.as_ref(),
         );
+        self.queue_named_issue_assignment(named_assignment, assignment_predecessor);
         if !self.pending_continue_work.contains_key(&window_id) {
             if let Some(context) = feedback.as_ref() {
                 let _ = self.arm_issue_monitor_startup(&window_id, context);
@@ -5892,6 +5909,48 @@ impl AppRuntime {
         }
     }
 
+    fn queue_named_issue_assignment(
+        &self,
+        session: Option<gwt_agent::Session>,
+        predecessor_session_id: Option<String>,
+    ) {
+        let Some(session) = session.filter(|session| {
+            session.agent_name.is_some()
+                && session.linked_issue_number.is_some()
+                && !session.review_dispatch
+        }) else {
+            return;
+        };
+        let sessions_dir = self.sessions_dir.clone();
+        let issue_client_factory = Arc::clone(&self.issue_client_factory);
+        let predecessor_session_id =
+            predecessor_session_id.or_else(|| session.restore_source_session_id.clone());
+        let project_root = session
+            .project_state_root
+            .clone()
+            .unwrap_or_else(|| session.worktree_path.clone());
+        let issue_number = session.linked_issue_number;
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = (|| -> Result<(), String> {
+                let previous_name = predecessor_session_id.as_ref().and_then(|id| {
+                    gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                        .filter(|previous| previous.id == *id && previous.linked_issue_number == session.linked_issue_number)
+                        .and_then(|previous| previous.agent_name)
+                });
+                let (owner, repo) = gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root).map_err(|error| error.to_string())?;
+                let client = issue_client_factory(&owner, &repo).map_err(|error| error.to_string())?;
+                gwt::session_launch::record_named_issue_assignment(client.as_ref(), &session, previous_name.as_deref())
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                tracing::warn!(?issue_number, session_id = %session.id, %error, "named Issue assignment could not be recorded");
+            }
+        }) {
+            tracing::warn!(?issue_number, %error, "named Issue assignment worker could not start");
+        }
+    }
+
     pub(crate) fn start_window(
         &mut self,
         tab_id: &str,
@@ -6009,7 +6068,25 @@ impl AppRuntime {
         }
         // Legacy direct presets bypass the Launch Wizard, but their PTYs
         // still belong in the same Session observation and stop lifecycle.
+        let mut named_assignment = None;
         if matches!(preset, WindowPreset::Claude | WindowPreset::Codex) {
+            let previous_session_id = self
+                .tab(tab_id)
+                .and_then(|tab| tab.workspace.window(raw_id))
+                .and_then(|window| window.session_id.clone());
+            let agent_name = match self.ensure_window_agent_name(tab_id, raw_id) {
+                Ok(name) => name,
+                Err(error) => {
+                    self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                    self.window_details.insert(window_id.clone(), error.clone());
+                    return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
+                }
+            };
+            if let Some(name) = &agent_name {
+                env.insert("GWT_AGENT_NAME".into(), name.clone());
+            } else {
+                env.remove("GWT_AGENT_NAME");
+            }
             let agent_id = if preset == WindowPreset::Claude {
                 gwt_agent::AgentId::ClaudeCode
             } else {
@@ -6020,6 +6097,12 @@ impl AppRuntime {
                 .and_then(|repo| repo.current_branch().ok().flatten())
                 .unwrap_or_default();
             let mut session = gwt_agent::Session::new(&project_root, &branch, agent_id.clone());
+            session.agent_name = agent_name;
+            session.linked_issue_number = self
+                .tab(tab_id)
+                .and_then(|tab| tab.workspace.window(raw_id))
+                .and_then(|window| window.linked_issue_number);
+            session.restore_source_session_id = previous_session_id;
             session.project_state_root = Some(project_root.clone());
             session.launch_command = launch.command.clone();
             session.launch_args = launch.args.clone();
@@ -6031,6 +6114,7 @@ impl AppRuntime {
                     .insert(window_id.clone(), detail.clone());
                 return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
+            named_assignment = Some(session.clone());
             if let Some(tab) = self.tab_mut(tab_id) {
                 let _ = tab
                     .workspace
@@ -6066,6 +6150,7 @@ impl AppRuntime {
             console_kind,
         ) {
             Ok(()) => {
+                self.queue_named_issue_assignment(named_assignment, None);
                 if let Some(id) = stage_id {
                     emit_agent_launch_stage(id, "ready", "PTY handoff complete");
                 }
@@ -6258,6 +6343,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context: None,
@@ -6280,6 +6366,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
@@ -6302,6 +6389,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
@@ -6349,6 +6437,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context,
@@ -6365,11 +6454,13 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         geometry: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
+        inherited_agent_name: Option<String>,
     ) -> Result<Vec<OutboundEvent>, String> {
         self.spawn_agent_window_with_placement(
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name,
                 placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: None,
@@ -6392,6 +6483,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context: Some(workspace_resume_context),
                 launch_feedback_context: None,
@@ -6483,7 +6575,7 @@ impl AppRuntime {
     fn spawn_agent_window_with_placement(
         &mut self,
         tab_id: &str,
-        config: gwt_agent::LaunchConfig,
+        mut config: gwt_agent::LaunchConfig,
         options: AgentWindowSpawnOptions,
     ) -> Result<Vec<OutboundEvent>, String> {
         let mut phase_started = std::time::Instant::now();
@@ -6494,6 +6586,7 @@ impl AppRuntime {
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let AgentWindowSpawnOptions {
+            inherited_agent_name,
             placement,
             workspace_resume_context,
             launch_feedback_context,
@@ -6737,6 +6830,23 @@ impl AppRuntime {
                 message
             })?
         };
+        // Name the window before its first snapshot and before SessionStart can run.
+        // Only the restore path supplies an inherited identity; fresh launch env
+        // inputs cannot choose or rename an Agent.
+        let agent_name = if config
+            .working_dir
+            .as_deref()
+            .is_some_and(gwt::pm_registry::is_canonical_pm_worktree)
+        {
+            config.env_vars.remove("GWT_AGENT_NAME");
+            None
+        } else {
+            let name = self.allocate_agent_name(&project_root_path, inherited_agent_name)?;
+            config
+                .env_vars
+                .insert("GWT_AGENT_NAME".into(), name.clone());
+            Some(name)
+        };
         let prepared_manual_launch_claim = claim_prepared_manual_successor_launch(
             &self.sessions_dir,
             &project_root_path,
@@ -6759,6 +6869,9 @@ impl AppRuntime {
                 .workspace
                 .add_window_at_geometry_with_title(WindowPreset::Agent, title, true, geometry),
         };
+        if let Some(name) = agent_name {
+            tab.workspace.set_agent_name(&window.id, Some(name));
+        }
         if let Some(purpose_title) = purpose_title {
             let _ = tab
                 .workspace
@@ -7421,6 +7534,7 @@ impl AppRuntime {
                 had_prepared_execution,
                 AgentLaunchRuntimeContext {
                     agent_project_root,
+                    predecessor_session_id: config.predecessor_session_id.clone(),
                     expected_execution_identity,
                     active_launch_handshake: active_launch_handshake_cleanup.take(),
                 },

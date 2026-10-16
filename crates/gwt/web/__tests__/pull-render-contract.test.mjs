@@ -138,6 +138,73 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
 });
 
+test("Index health receiver resolves only shared model updates", () => {
+  const file = 'crates/gwt/web/project-index-search-surface.js';
+  const source = readFileSync(new URL('../project-index-search-surface.js', import.meta.url), 'utf8');
+  assert.deepEqual(scanModule(source, file, { rootName: 'setIndexStatus' }), []);
+  const bypass = source.replace('function setIndexStatus(projectRoot, status) {',
+    'function setIndexStatus(projectRoot, status) { renderProjectIndexWindows();');
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file, { rootName: 'setIndexStatus' })
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("Release notes receivers resolve only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const surfaceFile = 'crates/gwt/web/release-notes-window.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../release-notes-window.js', import.meta.url), 'utf8');
+  const receivers = source => scanModule(source, appFile, { modules: new Map([[surfaceFile, surface]]) })
+    .filter(finding => finding.root === 'receive' && /^\/release_notes_(payload|error)$/.test(finding.context));
+  assert.deepEqual(receivers(app), []);
+  for (const name of ['handlePayload', 'handleError']) {
+    assert.deepEqual(scanModule(surface, surfaceFile, { rootName: name }), []);
+    const bypass = surface.replace(name === 'handlePayload' ? 'function handlePayload(payload) {' : 'function handleError(message) {',
+        `function ${name}(${name === 'handlePayload' ? 'payload' : 'message'}) { renderSidebar(model.read());`);
+    assert.notEqual(bypass, surface);
+    assert.ok(scanModule(bypass, surfaceFile, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Workspace state notice receiver resolves only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const noticeFile = 'crates/gwt/web/workspace-state-notice.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const notice = readFileSync(new URL('../workspace-state-notice.js', import.meta.url), 'utf8');
+  const receiverFindings = source => scanModule(source, appFile, { modules: new Map([[noticeFile, notice]]) })
+    .filter(finding => finding.root === 'receive' && finding.context === '/workspace_state_notice');
+  assert.deepEqual(scanModule(notice, noticeFile), []);
+  assert.deepEqual(receiverFindings(app), []);
+  const bypass = app.replace('case "workspace_state_notice":',
+    'case "workspace_state_notice": element.textContent = event.kind;');
+  assert.ok(receiverFindings(bypass).some(finding => finding.kind === 'dom-write'));
+  const directRender = notice.replace('function receive(notice) {',
+    'function receive(notice) { render(notice);');
+  assert.notEqual(directRender, notice, 'mutation must target the real notice receiver');
+  assert.ok(scanModule(directRender, noticeFile).some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("PM settings receiver resolves only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const panelFile = 'crates/gwt/web/pm-settings-panel.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const panel = readFileSync(new URL('../pm-settings-panel.js', import.meta.url), 'utf8');
+  const modules = new Map([[panelFile, panel]]);
+  const receiverFindings = source => scanModule(source, appFile, { modules })
+    .filter(finding => finding.root === 'receive' && /^\/pm_status(\/|$)/.test(finding.context));
+  assert.deepEqual(receiverFindings(app), []);
+  const bypass = app.replace('applyPmSettingsReceiveEvent(event);',
+    'applyPmSettingsReceiveEvent(event); element.textContent = event.kind;');
+  assert.notEqual(bypass, app, 'mutation must target the real PM settings receiver');
+  assert.ok(receiverFindings(bypass).some(finding => finding.kind === 'dom-write'));
+
+  const directRender = panel.replace('function applyPmSettingsReceiveEvent(status) {',
+    'function applyPmSettingsReceiveEvent(status) { renderView(mounts.values().next().value, model.read());');
+  assert.notEqual(directRender, panel, 'mutation must target the factory receiver');
+  assert.ok(scanModule(directRender, panelFile, { rootName: 'applyPmSettingsReceiveEvent' })
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
 test("Profile receivers resolve only shared model updates", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const appFile = 'crates/gwt/web/app.js';
