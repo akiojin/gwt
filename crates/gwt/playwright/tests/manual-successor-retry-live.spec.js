@@ -341,6 +341,7 @@ test.describe('Manual successor retry (isolated checkout)', () => {
       expect(successor.events.some(event => event.kind === 'start' && event.related_work_item_id === invalidWork.id)).toBe(true);
       const retired = activated.works.work_items.find(work => work.id === invalidWork.id);
       expect(retired.discarded).toBe(true);
+      expect(retired.execution_containers).toEqual([]);
       expect(retired.events).toEqual(expect.arrayContaining(invalidWork.events));
       expect(retired.events.filter(event => event.id === `superseded-${invalidWork.id}`
         && event.kind === 'discard' && event.related_work_item_id === oldWork.id

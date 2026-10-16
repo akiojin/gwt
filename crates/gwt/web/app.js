@@ -871,7 +871,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         mountProjectIndexSurface,
         indexSearchStateMap,
         pendingIndexOpenTargetsByPreset,
-        indexStatusByProjectRoot,
+        getIndexStatus,
       } = createProjectIndexSearchSurface({
         send,
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
@@ -1151,7 +1151,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         sendFocusedPaneInput(text);
       }
 
-      const releaseNotesWindow = createReleaseNotesWindow({
+      const { handlePayload: applyReleaseNotesPayload, handleError: applyReleaseNotesError, ...releaseNotesWindow } = createReleaseNotesWindow({
         document,
         send,
         beginUpdateDownloading: (version) =>
@@ -1220,7 +1220,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // sync isolation). Console-only reporting left the user with a silently
       // stale minimap / window list until reload.
       const renderDegradationBanner = createRenderDegradationBanner({ document });
-      const workspaceStateNotice = createWorkspaceStateNotice({ document, send });
+      const { receive: applyWorkspaceStateNoticeReceiveEvent } = createWorkspaceStateNotice({ document, send });
 
       // Issue #3365 — owns renderedWorkspaceWindowsKey's lifecycle: the key is
       // committed only after a fully clean per-window sync, so a degraded
@@ -5109,7 +5109,7 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // The controller is created before Settings so pm_status may hydrate its
       // shared snapshot before the first Settings window is mounted.
-      const pmSettingsPanel = createPmSettingsPanel({
+      const { applyStatus: applyPmSettingsReceiveEvent, ...pmSettingsPanel } = createPmSettingsPanel({
         document,
         send,
         confirm: (message) => window.confirm(message),
@@ -5625,7 +5625,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         activeProjectTab,
         focusOrSpawnPreset,
         renderUsagePanel,
-        indexStatusByProjectRoot,
+        getIndexStatus,
         pmSettingsPanel,
         mountIssues: (data, host) => {
           mountKnowledgeWindow(data, host);
@@ -6296,7 +6296,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "workspace_state_notice":
-            workspaceStateNotice.receive(event.notice);
+            applyWorkspaceStateNoticeReceiveEvent(event.notice);
             break;
           case "workspace_state": {
             projectError = "";
@@ -6340,10 +6340,10 @@ import { createUiStateStore } from "/ui-state-store.js";
             window.alert(`UI trace error: ${event.message}`);
             break;
           case "release_notes_payload":
-            releaseNotesWindow.handlePayload(event);
+            applyReleaseNotesPayload(event);
             break;
           case "release_notes_error":
-            releaseNotesWindow.handleError(event.message);
+            applyReleaseNotesError(event.message);
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
@@ -6398,7 +6398,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           }
           case "pm_status":
             // SPEC-3431 FR-026: the whole panel state arrives in one snapshot.
-            frontendUnits.pmSettingsPanel.applyStatus(event);
+            applyPmSettingsReceiveEvent(event);
             pmLauncherModel.update(state => ({ ...state, paused: Boolean(event.paused) }));
             break;
           case "issue_monitor_status":

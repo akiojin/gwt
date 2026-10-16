@@ -514,6 +514,7 @@ fn the_required_windows_check_requires_successful_core_stability() {
             CORE_STABILITY_JOB,
             "test-windows-index-stability",
             "test-windows-rust",
+            "test-windows-rust-lib",
             "test-windows-warm",
             "source-sync"
         ]

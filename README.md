@@ -527,6 +527,11 @@ Issue rows. Operators can stop a failed launch with `issue.monitor.stop`,
 `params.number`, and `params.reason`, even after its live claim/window identity
 was lost. The saved failed window is used only while it still belongs to that
 Issue; stopping records a persistent hold and returns any pane to close.
+The hold appears with its reason and removes the Issue from this host's launch
+queue by default. Set `params.remove_from_queue` to `false` to keep queue
+membership while holding the Issue. Launch failures show their category and
+the next recovery operation; repeated unchanged failures stop automatic retries
+after the configured attempt limit.
 
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent

@@ -20,7 +20,7 @@
 //   function created by createProviderUsageSurface in app.js (its usage
 //   snapshot state lives there), so it must be injected rather than
 //   imported as a sibling module.
-// - indexStatusByProjectRoot: per-project index status Map owned by the
+// - getIndexStatus: per-project shared index status snapshot owned by the
 //   Project Index surface instance created in app.js (E3).
 import { createInteractionGuard } from "/interaction-guard.js";
 import { renderIndexSettingsPanel } from "/index-settings-panel.js";
@@ -575,7 +575,7 @@ export function createSettingsSurface({
   activeProjectTab,
   focusOrSpawnPreset,
   renderUsagePanel,
-  indexStatusByProjectRoot,
+  getIndexStatus,
   pmSettingsPanel,
   mountIssues,
 }) {
@@ -1233,7 +1233,7 @@ export function createSettingsSurface({
       function renderIndexPanel(panel) {
         const activeProjectRoot = activeProjectTab()?.project_root || "";
         const status =
-          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+          getIndexStatus(activeProjectRoot);
         renderIndexSettingsPanel({
           panel,
           status,

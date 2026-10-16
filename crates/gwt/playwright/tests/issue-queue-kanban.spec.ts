@@ -24,7 +24,7 @@ test.beforeEach(async ({ page }, info) => {
   await installBackend(page, {
     narrowSettings,
     inboxFirst: info.title.startsWith("Issue #5287"),
-    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:"),
+    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862"),
     observeSkipped: info.title.startsWith("four columns preserve"),
   });
   await page.goto(liveUrl || APP_URL);
@@ -563,6 +563,68 @@ test("Issue #4862 a live delivered slice stays Active while its window binding i
   }]));
   await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
   await expect(column(page, "backlog").locator('[data-issue-number="5"]')).toHaveCount(0);
+  await expect(column(page, "queued").locator('[data-issue-number="5"]')).toHaveCount(0);
+});
+
+test("Issue #4862 failed launches with no window show their reason outside Active", async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([42, 43].map(number => ({ number, title: `Failed issue ${number}`, state: "open",
+      labels: [], related_work_refs: [{ id: `work-${number}` }] })));
+    fixture.__queueEvent({ kind: "active_work_projection", projection: { id: "stale-projection",
+      agents: [], works: [], unassigned_agents: [], journal_entries: [], active_works: [42, 43].map(number => ({
+        id: `work-${number}`, title: `Stale active Work ${number}`, active_agents: 1, agents: [], works: [],
+      })) } });
+  });
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(2);
+  await page.evaluate(() => (window as any).__queueInbox([42, 43].map((number, index) => ({ issue: { number },
+    state: index ? "agent_failed" : "launch_failed", launched_window_id: null,
+    error_message: `Issue ${number}: successor has invalid lineage` }))));
+  for (const [number, badge] of [[42, "Launch failed"], [43, "Agent failed"]] as const) {
+    const failed = column(page, "backlog").locator(`[data-issue-number="${number}"]`);
+    await expect(failed).toBeVisible();
+    await expect(failed.locator(".knowledge-row-badge")).toHaveText(badge);
+    await expect(failed.locator('[data-key="reason"]')).toHaveText(`Issue ${number}: successor has invalid lineage`);
+    await expect(failed.locator('[data-key="recovery"]')).toHaveText("Work lineage · Next: workspace.close (superseded), then issue.monitor.requeue");
+    await expect(failed.locator('[data-action="requeue-issue"]')).toBeVisible();
+    await expect(column(page, "active").locator(`[data-issue-number="${number}"]`)).toHaveCount(0);
+  }
+  await page.evaluate(() => (window as any).__queueInbox([
+    { issue: { number: 42 }, state: "agent_failed", error_message: "cannot launch successor of Work work-42: owner or execution container mismatch" },
+    { issue: { number: 43 }, state: "needs_human", error_message: "autonomous launch attempts exhausted (3/3) with an unchanging failure: Launch timed out: no window was created within 120s" },
+  ]));
+  await expect(row(page, 42).locator('[data-key="recovery"]')).toHaveText("Work owner mismatch · Next: workspace.candidates");
+  await expect(row(page, 43).locator('[data-key="recovery"]')).toHaveText("Window timeout · Next: issue.monitor.requeue");
+  await expect(row(page, 43).locator('[data-key="reason"]')).toContainText("autonomous launch attempts exhausted (3/3)");
+  await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();
+  await expect(column(page, "active").locator('[data-issue-number="43"]')).toHaveCount(0);
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 43 }, state: "needs_human",
+    error_message: "autonomous launch attempts exhausted (3/3) with an unchanging failure: successor work-43-next is duplicated; use workspace.close" }]));
+  await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();
+  await expect(row(page, 43).locator('[data-key="recovery"]')).toHaveText("Launch failure · Next: issue.monitor.status");
+  await expect(page.locator('[data-queue-column]')).toHaveCount(4);
+});
+
+test("Issue #4862 PM stop stays Held outside the queue while a stale pane lingers", async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([{ number: 5, title: "PM stopped issue", state: "open", labels: [],
+      monitor_state: "launched", related_work_refs: [{ id: "work-5" }] }]);
+    fixture.__queueEvent({ kind: "active_work_projection", projection: { id: "stale-projection", agents: [], works: [],
+      unassigned_agents: [], journal_entries: [], active_works: [{ id: "work-5", active_agents: 1, agents: [], works: [] }] } });
+  });
+  await confirm(page, []);
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "launch_failed", error_message: "old failed attempt" }]));
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText("Running");
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "needs_human", error_message: "stopped: PM paused for investigation" }]));
+  const held = column(page, "backlog").locator('[data-issue-number="5"]');
+  await expect(held).toBeVisible();
+  await expect(held.locator(".knowledge-row-badge")).toHaveText("Held");
+  await expect(held.locator(".knowledge-row-badge")).toHaveAttribute("data-tone", "idle");
+  await expect(held.locator('[data-key="reason"]')).toHaveText("PM paused for investigation");
+  await expect(held.locator('[data-key="recovery"]')).toHaveCount(0);
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toHaveCount(0);
   await expect(column(page, "queued").locator('[data-issue-number="5"]')).toHaveCount(0);
 });
 
