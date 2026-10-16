@@ -272,10 +272,13 @@ test.describe('Manual successor retry (isolated checkout)', () => {
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       const predecessor = fixture.inspect();
       const oldWork = predecessor.works.work_items.find(work => work.id === predecessor.workspace.id);
-      const invalidWork = predecessor.works.work_items.find(work => work.id !== oldWork.id);
+      const invalidWork = predecessor.works.work_items.find(work => work.status_category === 'active');
+      const terminalHistory = predecessor.works.work_items.filter(work => work.status_category === 'done');
+      expect(terminalHistory).toHaveLength(4);
+      expect(terminalHistory.filter(work => work.owner === `Issue #${OWNER}`)).toHaveLength(3);
       expect(invalidWork.status_category).toBe('active');
       expect(invalidWork.related_work_item_ids).toEqual([]);
-      expect(oldWork.owner).toBeNull();
+      expect(oldWork.owner).toBe(`Issue #${OWNER}`);
       expect(oldWork.status_category).toBe('done');
       expect(oldWork.execution_containers).toHaveLength(1);
       expect(oldWork.execution_containers[0].worktree_path).toBe(`E:\\gwt\\work\\issue-${OWNER}`);
@@ -359,6 +362,7 @@ test.describe('Manual successor retry (isolated checkout)', () => {
         purpose: 'Manual successor retry fixture', issue: OWNER, current_focus: 'Successor Work verification',
       });
       await fixture.sessionRpc(second.session_id, 'workspace.update', { current_focus: 'Validating successor execution authority' });
+      await fixture.sessionRpc(second.session_id, 'build.start', { spec: OWNER });
       // Probe verify authority without requesting a nested Heavy host slot.
       const commands = ['git diff --check'];
       await fixture.sessionRpc(second.session_id, 'verify.plan', { commands });
@@ -370,6 +374,9 @@ test.describe('Manual successor retry (isolated checkout)', () => {
       expect(verified.verification_run.execution_binding).toEqual(verified.binding);
       expect(verified.verification_run.all_passed).toBe(true);
       expect(verified.works.work_items.find(work => work.id === oldWork.id)).toEqual(oldWork);
+      for (const historical of terminalHistory) {
+        expect(verified.works.work_items.find(work => work.id === historical.id)).toEqual(historical);
+      }
       await info.attach(`active-${theme}`, { body: await page.screenshot(), contentType: 'image/png' });
       await info.attach('final-ledger', { body: JSON.stringify(verified), contentType: 'application/json' });
       expect(errors, 'real backend console/page errors').toEqual([]);

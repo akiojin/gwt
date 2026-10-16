@@ -14715,6 +14715,56 @@ fn repair_resume_owner_bleed_keeps_legitimate_duplicates_below_threshold() {
 }
 
 #[test]
+fn repair_resume_owner_bleed_preserves_same_branch_successor_lifetimes() {
+    let temp = tempfile::tempdir().unwrap();
+    let works_path = temp.path().join("works.json");
+    let current_path = temp.path().join("current.json");
+    let project_root = Path::new("/repo");
+    let branch = "work/issue-3287";
+    let now = Utc.timestamp_opt(31_000, 0).unwrap();
+    let mut works = WorkItemsProjection::empty(now);
+    let mut work_id = canonical_work_id(project_root, Some(branch), None).unwrap();
+    let mut parent = None;
+    for index in 0..3 {
+        let mut start = bleed_backfill_event(&work_id, branch, index);
+        start.kind = WorkEventKind::Start;
+        start.owner = Some("SPEC-3287".to_string());
+        start.related_work_item_id = parent.take();
+        works.apply_event(start);
+        let mut resume = bleed_resume_event(&work_id, index);
+        resume.owner = Some("SPEC-3287".to_string());
+        works.apply_event(resume);
+        if index < 2 {
+            works.apply_event(WorkEvent::new(WorkEventKind::Done, &work_id, now));
+            parent = Some(work_id.clone());
+            work_id = successor_work_id(&work_id);
+        }
+    }
+    save_workspace_work_items_projection_to_path(&works_path, &works).unwrap();
+    let mut current = WorkspaceProjection::default_for_project(project_root);
+    current.id = work_id.clone();
+    current.title = "gwt-manage-pr".to_string();
+    current.owner = Some("SPEC-3287".to_string());
+    save_workspace_projection_to_path(&current_path, &current).unwrap();
+
+    let report = repair_resume_owner_bleed_paths(&works_path, &current_path, now).unwrap();
+    assert_eq!(
+        report.sanitized_events, 0,
+        "successor history is one branch"
+    );
+    assert!(!report.cleared_current);
+    let reloaded = load_workspace_work_items_from_path(&works_path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded, works, "preserve owners and terminal history");
+    assert_eq!(
+        current_work_id(&reloaded, project_root, Some(branch), None),
+        Some(work_id),
+        "ordinary canonical readers must resolve the launched successor",
+    );
+}
+
+#[test]
 fn repair_resume_owner_bleed_preserves_other_work_session_assignment_after_reload() {
     let temp = tempfile::tempdir().expect("tempdir");
     let works_path = temp.path().join("works.json");
