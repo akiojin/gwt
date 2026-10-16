@@ -1938,10 +1938,10 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
 #[test]
 fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
     let html = frontend_bundle_source();
-    // Readiness must precede queue replay, and replay must match the immutable
-    // connection scope. Other projects retain their own pending messages.
+    // Readiness and the ephemeral attention report precede queue replay, and
+    // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
     )
     .expect("valid regex");
 
@@ -2991,7 +2991,7 @@ fn embedded_web_profile_surface_uses_config_backed_contract() {
             && html.contains("state.draft && profileDraftIsDirty(state)")
             && html.contains("profileDraftIsDirty(state)")
             && html.contains(
-                "((wasSaveInFlight && profileHasEditableFocus(event.id)) || hasNewerDraft)",
+                "((wasSaveInFlight && profileHasEditableFocus(windowId)) || hasNewerDraft)",
             ),
         "expected delayed Profile save snapshots to preserve newer draft edits before re-rendering",
     );
@@ -3355,12 +3355,10 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
             r#"case\s*"terminal_output":\s*applyPmWindowReceiveEvent\(event\);\s*break;\s*case\s*"terminal_snapshot":\s*applyPmWindowReceiveEvent\(event\);\s*break;"#,
         )
         .expect("valid regex");
-    // SPEC-3064 Phase 3 (E6e): the profile_snapshot body lives in the
-    // profile window surface applier; the app.js case arm delegates.
-    let profile_event = regex::Regex::new(
-            r#"function applyProfileReceiveEvent\(event\)\s*\{[\s\S]*?case\s*"profile_snapshot":\s*\{\s*const state = ensureProfileState\(event\.id\);[\s\S]*?renderProfile\(event\.id\);\s*break;\s*\}"#,
-        )
-        .expect("valid regex");
+    // Keep the embedded model/subscription wiring smoke here; the frontend
+    // pull-render contract enforces the semantic receiver DOM boundary.
+    let profile_model =
+        regex::Regex::new(r#"const profileModel\s*=\s*createUiStateStore\("#).expect("valid regex");
     let profile_event_delegate = regex::Regex::new(
         r#"case\s*"profile_snapshot":[\s\S]{0,300}?applyProfileReceiveEvent\(event\);\s*break;"#,
     )
@@ -3413,8 +3411,11 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected shared window subscriptions to retain the named terminal host delivery contract",
     );
     assert!(
-        profile_event.is_match(html) && profile_event_delegate.is_match(html),
-        "expected profile snapshot events to flow through the dedicated profile surface unit",
+        profile_model.is_match(html)
+            && html.contains("profileModel.update(")
+            && html.contains("profileModel.subscribe(")
+            && profile_event_delegate.is_match(html),
+        "expected profile snapshot events to flow through shared model subscriptions in the dedicated surface",
     );
     assert!(
         wizard_event.is_match(html) && wizard_event_delegate.is_match(html),

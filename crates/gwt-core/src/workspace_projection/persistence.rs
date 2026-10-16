@@ -569,6 +569,7 @@ pub fn transact_workspace_state_with_preflight<T>(
             &work_items_path,
             &events_path,
             repo_path,
+            false,
             update,
         )?;
         persist_workspace_state_transaction_locked(&current_path, &transaction)?;
@@ -617,6 +618,7 @@ pub fn transact_workspace_state_for_work_event_root_with_preflight<T>(
         project_state_root,
         work_event_root,
         false,
+        false,
         preflight,
         update,
     )
@@ -638,6 +640,30 @@ pub fn transact_workspace_close_state_for_work_event_root<T>(
         project_state_root,
         work_event_root,
         true,
+        false,
+        |_, _, _| Ok(()),
+        update,
+    )
+}
+
+/// The registered PM may explicitly retire an exact invalid successor after
+/// validating owner/container and current member liveness under this lock.
+/// Only reserved supersession audits receive cross-Work authority; ordinary
+/// event and Session-assignment checks remain unchanged.
+pub fn transact_workspace_successor_supersession_for_work_event_root<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_event_log(
+        project_state_root,
+        work_event_root,
+        false,
+        true,
         |_, _, _| Ok(()),
         update,
     )
@@ -647,6 +673,7 @@ fn transact_workspace_state_for_work_event_root_with_event_log<T>(
     project_state_root: &Path,
     work_event_root: &Path,
     machine_local_close_events: bool,
+    allow_successor_supersession: bool,
     preflight: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection, bool) -> Result<()>,
     update: impl FnOnce(
         &mut WorkspaceProjection,
@@ -685,6 +712,7 @@ fn transact_workspace_state_for_work_event_root_with_event_log<T>(
                 &work_items_path,
                 &events_path,
                 project_state_root,
+                allow_successor_supersession,
                 update,
             )?;
             persist_workspace_state_transaction_locked(&current_path, &transaction)?;
@@ -1801,6 +1829,51 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
     ) -> Result<(T, Vec<WorkEvent>)>,
     commit: impl FnOnce() -> Result<()>,
 ) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_commit_policy(
+        project_state_root,
+        work_event_root,
+        external_operation_id,
+        false,
+        update,
+        commit,
+    )
+}
+
+/// Authenticated fresh ECR activation may additionally publish exact
+/// successor supersession audits in the same externally committed batch.
+pub fn transact_workspace_state_for_work_event_root_with_supersession_commit<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    external_operation_id: &str,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<T> {
+    transact_workspace_state_for_work_event_root_with_commit_policy(
+        project_state_root,
+        work_event_root,
+        external_operation_id,
+        true,
+        update,
+        commit,
+    )
+}
+
+fn transact_workspace_state_for_work_event_root_with_commit_policy<T>(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    external_operation_id: &str,
+    allow_successor_supersession: bool,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<T> {
     validate_external_workspace_operation_id(external_operation_id)?;
     let (current_path, work_items_path) =
         split_root_workspace_state_paths(project_state_root, work_event_root);
@@ -1850,6 +1923,7 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
                 &work_items_path,
                 &events_path,
                 project_state_root,
+                allow_successor_supersession,
                 update,
             )?;
             transaction.external_commit = Some(ExternalWorkspaceCommit {
@@ -2180,6 +2254,7 @@ pub fn transact_workspace_state_at<T>(
             work_items_path,
             events_path,
             project_root,
+            false,
             update,
         )?;
         persist_workspace_state_transaction_locked(current_path, &transaction)?;
@@ -2238,6 +2313,7 @@ pub fn transact_workspace_state_at_with_commit<T>(
             work_items_path,
             events_path,
             project_root,
+            false,
             update,
         )?;
         transaction.external_commit = Some(ExternalWorkspaceCommit {
@@ -2506,6 +2582,7 @@ fn build_workspace_state_transaction_locked<T>(
     work_items_path: &Path,
     events_path: &Path,
     project_root: &Path,
+    allow_successor_supersession: bool,
     update: impl FnOnce(
         &mut WorkspaceProjection,
         &WorkItemsProjection,
@@ -2546,6 +2623,7 @@ fn build_workspace_state_transaction_locked<T>(
         &projection,
         &board_refs_before,
         &events,
+        allow_successor_supersession,
     )?;
 
     let mut next_work_items = work_items;
@@ -2591,8 +2669,12 @@ fn validate_workspace_state_transaction_mutations(
     projection_after: &WorkspaceProjection,
     board_refs_before: &HashSet<String>,
     events: &[WorkEvent],
+    allow_successor_supersession: bool,
 ) -> Result<()> {
     for event in events {
+        if allow_successor_supersession && event.is_successor_supersession() {
+            continue;
+        }
         if event.work_item_id == projection_before.id {
             continue;
         }
@@ -6039,7 +6121,8 @@ fn current_canonical_work_item<'a>(
         if candidates.next().is_some()
             || !successor.related_work_item_ids.contains(&current.id)
             || !successor.events.iter().any(|event| {
-                event.kind == WorkEventKind::Start
+                event.is_successor_lineage_anchor()
+                    && (event.kind == WorkEventKind::Start || successor.is_terminal())
                     && event.related_work_item_id.as_deref() == Some(current.id.as_str())
             })
             || !owner_matches

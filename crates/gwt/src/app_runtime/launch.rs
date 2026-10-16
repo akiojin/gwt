@@ -4818,6 +4818,147 @@ pub(super) fn register_codex_managed_project_trust_for_resolved_launch_with_host
     }
 }
 
+/// Choose one actual checkout whose repository and checked-out branch prove
+/// the owner being repaired. Historical foreign or missing paths grant no
+/// local mutation authority.
+fn pm_successor_recovery_checkout(
+    project_root: &Path,
+    parent: &gwt_core::workspace_projection::WorkItem,
+    target: &gwt_core::workspace_projection::WorkItem,
+    sessions_dir: &Path,
+) -> Result<
+    (
+        gwt::cli::execution_state::ExecutionOwnerKey,
+        String,
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
+    ),
+    String,
+> {
+    use gwt_core::workspace_projection as work;
+    let project_hash = gwt_core::paths::project_scope_hash(project_root);
+    let mut containers = Vec::new();
+    for item in [target, parent] {
+        containers.extend(item.execution_containers.iter().cloned());
+        containers.extend(
+            item.events
+                .iter()
+                .filter_map(|event| event.execution_container.clone()),
+        );
+        for agent in &item.agents {
+            if gwt_agent::validate_session_id_path_component(&agent.session_id).is_err() {
+                return Err("Work member Session identity is invalid".into());
+            }
+            if let Ok(session) =
+                gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", agent.session_id)))
+            {
+                containers.push(work::WorkspaceExecutionContainerRef {
+                    branch: Some(session.branch),
+                    worktree_path: Some(session.worktree_path),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                });
+            }
+        }
+    }
+    let mut selected = None;
+    for candidate in containers {
+        let Some(path) = candidate
+            .worktree_path
+            .as_deref()
+            .and_then(|path| dunce::canonicalize(path).ok())
+        else {
+            continue;
+        };
+        let Ok(repo) = gwt_git::repository::Repository::discover(&path) else {
+            continue;
+        };
+        if dunce::canonicalize(repo.path()).ok().as_ref() != Some(&path)
+            || gwt_core::repo_hash::detect_repo_hash(&path).as_ref() != Some(&project_hash)
+        {
+            continue;
+        }
+        let Some(branch) = repo.current_branch().ok().flatten() else {
+            continue;
+        };
+        let Some(expected_owner) = work::work_owner_for_branch(&branch) else {
+            continue;
+        };
+        if work::canonical_work_id(project_root, Some(&branch), Some(&path))
+            != work::canonical_work_id(
+                project_root,
+                candidate.branch.as_deref(),
+                candidate.worktree_path.as_deref(),
+            )
+        {
+            continue;
+        }
+        let number = expected_owner
+            .strip_prefix("Issue #")
+            .and_then(|number| number.parse().ok())
+            .ok_or_else(|| "canonical branch owner is invalid".to_string())?;
+        let container = work::WorkspaceExecutionContainerRef {
+            branch: Some(branch),
+            worktree_path: Some(path),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        };
+        let owner = match gwt::cli::execution_state::load(
+            container.worktree_path.as_deref().expect("local checkout"),
+        )
+        .map_err(|error| format!("execution owner is unavailable: {error}"))?
+        {
+            Some(record) => {
+                if !gwt::cli::execution_state::integrity_ok(&record)
+                    || record.owner_number != number
+                {
+                    return Err("execution owner conflicts with the canonical branch".into());
+                }
+                gwt::cli::execution_state::ExecutionOwnerKey {
+                    kind: record.owner_kind,
+                    number,
+                }
+            }
+            None => gwt::cli::execution_state::ExecutionOwnerKey {
+                kind: if [parent, target].iter().any(|item| {
+                    item.owner.as_deref().is_some_and(|owner| {
+                        owner == format!("SPEC-{number}") || owner == format!("SPEC #{number}")
+                    })
+                }) {
+                    gwt::cli::execution_state::ExecutionOwnerKind::Spec
+                } else {
+                    gwt::cli::execution_state::ExecutionOwnerKind::Issue
+                },
+                number,
+            },
+        };
+        let expected_owner = super::workspace::workspace_owner_label(owner);
+        if [parent, target].iter().any(|item| {
+            item.owner.as_deref().is_some_and(|known| {
+                known != expected_owner
+                    && !work::can_upgrade_work_owner(Some(known), Some(&expected_owner))
+            })
+        }) {
+            return Err("known Work owner conflicts with the execution owner".into());
+        }
+        let resolved = (owner, expected_owner, container);
+        if selected
+            .as_ref()
+            .is_some_and(|previous| previous != &resolved)
+        {
+            return Err(
+                "local owner checkout is ambiguous; workspace.close requires one exact checkout"
+                    .into(),
+            );
+        }
+        selected = Some(resolved);
+    }
+    selected.ok_or_else(|| {
+        "cannot prove a local checkout of the canonical owner branch; workspace.close did not change Work history".into()
+    })
+}
+
 impl AppRuntime {
     pub(super) fn latest_resumable_branch_session(
         &self,
@@ -5953,7 +6094,7 @@ impl AppRuntime {
         Ok(())
     }
 
-    fn install_process_window(
+    pub(crate) fn install_process_window(
         &mut self,
         id: &str,
         incarnation: u64,
@@ -5987,6 +6128,11 @@ impl AppRuntime {
         // status event exposes the pane. The registry owns only a cloned Arc;
         // the process owner remains WindowRuntime.
         self.runtimes.insert(id.to_string(), runtime);
+        // PTY liveness alone is not Agent Running. Use the same composed state
+        // as later hooks/status events, with the installed runtime incarnation.
+        if let Some(status) = self.window_status(id) {
+            self.observe_notification_transition_at(id, status, std::time::Instant::now());
+        }
         self.register_pty_writer(id, session_snapshot);
         // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
         // the pre-PTY failure guard.
@@ -7429,9 +7575,15 @@ impl AppRuntime {
     ) -> Result<bool, (String, bool)> {
         use gwt_core::workspace_projection as work;
         let kind = match close_kind {
-            "done" => work::WorkCloseKind::Done,
-            "discarded" => work::WorkCloseKind::Discarded,
-            _ => return Err(("close_kind must be done or discarded".into(), false)),
+            "done" => Some(work::WorkCloseKind::Done),
+            "discarded" => Some(work::WorkCloseKind::Discarded),
+            "superseded" => None,
+            _ => {
+                return Err((
+                    "close_kind must be done, discarded, or superseded".into(),
+                    false,
+                ))
+            }
         };
         if work_id.is_empty() || work_id.trim() != work_id {
             return Err(("an exact nonempty work_id is required".into(), false));
@@ -7453,6 +7605,9 @@ impl AppRuntime {
                 false,
             ));
         }
+        let Some(kind) = kind else {
+            return self.supersede_invalid_work_for_pm(&context, work_id);
+        };
         let items = work::load_workspace_work_items(&context.project_root)
             .map_err(|error| (error.to_string(), false))?
             .ok_or_else(|| ("current Work state is unavailable".into(), false))?;
@@ -7488,6 +7643,141 @@ impl AppRuntime {
         }
         let changed = Self::record_work_close(&context.project_root, work_id, kind)
             .map_err(|error| (error, false))?;
+        let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
+        Ok(changed)
+    }
+
+    fn supersede_invalid_work_for_pm(
+        &mut self,
+        context: &super::ProjectContext,
+        work_id: &str,
+    ) -> Result<bool, (String, bool)> {
+        use gwt_core::workspace_projection as work;
+        let items = work::load_workspace_work_items(&context.project_root)
+            .map_err(|error| (error.to_string(), false))?
+            .ok_or_else(|| ("current Work state is unavailable".into(), false))?;
+        let exact_target = |items: &work::WorkItemsProjection| {
+            let mut matches = items.work_items.iter().filter(|item| item.id == work_id);
+            let target = matches.next().ok_or_else(|| {
+                gwt_core::GwtError::Other("Work no longer exists in this project".into())
+            })?;
+            if matches.next().is_some() {
+                return Err(gwt_core::GwtError::Other(
+                    "exact Work identity is ambiguous; workspace.close cannot repair duplicate identities".into(),
+                ));
+            }
+            Ok(target.clone())
+        };
+        let target = exact_target(&items).map_err(|error| (error.to_string(), false))?;
+        let mut parents = items
+            .work_items
+            .iter()
+            .filter(|item| work::successor_work_id(&item.id) == work_id);
+        let parent = parents
+            .next()
+            .filter(|item| item.is_terminal())
+            .cloned()
+            .ok_or_else(|| ("an exact terminal predecessor is required".into(), false))?;
+        if parents.next().is_some() {
+            return Err(("exact predecessor identity is ambiguous".into(), false));
+        }
+        let (owner, expected_owner, container) = pm_successor_recovery_checkout(
+            &context.project_root,
+            &parent,
+            &target,
+            &self.sessions_dir,
+        )
+        .map_err(|error| (error, false))?;
+        let worktree = container
+            .worktree_path
+            .as_deref()
+            .expect("recovery checkout has a proven local path");
+        let live_session_ids = self
+            .active_agent_sessions
+            .values()
+            .map(|session| session.session_id.clone())
+            .collect();
+        if !self.project_context_is_current(context) {
+            return Err(("project changed before Work supersession".into(), false));
+        }
+        // Match fresh activation's global -> owner -> Work order. Acquiring
+        // the owner inside the Work transaction would invert that hierarchy.
+        let changed = gwt::cli::execution_state::with_workspace_successor_supersession_lease(
+            worktree,
+            owner,
+            || {
+                work::transact_workspace_successor_supersession_for_work_event_root(
+                    &context.project_root,
+                    worktree,
+                    |_, locked, _| {
+                        let locked_target = exact_target(locked)?;
+                        let mut parents = locked
+                            .work_items
+                            .iter()
+                            .filter(|item| item.id == parent.id);
+                        let locked_parent = parents.next().ok_or_else(|| {
+                            gwt_core::GwtError::Other("predecessor disappeared before Work supersession".into())
+                        })?;
+                        if parents.next().is_some()
+                            || locked_parent != &parent
+                            || locked_target != target
+                        {
+                            return Err(gwt_core::GwtError::Other(
+                                "exact Work or predecessor changed; retry workspace.close".into(),
+                            ));
+                        }
+                        let (locked_owner_key, locked_owner, locked_container) = pm_successor_recovery_checkout(
+                            &context.project_root,
+                            locked_parent,
+                            &locked_target,
+                            &self.sessions_dir,
+                        )
+                        .map_err(gwt_core::GwtError::Other)?;
+                        if locked_owner_key != owner || locked_owner != expected_owner || locked_container != container {
+                            return Err(gwt_core::GwtError::Other(
+                                "local owner checkout changed before Work supersession".into(),
+                            ));
+                        }
+                        if self.sessions_dir != gwt_core::paths::gwt_sessions_dir() {
+                            super::workspace::validate_superseded_member_runtimes(
+                                &self.sessions_dir,
+                                &locked_target,
+                            )?;
+                        }
+                        let audit = super::workspace::invalid_successor_supersession_event(
+                            &context.project_root,
+                            locked_parent,
+                            &locked_target,
+                            container.clone(),
+                            &expected_owner,
+                            &live_session_ids,
+                            chrono::Utc::now(),
+                        )?;
+                        if locked_target.events.iter().any(|event| {
+                            event.work_item_id == locked_target.id
+                                && event.is_successor_supersession()
+                        }) {
+                            return Ok((false, Vec::new()));
+                        }
+                        let current = work::current_work_id_for_launch(
+                            locked,
+                            &context.project_root,
+                            container.branch.as_deref(),
+                            container.worktree_path.as_deref(),
+                            Some(&expected_owner),
+                        )?;
+                        if current.as_deref() != Some(locked_parent.id.as_str()) {
+                            return Err(gwt_core::GwtError::Other(
+                                "Work already belongs to a valid successor lineage; use issue.monitor.requeue".into(),
+                            ));
+                        }
+                        Ok((true, vec![audit]))
+                    },
+                )
+                .map_err(std::io::Error::other)
+            },
+        )
+        .map_err(|error| (error.to_string(), false))?;
         let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
         Ok(changed)
     }

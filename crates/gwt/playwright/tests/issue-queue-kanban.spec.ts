@@ -275,6 +275,31 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
   expect(splitList.x + splitList.width, "narrow Split keeps its interactive list beside the detail pane").toBeLessThanOrEqual(splitDetail.x + 1);
 });
 
+test("Issue #5603 GitHub API read limit shows its reason and retry time, then clears", async ({ page }) => {
+  const pill = page.locator(".knowledge-monitor-pill");
+  await page.evaluate(() => (window as any).__queueStatus({
+    enabled: true, state: "idle", active_count: 0, last_error: null,
+    github_budget: { core: { throttled: true,
+      reason: "budget_reserve: resource=core remaining=0 reserve=1000",
+      backoff_until: "2026-10-16T01:59:53Z" } },
+  }));
+  await expect(pill).toHaveText("Limited · GitHub");
+  await expect(pill).toHaveAttribute("data-tone", "idle");
+  await expect(pill).toHaveAttribute("title", /GitHub API reads limited.*core.*budget_reserve.*Retry 2026-10-16T01:59:53Z/);
+  await pill.focus();
+  await expect(page.locator('.issue-control-explanation[role="tooltip"]:visible')).toContainText("Retry 2026-10-16T01:59:53Z");
+
+  await page.evaluate(() => (window as any).__queueStatus({ state: "error", last_error: "unrelated scan fault" }));
+  await expect(pill).toHaveText("⚠ Error");
+  await expect(pill).toHaveAttribute("title", /Details in notifications.*GitHub API reads limited.*Retry 2026-10-16T01:59:53Z/);
+
+  await page.evaluate(() => (window as any).__queueStatus({
+    state: "idle", last_error: null, github_budget: { core: { throttled: false } },
+  }));
+  await expect(pill).toHaveText("Running");
+  await expect(pill).toHaveAttribute("title", "");
+});
+
 test("Issue #5396 lazy preview retains DOM across unchanged list and detail replies", async ({ page }, info) => {
   const detail = page.locator(".knowledge-detail-pane");
   expect(await page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>

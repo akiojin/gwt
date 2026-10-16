@@ -492,10 +492,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "workspace.close" => {
             reject_unknown_params(params, &["work_id", "close_kind"], "workspace.close")?;
             let close_kind = required_string(params, "close_kind")?;
-            if !matches!(close_kind.as_str(), "done" | "discarded") {
+            if !matches!(close_kind.as_str(), "done" | "discarded" | "superseded") {
                 return Err(CliParseError::InvalidValue {
                     flag: "close_kind",
-                    reason: "expected done or discarded",
+                    reason: "expected done, discarded, or superseded",
                 });
             }
             CliCommand::Workspace(WorkspaceCommand::Close {
@@ -4533,6 +4533,11 @@ mod tests {
             ok("workspace.close", json!({"work_id":"work-1","close_kind":"done"})),
             CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
                 if work_id == "work-1" && close_kind == "done"
+        ));
+        assert!(matches!(
+            ok("workspace.close", json!({"work_id":"work-1","close_kind":"superseded"})),
+            CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
+                if work_id == "work-1" && close_kind == "superseded"
         ));
         for params in [
             json!({"close_kind":"done"}),

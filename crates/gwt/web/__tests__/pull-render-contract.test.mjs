@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parseHTML } from "linkedom";
 import { scanModule, assertBaseline, checkRepository } from "../../../../scripts/check-pull-render.mjs";
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
@@ -135,6 +136,86 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
   const bypass = app.replace('applyPmWindowReceiveEvent(event);', 'applyPmWindowReceiveEvent(event); element.textContent = event.kind;');
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Profile receivers resolve only shared model updates", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const appFile = 'crates/gwt/web/app.js';
+  const profileFile = 'crates/gwt/web/profile-window-surface.js';
+  const profile = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([[profileFile, profile]]);
+  const profileReceivers = findings => findings.filter(finding => finding.root === 'receive'
+    && /^\/profile_(snapshot|error)(\/|$)/.test(finding.context));
+  const moduleFindings = scanModule(profile, profileFile, { rootName: 'applyProfileReceiveEvent' });
+  assert.equal(moduleFindings.length, 0, 'Profile module receiver must contain no DOM or unresolved calls');
+  assert.deepEqual(profileReceivers(scanModule(app, appFile, { modules })), []);
+
+  const directRender = profile.replace('function applyProfileReceiveEvent(event) {',
+    'function applyProfileReceiveEvent(event) { renderProfile(event.id);');
+  assert.notEqual(directRender, profile, 'the direct-render mutation must target the real receiver');
+  assert.ok(scanModule(directRender, profileFile, { rootName: 'applyProfileReceiveEvent' })
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(profileReceivers(scanModule(app, appFile, { modules: new Map([[profileFile, directRender]]) }))
+    .some(finding => finding.kind.startsWith('dom-')), 'factory tracing must detect the old rendering path');
+  const bypass = app.replace('applyProfileReceiveEvent(event);',
+    'applyProfileReceiveEvent(event); element.textContent = event.kind;');
+  assert.ok(profileReceivers(scanModule(bypass, appFile, { modules }))
+    .some(finding => finding.kind === 'dom-write'));
+});
+
+test("Profile disposal cancels pending saves and remounts without closed-window data", async t => {
+  const source = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8')
+    .replace('"/ui-state-store.js"', JSON.stringify(new URL('../ui-state-store.js', import.meta.url).href));
+  const { createProfileWindowSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document, window } = parseHTML('<html><body></body></html>');
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const sends = [], windowMap = new Map();
+  const surface = createProfileWindowSurface({
+    send: message => sends.push(message),
+    createNode: (tag, className, text = '') => {
+      const node = document.createElement(tag);
+      node.className = className;
+      node.textContent = text;
+      return node;
+    },
+    windowMap,
+    focusWindowLocally() {},
+    sendWindowFocus() {},
+  });
+  const mount = () => {
+    const pane = document.createElement('div');
+    pane.innerHTML = '<div class="window-body"></div>';
+    windowMap.set('profile', pane);
+    surface.mountProfileWindow({ id: 'profile' }, pane.firstChild);
+    return pane;
+  };
+  const snapshot = {
+    active_profile: 'default', selected_profile: 'default', os_env: [],
+    profiles: [{ name: 'default', description: 'Original', env_vars: [], disabled_env: [] }],
+  };
+  const pane = mount();
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
+  const input = pane.querySelector('.profile-field input');
+  input.value = 'pending';
+  input.dispatchEvent(new window.Event('input'));
+  surface.disposeProfileWindow('profile');
+  windowMap.delete('profile');
+  t.mock.timers.tick(1000);
+  assert.equal(sends.filter(message => message.kind === 'save_profile').length, 0);
+  assert.equal(surface.profileStateMap.has('profile'), false);
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
+  surface.applyProfileReceiveEvent({ kind: 'profile_error', id: 'profile', message: 'late error' });
+  assert.equal(surface.profileStateMap.has('profile'), false);
+  const remounted = mount();
+  assert.equal(sends.filter(message => message.kind === 'load_profile').length, 2);
+  assert.equal(remounted.querySelector('.profile-field input'), null);
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
+  assert.equal(remounted.querySelector('.profile-field input').value, 'default');
+  assert.match(remounted.querySelector('.profile-status').textContent, /^Active /);
+  surface.disposeProfileWindow('profile');
 });
 
 test("Window List receiver updates the catalog model and rejects direct rendering bypass", () => {

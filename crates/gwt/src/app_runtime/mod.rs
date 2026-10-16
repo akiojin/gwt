@@ -610,6 +610,7 @@ pub(crate) mod persist_dispatcher;
 pub(crate) mod pm;
 mod pm_chat;
 mod profile;
+mod project_notifications;
 mod project_route;
 mod project_tabs;
 mod pty_io;
@@ -1929,6 +1930,7 @@ pub struct AppRuntime {
     pub(crate) project_states: HashMap<gwt_core::repo_hash::ProjectKey, ProjectRuntimeState>,
     pub(crate) project_aggregates: HashMap<gwt_core::repo_hash::ProjectKey, ProjectAggregateState>,
     pub(crate) next_project_aggregate_revision: u64,
+    pub(crate) notification_coordinator: gwt::project_notifications::NotificationCoordinator,
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     #[cfg(test)]
     pub(crate) active_tab_id: Option<String>,
@@ -4413,6 +4415,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn refresh_project_state(&mut self, tab_id: &str) {
+        self.retain_notification_projects();
         let context = self.project_context(tab_id);
         let stale: Vec<ProjectContext> = self
             .project_states
@@ -4748,6 +4751,7 @@ impl AppRuntime {
             project_states: initial_project_states(&project_tab_incarnations),
             project_aggregates: HashMap::new(),
             next_project_aggregate_revision: 0,
+            notification_coordinator: Default::default(),
             project_tab_incarnations,
             next_project_incarnation,
             project_navigation_request: 0,
@@ -5970,6 +5974,7 @@ impl AppRuntime {
                     Some(&project_root),
                     BackendEvent::IssueMonitorToast {
                         notification_transition: None,
+                        notification_transition_id: None,
                         level: "error".to_string(),
                         message: format!(
                             "Issue Monitor could not deliver the human answer to live window \
@@ -5997,6 +6002,7 @@ impl AppRuntime {
                 Some(&project_root),
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "info".to_string(),
                     message:
                         "Issue Monitor submitted the human answer; waiting for the provider receipt"
@@ -6530,6 +6536,7 @@ impl AppRuntime {
                 project_root,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message: message.to_string(),
                     issue_number: Some(issue_number),
@@ -7655,6 +7662,7 @@ impl AppRuntime {
             Some(project_root),
             BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: "error".to_string(),
                 message: message.to_string(),
                 issue_number,
@@ -8119,6 +8127,7 @@ impl AppRuntime {
                             context.project_key.clone(),
                             BackendEvent::IssueMonitorToast {
                                 notification_transition: None,
+                                notification_transition_id: None,
                                 level: "error".to_string(),
                                 message: error.to_string(),
                                 issue_number: None,
@@ -8666,6 +8675,7 @@ impl AppRuntime {
         // would overwrite live queue/active counts with zeros (Issue #4273).
         let toast = BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "error".to_string(),
             message,
             issue_number,
@@ -8717,6 +8727,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message: "Issue title is required".to_string(),
                     issue_number: None,
@@ -8734,6 +8745,7 @@ impl AppRuntime {
                         client_id,
                         BackendEvent::IssueMonitorToast {
                             notification_transition: None,
+                            notification_transition_id: None,
                             level: "error".to_string(),
                             message: format!("GitHub origin remote is unavailable: {error}"),
                             issue_number: None,
@@ -8750,6 +8762,7 @@ impl AppRuntime {
                     client_id,
                     BackendEvent::IssueMonitorToast {
                         notification_transition: None,
+                        notification_transition_id: None,
                         level: "error".to_string(),
                         message: issue_registration_failure_message(&error),
                         issue_number: None,
@@ -8772,6 +8785,7 @@ impl AppRuntime {
                     client_id,
                     BackendEvent::IssueMonitorToast {
                         notification_transition: None,
+                        notification_transition_id: None,
                         level: "error".to_string(),
                         message: issue_registration_failure_message(&error),
                         issue_number: None,
@@ -8791,6 +8805,7 @@ impl AppRuntime {
                     client_id,
                     BackendEvent::IssueMonitorToast {
                         notification_transition: None,
+                        notification_transition_id: None,
                         level: "error".to_string(),
                         message: format!(
                             "Issue #{} registered, but local cache update failed: {error}",
@@ -8807,6 +8822,7 @@ impl AppRuntime {
             client_id,
             BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: "info".to_string(),
                 message: "Issue registered".to_string(),
                 issue_number: Some(snapshot.number.0),
@@ -9265,6 +9281,7 @@ impl AppRuntime {
                         Some(&project_root),
                         BackendEvent::IssueMonitorToast {
                             notification_transition: None,
+                            notification_transition_id: None,
                             level: "error".to_string(),
                             message: format!(
                                 "Issue Monitor scheduled worker could not start: {error}"
@@ -9847,6 +9864,7 @@ impl AppRuntime {
                 Some(&project_root),
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "error".to_string(),
                     message: error,
                     issue_number: None,
@@ -10104,6 +10122,7 @@ impl AppRuntime {
             context.project_key,
             BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: "error".to_string(),
                 message: diagnosis.to_string(),
                 issue_number: None,
@@ -11803,6 +11822,23 @@ impl AppRuntime {
                 visible,
                 focused,
             } => self.acknowledge_project_aggregate(context, revision, visible, focused),
+            FrontendEvent::ProjectClientAttention {
+                visible,
+                focused,
+                notification_permission,
+            } => {
+                self.notification_coordinator
+                    .open_project(context.project_key.clone(), context.generation);
+                self.notification_coordinator.report_attention(
+                    &context.project_key,
+                    context.generation,
+                    &client_id,
+                    visible,
+                    focused,
+                    notification_permission,
+                );
+                Vec::new()
+            }
             FrontendEvent::FrontendReady => {
                 // SPEC-2970: kick an immediate usage poll on connect so the
                 // status-bar pill populates right away instead of waiting for
@@ -14457,6 +14493,7 @@ impl AppRuntime {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
         }
         self.observe_pm_agent_idle_transition(window_id, composed);
+        self.observe_notification_transition_at(window_id, composed, Instant::now());
         Some(composed)
     }
 

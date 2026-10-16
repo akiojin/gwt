@@ -73,11 +73,11 @@ impl SharedWorkEventsSource {
     }
 }
 
-fn is_close_kind(kind: WorkEventKind) -> bool {
+fn is_close_kind(event: &WorkEvent) -> bool {
     matches!(
-        kind,
+        event.kind,
         WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
-    )
+    ) && !event.is_successor_supersession()
 }
 
 /// The first durable terminal close instant. Metadata and heartbeat events may
@@ -210,7 +210,7 @@ fn prepare_ingested_work_events(
         .collect::<HashMap<_, _>>();
     if !compacted_through.is_empty() {
         incoming.retain(|(event, _)| {
-            let already_folded = !is_close_kind(event.kind)
+            let already_folded = !is_close_kind(event)
                 && !seen_event_ids.contains(&event.id)
                 && compacted_through
                     .get(&event.work_item_id)
@@ -673,7 +673,7 @@ where
                         }
                         Some(match decode(line.as_bytes()) {
                             Ok(DecodedWorkspaceWorkEvent::Known(event)) => {
-                                if event.execution_container.is_none() && !is_close_kind(event.kind) {
+                                if event.execution_container.is_none() && !is_close_kind(&event) {
                                     tracing::warn!(
                                         event_id = %event.id,
                                         work_item_id = %event.work_item_id,
@@ -704,7 +704,7 @@ where
                     continue;
                 }
             };
-            if is_close_kind(event.kind) {
+            if is_close_kind(&event) {
                 report.skipped_close_kind += 1;
                 continue;
             }

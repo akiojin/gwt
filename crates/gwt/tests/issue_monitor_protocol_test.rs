@@ -278,6 +278,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
             autonomous_mode: false,
             quota_hold: None,
+            github_budget: None,
             update_drain: None,
             update_drain_release: None,
             autonomous_issues: Vec::new(),
@@ -362,6 +363,7 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
         .expect("serialize inbox");
     let toast = serde_json::to_value(BackendEvent::IssueMonitorToast {
         notification_transition: None,
+        notification_transition_id: None,
         level: "info".to_string(),
         message: "Issue queued".to_string(),
         issue_number: Some(42),
