@@ -45,10 +45,17 @@ test('Issue #5596: twelve admitted launches keep completion handlers within budg
       expect(() => process.kill(provider.pid, 0), 'owned provider is alive').not.toThrow();
       await writeFile(join(HOME, `ready-${provider.session_id}`), 'start\n');
     }
-    await expect.poll(async () => Promise.all(providers.map(async provider => {
-      try { return JSON.parse(await readFile(join(HOME, `hook-${provider.session_id}.json`), 'utf8')).success; }
-      catch { return false; }
-    })), { timeout: 120_000, message: 'checkout SessionStart hooks activate every provider session' }).toEqual(Array(12).fill(true));
+    await expect.poll(async () => {
+      measurement = await observe(fixture);
+      return Promise.all(providers.map(async provider => {
+        try {
+          const hook = JSON.parse(await readFile(join(HOME, `hook-${provider.session_id}.json`), 'utf8'));
+          return hook.success === true
+            && measurement.user_prompt_authenticated_sessions.includes(provider.session_id)
+            && measurement.user_prompt_matched_sessions.includes(provider.session_id);
+        } catch { return false; }
+      }));
+    }, { timeout: 120_000, message: 'all twelve exact UserPromptSubmit hooks are authenticated and matched by the GUI' }).toEqual(Array(12).fill(true));
     await sendLiveGwtEvent(page, { kind: 'list_windows' });
     await expect.poll(() => page.evaluate(sessions => {
       const entry = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) => entry.payload.kind === 'workspace_state').at(-1);
@@ -105,6 +112,8 @@ async function observe(fixture: any): Promise<any> {
   const directories = [join(HOME, '.gwt/logs'), join(HOME, '.gwt/projects', fixture.project_key, 'logs')];
   const logs = (await Promise.all(directories.map(directory => jsonRows(directory, /^gwt\.log\./)))).flat();
   const started = Date.parse(fixture.gui_started_at);
+  const promptReceipts = logs.filter(row => row.target === 'gwt.hook.delivery' && Date.parse(row.timestamp) >= started
+    && row.fields?.source_event === 'UserPromptSubmit');
   const dispatch = logs.filter(row => row.target === 'gwt.frontend.timing' && Date.parse(row.timestamp) >= started
     && (row.fields?.message === 'GUI event loop dispatch handled' || /blocked the GUI event loop for \d+ms/.test(row.fields?.message || '')));
   const targets = dispatch.filter(row => row.fields.event === 'IssueMonitorLaunchPrepared');
@@ -149,6 +158,11 @@ async function observe(fixture: any): Promise<any> {
       .reduce((sum, row) => sum + row.fields.elapsed_ms + 1, 0));
   }
   return {
+    user_prompt_authenticated_sessions: [...new Set(promptReceipts.filter(row => row.fields.stage === 'receipt'
+      && row.fields.outcome === 'authenticated').map(row => row.fields.gwt_session_id))],
+    user_prompt_matched_sessions: [...new Set(promptReceipts.filter(row => row.fields.stage === 'window'
+      && row.fields.outcome === 'matched' && row.fields.route === 'live').map(row => row.fields.gwt_session_id))],
+    user_prompt_receipt_rows: promptReceipts,
     target_count: targets.length,
     target_rolling_minute_upper_bound_ms: rollingUpperBound,
     all_event_handlers: [...groups.values()].sort((a, b) => b.total_ms - a.total_ms),

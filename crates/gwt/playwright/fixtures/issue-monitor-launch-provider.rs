@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 fn main() {
@@ -102,10 +102,57 @@ fn main() {
         child.stdin.take().unwrap().write_all(serde_json::json!({"session_id":session,"hook_event_name":event,"source":"startup","cwd":std::env::current_dir().unwrap(),"prompt":args.last().unwrap()}).to_string().as_bytes()).unwrap();
         success &= child.wait_with_output().unwrap().status.success();
     }
+    // Hook exit 0 is fail-open: the exact prompt event can still be journaled.
+    // Forward flushes that existing event without submitting another prompt.
+    let runtime = PathBuf::from(std::env::var_os("GWT_SESSION_RUNTIME_PATH").unwrap());
+    assert_eq!(
+        runtime.file_stem().unwrap().to_str(),
+        Some(session.as_str())
+    );
+    let host = runtime.parent().unwrap();
+    let journal = host
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("hook-live")
+        .join(host.file_name().unwrap())
+        .join(runtime.file_name().unwrap());
+    let drained = || {
+        std::fs::read(&journal)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|state| {
+                state["health"]["pending_runtime_state"] == false && state["pending"].is_null()
+            })
+    };
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while success && !drained() && Instant::now() < deadline {
+        let mut child = Command::new(std::env::var_os("GWT_BIN_PATH").unwrap())
+            .args(["hook", "forward"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                serde_json::json!({"session_id":session,"cwd":std::env::current_dir().unwrap()})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        success &= child.wait_with_output().unwrap().status.success();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let journal_drained = drained();
     // Hook output may contain launch-scoped credentials; retain success only.
     std::fs::write(
         home.join(format!("hook-{session}.json")),
-        serde_json::json!({"success":success}).to_string(),
+        serde_json::json!({"success":success && journal_drained,"cli_success":success,"journal_drained":journal_drained}).to_string(),
     )
     .unwrap();
     println!("FIXTURE_SESSION_START_COMPLETE {session}");
