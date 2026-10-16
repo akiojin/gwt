@@ -518,6 +518,142 @@ fn issue4803_monitor_preparation_rechecks_deleted_resume_session() {
 }
 
 #[test]
+fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "prepared-fresh",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let previous_spawner = fixture.runtime.blocking_tasks.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    fixture.runtime.blocking_tasks = previous_spawner;
+    let before = gwt_core::process::thread_git_spawn_count();
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    let git_spawns = gwt_core::process::thread_git_spawn_count() - before;
+    // Reap the fixture launch before asserting, including on the RED path.
+    let result = take_monitor_launch_complete("prepared-fresh", &fixture.recorded_events);
+    assert!(result.is_ok(), "fresh launch: {result:?}");
+    assert_eq!(
+        git_spawns, 0,
+        "prepared completion spawned Git on the GUI thread"
+    );
+}
+
+fn assert_issue5596_unsubmitted_answer_packet_retries(close_project: bool) {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "unsubmitted-answer",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    seed_resumed_autonomous_handoff(&fixture, "Keep the exact Session");
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    assert!(
+        matches!(
+            gwt::load_issue_monitor_prefs(&prefs_path)
+                .unwrap()
+                .autonomous_handoffs[0]
+                .delivery,
+            gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { attempt: 1, .. }
+        ),
+        "the callback must carry an existing unsubmitted write-ahead token"
+    );
+    if close_project {
+        fixture.runtime.close_project_tab_events("tab-1");
+    } else {
+        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.launch_profile.as_mut().expect("saved profile").model =
+                Some("changed-while-answer-worker-returned".to_string());
+            Ok(())
+        })
+        .expect("change profile after write-ahead");
+    }
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    drain_queued_blocking_tasks(&queued);
+    let prefs =
+        gwt::load_issue_monitor_prefs(&prefs_path).expect("load settled unsubmitted attempt");
+    assert!(
+        matches!(
+            prefs.autonomous_handoffs[0].delivery,
+            gwt::autonomous_handoff::AutonomousHandoffDeliveryState::RetryBackoff {
+                attempt: 1,
+                ..
+            }
+        ),
+        "unsubmitted token must retain bounded exact-session retry: {:?}",
+        prefs.autonomous_handoffs[0].delivery
+    );
+    assert!(prefs.autonomous_handoffs[0].delivered_at.is_none());
+    assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+}
+
+#[test]
+fn issue5596_answer_packet_pref_stale_settles_unsubmitted_attempt() {
+    assert_issue5596_unsubmitted_answer_packet_retries(false);
+}
+
+#[test]
+fn issue5596_answer_packet_project_closed_settles_unsubmitted_attempt() {
+    assert_issue5596_unsubmitted_answer_packet_retries(true);
+}
+
+#[test]
 fn runtime_factory_override_gui_rejects_partial_configuration() {
     let _lock = env_test_lock()
         .lock()

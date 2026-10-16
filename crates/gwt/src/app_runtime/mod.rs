@@ -1147,6 +1147,7 @@ pub struct LaunchFeedbackContext {
     pub(crate) issue_monitor_review_dispatch: bool,
 }
 
+#[derive(Debug, Clone)]
 pub(super) struct PreparedIssueMonitorLaunchFailure {
     retryable: bool,
     monitor: Option<gwt::IssueMonitorState>,
@@ -1321,6 +1322,174 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
         // Retain the original candidate and pane generation across an unknown commit.
         fresh_execution: Option<(String, Box<gwt_agent::SessionExecutionIdentity>, u64)>,
     },
+}
+
+/// Immutable GUI observation captured before launch delivery I/O runs on a worker.
+#[derive(Debug, Clone)]
+pub(super) struct IssueMonitorLaunchClaimInput {
+    pub(super) project_root: PathBuf,
+    pub(super) issue_number: u64,
+    pub(super) delivery_id: String,
+    pub(super) materializer_window_id: String,
+    pub(super) materializer_id: String,
+    pub(super) materializer_pid: u32,
+    pub(super) fallback_timeout: std::time::Duration,
+    pub(super) snapshot: Option<gwt::IssueMonitorWindowSnapshot>,
+    pub(super) snapshot_tabs: std::collections::BTreeSet<String>,
+}
+
+impl IssueMonitorLaunchClaimInput {
+    pub(super) fn claim(
+        &self,
+    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        self.claim_with_publishers(
+            |snapshot, tabs| {
+                gwt::daemon_publisher::publish_issue_monitor_window_snapshot(
+                    &self.project_root,
+                    snapshot,
+                    tabs,
+                )
+            },
+            |payload| {
+                let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    payload,
+                    self.materializer_pid,
+                );
+                gwt::daemon_publisher::publish_issue_monitor_control(&self.project_root, payload)
+            },
+        )
+    }
+
+    fn claim_with_publishers(
+        &self,
+        publish_snapshot: impl FnOnce(
+            &gwt::IssueMonitorWindowSnapshot,
+            &std::collections::BTreeSet<String>,
+        ) -> Result<
+            (),
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+        >,
+        publish_claim: impl FnOnce(
+            serde_json::Value,
+        ) -> Result<
+            (),
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError,
+        >,
+    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        let project_root = &self.project_root;
+        let issue_number = self.issue_number;
+        let delivery_id = self.delivery_id.as_str();
+        let materializer_window_id = self.materializer_window_id.as_str();
+        let materializer_id = self.materializer_id.clone();
+        let materializer_pid = self.materializer_pid;
+        let snapshot = self.snapshot.clone();
+        let snapshot_tabs = self.snapshot_tabs.clone();
+        let host_started_at = gwt::process::host_process_start_time(materializer_pid);
+        let observe = |monitor: &mut gwt::IssueMonitorState| {
+            if let Some(snapshot) = snapshot.as_ref() {
+                if let Some(started) = host_started_at {
+                    monitor.record_window_snapshot_from_host(
+                        snapshot.clone(),
+                        materializer_pid,
+                        started,
+                        snapshot_tabs.clone(),
+                    );
+                } else {
+                    monitor
+                        .record_window_snapshot_for_tabs(snapshot.clone(), snapshot_tabs.clone());
+                }
+            }
+        };
+        // A rejected idempotent claim can still be present in prefs. Validate
+        // against the current canvas before trusting the daemon readback.
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            project_root,
+        ))
+        .map_err(|error| {
+            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                "launch delivery capacity read failed: {error}"
+            ))
+        })?;
+        let mut preflight =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        observe(&mut preflight);
+        if !preflight.claim_launch_delivery(
+            issue_number,
+            delivery_id,
+            &materializer_id,
+            materializer_pid,
+            materializer_window_id,
+            gwt::process::is_host_process_alive,
+        ) {
+            return Ok(false);
+        }
+        // The daemon must judge this claim against the same current canvas.
+        // Waiting for its periodic scan can strand an existing-pane adoption
+        // at capacity even though this GUI's preflight accepted it.
+        if let Some(snapshot) = snapshot.as_ref() {
+            match publish_snapshot(snapshot, &snapshot_tabs) {
+                Ok(()) => {}
+                Err(error) if error.allows_local_fallback() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let publication = publish_claim(serde_json::json!({
+            "claim_launch_delivery": {
+                "issue_number": issue_number,
+                "delivery_id": delivery_id,
+                "materializer_id": materializer_id.clone(),
+                "materializer_pid": materializer_pid,
+                "materializer_window_id": materializer_window_id,
+            }
+        }));
+        match publication {
+            Ok(()) => {
+                let prefs = gwt::load_issue_monitor_prefs(
+                    &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+                )
+                .map_err(|error| {
+                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                        format!("launch delivery claim readback failed: {error}"),
+                    )
+                })?;
+                Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
+                    delivery.issue_number == issue_number
+                        && delivery.delivery_id == delivery_id
+                        && delivery.materializer_id.as_deref() == Some(materializer_id.as_str())
+                        && delivery.materializer_pid == Some(materializer_pid)
+                        && delivery.materializer_window_id.as_deref()
+                            == Some(materializer_window_id)
+                }))
+            }
+            Err(error) if error.allows_local_fallback() => {
+                AppRuntime::commit_local_issue_monitor_control_with_timeout(
+                    project_root,
+                    self.fallback_timeout,
+                    |monitor| {
+                        observe(monitor);
+                        monitor.claim_launch_delivery(
+                            issue_number,
+                            delivery_id,
+                            &materializer_id,
+                            materializer_pid,
+                            materializer_window_id,
+                            gwt::process::is_host_process_alive,
+                        )
+                    },
+                )
+                .map(|(monitor, accepted)| {
+                    accepted
+                        && monitor.pending_launch_delivery_id(issue_number).as_deref()
+                            == Some(delivery_id)
+                })
+            }
+            Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// Issue #4378 AC-2: one Issue Monitor launch delivery held until the startup
@@ -5493,22 +5662,47 @@ impl AppRuntime {
         delivery_id: &str,
         materializer_window_id: &str,
     ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        self.claim_issue_monitor_launch_delivery_with_publishers(
+        self.capture_issue_monitor_launch_claim(
             project_root,
             issue_number,
             delivery_id,
             materializer_window_id,
-            |snapshot, tabs| {
-                gwt::daemon_publisher::publish_issue_monitor_window_snapshot(
-                    project_root,
-                    snapshot,
-                    tabs,
-                )
-            },
-            |payload| self.publish_issue_monitor_control(project_root, payload),
         )
+        .claim()
     }
 
+    pub(super) fn capture_issue_monitor_launch_claim(
+        &self,
+        project_root: &Path,
+        issue_number: u64,
+        delivery_id: &str,
+        materializer_window_id: &str,
+    ) -> IssueMonitorLaunchClaimInput {
+        let tab_id = self.issue_monitor_tab_id_for_project_root(project_root);
+        let snapshot_tabs = tab_id
+            .as_deref()
+            .map(|tab_id| self.issue_monitor_project_tab_ids(tab_id))
+            .unwrap_or_default();
+        let snapshot = tab_id.and_then(|tab_id| {
+            self.issue_monitor_window_snapshot_for_tab_cached(
+                &tab_id,
+                &chrono::Utc::now().to_rfc3339(),
+            )
+        });
+        IssueMonitorLaunchClaimInput {
+            project_root: project_root.to_path_buf(),
+            issue_number,
+            delivery_id: delivery_id.to_string(),
+            materializer_window_id: materializer_window_id.to_string(),
+            materializer_id: self.issue_monitor_materializer_id.clone(),
+            materializer_pid: std::process::id(),
+            fallback_timeout: self.issue_monitor_fallback_commit_timeout,
+            snapshot,
+            snapshot_tabs,
+        }
+    }
+
+    #[cfg(test)]
     fn claim_issue_monitor_launch_delivery_with_publishers(
         &self,
         project_root: &Path,
@@ -5529,115 +5723,13 @@ impl AppRuntime {
             gwt::runtime_daemon_events::IssueMonitorControlPublishError,
         >,
     ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        let materializer_id = self.issue_monitor_materializer_id.clone();
-        let materializer_pid = std::process::id();
-        let tab_id = self.issue_monitor_tab_id_for_project_root(project_root);
-        let snapshot_tabs = tab_id
-            .as_deref()
-            .map(|tab_id| self.issue_monitor_project_tab_ids(tab_id))
-            .unwrap_or_default();
-        let snapshot = tab_id.and_then(|tab_id| {
-            self.issue_monitor_window_snapshot_for_tab(&tab_id, &chrono::Utc::now().to_rfc3339())
-        });
-        let host_started_at = gwt::process::host_process_start_time(materializer_pid);
-        let observe = |monitor: &mut gwt::IssueMonitorState| {
-            if let Some(snapshot) = snapshot.as_ref() {
-                if let Some(started) = host_started_at {
-                    monitor.record_window_snapshot_from_host(
-                        snapshot.clone(),
-                        materializer_pid,
-                        started,
-                        snapshot_tabs.clone(),
-                    );
-                } else {
-                    monitor
-                        .record_window_snapshot_for_tabs(snapshot.clone(), snapshot_tabs.clone());
-                }
-            }
-        };
-        // A rejected idempotent claim can still be present in prefs. Validate
-        // against the current canvas before trusting the daemon readback.
-        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        self.capture_issue_monitor_launch_claim(
             project_root,
-        ))
-        .map_err(|error| {
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
-                "launch delivery capacity read failed: {error}"
-            ))
-        })?;
-        let mut preflight =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-        observe(&mut preflight);
-        if !preflight.claim_launch_delivery(
             issue_number,
             delivery_id,
-            &materializer_id,
-            materializer_pid,
             materializer_window_id,
-            gwt::process::is_host_process_alive,
-        ) {
-            return Ok(false);
-        }
-        // The daemon must judge this claim against the same current canvas.
-        // Waiting for its periodic scan can strand an existing-pane adoption
-        // at capacity even though this GUI's preflight accepted it.
-        if let Some(snapshot) = snapshot.as_ref() {
-            match publish_snapshot(snapshot, &snapshot_tabs) {
-                Ok(()) => {}
-                Err(error) if error.allows_local_fallback() => {}
-                Err(error) => return Err(error),
-            }
-        }
-        let publication = publish_claim(serde_json::json!({
-            "claim_launch_delivery": {
-                "issue_number": issue_number,
-                "delivery_id": delivery_id,
-                "materializer_id": materializer_id.clone(),
-                "materializer_pid": materializer_pid,
-                "materializer_window_id": materializer_window_id,
-            }
-        }));
-        match publication {
-            Ok(()) => {
-                let prefs = gwt::load_issue_monitor_prefs(
-                    &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
-                )
-                .map_err(|error| {
-                    gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
-                        format!("launch delivery claim readback failed: {error}"),
-                    )
-                })?;
-                Ok(prefs.pending_launch_deliveries.iter().any(|delivery| {
-                    delivery.issue_number == issue_number
-                        && delivery.delivery_id == delivery_id
-                        && delivery.materializer_id.as_deref() == Some(materializer_id.as_str())
-                        && delivery.materializer_pid == Some(materializer_pid)
-                        && delivery.materializer_window_id.as_deref()
-                            == Some(materializer_window_id)
-                }))
-            }
-            Err(error) if error.allows_local_fallback() => self
-                .commit_local_issue_monitor_control_for_project(project_root, |monitor| {
-                    observe(monitor);
-                    monitor.claim_launch_delivery(
-                        issue_number,
-                        delivery_id,
-                        &materializer_id,
-                        materializer_pid,
-                        materializer_window_id,
-                        gwt::process::is_host_process_alive,
-                    )
-                })
-                .map(|(monitor, accepted)| {
-                    accepted
-                        && monitor.pending_launch_delivery_id(issue_number).as_deref()
-                            == Some(delivery_id)
-                }),
-            Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
-                Ok(false)
-            }
-            Err(error) => Err(error),
-        }
+        )
+        .claim_with_publishers(publish_snapshot, publish_claim)
     }
 
     #[cfg(test)]
@@ -9316,6 +9408,30 @@ impl AppRuntime {
                     gwt::cli::execution_state::session_launch_route(Some(session_id))
                         == Some(gwt_agent::LaunchRoute::Autonomous),
                 )
+            },
+        )
+    }
+
+    /// Capture the current canvas without resolving Session metadata from disk.
+    pub(super) fn issue_monitor_window_snapshot_for_tab_cached(
+        &self,
+        project_tab_id: &str,
+        now: &str,
+    ) -> Option<gwt::IssueMonitorWindowSnapshot> {
+        self.issue_monitor_window_snapshot_with_session_metadata(
+            project_tab_id,
+            now,
+            |session_id| {
+                self.launch_wizard_cache
+                    .session_by_id(session_id)
+                    .map(|session| {
+                        (
+                            session.linked_issue_number,
+                            gwt::cli::execution_state::session_launch_route_from_session(session)
+                                == gwt_agent::LaunchRoute::Autonomous,
+                        )
+                    })
+                    .unwrap_or_default()
             },
         )
     }

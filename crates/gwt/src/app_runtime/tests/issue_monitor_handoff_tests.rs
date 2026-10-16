@@ -2261,16 +2261,29 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
     // existing offline fallback, including its Git-backed cache validation.
     // Keep this an authorization regression; request latency is tested separately.
     drain_queued_blocking_tasks(&queued);
-    let events =
+    let mut events =
         fixture
             .runtime
             .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
                 &fixture.recorded_events,
             ));
-    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
-        &fixture.project_root,
-    ))
-    .expect("read rejected delivery");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let claimed = gwt::load_issue_monitor_prefs(&prefs_path).expect("read claimed rejection");
+    assert!(
+        claimed.pending_launch_deliveries.iter().any(|delivery| {
+            Some(&delivery.delivery_id) == fixture.delivery_id.as_ref()
+                && delivery.materializer_id.as_deref()
+                    == Some(fixture.runtime.issue_monitor_materializer_id.as_str())
+                && delivery.materializer_window_id.is_some()
+        }),
+        "the rejected launch must own its exact delivery before failure settlement runs"
+    );
+    // Rejection settlement now uses the same worker boundary as launch preparation.
+    drain_queued_blocking_tasks(&queued);
+    events.extend(fixture.runtime.handle_issue_monitor_launch_prepared(
+        take_issue4803_monitor_preparation(&fixture.recorded_events),
+    ));
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read rejected delivery");
     assert!(
         prefs
             .failed_issues

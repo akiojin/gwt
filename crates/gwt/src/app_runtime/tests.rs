@@ -2871,8 +2871,50 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     assert_eq!(measured.machine_budget, Some(2));
     assert_eq!(measured.recommended_worker_limit, 1, "reserve one own PM");
 
+    let prepared = runtime
+        .capture_issue_monitor_spawn_admission(&repo, 43, "work/issue-43")
+        .prepare()
+        .expect("prepare fresh shared capacity");
+    let mut exhausted_snapshot = snapshot.clone();
+    exhausted_snapshot["available_ram_bytes"] = serde_json::json!(0);
+    fs::write(
+        machine_state.join("agent-capacity.json"),
+        serde_json::to_vec(&exhausted_snapshot).expect("serialize exhausted capacity"),
+    )
+    .expect("lower shared capacity after preparation");
+    let rejected = runtime.spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+        "tab-1",
+        config.clone(),
+        canvas_bounds(),
+        None,
+        feedback.clone(),
+        prepared,
+    );
+    assert!(
+        rejected
+            .is_err_and(|reason| { reason == super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE }),
+        "a changed shared capacity must invalidate prepared admission"
+    );
+    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+
+    fs::write(
+        machine_state.join("agent-capacity.json"),
+        serde_json::to_vec(&snapshot).expect("serialize restored capacity"),
+    )
+    .expect("restore positive shared capacity");
+    let prepared = runtime
+        .capture_issue_monitor_spawn_admission(&repo, 43, "work/issue-43")
+        .prepare()
+        .expect("prepare current shared capacity again");
     runtime
-        .spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback)
+        .spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+            "tab-1",
+            config,
+            canvas_bounds(),
+            None,
+            feedback,
+            prepared,
+        )
         .expect("fresh shared capacity admits the proposed Monitor pane");
     assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
     let completion = take_monitor_launch_complete("post-admission fixture failure", &events);
