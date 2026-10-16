@@ -4440,9 +4440,6 @@ fn commit_issue_monitor_scan_if_current(
     captured_authority_epoch: u64,
 ) -> bool {
     let _timing = crate::issue_monitor_worker::IssueMonitorScanTiming::start("durable-commit");
-    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
-    );
     if monitor.effect_authority_epoch() != captured_authority_epoch {
         return false;
     }
@@ -4454,13 +4451,30 @@ fn commit_issue_monitor_scan_if_current(
     scanned.set_process_held_issues(monitor.process_held_issues().clone());
     let proposed_effects = scanned.pending_effects().to_vec();
     let proposed_launch_session_strategies = scanned.prefs().queued_launch_session_strategies;
+    // Read trusted runtime evidence before the prefs transaction. Its rebase
+    // can restore a terminal predecessor and the queue entry the scan retired.
+    let execution_owners = monitor
+        .execution_settlement_issue_numbers()
+        .into_iter()
+        .chain(scanned.execution_settlement_issue_numbers())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let execution_observations =
+        crate::issue_monitor_worker::read_execution_observations(project_root, &execution_owners);
+    let execution_observed_at = chrono::Utc::now().to_rfc3339();
     let recovery_baseline = monitor.prefs();
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
+    );
     let transaction =
         crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
             if disk.effect_authority_epoch != captured_authority_epoch {
                 return false;
             }
             scanned.rebase_daemon_driver_prefs(disk);
+            scanned
+                .reconcile_dead_terminal_launches(&execution_observations, &execution_observed_at);
             // A rebase can import the stale owner this scan just disproved.
             // Revalidate the producing Session after adopting the latest ACKs.
             crate::issue_monitor_worker::reconcile_verified_live_launch_bindings(
@@ -5671,6 +5685,15 @@ fn scan_issue_monitor_once_blocking(
             detail: error.to_string(),
         });
     }
+    timing.next("execution-observation");
+    let execution_observations =
+        crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+            &mut monitor,
+            &scope.project_root,
+        );
+    // Candidate projection may run again for refreshed cache rows. Retire the
+    // dead predecessor once, before any verified ownership repair can requeue it.
+    let terminal_windows = monitor.reconcile_dead_terminal_launches(&execution_observations, &now);
     timing.next("candidate-reconciliation");
     let monitor_owner = crate::process::current_claim_owner();
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
@@ -5828,10 +5851,19 @@ fn scan_issue_monitor_once_blocking(
     // Recover stuck launches and classify idle windows before admission,
     // sharing the live worktree observations across both decisions (#4862).
     timing.next("window-reconciliation");
-    crate::issue_monitor_worker::reconcile_issue_monitor_windows(
+    let (live_launch_owners, observed_at) =
+        crate::issue_monitor_worker::read_verified_live_launch_owners(
+            &monitor,
+            &scope.project_root,
+            &now,
+        );
+    crate::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
         &mut monitor,
-        &scope.project_root,
+        &execution_observations,
+        &live_launch_owners,
+        &observed_at,
         &now,
+        terminal_windows,
     );
     // SPEC #3200 Phase 7: a scan only proposes kill-switch disarms. Executing
     // `gh pr merge --disable-auto` here would let a stale cloned scan mutate

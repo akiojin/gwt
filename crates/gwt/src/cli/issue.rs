@@ -719,7 +719,7 @@ pub(crate) fn merge_board_escalations_into_needs_human(
         "monitor": monitor_needs_human,
         "board_escalations": board_escalations,
         "runtime_fields": ["inbox", "active_launches"],
-        "guidance": "needs_human combines Monitor handoffs and unresolved Board requests. A Board escalation does not override the runtime state in inbox and active_launches. Do not requeue an active launch to clear a Board request; resolve its escalation.",
+        "guidance": "needs_human combines Monitor handoffs and unresolved Board requests. A Board escalation does not override the runtime state in inbox and active_launches. Clear Monitor handoffs with issue.monitor.requeue. Do not requeue an active launch to clear a Board request; resolve its escalation with board.post and params.resolves naming the blocked entry.",
     })
 }
 
@@ -824,6 +824,48 @@ fn run_monitor_status<E: CliEnv>(
         &project_root,
     ))
     .map_err(io_as_api_error)?;
+    // Keep released, unsettled launches observable without reading every queued
+    // owner's ledger or changing Monitor/ECR state during a status read.
+    let execution_generations = status
+        .active_launches
+        .iter()
+        .copied()
+        .chain(status.inbox.iter().filter_map(|row| {
+            matches!(
+                row.state,
+                crate::MonitorInboxState::Launched | crate::MonitorInboxState::NeedsHuman
+            )
+            .then_some(row.issue_number)
+            .or_else(|| row.last_activity_at.as_ref().map(|_| row.issue_number))
+        }))
+        .chain(prefs.autonomous_records.iter().filter_map(|record| {
+            (record.last_heartbeat.is_some()
+                && prefs
+                    .terminal_queue_exclusions
+                    .get(&crate::process::current_hostname())
+                    .is_some_and(|excluded| excluded.contains(&record.issue_number)))
+            .then_some(record.issue_number)
+        }))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|number| {
+            let diagnosis = crate::cli::execution_state::diagnose_owner(
+                &project_root,
+                crate::cli::execution_state::ExecutionOwnerKey {
+                    kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number,
+                },
+            );
+            diagnosis
+                .generation_id
+                .is_some()
+                .then_some((number, diagnosis))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if !execution_generations.is_empty() {
+        output["execution_generations"] = serde_json::to_value(execution_generations)
+            .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    }
     if let Some(mut drain) = status.update_drain.clone() {
         let wait = gwt_core::update::load_update_wait_observation(&project_root).filter(|wait| {
             wait.version == drain.version
@@ -9328,9 +9370,12 @@ mod tests {
             authority["runtime_fields"],
             serde_json::json!(["inbox", "active_launches"])
         );
-        assert!(authority["guidance"]
-            .as_str()
-            .is_some_and(|text| text.contains("does not override") && text.contains("requeue")));
+        assert!(authority["guidance"].as_str().is_some_and(|text| {
+            text.contains("does not override")
+                && text.contains("issue.monitor.requeue")
+                && text.contains("board.post")
+                && text.contains("params.resolves")
+        }));
     }
 
     /// Issue #5399: unknown measurements preserve the saved Auto limit in

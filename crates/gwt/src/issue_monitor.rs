@@ -2715,6 +2715,8 @@ pub struct IssueMonitorExecutionObservation {
     pub process_held: bool,
     /// Exact holder runtime evidence proves its previous GUI host has exited.
     pub holder_host_dead: bool,
+    /// Exact dead holder host incarnations, observed outside the prefs lock.
+    pub dead_holder_hosts: BTreeSet<(u32, u64)>,
     /// Current ECR holder identity while its exact runtime is live or uncertain.
     pub held_holder_session_id: Option<String>,
 }
@@ -19270,6 +19272,7 @@ impl IssueMonitorState {
             .filter(|item| {
                 let issue_number = item.issue.number;
                 item.state == MonitorInboxState::Launched
+                    && self.terminal_queue_contains(issue_number)
                     && item.launched_window_id.is_none()
                     && !self.active_launches.contains(&issue_number)
                     && !self.launched_windows.contains_key(&issue_number)
@@ -20626,9 +20629,11 @@ impl IssueMonitorState {
 
     /// Issue #4084 AC-1: classify every idle launched window against the last
     /// fresh canvas snapshot. Pure: nothing is mutated, and a missing, stale,
-    /// or foreign-tab snapshot classifies nothing (a binding is judged dead
+    /// or foreign-tab snapshot cannot prove a binding dead: absence is judged
     /// only against the complete canvas of its own tab, as
-    /// [`Self::vanished_launched_windows`] judges it).
+    /// [`Self::vanished_launched_windows`] judges it. A terminal ECR whose
+    /// exact holder host is dead can release independently of the canvas,
+    /// after registration grace and only without live/uncertain processes.
     ///
     /// `settlements` is the execution record state per launched Issue, read by
     /// the caller from the trusted store; an absent entry is `Unknown`.
@@ -20637,8 +20642,49 @@ impl IssueMonitorState {
         settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
         now: &str,
     ) -> Vec<IssueMonitorIdleWindow> {
+        let mut classified = self
+            .launched_windows
+            .iter()
+            .filter(|(number, window)| {
+                settlements.get(number).is_some_and(|observation| {
+                    observation.holder_host_dead
+                        && matches!(
+                            observation.settlement,
+                            IssueMonitorExecutionSettlement::Completed
+                                | IssueMonitorExecutionSettlement::Blocked
+                        )
+                }) && !self.binding_recovery_pending(**number, now, settlements)
+                    // A fresh ordered absence already has its own unfinished
+                    // recovery policy. Only bypass missing/stale canvas proof
+                    // or a retained obsolete pane identity (Issue #4446).
+                    && !self.fresh_window_snapshot(now).is_some_and(|snapshot| {
+                        issue_monitor_qualified_window_id(window).is_some_and(|(tab, _)| {
+                            self.window_snapshot_tabs.contains(tab)
+                                || self.window_snapshot_host.is_some()
+                        }) && self.window_observation_covers_launch(
+                            **number,
+                            window,
+                            &snapshot.observed_at,
+                        ) && !snapshot.windows.iter().any(|observed| {
+                            issue_monitor_window_ids_match(window, &observed.window_id)
+                        })
+                    })
+            })
+            .map(|(number, window)| IssueMonitorIdleWindow {
+                window_id: window.clone(),
+                issue_number: Some(*number),
+                idle_kind: IssueMonitorIdleKind::ExecutionSettled,
+                idle_since: now.to_string(),
+                bound: true,
+                // The exact holder host is gone. A remaining canvas ID
+                // can belong to a new pane, so never issue a GUI close.
+                pane_present: false,
+                rebind_to: None,
+                requeue_on_release: false,
+            })
+            .collect::<Vec<_>>();
         let Some(snapshot) = self.fresh_window_snapshot(now) else {
-            return Vec::new();
+            return classified;
         };
         let observation = |window_id: &str| {
             snapshot
@@ -20663,8 +20709,10 @@ impl IssueMonitorState {
                 )
             })
         };
-        let mut classified = Vec::new();
         for (issue_number, window_id) in &self.launched_windows {
+            if classified.iter().any(|idle| idle.window_id == *window_id) {
+                continue;
+            }
             let owned_here =
                 issue_monitor_qualified_window_id(window_id).is_some_and(|(tab, _)| {
                     self.window_snapshot_tabs.contains(tab)
@@ -20772,7 +20820,11 @@ impl IssueMonitorState {
                     })
                     .map(|other| other.window_id.clone());
             }
-            if idle_kind == IssueMonitorIdleKind::BindingDead
+            if (idle_kind == IssueMonitorIdleKind::BindingDead
+                || (idle_kind == IssueMonitorIdleKind::ExecutionSettled
+                    && settlements
+                        .get(issue_number)
+                        .is_some_and(|observation| observation.holder_host_dead)))
                 && rebind_to.is_none()
                 && self.binding_recovery_pending(*issue_number, &snapshot.observed_at, settlements)
             {
@@ -20817,6 +20869,16 @@ impl IssueMonitorState {
             let Some(issue_number) = observed.issue_number else {
                 continue;
             };
+            // The terminal ECR belongs to the dead predecessor, not an
+            // unbound successor whose process still owns this worktree.
+            if !observed.review_dispatch
+                && settlements
+                    .get(&issue_number)
+                    .is_some_and(|observation| observation.holder_host_dead)
+                && self.binding_recovery_pending(issue_number, now, settlements)
+            {
+                continue;
+            }
             if issue_monitor_qualified_window_id(&observed.window_id)
                 .is_none_or(|(tab, _)| tab != snapshot.project_tab_id)
                 || !self.window_observation_covers_launch(
@@ -20887,6 +20949,107 @@ impl IssueMonitorState {
             });
         }
         classified
+    }
+
+    /// Retire only exact dead terminal holders before verified binding repair.
+    /// Normal pane closes, review rebinds and missing-pane grace run afterwards.
+    pub fn reconcile_dead_terminal_launches(
+        &mut self,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
+        now: &str,
+    ) -> IssueMonitorIdleReconciliation {
+        let idle_windows = self
+            .classify_idle_windows(settlements, now)
+            .into_iter()
+            .filter(|idle| {
+                idle.bound
+                    && idle.idle_kind == IssueMonitorIdleKind::ExecutionSettled
+                    && idle.issue_number.is_some_and(|number| {
+                        settlements.get(&number).is_some_and(|observation| {
+                            observation.holder_host_dead && !observation.process_held
+                        })
+                    })
+            })
+            .collect();
+        let mut outcome = IssueMonitorIdleReconciliation {
+            idle_windows,
+            ..IssueMonitorIdleReconciliation::default()
+        };
+        self.apply_idle_release(
+            &mut outcome,
+            None,
+            "released automatically by the Issue Monitor: terminal holder host is dead",
+            false,
+            IdleReleaseScope::FinishedImplementations,
+        );
+        self.prune_dead_terminal_launches(&outcome, settlements, now);
+        outcome
+    }
+
+    fn prune_dead_terminal_launches(
+        &mut self,
+        outcome: &IssueMonitorIdleReconciliation,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
+        now: &str,
+    ) {
+        // A canvas/census left by the dead host is no longer physical evidence.
+        // Retire only the released binding; live or uncertain successors vetoed
+        // its release above and keep their observations and capacity.
+        for idle in &outcome.idle_windows {
+            let Some(number) = idle.issue_number.filter(|number| {
+                idle.bound
+                    && idle.idle_kind == IssueMonitorIdleKind::ExecutionSettled
+                    && outcome.released.contains(number)
+                    && settlements.get(number).is_some_and(|observation| {
+                        observation.holder_host_dead
+                            && !observation.process_held
+                            && matches!(
+                                observation.settlement,
+                                IssueMonitorExecutionSettlement::Completed
+                                    | IssueMonitorExecutionSettlement::Blocked
+                            )
+                    })
+            }) else {
+                continue;
+            };
+            // A settled generation must not return after the stranded-row
+            // grace or a restart. Explicit operator resubmission remains valid.
+            self.terminal_queue_remove(&[number], now);
+            if let Some(snapshot) = &mut self.window_snapshot {
+                for observed in &mut snapshot.windows {
+                    if observed.issue_number == Some(number)
+                        && issue_monitor_qualified_window_id(&idle.window_id).is_some()
+                        && observed.window_id == idle.window_id
+                    {
+                        // Keep the old ID: our derived cleanup is not a new
+                        // canvas absence observation after a prefs rebase.
+                        observed.status = WindowState::Stopped;
+                        observed.monitor_owned = false;
+                    }
+                }
+            }
+            for census in self.monitor_runtime_counts.values_mut() {
+                if !settlements[&number]
+                    .dead_holder_hosts
+                    .contains(&(census.host_pid, census.host_started_at))
+                {
+                    continue;
+                }
+                let count_removed = census.counts.remove(&number).is_some();
+                let before = census.windows.len();
+                census.windows.retain(|_, owner| *owner != number);
+                if count_removed || before != census.windows.len() {
+                    // Rebase rejects equal/older observations. Publish this
+                    // correction after the old census, even within one tick.
+                    if let Some(previous) = parse_rfc3339_utc(&census.observed_at) {
+                        let next = previous + chrono::Duration::nanoseconds(1);
+                        census.observed_at = parse_rfc3339_utc(now)
+                            .map_or(next, |now| now.max(next))
+                            .to_rfc3339();
+                    }
+                }
+            }
+        }
     }
 
     /// Issue #4084 AC-2/AC-3/AC-4: classify the idle windows, then act.
@@ -21071,6 +21234,7 @@ impl IssueMonitorState {
                 );
             }
         }
+        self.prune_dead_terminal_launches(&outcome, settlements, now);
         outcome
     }
 
@@ -21105,8 +21269,9 @@ impl IssueMonitorState {
         forced: bool,
         scope: IdleReleaseScope,
     ) {
-        let targets = self
-            .idle_windows()
+        let targets = outcome
+            .idle_windows
+            .clone()
             .into_iter()
             .filter(|idle| number.is_none_or(|number| idle.issue_number == Some(number)))
             .filter(|idle| scope.admits(idle.idle_kind))
@@ -21199,8 +21364,10 @@ impl IssueMonitorState {
                     });
                 outcome.pane_closes.push(idle.window_id.clone());
             }
-            self.launch_bindings
-                .retain(|window_id, _| !issue_monitor_window_ids_match(window_id, &idle.window_id));
+            self.launch_bindings.retain(|window_id, owner| {
+                idle.issue_number.is_some_and(|number| *owner != number)
+                    || !issue_monitor_window_ids_match(window_id, &idle.window_id)
+            });
             self.idle_windows.remove(&idle.window_id);
         }
     }
@@ -21270,8 +21437,9 @@ impl IssueMonitorState {
             item.launched_window_id = None;
         }
         self.queue.retain(|queued| *queued != issue_number);
-        self.launch_bindings
-            .retain(|bound, _| !issue_monitor_window_ids_match(bound, window_id));
+        self.launch_bindings.retain(|bound, owner| {
+            *owner != issue_number || !issue_monitor_window_ids_match(bound, window_id)
+        });
         // Same reason as the requeue notice: a release reached with autonomous
         // mode off — the dead-binding recovery, or an operator-forced
         // `release_idle_windows` — must still be reported.
@@ -42450,6 +42618,7 @@ mod tests {
                     settlement,
                     process_held,
                     holder_host_dead,
+                    dead_holder_hosts: Default::default(),
                     held_holder_session_id: None,
                 },
             )]);
@@ -42513,6 +42682,7 @@ mod tests {
                         settlement: *settlement,
                         process_held: false,
                         holder_host_dead: false,
+                        dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
                     },
                 )
@@ -42630,6 +42800,7 @@ mod tests {
                 settlement: IssueMonitorExecutionSettlement::Completed,
                 process_held: true,
                 holder_host_dead: false,
+                dead_holder_hosts: Default::default(),
                 held_holder_session_id: None,
             },
         )]);
