@@ -1910,7 +1910,7 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains("function handleSocketOpen()"),
+        html.contains("function handleSocketOpen(recoverSnapshots = false)"),
         "expected socket open flow to live in a named handler",
     );
     assert!(
@@ -1918,17 +1918,19 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
         "expected socket message flow to live in a named handler",
     );
     assert!(
-        html.contains("function handleSocketClose()"),
+        html.contains("function handleSocketClose(recoverSnapshots = false)"),
         "expected socket close flow to live in a named handler",
     );
     assert!(
-        html.contains("function installSocketEventHandlers(activeSocket)"),
+        html.contains(
+            "function installSocketEventHandlers(activeSocket, recoverSnapshots = false)"
+        ),
         "expected socket listener registration to be isolated behind an installer",
     );
     assert!(
-        html.contains("[\"open\", handleSocketOpen]")
+        html.contains("[\"open\", () => handleSocketOpen(recoverSnapshots)]")
             && html.contains("[\"message\", handleSocketMessage]")
-            && html.contains("[\"close\", handleSocketClose]")
+            && html.contains("[\"close\", () => handleSocketClose(recoverSnapshots)]")
             && html.contains("activeSocket.addEventListener(kind, (event) => {")
             && html.contains("if (socket === activeSocket) handler(event);"),
         "expected named socket handlers to ignore events from replaced connections",
@@ -1941,18 +1943,18 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness must precede queue replay, and replay must match the immutable
     // connection scope. Other projects retain their own pending messages.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
     )
     .expect("valid regex");
 
     assert!(
-        html.contains("function connectSocket()"),
+        html.contains("function connectSocket(force = false)"),
         "expected socket transport bootstrap helper in embedded html",
     );
     assert!(
             html.contains("socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;")
                 && html.contains("setConnectionState(false);")
-                && html.contains("installSocketEventHandlers(socket);"),
+                && html.contains("installSocketEventHandlers(socket, force === true);"),
             "expected socket bootstrap to create the websocket, reset connection state, and install handlers",
         );
     assert!(

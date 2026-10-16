@@ -4,9 +4,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
-import { createProfileWindowSurface } from "../profile-window-surface.js";
+import { createUiStateStore } from "../ui-state-store.js";
 
 test("Issue #5531: Profile resync reloads a lost read while preserving the draft and save", () => {
+  const source = readFileSync(new URL("../profile-window-surface.js", import.meta.url), "utf8");
+  const createProfileWindowSurface = Function("createUiStateStore",
+    '"use strict"; ' + source.slice(source.indexOf("export function"))
+      .replace("export function", "function") + "; return createProfileWindowSurface;",
+  )(createUiStateStore);
   const sent = [];
   const surface = createProfileWindowSurface({ send: message => sent.push(message), windowMap: new Map() });
   const state = surface.ensureProfileState("profile");

@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import vm from "node:vm";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const surfaceSource = readFileSync(
@@ -34,10 +34,10 @@ test("works is part of the default selected search scopes", () => {
 });
 
 test("Issue #5531: resync replaces a lost index search without losing its query or results", () => {
-  const createSurface = vm.runInNewContext(surfaceSource.slice(surfaceSource.indexOf("export function"))
-    .replace("export function", "function") + "; createProjectIndexSearchSurface;", {
-    document: { querySelector: () => null }, CSS: { escape: value => value }, clearTimeout,
-  });
+  const createSurface = Function("createUiStateStore", "document", "CSS",
+    '"use strict"; ' + surfaceSource.slice(surfaceSource.indexOf("export function"))
+      .replace("export function", "function") + "; return createProjectIndexSearchSurface;",
+  )(createUiStateStore, { querySelector: () => null }, { escape: value => value });
   const sent = [];
   const surface = createSurface({ send: message => sent.push(message), activeProjectTab: () => null });
   const state = { query: "pending query", selectedScopes: new Set(["issues"]), matchMode: "all_terms",
