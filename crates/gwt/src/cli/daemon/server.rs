@@ -5927,9 +5927,10 @@ fn refresh_issue_monitor_agent_status(hub: &BroadcastHub, monitor: &crate::Issue
     // daemon whose worker has stopped scanning cannot keep serving a snapshot
     // that reads healthy.
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut status = monitor.agent_status_at(&now);
+    crate::cli::issue::attach_github_budget(&mut status);
     hub.set_issue_monitor_status(
-        serde_json::to_value(monitor.agent_status_at(&now))
-            .expect("Issue Monitor agent status serializes"),
+        serde_json::to_value(status).expect("Issue Monitor agent status serializes"),
     );
 }
 
@@ -13718,9 +13719,10 @@ exit 0
     }
 
     /// SPEC #4093 AC-8 (Issue #3737 AC-1/AC-2/AC-6): once the persisted
-    /// window's `reset_at` has passed, the very next scan spends GraphQL
-    /// again — nothing is deferred, no toggle is needed — and the rate-limit
-    /// text left by the earlier scan is gone from `last_error`.
+    /// window's `reset_at` has passed, the very next scan loads live candidates
+    /// and prepares a claim without a toggle. Issue #5603 also expires an old
+    /// core reserve despite a recently refreshed shared probe timestamp. The
+    /// earlier rate-limit text is gone from `last_error`.
     #[test]
     fn an_expired_rate_limit_window_defers_nothing_on_the_next_scan() {
         let _env_lock = crate::env_test_lock()
@@ -13733,7 +13735,19 @@ exit 0
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
-        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "open_pr_inventory");
+        let issue_list = temp.path().join("issues.json");
+        fs::write(
+            &issue_list,
+            serde_json::json!([{
+                "number": 44, "title": "Queued issue", "body": "Queued body",
+                "labels": [{"name": "bug"}, {"name": "gwt-queued"}],
+                "state": "OPEN", "updatedAt": "2026-08-15T00:00:00Z"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let _issues = ScopedEnvVar::set("GWT_FAKE_GH_ISSUE_LIST_FILE", &issue_list);
 
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -13755,6 +13769,30 @@ exit 0
             .expect("seed the previous successful candidate result");
         // The window a previous scan persisted has already reset.
         let now = chrono::Utc::now();
+        // Issue #5603: GraphQL traffic may have refreshed the shared probe
+        // while the old core remaining=0 observation crossed its own reset.
+        let ledger = gwt_core::github_budget::BudgetLedger::global();
+        ledger.record_probe(&gwt_core::github_budget::ProbeSnapshot {
+            probed_at: now,
+            resources: std::collections::BTreeMap::from([(
+                "core".to_string(),
+                gwt_core::github_budget::ResourceWindow {
+                    limit: 5000,
+                    remaining: 0,
+                    reset_at: now - chrono::Duration::seconds(1),
+                },
+            )]),
+        });
+        assert!(
+            gwt_core::github_budget::throttle_reason(
+                &ledger.snapshot(now),
+                gwt_core::github_quota::GitHubQuota::Rest,
+                &gwt_core::github_budget::ThrottlePolicy::default(),
+                now,
+            )
+            .is_none(),
+            "the expired core window must not stop the first scan"
+        );
         gwt_core::github_budget::BudgetLedger::global().record_block(
             &gwt_core::github_quota::RateLimitBlock {
                 resource: "graphql".to_string(),
@@ -13794,6 +13832,16 @@ exit 0
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
             .expect("the scan after the window completes");
+        assert!(
+            scanned
+                .agent_status()
+                .inbox_coverage
+                .as_ref()
+                .is_some_and(|coverage| {
+                    coverage.source == crate::IssueMonitorCandidateSource::Live
+                }),
+            "the first scan after core reset loads the live candidate list"
+        );
 
         let last_error = scanned.status_view().last_error.unwrap_or_default();
         assert!(
@@ -13806,8 +13854,8 @@ exit 0
         );
         let snapshot = gwt_core::github_budget::BudgetLedger::global().snapshot(chrono::Utc::now());
         assert!(
-            snapshot.local["graphql"].calls_last_hour >= 1,
-            "the per-candidate readback spends GraphQL again: {:?}",
+            snapshot.local["core"].calls_last_hour >= 1,
+            "candidate loading spends the reset REST budget again: {:?}",
             snapshot.local
         );
         assert!(

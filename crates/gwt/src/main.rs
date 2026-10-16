@@ -3303,6 +3303,7 @@ mod tests {
             tier_facts: Vec::new(),
             agent_blackout: None,
             quota_hold: None,
+            github_budget: None,
             update_drain: None,
             update_drain_release: None,
             launch_profile_candidates: Vec::new(),

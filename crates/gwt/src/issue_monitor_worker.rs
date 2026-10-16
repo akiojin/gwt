@@ -675,8 +675,14 @@ pub fn issue_monitor_daemon_payloads(
 pub fn issue_monitor_read_only_daemon_payloads(
     monitor: &IssueMonitorState,
 ) -> Vec<IssueMonitorDaemonPayload> {
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now_instant = chrono::Utc::now();
+    let now = now_instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut status = monitor.status_view_at(&now);
+    status.github_budget = Some(gwt_core::github_budget::status_by_resource(
+        &gwt_core::github_budget::BudgetLedger::global().snapshot(now_instant),
+        &gwt_core::github_budget::ThrottlePolicy::current(),
+        now_instant,
+    ));
     if let Some(drain) = status.update_drain.as_mut() {
         drain.blocking = monitor
             .pending_effects()
@@ -873,7 +879,9 @@ where
             None
         } else {
             refresh_count += 1;
-            match refresh(number) {
+            match run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+                refresh(number)
+            }) {
                 Ok(()) => {
                     let refreshed = cache.load_entry(number);
                     match refreshed {
@@ -1107,7 +1115,10 @@ pub fn refresh_issue_cache_for_scan_if_stale(
     {
         return Ok(false);
     }
-    crate::issue_cache::sync_issue_cache_from_remote(repo_path, cache_root)?;
+    run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
+        crate::issue_cache::sync_issue_cache_from_remote(repo_path, cache_root)
+    })
+    .map_err(|error| error.to_string())?;
     Ok(true)
 }
 
@@ -1534,7 +1545,7 @@ pub fn reconcile_issue_monitor_merges(
     {
         return Ok(IssueMonitorMergeReconciliation::default());
     }
-    let merged_prs = gwt_git::pr_status::fetch_merged_pr_deliveries(repo_path)?;
+    let merged_prs = gwt_git::pr_status::fetch_merged_pr_deliveries_for_monitor(repo_path)?;
     let merged_branches = merged_prs.branches;
     let deliveries = merged_prs
         .deliveries
@@ -2007,7 +2018,7 @@ fn read_open_pr_inventory(
         return None;
     }
     match run_budgeted_readback_stage(IssueMonitorScanStage::OpenPrReadback, || {
-        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch(repo_path)
+        gwt_git::pr_status::try_fetch_open_pr_numbers_by_branch_for_monitor(repo_path)
     }) {
         Ok(index) => Some(index),
         Err(failure) => {
@@ -2792,6 +2803,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_5603_readiness_refresh_preserves_the_launch_reserve() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let scan_deadline = now + std::time::Duration::from_secs(60);
+        let _scan = gwt_core::operation_deadline::ScopedOperationDeadline::enter(scan_deadline);
+        let (issues, errors) = issue_monitor_candidates_with_readiness(
+            vec![live_issue(42, &["gwt-spec"], Some("t1"))],
+            temp.path(),
+            |_| {
+                let deadline = gwt_core::operation_deadline::current().unwrap();
+                assert!(deadline <= scan_deadline - ISSUE_MONITOR_LAUNCH_RESERVE);
+                assert!(deadline <= now + issue_monitor_readback_budget());
+                Err("readback timed out".to_string())
+            },
+        );
+        assert_eq!(issues.len(), 1);
+        assert_eq!(errors.len(), 1);
+        ensure_scan_deadline(IssueMonitorScanStage::CandidateLoad).unwrap();
+    }
+
     fn structured_spec(number: u64, updated_at: &str, plan: &str, tasks: &str) -> IssueSnapshot {
         IssueSnapshot {
             number: IssueNumber(number),
@@ -3276,6 +3309,39 @@ mod tests {
             issues[0].readiness,
             IssueMonitorReadiness::ReadyWithOpenTasks
         );
+    }
+
+    #[test]
+    fn github_budget_pause_is_visible_in_the_gui_status_payload() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path().join("home"));
+        let now = chrono::Utc::now();
+        let deadline = now + chrono::Duration::minutes(30);
+        gwt_core::github_budget::BudgetLedger::global().record_block(
+            &gwt_core::github_quota::RateLimitBlock {
+                resource: "core".to_string(),
+                limit: 5000,
+                remaining: 0,
+                reset_at: deadline,
+            },
+            now,
+        );
+        let monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let payloads = issue_monitor_read_only_daemon_payloads(&monitor);
+        let status = &payloads
+            .iter()
+            .find(|payload| payload.event == "status")
+            .expect("status payload")
+            .payload;
+        let core = &status["github_budget"]["core"];
+        assert_eq!(core["throttled"], true, "{status}");
+        assert!(
+            core["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("github_rate_limited")),
+            "{status}"
+        );
+        assert_eq!(core["backoff_until"], serde_json::json!(deadline));
     }
 
     #[test]

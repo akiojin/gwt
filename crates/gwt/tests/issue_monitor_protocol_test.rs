@@ -278,6 +278,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
             autonomous_mode: false,
             quota_hold: None,
+            github_budget: None,
             update_drain: None,
             update_drain_release: None,
             autonomous_issues: Vec::new(),

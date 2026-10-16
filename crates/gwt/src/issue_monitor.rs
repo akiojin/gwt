@@ -3455,6 +3455,9 @@ pub struct IssueMonitorStatusView {
     pub autonomous_mode: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_hold: Option<IssueMonitorProviderQuotaHold>,
+    /// Current host-local GitHub budget, attached by the publishing surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_budget: Option<BTreeMap<String, gwt_core::github_budget::ResourceBudgetStatus>>,
     /// Issue #4037 AC-6: the update drain, if raised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_drain: Option<IssueMonitorUpdateDrain>,
@@ -12518,6 +12521,7 @@ impl IssueMonitorState {
             },
             autonomous_mode: self.autonomous_mode,
             quota_hold,
+            github_budget: None,
             update_drain: self.update_drain.clone(),
             update_drain_release: self
                 .update_drain

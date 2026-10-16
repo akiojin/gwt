@@ -511,14 +511,18 @@ fn issue_monitor_project_root<E: CliEnv>(
 /// machine-local ledger every gwt process on this host writes to. Attached at
 /// the surface rather than in the daemon projection so it is current at read
 /// time and answers with or without a live daemon.
-fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
+pub(crate) fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) {
     let now = chrono::Utc::now();
     let ledger = gwt_core::github_budget::BudgetLedger::global();
-    status.github_budget = Some(gwt_core::github_budget::status_by_resource(
+    let budget = gwt_core::github_budget::status_by_resource(
         &ledger.snapshot(now),
         &gwt_core::github_budget::ThrottlePolicy::current(),
         now,
-    ));
+    );
+    if let Some(gui_status) = status.gui_status.as_mut() {
+        gui_status.github_budget = Some(budget.clone());
+    }
+    status.github_budget = Some(budget);
 }
 
 /// Issue #4009 AC-4: free space where the worktrees live and where the
@@ -10515,6 +10519,10 @@ mod tests {
 
         let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
         let graphql = &status["github_budget"]["graphql"];
+        assert_eq!(
+            status["gui_status"]["github_budget"],
+            status["github_budget"]
+        );
         assert_eq!(graphql["throttled"], true, "{status}");
         assert!(
             graphql["reason"]

@@ -349,6 +349,36 @@ test("Issue Monitor band presents and clears the quota-hold provider and reset",
   assert.equal(band.pill.title, "");
 });
 
+test("Issue #5603: GitHub API read limits explain the reason and retry time, then clear", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const band = monitorBand(body);
+  const status = { enabled: true, state: "idle", queue_len: 3, active_count: 0,
+    max_active_agents: 2, last_error: null };
+  const budget = {
+    core: { throttled: true, reason: "budget_reserve: resource=core remaining=0 reserve=1000",
+      backoff_until: "2026-10-16T01:59:53Z" },
+    graphql: { throttled: false },
+  };
+  surface.applyIssueMonitorStatus({ ...status, github_budget: budget });
+  assert.equal(band.pill.textContent, "Limited · GitHub");
+  assert.equal(band.pill.dataset.tone, "idle");
+  assert.match(band.pill.title, /GitHub API reads limited.*core.*budget_reserve/);
+  assert.match(band.pill.title, /Retry 2026-10-16T01:59:53Z/);
+
+  surface.applyIssueMonitorStatus({ ...status, state: "error", last_error: "unrelated scan fault", github_budget: budget });
+  assert.equal(band.pill.textContent, "⚠ Error");
+  assert.match(band.pill.title, /Details in notifications.*GitHub API reads limited.*core.*budget_reserve/);
+  assert.match(band.pill.title, /Retry 2026-10-16T01:59:53Z/);
+
+  surface.applyIssueMonitorStatus({ ...status, enabled: false, state: "disabled" });
+  assert.equal(band.pill.textContent, "Stopped");
+  assert.equal(band.pill.title, "");
+  surface.applyIssueMonitorStatus({ ...status, state: "idle", last_error: null });
+  assert.equal(band.pill.textContent, "Running");
+  assert.equal(band.pill.title, "");
+});
+
 // Issue #4366 AC-6 / AC-6b: a hold never rewrites the saved settings line; the
 // launch target and its reason are a separate line (now of the ⚙ tooltip) that
 // exists only while held.
