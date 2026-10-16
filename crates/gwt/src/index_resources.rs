@@ -187,10 +187,57 @@ fn measure_process_trees(root_pid: Option<u32>) -> Option<ProcessTreeUsage> {
     })
 }
 
-/// Host-wide index resource snapshot for `index.status` and
-/// `diagnostics cpu --json`.
+/// Readiness of the resident worker selected by the current search runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QueryWorkerStatus {
+    pub model_state: &'static str,
+    pub worker_pid: Option<u32>,
+    pub model_load_ms: Option<u64>,
+}
+
+impl Default for QueryWorkerStatus {
+    fn default() -> Self {
+        Self {
+            model_state: "cold",
+            worker_pid: None,
+            model_load_ms: None,
+        }
+    }
+}
+
+fn query_worker_status_at(worker_dir: &Path) -> QueryWorkerStatus {
+    let read = || -> Option<QueryWorkerStatus> {
+        let endpoint: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(worker_dir.join("endpoint.json")).ok()?).ok()?;
+        let pid = u32::try_from(endpoint.get("pid")?.as_u64()?).ok()?;
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+            true,
+            ProcessRefreshKind::nothing().without_tasks(),
+        );
+        system.process(Pid::from_u32(pid))?;
+        let model_state = match endpoint.get("model_state")?.as_str()? {
+            "cold" => "cold",
+            "warming" => "warming",
+            "warm" => "warm",
+            _ => return None,
+        };
+        Some(QueryWorkerStatus {
+            model_state,
+            worker_pid: Some(pid),
+            model_load_ms: endpoint
+                .get("model_load_ms")
+                .and_then(serde_json::Value::as_u64),
+        })
+    };
+    read().unwrap_or_default()
+}
+
+/// Host-wide snapshot for `index.status` and `diagnostics cpu --json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct IndexResourceDiagnostics {
+    pub query_worker: QueryWorkerStatus,
     pub heavy_held: bool,
     pub heavy_owner_pid: Option<u32>,
     pub heavy_holder_kind: Option<String>,
@@ -209,7 +256,10 @@ pub struct IndexResourceDiagnostics {
 /// Collect the snapshot without creating coordinator or broker state on a
 /// host that has none yet.
 pub fn collect_index_resources() -> IndexResourceDiagnostics {
-    let mut diagnostics = IndexResourceDiagnostics::default();
+    let mut diagnostics = IndexResourceDiagnostics {
+        query_worker: query_worker_status_at(&crate::index_search::search_worker_dir()),
+        ..Default::default()
+    };
     let coordinator_root = gwt_core::index_coordinator::coordinator_root();
     if coordinator_root.is_dir() {
         if let Ok(status) = gwt_core::index_coordinator::IndexCoordinator::open(coordinator_root)
@@ -265,6 +315,17 @@ pub fn render_index_resources(out: &mut String, diagnostics: &IndexResourceDiagn
     if let Some(holder) = &diagnostics.heavy_holder {
         out.push_str(&format!("resources: runner_holder {holder}\n"));
     }
+    let worker = &diagnostics.query_worker;
+    out.push_str(&format!(
+        "resources: query_worker model_state={} worker_pid={} model_load_ms={}\n",
+        worker.model_state,
+        worker
+            .worker_pid
+            .map_or_else(|| "none".into(), |pid| pid.to_string()),
+        worker
+            .model_load_ms
+            .map_or_else(|| "unknown".into(), |ms| ms.to_string()),
+    ));
     match &diagnostics.runner_tree {
         Some(tree) => out.push_str(&format!(
             "resources: runner_tree processes={} cpu_percent={:.1} rss_bytes={} private_bytes={}\n",
@@ -281,6 +342,45 @@ pub fn render_index_resources(out: &mut String, diagnostics: &IndexResourceDiagn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_worker_readiness_is_live_and_rendered() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(query_worker_status_at(temp.path()).model_state, "cold");
+        let endpoint = temp.path().join("endpoint.json");
+        for state in ["cold", "warming", "warm"] {
+            std::fs::write(
+                &endpoint,
+                serde_json::json!({
+                    "pid": std::process::id(), "model_state": state, "model_load_ms": 1234,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let status = query_worker_status_at(temp.path());
+            assert_eq!(status.model_state, state);
+            assert_eq!(status.worker_pid, Some(std::process::id()));
+            assert_eq!(status.model_load_ms, Some(1234));
+            let mut out = String::new();
+            let diagnostics = IndexResourceDiagnostics {
+                query_worker: status,
+                ..Default::default()
+            };
+            render_index_resources(&mut out, &diagnostics);
+            assert!(
+                out.contains(&format!("query_worker model_state={state}")),
+                "{out}"
+            );
+            assert_eq!(
+                serde_json::to_value(diagnostics).unwrap()["query_worker"]["model_state"],
+                state
+            );
+        }
+        std::fs::write(&endpoint, r#"{"pid":4294967295,"model_state":"warm"}"#).unwrap();
+        assert_eq!(query_worker_status_at(temp.path()).model_state, "cold");
+        std::fs::remove_file(&endpoint).unwrap();
+        assert_eq!(query_worker_status_at(temp.path()).model_state, "cold");
+    }
 
     #[test]
     fn runner_selection_excludes_owner_and_agent_trees_but_includes_reused_workers() {
@@ -416,7 +516,7 @@ mod tests {
         render_index_resources(&mut out, &IndexResourceDiagnostics::default());
         assert_eq!(
             out,
-            "resources: heavy_held=false heavy_owner=none heavy_kind=none heavy_pending=0 broker_targets=0 queue_depth=0 running=0 follow_ups=0\nresources: runner_tree=idle\n"
+            "resources: heavy_held=false heavy_owner=none heavy_kind=none heavy_pending=0 broker_targets=0 queue_depth=0 running=0 follow_ups=0\nresources: query_worker model_state=cold worker_pid=none model_load_ms=unknown\nresources: runner_tree=idle\n"
         );
 
         let mut out = String::new();
