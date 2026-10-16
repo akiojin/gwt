@@ -255,6 +255,8 @@ pub(crate) struct GcReport {
     pub reclaimed_bytes: u64,
     pub unreclaimed_bytes: u64,
     pub unreclaimed_by_reason: Vec<GcUnreclaimedReason>,
+    pub pressure_volumes: BTreeSet<String>,
+    pub reclaimed_volumes: BTreeMap<String, u64>,
     pub disk_space: crate::disk_space::DiskSpaceStatus,
 }
 
@@ -269,7 +271,7 @@ pub(crate) fn run_gc(
 
 /// Automatic GC gives unmerged caches lower priority, rather than permanent
 /// protection. The probe is shared with the trigger, including its configured
-/// thresholds, and is checked before each unmerged removal.
+/// thresholds. Every target must belong to a volume still under pressure.
 pub(crate) fn run_gc_with_pressure(
     repo_path: &Path,
     base: &str,
@@ -336,17 +338,29 @@ pub(crate) fn run_gc_with_pressure(
     let mut candidates = Vec::new();
     let mut removed = Vec::new();
     let mut failed = Vec::new();
+    let mut pressure_volumes = BTreeSet::new();
+    let mut reclaimed_volumes = BTreeMap::new();
     for candidate in plan.candidates {
-        if unmerged.contains(&candidate.worktree)
-            && pressure_probe.is_some_and(|probe| probe().warning.is_none())
-        {
-            plan.kept.push(GcKept {
-                worktree: candidate.worktree,
-                branch: candidate.branch,
-                reason: "unmerged cache: no remaining disk pressure".to_string(),
-                bytes: candidate.bytes,
-            });
-            continue;
+        let target_volume = crate::disk_space::volume_id(&candidate.target);
+        if let Some(probe) = pressure_probe {
+            let low_volumes = probe().low_volume_ids();
+            pressure_volumes.extend(low_volumes.iter().cloned());
+            let reason = match &target_volume {
+                Err(error) => Some(format!("target volume unknown: {error}")),
+                Ok(volume) if !low_volumes.contains(volume) => Some(format!(
+                    "target volume is not under disk pressure: {volume}"
+                )),
+                Ok(_) => None,
+            };
+            if let Some(reason) = reason {
+                plan.kept.push(GcKept {
+                    worktree: candidate.worktree,
+                    branch: candidate.branch,
+                    reason,
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
         }
         // Dry runs use the same kernel evidence as deletion. Marker files
         // alone never make a cache busy. Hold both guards through deletion.
@@ -372,6 +386,31 @@ pub(crate) fn run_gc_with_pressure(
             }
         };
         if !dry_run {
+            // A sweep can take many minutes. Re-read physical processes and
+            // live pane/launch sidecars while holding the deletion boundary;
+            // enumeration's snapshot cannot authorize a later deletion.
+            let system = process_table();
+            let roots = std::slice::from_ref(&candidate.worktree);
+            let processes = scan_processes(&system, roots);
+            let hosts = live_gwt_hosts(&system);
+            let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
+            let reason = processes
+                .get(&candidate.worktree)
+                .map(|names| format!("active process: {}", names.join(", ")))
+                .or_else(|| {
+                    tracked
+                        .get(&candidate.worktree)
+                        .map(|sessions| format!("tracked launch: {}", sessions.join(", ")))
+                });
+            if let Some(reason) = reason {
+                plan.kept.push(GcKept {
+                    worktree: candidate.worktree,
+                    branch: candidate.branch,
+                    reason,
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
             // Only ever `<worktree>/target` of a listed worktree; the plan
             // cannot name anything else.
             debug_assert_eq!(
@@ -379,11 +418,16 @@ pub(crate) fn run_gc_with_pressure(
                 candidate.worktree.join(BUILD_ARTIFACT_DIR)
             );
             match std::fs::remove_dir_all(&candidate.target) {
-                Ok(()) => removed.push(GcRemoval {
-                    worktree: candidate.worktree.clone(),
-                    target: candidate.target.clone(),
-                    bytes: candidate.bytes,
-                }),
+                Ok(()) => {
+                    if let Ok(volume) = target_volume {
+                        *reclaimed_volumes.entry(volume).or_default() += candidate.bytes;
+                    }
+                    removed.push(GcRemoval {
+                        worktree: candidate.worktree.clone(),
+                        target: candidate.target.clone(),
+                        bytes: candidate.bytes,
+                    });
+                }
                 Err(error) => failed.push(GcFailure {
                     worktree: candidate.worktree.clone(),
                     target: candidate.target.clone(),
@@ -408,6 +452,9 @@ pub(crate) fn run_gc_with_pressure(
         || crate::disk_space::probe(&[repo_path.as_path(), coordinator_root.as_path()]),
         |probe| probe(),
     );
+    if pressure_probe.is_some() {
+        pressure_volumes.extend(disk_space.low_volume_ids());
+    }
     Ok(GcReport {
         dry_run,
         base: base.to_string(),
@@ -421,6 +468,8 @@ pub(crate) fn run_gc_with_pressure(
         reclaimed_bytes,
         unreclaimed_bytes,
         unreclaimed_by_reason,
+        pressure_volumes,
+        reclaimed_volumes,
         disk_space,
     })
 }
@@ -709,6 +758,9 @@ fn scan_processes(system: &System, roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<S
     if roots.is_empty() {
         return found;
     }
+    // Roots are canonical; Windows can report a process cwd through its
+    // short-name alias, which must still protect the same physical worktree.
+    let normalize = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let own_pid = std::process::id();
     for (pid, process) in system.processes() {
         let pid = pid.as_u32();
@@ -717,7 +769,11 @@ fn scan_processes(system: &System, roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<S
         }
         let exe = process.exe();
         let cwd = process.cwd();
-        let Some(root) = attribute_worktree(cwd, exe, roots) else {
+        let normalized_exe = exe.map(normalize);
+        let normalized_cwd = cwd.map(normalize);
+        let Some(root) =
+            attribute_worktree(normalized_cwd.as_deref(), normalized_exe.as_deref(), roots)
+        else {
             continue;
         };
         let name = exe
@@ -1412,10 +1468,13 @@ mod tests {
                 };
                 verification.replace(Some(guard));
             }
-            crate::disk_space::DiskSpaceStatus {
-                warning: Some("fixture disk pressure".to_string()),
-                ..crate::disk_space::evaluate(Vec::new())
-            }
+            crate::disk_space::probe_with(
+                &[sibling.as_path()],
+                crate::disk_space::DiskThresholds {
+                    below_bytes: u64::MAX,
+                    below_percent: 100,
+                },
+            )
         };
         let held = run_gc_with_pressure(
             &repo,
