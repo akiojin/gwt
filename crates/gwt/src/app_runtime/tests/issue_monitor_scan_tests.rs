@@ -1643,8 +1643,21 @@ fn issue_monitor_capacity_sampler_notifies_stopped_projects_without_scanning() {
         "capacity observations must notify stopped GUI monitors"
     );
     assert!(
-        main.contains("app.issue_monitor_capacity_changed_events(&project_root)"),
+        main.contains("app.issue_monitor_capacity_changed_events(&context, revision, update)"),
         "the event loop must publish the capacity-only overlay"
+    );
+    assert!(
+        sampler.contains("CapacityUpdate::read") && sampler.contains("changed_from"),
+        "prepare capacity and suppress unchanged notifications on the sampler worker"
+    );
+    assert!(
+        sampler.contains("let Some(accepted) = accepted")
+            && sampler.contains("previous.remove(&root)"),
+        "initial status must become ready before a notification is consumed"
+    );
+    assert!(
+        sampler.contains("Some(&accepted)"),
+        "worker must preserve the GUI's last accepted Auto limit and Manual mode on read failure"
     );
     assert!(
         !sampler.contains("IssueMonitorScheduledTick"),
@@ -1830,6 +1843,160 @@ fn issue_monitor_capacity_waits_for_the_initial_full_projection() {
             panic!("closed project must not publish capacity")
         })
         .is_empty());
+}
+
+#[test]
+fn issue_monitor_capacity_overlay_rejects_observations_before_control_or_reopen() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab",
+            "Repo",
+            root.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab"),
+    );
+    let (context, revision, ready) = runtime.capacity_observation_contexts().pop().unwrap();
+    assert!(ready.is_none());
+    let mut initial = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).status_view();
+    initial.max_active_agents = 7;
+    initial.max_active_agents_override = None;
+    let state = runtime.project_state(&context).unwrap();
+    state
+        .issue_monitor_status_cache
+        .replace(Some(initial.clone()));
+    assert_eq!(
+        runtime
+            .capacity_observation_contexts()
+            .pop()
+            .unwrap()
+            .2
+            .unwrap()
+            .limits,
+        Some((7, None))
+    );
+    let mut measured = initial.clone();
+    measured.max_active_agents = 9;
+    measured.max_active_agents_override = Some(9);
+    let update = gwt::agent_capacity::CapacityUpdate::from_status(&measured);
+    runtime.invalidate_issue_monitor_list(&root);
+    assert!(runtime
+        .issue_monitor_capacity_changed_events(&context, revision, update.clone())
+        .is_empty());
+    assert_eq!(
+        state.issue_monitor_status_cache.borrow().as_ref(),
+        Some(&initial)
+    );
+    let revision = (
+        state.issue_monitor_list_revision.get(),
+        state.issue_monitor_status_revision.get(),
+    );
+    let mut replaced = context.clone();
+    replaced.generation += 1;
+    assert!(runtime
+        .issue_monitor_capacity_changed_events(&replaced, revision, update.clone())
+        .is_empty());
+    assert_eq!(
+        runtime
+            .issue_monitor_capacity_changed_events(&context, revision, update)
+            .len(),
+        1
+    );
+    assert_eq!(
+        state.issue_monitor_status_cache.borrow().as_ref(),
+        Some(&measured)
+    );
+}
+
+#[test]
+fn issue_monitor_capacity_overlay_preserves_newer_daemon_limit_and_accepts_next_observation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab",
+            "Repo",
+            root.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab"),
+    );
+    let mut initial = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).status_view();
+    initial.max_active_agents = 7;
+    initial.max_active_agents_override = None;
+    initial.agent_capacity = gwt::agent_capacity::AgentCapacity {
+        measurement_complete: true,
+        recommended_worker_limit: 7,
+        ..Default::default()
+    };
+    runtime.issue_monitor_daemon_status_events(&root, Box::new(initial.clone()));
+    let (context, revision, accepted) = runtime.capacity_observation_contexts().pop().unwrap();
+    let old_update =
+        gwt::agent_capacity::CapacityUpdate::read_with(&root, accepted.as_ref(), |_| {
+            gwt::agent_capacity::AgentCapacity {
+                measurement_complete: false,
+                reason: "pending observation".into(),
+                ..initial.agent_capacity.clone()
+            }
+        });
+    assert_eq!(old_update.limits, Some((7, None)));
+
+    let mut newer = initial;
+    newer.max_active_agents = 4;
+    newer.agent_capacity.recommended_worker_limit = 4;
+    runtime.issue_monitor_daemon_status_events(&root, Box::new(newer));
+    runtime.issue_monitor_capacity_changed_events(&context, revision, old_update);
+    let state = runtime.project_state(&context).unwrap();
+    assert_eq!(
+        state
+            .issue_monitor_status_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .max_active_agents,
+        4,
+        "an old incomplete worker observation must not restore the prior Auto limit"
+    );
+
+    let (context, revision, accepted) = runtime.capacity_observation_contexts().pop().unwrap();
+    let next_update =
+        gwt::agent_capacity::CapacityUpdate::read_with(&root, accepted.as_ref(), |_| {
+            gwt::agent_capacity::AgentCapacity {
+                measurement_complete: true,
+                recommended_worker_limit: 5,
+                reason: "next observation".into(),
+                ..Default::default()
+            }
+        });
+    assert_eq!(
+        runtime
+            .issue_monitor_capacity_changed_events(&context, revision, next_update)
+            .len(),
+        1,
+        "the next worker observation must still be published"
+    );
+    assert_eq!(
+        state
+            .issue_monitor_status_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .max_active_agents,
+        5
+    );
 }
 
 #[test]

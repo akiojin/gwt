@@ -1,6 +1,237 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.128.0] - 2026-10-16
+
+### Bug Fixes
+
+- **monitor:** Scanの永続ログと期限付きの自動補充を修正する
+- **gc:** Protect active caches and restrict pressure volumes
+
+### Features
+
+- **board:** Create a discussion for each shared topic
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 4833 pull request
+- **work:** PR #5660の作成記録を配信する
+- **work:** Record cleanup pull request
+
+### Refactor
+
+- **ui:** Render cleanup lifecycle from shared state
+
+### Testing
+
+- **board:** Avoid cloning the expected synced entry
+
+## [9.127.1] - 2026-10-16
+
+### Bug Fixes
+
+- **workspace:** Recover shared Work state without full serialization
+- **workspace:** Validate recovery once and report recreated stores
+- **index:** Wait for SQLite worker handles before Windows publication
+- **runtime:** Fence terminal restores and preserve fresh launches
+- **monitor:** Verify pane ownership and keep scans progressing
+- **work:** Recover authenticated successors and retain local Done
+- **work:** Expose guarded closure for orphan issue work
+- **gui:** Publish related work detail through existing view
+- **ci:** Provision coverage tools and observe target measurement
+- **execution:** Recover Monitor relaunches across terminal Work lifetimes
+
+### Refactor
+
+- **ui:** Render index search responses from shared state
+
+### Testing
+
+- **gui:** Follow Agents runtime for exact relaunch
+- **runtime:** Cover reopened launch through terminal grace
+- **monitor:** Fix operation time in nominal persistence fixtures
+
+## [9.127.0] - 2026-10-16
+
+### Bug Fixes
+
+- **monitor:** Recover missing panes without phantom active rows
+- **monitor:** Retain execution holders and clarify queue failures
+- **agent:** Release name locks and hydrate recovery fixture
+- **agent:** Retain created PRs and distinct resume sessions
+- **ci:** Retain truncated profile recovery across pool slots
+- **verify:** Recover stale runners after pid reuse
+- **verify:** Settle bound attempts waiting for admission
+- **gui:** Reject capacity updates after newer status
+- **gui:** Replace legacy canvas with rail surfaces
+- **gui:** Preserve rail restore and attachment contracts
+- **gui:** Complete rail navigation and visibility contracts
+- **skills:** Preserve concurrent Windows asset readers
+- **skills:** Retry transient Windows asset sharing failures
+- **gui:** Trace issue cache dispatch latency through transport
+- **gui:** Refresh enriched issue detail through view model
+- **verify:** Admit bounded node test in a shared slot
+- **test:** Observe inherited lease lock release in admission fixtures
+- **gc:** Explain retained build caches and reclaim largest first
+- **gc:** Exclude coordination failures from reclaimable bytes
+- **core:** Windows の予約読み取りで一時的な共有違反を再試行する
+- **verify:** Report unknown reservations during target admission
+- **verify:** Align repository and ci rust toolchains
+- **ci:** Install rustfmt for coverage verification tests
+
+### Features
+
+- **agent:** Assign localized names and preserve named work history
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue #4862 PR delivery
+- **work:** Record verified PR delivery
+- **work:** Checkpoint Index health investigation for restart
+- **work:** Record Index health PR delivery metadata
+- **work:** Record issue-3824 PR delivery metadata
+- **work:** Record Issue 5566 delivery scope
+- **work:** Record verification runner recovery handoff
+- **work:** Record runner recovery delivery continuation
+- **work:** Record resumed notification delivery
+- **work:** Record notification delivery recovery
+- **work:** Record atomic publication delivery audit
+- **work:** Issue #5543 の配信引継ぎを記録
+- **work:** Record GC delivery handoff
+- **work:** Record GC pull request link
+- **work:** Record GC review recovery handoff
+- **work:** Record replacement GC pull request
+- **work:** Record Issue 5560 relaunch delivery
+- **work:** Record toolchain parity delivery restart
+- **work:** Record toolchain parity delivery resumption
+- **work:** Save final toolchain delivery state
+- **work:** PR 配信記録を保存
+- **work:** Record agent surface acceptance audit
+
+### Performance
+
+- **gui:** Move periodic notification work off the event loop
+- **gui:** Send issue cache rows before historical enrichment
+
+### Refactor
+
+- **ui:** Release notesを共有状態から描画
+- **ui:** Render Index health from shared state
+
+### Testing
+
+- **agent:** Satisfy strict lint in naming regressions
+- **agent:** Retain named surface verification captures
+- **agent:** Reconcile naming and author snapshot fixtures
+- **gui:** Select agents overview for attachment checks
+- **gui:** Await restored catalog before settings navigation
+- **gui:** Isolate issue load telemetry between themes
+- **verify:** Remove rustup dependence from FIFO probe
+- **verify:** Register FIFO regression in Windows filter inventory
+- **verify:** Align admission and recovery fixtures
+- **agent:** Cover duplicate naming candidates
+
+### Ci
+
+- Coverage と flake 検出の実行を最適化
+- Coverage 専用の nextest 並列数を調整
+- Select flake tests from the owner head
+- Retain workspace cache and mixed-change flake coverage
+
+## [9.126.1] - 2026-10-16
+
+### Bug Fixes
+
+- **execution:** Resolve superseded work after container detachment
+
+### Miscellaneous Tasks
+
+- **work:** Record PM settings delivery gate handoff
+- **work:** Record Windows CI delivery continuation
+- **work:** Record Windows CI delivery recovery
+- **work:** Record PR 5622 delivery metadata
+
+### Performance
+
+- **ci:** Trim Windows test symbols and parallelize providers
+- **ci:** Compile Windows regression harness groups in parallel
+
+### Refactor
+
+- **ui:** Render PM settings from shared state
+- **ui:** Render workspace state notices from shared state
+
+### Testing
+
+- **workspace:** Isolate rebuild detachment fixture home
+- **ci:** Align native caller contracts with Windows slices
+- **execution:** Fix detached successor fixture path lookup
+
+## [9.126.0] - 2026-10-16
+
+### Bug Fixes
+
+- **pm:** Require a registered executor for scoped operations
+- **pm:** Keep automatic prompts out of Q&A reports
+- **verify:** Record TTL overruns and reclaim diagnostics
+- **index:** Retain query models across revision switches
+- **verify:** Bound exclusive command occupancy
+- **agent:** Preserve reused sessions after exact relaunch
+- **execution:** Supersede invalid successor work occupancy
+- **monitor:** Recover expired budgets and bound candidate reads
+- **monitor:** Preserve launches when merge discovery fails
+
+### Features
+
+- **ui:** Bound PM reports and version raw updates
+- **notifications:** Route project notices through the server
+
+### Miscellaneous Tasks
+
+- **work:** Preserve the restored pull request link
+- **work:** Issue #3287 の配信済みスライスを記録する
+- **work:** Settle the delivered tray slice successor
+- **ci:** Rust workspace テストを6 shardに分割して実行集合を検証
+- **work:** Record the delivered tray execution
+- **work:** Preserve issue 5016 delivery recovery records
+- **work:** Record SAFE-C performance handoff
+- **work:** Record Profiles delivery relaunch
+- **work:** Record the notification pull request
+
+### Performance
+
+- **ci:** Share Windows test artifacts and parallelize regressions
+- **ci:** Avoid Windows regression runner queues
+- **ui:** Avoid per-packet RAW and snapshot allocations
+- **reports:** Bound live history and expose older pages
+- **state:** Avoid mapped tuples in immutable snapshots
+
+### Refactor
+
+- **ui:** Share Profile state through subscriptions
+
+### Testing
+
+- **ci:** 分割コマンドに既存の対応テストを追従
+- **perf:** 現行の起動導線で計測ペインを開く
+- **perf:** Snapshot回復と区間時計同期を計測する
+- **perf:** Compare captures with measured baseline noise
+- **ui:** Verify Profile state disposal and remount
+- **ui:** Resize live Profile window before environment checks
+- **ui:** Align Profile contract with subscriber identity
+- **notifications:** Align the monitor protocol fixture
+- **notifications:** Preserve the socket readiness contract
+- **monitor:** Account for budget-enriched daemon projections
+
+### Ci
+
+- Separate workflow queue and dependency timing
+
+### Revert
+
+- **perf:** Remove unshipped preview and Reports changes
+- **perf:** Remove unshipped snapshot-copy change
+
 ## [9.125.0] - 2026-10-15
 
 ### Bug Fixes

@@ -150,6 +150,7 @@ fn stale_project_launch_completion_cleans_exact_genesis_without_touching_reopene
             false,
             super::launch::AgentLaunchRuntimeContext {
                 agent_project_root: repo.display().to_string(),
+                predecessor_session_id: None,
                 expected_execution_identity: gwt_agent::SessionExecutionIdentity::from_session(
                     &session,
                 )

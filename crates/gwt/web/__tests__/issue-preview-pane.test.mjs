@@ -350,7 +350,7 @@ test("Windowize hands the mirrored agent back to the canvas", async (t) => {
   })]);
   fixture.surface.renderKnowledgeBridge("win-1");
   const detail = fixture.body.querySelector(".knowledge-detail-pane");
-  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown on canvas/);
+  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Agents/);
   assert.ok(detail.querySelector('[data-action="focus-canvas-window"]'));
   assert.equal(detail.querySelectorAll(".terminal-root").length, 0);
 });

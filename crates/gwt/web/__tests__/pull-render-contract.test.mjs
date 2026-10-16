@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parseHTML } from "linkedom";
 import { scanModule, assertBaseline, checkRepository } from "../../../../scripts/check-pull-render.mjs";
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
@@ -137,6 +138,165 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
 });
 
+test("Index health receiver resolves only shared model updates", () => {
+  const file = 'crates/gwt/web/project-index-search-surface.js';
+  const source = readFileSync(new URL('../project-index-search-surface.js', import.meta.url), 'utf8');
+  assert.deepEqual(scanModule(source, file, { rootName: 'setIndexStatus' }), []);
+  const bypass = source.replace('function setIndexStatus(projectRoot, status) {',
+    'function setIndexStatus(projectRoot, status) { renderProjectIndexWindows();');
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file, { rootName: 'setIndexStatus' })
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("Index search receivers resolve only shared model updates", () => {
+  const file = 'crates/gwt/web/project-index-search-surface.js';
+  const source = readFileSync(new URL('../project-index-search-surface.js', import.meta.url), 'utf8');
+  for (const name of ['handleProjectIndexSearchResults', 'handleProjectIndexSearchError']) {
+    assert.deepEqual(scanModule(source, file, { rootName: name }), []);
+    const bypass = source.replace(`function ${name}(event) {`,
+      `function ${name}(event) { renderProjectIndexSearch(event.id);`);
+    assert.notEqual(bypass, source);
+    assert.ok(scanModule(bypass, file, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Release notes receivers resolve only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const surfaceFile = 'crates/gwt/web/release-notes-window.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../release-notes-window.js', import.meta.url), 'utf8');
+  const receivers = source => scanModule(source, appFile, { modules: new Map([[surfaceFile, surface]]) })
+    .filter(finding => finding.root === 'receive' && /^\/release_notes_(payload|error)$/.test(finding.context));
+  assert.deepEqual(receivers(app), []);
+  for (const name of ['handlePayload', 'handleError']) {
+    assert.deepEqual(scanModule(surface, surfaceFile, { rootName: name }), []);
+    const bypass = surface.replace(name === 'handlePayload' ? 'function handlePayload(payload) {' : 'function handleError(message) {',
+        `function ${name}(${name === 'handlePayload' ? 'payload' : 'message'}) { renderSidebar(model.read());`);
+    assert.notEqual(bypass, surface);
+    assert.ok(scanModule(bypass, surfaceFile, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Workspace state notice receiver resolves only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const noticeFile = 'crates/gwt/web/workspace-state-notice.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const notice = readFileSync(new URL('../workspace-state-notice.js', import.meta.url), 'utf8');
+  const receiverFindings = source => scanModule(source, appFile, { modules: new Map([[noticeFile, notice]]) })
+    .filter(finding => finding.root === 'receive' && finding.context === '/workspace_state_notice');
+  assert.deepEqual(scanModule(notice, noticeFile), []);
+  assert.deepEqual(receiverFindings(app), []);
+  const bypass = app.replace('case "workspace_state_notice":',
+    'case "workspace_state_notice": element.textContent = event.kind;');
+  assert.ok(receiverFindings(bypass).some(finding => finding.kind === 'dom-write'));
+  const directRender = notice.replace('function receive(notice) {',
+    'function receive(notice) { render(notice);');
+  assert.notEqual(directRender, notice, 'mutation must target the real notice receiver');
+  assert.ok(scanModule(directRender, noticeFile).some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("PM settings receiver resolves only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const panelFile = 'crates/gwt/web/pm-settings-panel.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const panel = readFileSync(new URL('../pm-settings-panel.js', import.meta.url), 'utf8');
+  const modules = new Map([[panelFile, panel]]);
+  const receiverFindings = source => scanModule(source, appFile, { modules })
+    .filter(finding => finding.root === 'receive' && /^\/pm_status(\/|$)/.test(finding.context));
+  assert.deepEqual(receiverFindings(app), []);
+  const bypass = app.replace('applyPmSettingsReceiveEvent(event);',
+    'applyPmSettingsReceiveEvent(event); element.textContent = event.kind;');
+  assert.notEqual(bypass, app, 'mutation must target the real PM settings receiver');
+  assert.ok(receiverFindings(bypass).some(finding => finding.kind === 'dom-write'));
+
+  const directRender = panel.replace('function applyPmSettingsReceiveEvent(status) {',
+    'function applyPmSettingsReceiveEvent(status) { renderView(mounts.values().next().value, model.read());');
+  assert.notEqual(directRender, panel, 'mutation must target the factory receiver');
+  assert.ok(scanModule(directRender, panelFile, { rootName: 'applyPmSettingsReceiveEvent' })
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+test("Profile receivers resolve only shared model updates", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const appFile = 'crates/gwt/web/app.js';
+  const profileFile = 'crates/gwt/web/profile-window-surface.js';
+  const profile = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([[profileFile, profile]]);
+  const profileReceivers = findings => findings.filter(finding => finding.root === 'receive'
+    && /^\/profile_(snapshot|error)(\/|$)/.test(finding.context));
+  const moduleFindings = scanModule(profile, profileFile, { rootName: 'applyProfileReceiveEvent' });
+  assert.equal(moduleFindings.length, 0, 'Profile module receiver must contain no DOM or unresolved calls');
+  assert.deepEqual(profileReceivers(scanModule(app, appFile, { modules })), []);
+
+  const directRender = profile.replace('function applyProfileReceiveEvent(event) {',
+    'function applyProfileReceiveEvent(event) { renderProfile(event.id);');
+  assert.notEqual(directRender, profile, 'the direct-render mutation must target the real receiver');
+  assert.ok(scanModule(directRender, profileFile, { rootName: 'applyProfileReceiveEvent' })
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(profileReceivers(scanModule(app, appFile, { modules: new Map([[profileFile, directRender]]) }))
+    .some(finding => finding.kind.startsWith('dom-')), 'factory tracing must detect the old rendering path');
+  const bypass = app.replace('applyProfileReceiveEvent(event);',
+    'applyProfileReceiveEvent(event); element.textContent = event.kind;');
+  assert.ok(profileReceivers(scanModule(bypass, appFile, { modules }))
+    .some(finding => finding.kind === 'dom-write'));
+});
+
+test("Profile disposal cancels pending saves and remounts without closed-window data", async t => {
+  const source = readFileSync(new URL('../profile-window-surface.js', import.meta.url), 'utf8')
+    .replace('"/ui-state-store.js"', JSON.stringify(new URL('../ui-state-store.js', import.meta.url).href));
+  const { createProfileWindowSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document, window } = parseHTML('<html><body></body></html>');
+  const previousDocument = globalThis.document;
+  globalThis.document = document;
+  t.after(() => { globalThis.document = previousDocument; });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const sends = [], windowMap = new Map();
+  const surface = createProfileWindowSurface({
+    send: message => sends.push(message),
+    createNode: (tag, className, text = '') => {
+      const node = document.createElement(tag);
+      node.className = className;
+      node.textContent = text;
+      return node;
+    },
+    windowMap,
+    focusWindowLocally() {},
+    sendWindowFocus() {},
+  });
+  const mount = () => {
+    const pane = document.createElement('div');
+    pane.innerHTML = '<div class="window-body"></div>';
+    windowMap.set('profile', pane);
+    surface.mountProfileWindow({ id: 'profile' }, pane.firstChild);
+    return pane;
+  };
+  const snapshot = {
+    active_profile: 'default', selected_profile: 'default', os_env: [],
+    profiles: [{ name: 'default', description: 'Original', env_vars: [], disabled_env: [] }],
+  };
+  const pane = mount();
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
+  const input = pane.querySelector('.profile-field input');
+  input.value = 'pending';
+  input.dispatchEvent(new window.Event('input'));
+  surface.disposeProfileWindow('profile');
+  windowMap.delete('profile');
+  t.mock.timers.tick(1000);
+  assert.equal(sends.filter(message => message.kind === 'save_profile').length, 0);
+  assert.equal(surface.profileStateMap.has('profile'), false);
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
+  surface.applyProfileReceiveEvent({ kind: 'profile_error', id: 'profile', message: 'late error' });
+  assert.equal(surface.profileStateMap.has('profile'), false);
+  const remounted = mount();
+  assert.equal(sends.filter(message => message.kind === 'load_profile').length, 2);
+  assert.equal(remounted.querySelector('.profile-field input'), null);
+  surface.applyProfileReceiveEvent({ kind: 'profile_snapshot', id: 'profile', snapshot });
+  assert.equal(remounted.querySelector('.profile-field input').value, 'default');
+  assert.match(remounted.querySelector('.profile-status').textContent, /^Active /);
+  surface.disposeProfileWindow('profile');
+});
+
 test("Window List receiver updates the catalog model and rejects direct rendering bypass", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const file = 'crates/gwt/web/app.js';
@@ -210,4 +370,33 @@ test("unrelated remote advances leave the default comparison stable; explicit CI
 
 test("checkout baseline satisfies the live and Git base contracts", () => {
   checkRepository();
+});
+
+
+test("cleanup progress/result receivers commit shared data and reject direct rendering", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const surfaceFile = 'crates/gwt/web/branches-cleanup-surface.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../branches-cleanup-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([[surfaceFile, surface]]);
+  const selected = findings => findings.filter(finding =>
+    /\/branch_cleanup_(progress|result)$/.test(finding.context));
+  assert.deepEqual(selected(scanModule(surface, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' })), []);
+  assert.deepEqual(selected(scanModule(app, appFile, { modules })), []);
+  const bypass = surface.replace('case "branch_cleanup_result": {',
+    'case "branch_cleanup_result": { renderBranches(event.id);');
+  assert.notEqual(bypass, surface);
+  assert.ok(selected(scanModule(bypass, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
+
+test("Close Project receiver commits shared data and rejects direct rendering", () => {
+  const file = 'crates/gwt/web/close-project-confirm-modal.js';
+  const source = readFileSync(new URL('../close-project-confirm-modal.js', import.meta.url), 'utf8');
+  assert.deepEqual(scanModule(source, file), []);
+  const bypass = source.replace("if (event.kind === 'project_closed') {",
+    "if (event.kind === 'project_closed') { hide();");
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file).some(finding => finding.kind.startsWith('dom-')));
 });

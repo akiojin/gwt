@@ -349,6 +349,36 @@ test("Issue Monitor band presents and clears the quota-hold provider and reset",
   assert.equal(band.pill.title, "");
 });
 
+test("Issue #5603: GitHub API read limits explain the reason and retry time, then clear", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const band = monitorBand(body);
+  const status = { enabled: true, state: "idle", queue_len: 3, active_count: 0,
+    max_active_agents: 2, last_error: null };
+  const budget = {
+    core: { throttled: true, reason: "budget_reserve: resource=core remaining=0 reserve=1000",
+      backoff_until: "2026-10-16T01:59:53Z" },
+    graphql: { throttled: false },
+  };
+  surface.applyIssueMonitorStatus({ ...status, github_budget: budget });
+  assert.equal(band.pill.textContent, "Limited · GitHub");
+  assert.equal(band.pill.dataset.tone, "idle");
+  assert.match(band.pill.title, /GitHub API reads limited.*core.*budget_reserve/);
+  assert.match(band.pill.title, /Retry 2026-10-16T01:59:53Z/);
+
+  surface.applyIssueMonitorStatus({ ...status, state: "error", last_error: "unrelated scan fault", github_budget: budget });
+  assert.equal(band.pill.textContent, "⚠ Error");
+  assert.match(band.pill.title, /Details in notifications.*GitHub API reads limited.*core.*budget_reserve/);
+  assert.match(band.pill.title, /Retry 2026-10-16T01:59:53Z/);
+
+  surface.applyIssueMonitorStatus({ ...status, enabled: false, state: "disabled" });
+  assert.equal(band.pill.textContent, "Stopped");
+  assert.equal(band.pill.title, "");
+  surface.applyIssueMonitorStatus({ ...status, state: "idle", last_error: null });
+  assert.equal(band.pill.textContent, "Running");
+  assert.equal(band.pill.title, "");
+});
+
 // Issue #4366 AC-6 / AC-6b: a hold never rewrites the saved settings line; the
 // launch target and its reason are a separate line (now of the ⚙ tooltip) that
 // exists only while held.
@@ -1038,6 +1068,99 @@ test("latest inbox launch state moves a cached queued row to Active while retain
     'move uses the full terminal queue including the active row and uncached predecessor');
 });
 
+test("Issue #4862 failed launches leave Active despite stale Work and show the current failure reason", async (t) => {
+  const failures = [[42, "launch_failed", "Launch failed"], [43, "agent_failed", "Agent failed"]];
+  const { body, surface, load } = await makeFixture({
+    getActiveWorkProjection: () => ({ active_works: failures.map(([number]) => ({
+      id: `work-${number}`, active_agents: 1,
+    })) }),
+  });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const cached = { kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue", request_id: load.request_id,
+    entries: failures.map(([number]) => ({ ...knowledgeEntry(number, "launched"), related_work_refs: [{ id: `work-${number}` }] })),
+    refresh_enabled: true };
+  surface.applyKnowledgeReceiveEvent(cached);
+  const inbox = failures.map(([number, state]) => ({ issue: { number }, state, launched_window_id: null,
+    error_message: `Issue ${number}: successor has invalid lineage` }));
+  surface.applyIssueMonitorInbox(inbox);
+  surface.applyKnowledgeReceiveEvent(cached);
+  for (const [number, , badge] of failures) {
+    const row = body.querySelector(`[data-queue-column="backlog"] [data-issue-number="${number}"]`);
+    assert.ok(row, "a failed launch with no window must not inherit stale Work activity");
+    assert.equal(row.querySelector(".knowledge-row-badge").textContent, badge);
+    assert.match(row.querySelector('[data-kind="reason"]').textContent, /successor has invalid lineage/);
+    assert.match(row.querySelector('[data-key="recovery"]')?.textContent || "", /Work lineage.*workspace.close.*issue.monitor.requeue/);
+    assert.ok(row.querySelector('[data-action="requeue-issue"]'));
+    assert.equal(body.querySelector(`[data-queue-column="active"] [data-issue-number="${number}"]`), null);
+  }
+  surface.applyIssueMonitorInbox(inbox.map(({ error_message, ...item }) => item));
+  assert.equal(body.querySelector('[data-kind="reason"]'), null, "omitted failure reasons clear the previous diagnosis");
+  surface.applyIssueMonitorInbox([{ issue: { number: 43 }, state: "needs_human",
+    error_message: "autonomous launch attempts exhausted (3/3) with an unchanging failure: Launch timed out: no window was created within 120s" }]);
+  const capped = body.querySelector('[data-queue-column="backlog"] [data-issue-number="43"]');
+  assert.ok(capped, "a capped launch failure must also ignore stale Work activity");
+  assert.match(capped.querySelector('[data-key="recovery"]').textContent, /Window timeout.*issue.monitor.requeue/);
+  surface.applyIssueMonitorInbox([{ issue: { number: 43 }, state: "needs_human",
+    error_message: "autonomous launch attempts exhausted (3/3) with an unchanging failure: successor work-43-next is duplicated; use workspace.close" }]);
+  const unclassified = body.querySelector('[data-queue-column="backlog"] [data-issue-number="43"]');
+  assert.ok(unclassified, "an unclassified capped launch failure must also ignore stale Work activity");
+  assert.equal(unclassified.querySelector('[data-key="recovery"]').textContent, "Launch failure · Next: issue.monitor.status");
+});
+
+test("Issue #4862 a live inbox stop replaces stale cached activity outside the terminal queue", async (t) => {
+  const { body, surface, load } = await makeFixture({
+    getActiveWorkProjection: () => ({ active_works: [{ id: "work-42", active_agents: 1 }] }),
+  });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const cached = { kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue", request_id: load.request_id,
+    entries: [{ ...knowledgeEntry(42, "launched"), related_work_refs: [{ id: "work-42" }] }], refresh_enabled: true };
+  surface.applyKnowledgeReceiveEvent(cached);
+  surface.applyIssueMonitorStatus({ terminal_queue: [] });
+  surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "needs_human", error_message: "stopped: PM chose to pause" }]);
+  surface.applyKnowledgeReceiveEvent(cached);
+  const held = body.querySelector('[data-queue-column="backlog"] [data-issue-number="42"]');
+  assert.ok(held, "a stop outside the terminal queue still overrides stale Work activity");
+  assert.equal(held.querySelector(".knowledge-row-badge").textContent, "Held");
+  assert.equal(held.querySelector(".knowledge-row-badge").dataset.tone, "idle");
+  assert.equal(held.querySelector('[data-key="reason"]').textContent, "PM chose to pause");
+  assert.equal(held.querySelector('[data-key="recovery"]'), null);
+  assert.equal(body.querySelector('[data-queue-column="active"] [data-issue-number="42"]'), null);
+});
+
+test("Issue #4862 an actual same-owner running pane outranks a stale failed inbox state", async (t) => {
+  const pane = { id: "agent-42", preset: "agent", agent_id: "codex", status: "running",
+    placement: { kind: "issue_preview", issue_window_id: "win-1", issue_number: 42 } };
+  const { body, surface, load } = await makeFixture({ getWorkspaceWindows: () => [pane] });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue", request_id: load.request_id,
+    entries: [knowledgeEntry(42, "launched")], refresh_enabled: true });
+  surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "launch_failed", error_message: "old failed attempt" }]);
+  const active = body.querySelector('[data-queue-column="active"] [data-issue-number="42"]');
+  assert.ok(active, "a real running pane is stronger evidence than a stale failure");
+  assert.equal(active.querySelector(".knowledge-row-badge").textContent, "Running");
+  assert.equal(body.querySelector('[data-queue-column="backlog"] [data-issue-number="42"]'), null);
+});
+
+test("Issue #4862 a live pane wins over an earlier terminal preview", async (t) => {
+  const terminal = { id: "old-agent", preset: "agent", agent_id: "codex", status: "error",
+    placement: { kind: "issue_preview", issue_window_id: "win-1", issue_number: 42 } };
+  const live = { ...terminal, id: "live-agent", status: "running", linked_issue_number: 42 };
+  const { body, surface, load } = await makeFixture({
+    getWorkspaceWindows: () => [terminal, live],
+    getActiveWorkProjection: () => ({ active_works: [{ id: "work-42", agents: [{ window_id: live.id }] }] }),
+  });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue", request_id: load.request_id,
+    entries: [{ ...knowledgeEntry(42, "launched"), related_work_refs: [{ id: "work-42" }] }], refresh_enabled: true });
+  for (const placement of [terminal.placement, { kind: "canvas" }]) {
+    live.placement = placement;
+    surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "launch_failed", error_message: `old failed attempt: ${placement.kind}` }]);
+    const active = body.querySelector('[data-queue-column="active"] [data-issue-number="42"]');
+    assert.ok(active, `the live ${placement.kind} pane must outrank the earlier error preview`);
+    assert.equal(active.querySelector(".knowledge-row-badge").textContent, "Running");
+  }
+});
+
 test("queue drag uses terminal positions when a queued issue is not cached", async (t) => {
   const { body, surface, load, sent } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -1109,4 +1232,45 @@ test("queue priority displays canonical reasons and observed assignment without 
     if (number === 1) assert.equal(body.querySelector(".issue-detail-provenance").textContent, "Queued by: Urgent label");
     assert.equal(body.querySelector(".issue-detail-priority-assignment").textContent, `Priority assigned by: ${actor} · Assigned at: ${time}`);
   }
+});
+
+test("Issue #4783: Related Work closes only an exact backend-approved child Work", async (t) => {
+  const projection = { active_works: [{ id: "workspace-1", branch: "work/one",
+    manual_close_allowed: true,
+    works: [
+      { id: "orphan-work", lifecycle_state: "paused", manual_close_allowed: true },
+      { id: "live-work", lifecycle_state: "active", manual_close_allowed: false,
+        close_blocked_reason: "live_agent" },
+    ],
+  }] };
+  const { body, surface, load, sent } = await makeFixture({
+    getActiveWorkProjection: () => projection,
+  });
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+    request_id: load.request_id, entries: [knowledgeEntry(1, "launched")], refresh_enabled: true });
+  body.querySelector('.knowledge-row-select').click();
+  const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+    request_id: request.request_id, detail: { number: 1, title: "Issue 1", state: "open",
+      labels: [], sections: [], related_works: ["orphan-work", "live-work", "unmatched-work"].map(id => ({
+        id, title: id, branch: "work/one", status_category: "idle", agents: [],
+      })) } });
+
+  const cards = [...body.querySelectorAll(".knowledge-related-work")];
+  assert.equal(cards.length, 3, "restored Work remains visible without an agent");
+  const buttons = card => [...card.querySelectorAll(".workspace-detail-work-actions button")];
+  assert.deepEqual(buttons(cards[0]).map(button => button.textContent), ["Done", "Discard"]);
+  buttons(cards[0])[0].click();
+  buttons(cards[0])[1].click();
+  assert.deepEqual(sent.filter(message => message.kind === "close_work"), [
+    { kind: "close_work", work_id: "orphan-work", close_kind: "done" },
+    { kind: "close_work", work_id: "orphan-work", close_kind: "discarded" },
+  ]);
+  assert.equal(buttons(cards[1]).length, 2);
+  for (const button of buttons(cards[1])) {
+    assert.ok(button.disabled);
+    assert.equal(button.title, "live_agent");
+  }
+  assert.equal(buttons(cards[2]).length, 0, "branch equality must not supply close authority");
 });

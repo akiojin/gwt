@@ -34,15 +34,21 @@ test("surfaceForPreset folds every window preset into one of the four surfaces",
     agent: "agents",
     claude: "agents",
     codex: "agents",
+    shell: "agents",
+    console: "settings",
     board: "board",
     settings: "settings",
-    branches: "settings",
+    branches: "issues",
     profile: "settings",
+    logs: "settings",
+    file_tree: "settings",
+    pr: "issues",
+    memo: "board",
   };
   for (const [preset, surface] of Object.entries(cases)) {
     assert.equal(surfaceForPreset(preset), surface, `preset ${preset}`);
   }
-  for (const preset of ["shell", "file_tree", "logs", "pr", "console", "memo", "", null, undefined]) {
+  for (const preset of ["unknown", "", null, undefined]) {
     assert.equal(surfaceForPreset(preset), null, `preset ${preset} belongs to no surface`);
   }
 });
@@ -66,7 +72,7 @@ test("surface ownership retains authoritative roles and only routes the dedicate
   assert.equal(surfaceForWindow({ preset: "settings", surface_owner: "pm", settingsSection: "issues" }), "pm");
   assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "issues", "legacy Settings retains its existing section classification");
   assert.equal(surfaceForWindow({ preset: "shell", surface_owner: "agents" }), "agents");
-  assert.equal(surfaceForWindow({ preset: "shell" }), null, "ordinary Shell keeps its existing route");
+  assert.equal(surfaceForWindow({ preset: "shell" }), "agents", "ordinary Shell has a rail host");
 });
 
 test("the PM sits alone above the rule, then the Surfaces group of Issues / Agents / Board / Settings", () => {

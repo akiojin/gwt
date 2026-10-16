@@ -1492,6 +1492,15 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
             review_status: "APPROVED".to_string(),
         },
     );
+    env.pr_quarantine_contexts.insert(
+        42,
+        serde_json::from_value(serde_json::json!({
+            "number": 42,
+            "body": "Original PR description",
+            "comments": []
+        }))
+        .unwrap(),
+    );
 
     let code = dispatch(
         &mut env,

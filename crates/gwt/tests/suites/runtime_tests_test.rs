@@ -12,6 +12,8 @@ mod branch_cleanup_reconnect_test;
 mod branch_cleanup_test;
 #[path = "../branch_list_test.rs"]
 mod branch_list_test;
+#[path = "../daemon_logging_test.rs"]
+mod daemon_logging_test;
 #[path = "../daemon_project_root_test.rs"]
 mod daemon_project_root_test;
 #[path = "../daemon_runtime_hook_test.rs"]

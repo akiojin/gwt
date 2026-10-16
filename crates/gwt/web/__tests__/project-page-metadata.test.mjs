@@ -4,10 +4,17 @@ import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { createProjectPageMetadata } from "../project-page-metadata.js";
 
-function setup(project = true) {
-  const { document, window } = parseHTML('<html><head><title>gwt — Operator</title><link rel="icon" href="data:,"></head><body></body></html>');
+function setup(project = true, permissions = null) {
+  const { document, window: domWindow } = parseHTML('<html><head><title>gwt — Operator</title><link rel="icon" href="data:,"></head><body></body></html>');
+  const window = {
+    Event: domWindow.Event, MutationObserver: domWindow.MutationObserver,
+    addEventListener: domWindow.addEventListener.bind(domWindow),
+    dispatchEvent: domWindow.dispatchEvent.bind(domWindow),
+    navigator: { permissions },
+  };
   window.getComputedStyle = () => ({ getPropertyValue: (token) => token === "--color-state-blocked" ? "red" : "blue" });
   const sent = [];
+  window.Notification = { permission: "default", requestPermission() { throw new Error("must not prompt"); } };
   document.hasFocus = () => false;
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   return { document, window, sent, controller: createProjectPageMetadata({ document, window, project, send: (event) => sent.push(event) }) };
@@ -30,10 +37,12 @@ test("server aggregate renders exact project counts, unread, and semantic favico
   assert.equal(icon.dataset.state, "idle");
 });
 test("Hub metadata remains fixed despite aggregate and name input", () => {
-  const { document, controller } = setup(false);
+  const { document, sent, controller } = setup(false);
   controller.setProjectName("Repo A");
   controller.update({ running_count: 7, unread: true });
+  controller.reportAttention();
   assert.equal(document.title, "gwt — Hub");
+  assert.deepEqual(sent, []);
   assert.equal(document.querySelector('link[rel="icon"]').getAttribute("href"), "data:,");
 });
 test("metadata uses Operator tokens without literal palette colors", () => {
@@ -48,17 +57,18 @@ test("only visible focused clients acknowledge server unread, never clear it loc
   assert.deepEqual(sent, []);
   document.hasFocus = () => true;
   window.dispatchEvent(new window.Event("focus"));
-  assert.deepEqual(sent, [{ kind: "project_aggregate_ack", revision: 9, visible: true, focused: true }]);
+  const acknowledgements = () => sent.filter((event) => event.kind === "project_aggregate_ack");
+  assert.deepEqual(acknowledgements(), [{ kind: "project_aggregate_ack", revision: 9, visible: true, focused: true }]);
   assert.match(document.title, /^●/);
   controller.update({ running_count: 2, unread: false, revision: 10 });
-  assert.equal(sent.length, 1, "server acknowledgement must not cause a feedback loop");
+  assert.equal(acknowledgements().length, 1, "server acknowledgement must not cause a feedback loop");
   assert.doesNotMatch(document.title, /^●/);
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
   controller.update({ unread: true, revision: 11 });
-  assert.equal(sent.length, 1);
+  assert.equal(acknowledgements().length, 1);
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
   document.dispatchEvent(new window.Event("visibilitychange"));
-  assert.equal(sent.at(-1).revision, 11);
+  assert.equal(acknowledgements().at(-1).revision, 11);
 });
 test("old aggregate cannot overwrite newer metadata", () => {
   const { document, controller } = setup();
@@ -76,4 +86,56 @@ test("unavailable favicon style API does not prevent title updates or acknowledg
   assert.doesNotThrow(() => controller.update({ running_count: 3, unread: true, revision: 9 }));
   assert.equal(document.title, "● Project — RUN 3 · BLOCK 0 — gwt");
   assert.equal(sent.at(-1).revision, 9);
+});
+
+
+test("attention reporting is independent of unread and tracks focus, blur, visibility, and reconnect", () => {
+  const { document, window, sent, controller } = setup();
+  controller.reportAttention();
+  assert.deepEqual(sent.at(-1), { kind: "project_client_attention", visible: true, focused: false, notification_permission: "default" });
+  document.hasFocus = () => true;
+  window.Notification.permission = "granted";
+  window.dispatchEvent(new window.Event("focus"));
+  assert.deepEqual(sent.at(-1), { kind: "project_client_attention", visible: true, focused: true, notification_permission: "granted" });
+  document.hasFocus = () => false;
+  window.dispatchEvent(new window.Event("blur"));
+  assert.equal(sent.at(-1).focused, false);
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  assert.equal(sent.at(-1).visible, false);
+  window.Notification = undefined;
+  controller.resetConnection();
+  controller.reportAttention();
+  assert.equal(sent.at(-1).notification_permission, "unsupported");
+  assert.equal(sent.length, 5);
+  assert.ok(sent.every((event) => event.kind === "project_client_attention"));
+});
+
+test("browser permission changes report current grant without requesting permission", async () => {
+  const status = new EventTarget();
+  const queries = [];
+  const { window, sent } = setup(true, { query: async (descriptor) => { queries.push(descriptor); return status; } });
+  await Promise.resolve();
+  assert.deepEqual(queries, [{ name: "notifications" }]);
+  window.Notification.permission = "denied";
+  status.dispatchEvent(new Event("change"));
+  assert.equal(sent.at(-1).notification_permission, "denied");
+});
+
+
+test("first aggregate after reconnect resyncs capability once after Project materialization", () => {
+  const { sent, controller } = setup();
+  controller.resetConnection();
+  controller.reportAttention(); // Socket-open report can arrive before a Recent Project exists.
+  assert.equal(sent.length, 1);
+  controller.update({ unread: false, revision: 7 });
+  assert.equal(sent.length, 2, "first accepted aggregate must repeat the capability report");
+  assert.deepEqual(sent[1], sent[0]);
+  controller.update({ unread: false, revision: 7 });
+  controller.update({ unread: false, revision: 8 });
+  assert.equal(sent.length, 2, "later aggregates must not reorder recipient election");
+  controller.resetConnection();
+  controller.reportAttention();
+  controller.update({ unread: false, revision: 1 });
+  assert.equal(sent.length, 4, "each fresh connection gets one materialization resync");
 });

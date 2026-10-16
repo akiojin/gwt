@@ -188,7 +188,7 @@ fn board_post_dispatches_under_remote_provider_config_via_local_fallback() {
 }
 
 #[test]
-fn local_board_succeeds_when_discussion_worker_cannot_start() {
+fn local_board_succeeds_when_discussion_worker_and_origin_recording_fail() {
     use gwt_core::{
         coordination::{AuthorKind, BoardEntry, BoardEntryKind},
         test_support::{env_lock, ScopedEnvVar},
@@ -205,7 +205,14 @@ fn local_board_succeeds_when_discussion_worker_cannot_start() {
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(
         work.join("board.toml"),
-        "provider = 'local'\n[github_discussion]\nowner = 'example'\nrepo = 'project'\nnumber = 42\n",
+        "provider = 'local'\n[github_discussion]\nowner = 'example'\nrepo = 'project'\ncategory = 'General'\n",
+    )
+    .unwrap();
+    let coordination = gwt_core::coordination::coordination_dir(fixture.project.path());
+    std::fs::create_dir_all(&coordination).unwrap();
+    std::fs::write(
+        coordination.join("discussion-topic-origins"),
+        "blocked directory",
     )
     .unwrap();
     let entry = BoardEntry::new(

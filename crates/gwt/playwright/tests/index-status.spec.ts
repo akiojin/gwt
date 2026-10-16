@@ -1,17 +1,17 @@
 /* SPEC-1939 Phase 13+15 — project-bar Index badge withdrawn. The remaining
- * coverage exercises the dedicated Index window health panel (per-cell
- * rebuild IPC)
+ * coverage exercises the dedicated Index window health and search panels
  * using the SPEC-2017 Kanban fixture pattern:
  * the embedded frontend is served via `installEmbeddedRoutes`
  * (`_helpers/embedded-frontend.ts`) and the WebSocket is stubbed with a
  * deterministic backend that emits canned `workspace_state` +
- * `project_index_status` events. No xvfb / wry / live gwt process required.
+ * `project_index_status` events. The live reconnect case uses a real backend;
+ * fixture cases can also fetch binary-served assets when a base URL is set.
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { acquireLiveGwtBackendLock, gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
-test("live backend replays fresh index health after reconnect", async ({ page }, testInfo) => {
+test("live backend replays fresh index health after reconnect and completes offline index search", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base, "requires browser-check isolated backend");
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -30,14 +30,51 @@ test("live backend replays fresh index health after reconnect", async ({ page },
       return messages.map((entry: any) => entry.payload)
         .findLast((payload: any) => payload.kind === "project_index_status" && payload.status?.scopes?.issues);
     }).then((handle) => handle.jsonValue());
-    expect(status.status.state).toBe("ready");
-    expect(status.status.scopes.issues.healthy).toBe(true);
+    // A fresh HOME can legitimately have an index awaiting repair. Verify the
+    // backend's actual health rather than requiring the user's populated index.
+    const cellClass = status.status.scopes.issues.healthy ? 'ready' : 'unhealthy';
+    await expect(table.locator(`tr[data-scope='issues'] .settings-index-cell.${cellClass}`)).toBeVisible();
     await sendLiveGwtEvent(page, { kind: "refresh_index_status", project_root: status.project_root });
-    await expect(table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+    await expect(table.locator(`tr[data-scope='issues'] .settings-index-cell.${cellClass}`)).toBeVisible();
 
     await gotoLiveGwt(page, page.url(), { enableTestBridge: true });
     const reconnected = await openIndexHealthPanel(page, false, true);
-    await expect(reconnected.table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+    await expect(reconnected.table.locator(`tr[data-scope='issues'] .settings-index-cell.${cellClass}`)).toBeVisible();
+    // Keep the real request/reply and receiver path offline: only the wire
+    // query is empty, which returns before index runtime/model provisioning.
+    // Nonempty result bodies and errors are controlled in the fixture below.
+    await page.evaluate(() => {
+      const send = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === "string") {
+          const payload = JSON.parse(data);
+          if (payload.kind === "search_project_index") {
+            (window as any).__gwtLiveIndexSearchRequest = payload;
+            return send.call(this, JSON.stringify({ ...payload, query: "" }));
+          }
+        }
+        return send.call(this, data);
+      };
+    });
+    await reconnected.root.locator("[data-index-tab='search']").click();
+    await reconnected.root.locator(".index-search-input").fill("offline receiver acceptance");
+    const reply = await page.waitForFunction(() => {
+      const request = (window as any).__gwtLiveIndexSearchRequest;
+      const messages = (window as any).__gwtPlaywrightMessages ?? [];
+      return request && messages.map((entry: any) => entry.payload).findLast((payload: any) =>
+        payload.kind === "project_index_search_results" && payload.id === request.id
+        && payload.request_id === request.request_id);
+    }, undefined, { timeout: 10_000 }).then(handle => handle.jsonValue());
+    expect(reply).toMatchObject({ query: "", results: [] });
+    // The wire contract omits suggestions when the vector is empty.
+    expect(reply.suggestions ?? []).toEqual([]);
+    await expect(reconnected.root.locator(".index-search-input")).toHaveValue("offline receiver acceptance");
+    await expect(reconnected.root.locator(".index-search-status")).toHaveText("No indexed results");
+    await expect(reconnected.root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "false");
+    await expect(reconnected.root.locator(".index-run-button")).toBeEnabled();
+    await expect(page.locator("html")).toHaveAttribute("data-theme",
+      testInfo.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: testInfo.outputPath("index-search-live-reconnect.png") });
     expect(errors).toEqual([]);
   } finally {
     await release();
@@ -60,7 +97,10 @@ test.describe("Project Index status surface", () => {
 
   test("Index window Health renders the scope health table from project_index_status (T-IDX-106)", async ({
     page,
-  }) => {
+  }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(String(error)));
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
       state: "repair_required",
@@ -86,7 +126,9 @@ test.describe("Project Index status surface", () => {
     });
 
     await page.goto(APP_URL);
-    const { table } = await openIndexHealthPanel(page);
+    const { root, table } = await openIndexHealthPanel(page);
+    await expect(page.locator("html")).toHaveAttribute("data-theme",
+      testInfo.project.name.includes("light") ? "light" : "dark");
     await expect(table).toBeVisible();
 
     const specsRow = table.locator("tr[data-scope='specs']");
@@ -100,6 +142,22 @@ test.describe("Project Index status surface", () => {
     // Worktree column header should reflect the supplied branch label.
     await expect(table.locator("thead th[data-worktree-hash='wtAhash']"))
       .toContainText("develop");
+
+    // The same committed status updates the visible Search summary and the
+    // hidden Health table; opening Health must not be the update trigger.
+    await root.locator("[data-index-tab='search']").click();
+    await page.evaluate(() => window.__gwtFixtureWebSocket.setIndexStatus({
+      state: "ready", scopes: {
+        issues: { healthy: true, repair_required: false, document_count: 27 },
+        specs: { healthy: true, repair_required: false, document_count: 6 },
+      }, worktrees: {},
+    }));
+    await expect(root.locator(".index-search-health-summary")).toContainText("2 ready");
+    await expect(table.locator("tr[data-scope='specs'] .settings-index-cell.ready")).toHaveCount(1);
+    await root.locator("[data-index-tab='health']").click();
+    await expect(table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("index-health-shared-state.png") });
+    expect(errors).toEqual([]);
   });
 
   test("Index window Health tab and refresh button request full status refresh", async ({
@@ -436,8 +494,16 @@ test.describe("Project Index status surface", () => {
 
   test("Index window Search all-terms mode separates strict results and suggestions", async ({
     page,
-  }) => {
-    await installEmbeddedRoutes(page);
+  }, testInfo) => {
+    const configuredUrl = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(String(error)));
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    // Responses remain deterministic; a configured URL serves the actual
+    // checkout binary's embedded HTML/modules rather than filesystem routes.
+    if (!configuredUrl) await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
       state: "ready",
       scopes: {
@@ -447,7 +513,8 @@ test.describe("Project Index status surface", () => {
       worktrees: {},
     });
 
-    await page.goto(APP_URL);
+    await page.goto(configuredUrl ? new URL(new URL(APP_URL).pathname, configuredUrl).toString() : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     const { root } = await openIndexSearchPanel(page);
     await expect(root.locator(".index-search-input")).toHaveAttribute(
       "placeholder",
@@ -458,6 +525,8 @@ test.describe("Project Index status surface", () => {
       "placeholder",
       "All terms required, e.g. Work discussion",
     );
+    await root.locator(".index-scope-button[data-scope='board']").click();
+    await expect(root.locator(".index-scope-button[data-scope='board']")).toHaveAttribute("aria-pressed", "false");
     await root.locator(".index-search-input").fill("Workspace volatile");
 
     const request = await page.waitForFunction(() => {
@@ -479,6 +548,8 @@ test.describe("Project Index status surface", () => {
       match_mode: "all_terms",
       query: "Workspace volatile",
     });
+    expect(requestPayload.scopes).not.toContain("board");
+    await expect(root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "true");
 
     await page.evaluate((payload) => {
       window.__gwtFixtureWebSocket.emit(payload);
@@ -530,6 +601,55 @@ test.describe("Project Index status surface", () => {
     );
     await root.locator(".index-result-row.is-suggestion").click();
     await expect(root.locator(".index-detail-meta", { hasText: "Missing: volatile" })).toBeVisible();
+    await expect(root.locator(".index-detail-title")).toHaveText("Workspace naming discussion");
+    await expect(root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "false");
+    await root.locator(".index-result-row.is-suggestion").press("ArrowUp");
+    await expect(root.locator(".index-detail-title")).toHaveText("Workspace volatility decision");
+
+    await root.locator(".index-search-input").fill("Workspace recovery");
+    const failedRequest = await page.waitForFunction(() =>
+      window.__gwtFixtureWebSocket.recordedSends.map(raw => JSON.parse(raw))
+        .findLast(message => message.kind === "search_project_index" && message.query === "Workspace recovery"),
+    ).then(handle => handle.jsonValue());
+    await page.evaluate(payload => window.__gwtFixtureWebSocket.emit(payload), {
+      kind: "project_index_search_error", id: failedRequest.id,
+      request_id: failedRequest.request_id, query: failedRequest.query, message: "Index search fixture unavailable",
+    });
+    await expect(root.locator(".index-search-status")).toHaveText("Index search fixture unavailable");
+    await expect(root.locator(".index-result-list")).toHaveText("Index search fixture unavailable");
+    await expect(root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "false");
+    await expect(root.locator(".index-run-button")).toBeEnabled();
+
+    await root.locator(".index-search-input").fill("Workspace restored");
+    const recoveredRequest = await page.waitForFunction(() =>
+      window.__gwtFixtureWebSocket.recordedSends.map(raw => JSON.parse(raw))
+        .findLast(message => message.kind === "search_project_index" && message.query === "Workspace restored"),
+    ).then(handle => handle.jsonValue());
+    await page.evaluate(payload => window.__gwtFixtureWebSocket.emit(payload), {
+      kind: "project_index_search_results", id: recoveredRequest.id,
+      request_id: recoveredRequest.request_id, query: recoveredRequest.query, suggestions: [],
+      results: [{ scope: "specs", title: "Workspace restored result", preview: "Fresh committed response", distance: 0.1 }],
+    });
+    await expect(root.locator(".index-search-status")).toContainText("1 strict results · 0 semantic suggestions");
+    await expect(root.locator(".index-result-row")).toHaveCount(1);
+    await expect(root.locator(".index-detail-title")).toHaveText("Workspace restored result");
+    await expect(root.locator(".index-detail-preview")).toHaveText("Fresh committed response");
+    await expect(root.locator(".index-search-layout")).toHaveAttribute("aria-busy", "false");
+    await page.screenshot({ path: testInfo.outputPath("index-search-shared-state.png") });
+
+    const workspace = await page.evaluate(() => window.__gwtFixtureWebSocket.workspaceSnapshot());
+    const closed = structuredClone(workspace);
+    closed.workspace.tabs[0].workspace.windows = [];
+    await page.evaluate(payload => window.__gwtFixtureWebSocket.emit(payload), closed);
+    await expect(root).toHaveCount(0);
+    await page.evaluate(payload => window.__gwtFixtureWebSocket.emit(payload), workspace);
+    await expect(root).toHaveCount(1);
+    // Restored windows stay parked until the normal entrypoint selects them.
+    await openIndexSearchPanel(page);
+    await expect(root.locator(".index-search-input")).toHaveValue("");
+    await expect(root.locator(".index-result-row")).toHaveCount(0);
+    await expect(root.locator(".index-result-detail")).toHaveText("Select a result");
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 
   test("Index window Health per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)", async ({
@@ -786,6 +906,15 @@ async function installIndexStatusBackend(page, indexStatus, options = {}) {
         const payload = this.pendingRefreshStatus;
         this.pendingRefreshStatus = null;
         this.emit(payload);
+      }
+
+      setIndexStatus(status) {
+        projectIndexStatus.status = status;
+        this.emit(projectIndexStatus);
+      }
+
+      workspaceSnapshot() {
+        return JSON.parse(JSON.stringify(workspaceState));
       }
     }
 

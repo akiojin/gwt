@@ -14,7 +14,9 @@
 //! Per-session rows are gathered by [`collect_sessions`], which enumerates the
 //! gwt session store and reads each session's local rollout / transcript.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -42,7 +44,7 @@ const TICK_SECS: u64 = 30;
 /// this often (or immediately on a forced refresh).
 const CONSUMPTION_CACHE_SECS: i64 = 300;
 
-/// Called with each tick's account rows, in addition to the client broadcast.
+/// Called when the account rows meaningfully change, alongside the client broadcast.
 ///
 /// Issue #3616: the quota classifier lives in `AppRuntime`, which only the tao
 /// event loop can touch, so the caller supplies the hop. Taking a callback
@@ -54,17 +56,24 @@ pub fn spawn_usage_poller(
     runtime: &tokio::runtime::Runtime,
     clients: ClientHub,
     refresh: Arc<Notify>,
+    project_roots: Arc<RwLock<Vec<PathBuf>>>,
     observe_accounts: AccountsObserver,
 ) {
     drop(
         runtime
             .handle()
-            .spawn(run(clients, refresh, observe_accounts)),
+            .spawn(run(clients, refresh, project_roots, observe_accounts)),
     );
 }
 
-async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: AccountsObserver) {
+async fn run(
+    clients: ClientHub,
+    refresh: Arc<Notify>,
+    project_roots: Arc<RwLock<Vec<PathBuf>>>,
+    observe_accounts: AccountsObserver,
+) {
     let mut poller = Poller::default();
+    let mut observed_accounts = None;
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -80,7 +89,11 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
             continue;
         }
         let now = Utc::now();
-        let snapshot = match poller.poll_in_background(now, forced).await {
+        let roots = project_roots
+            .read()
+            .map(|roots| roots.clone())
+            .unwrap_or_default();
+        let snapshot = match poller.poll_in_background(now, forced, roots).await {
             Ok((returned, snapshot)) => {
                 poller = returned;
                 snapshot
@@ -91,10 +104,12 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
                 continue;
             }
         };
-        // Issue #3616: hand the account rows to the event loop before the
-        // broadcast. Both consumers need the same tick, and the classifier is
-        // the one whose absence lets a quota-dead pane hold a slot for days.
-        observe_accounts(snapshot.accounts.clone());
+        // Issue #5597: only meaningful changes need a GUI-thread update.
+        // The existing terminal-convergence clock still sweeps pending quota
+        // candidates even when the account observation remains unchanged.
+        if account_usage_changed(&mut observed_accounts, &snapshot.accounts) {
+            observe_accounts(snapshot.accounts.clone());
+        }
         clients.dispatch(vec![OutboundEvent::broadcast(
             BackendEvent::ProviderUsage {
                 accounts: snapshot.accounts,
@@ -102,6 +117,73 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
                 consumption: snapshot.consumption,
             },
         )]);
+    }
+}
+
+/// Poll timestamps and the age of an already-stale reading do not alter quota
+/// decisions. Preserve state transitions, account identity and every usage
+/// window (including its reset) when deciding whether the GUI needs a notice.
+fn account_usage_changed(
+    previous: &mut Option<Vec<ProviderUsage>>,
+    accounts: &[ProviderUsage],
+) -> bool {
+    let current = accounts
+        .iter()
+        .cloned()
+        .map(|mut account| {
+            account.fetched_at = None;
+            if let UsageState::Stale { age_secs } = &mut account.state {
+                *age_secs = 0;
+            }
+            account
+        })
+        .collect::<Vec<_>>();
+    if previous.as_ref() == Some(&current) {
+        return false;
+    }
+    *previous = Some(current);
+    true
+}
+
+/// Account recovery requires repository discovery and a durable prefs
+/// transaction. Keep both on the collection worker, including unchanged ticks
+/// so newly opened projects and failed writes still receive the observation.
+fn reconcile_project_accounts(
+    project_roots: &[PathBuf],
+    accounts: &[ProviderUsage],
+    now: DateTime<Utc>,
+) {
+    let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let prefs_paths = project_roots
+        .iter()
+        .map(|root| gwt::issue_monitor_prefs_path_for_repo_path(root))
+        .collect::<HashSet<_>>();
+    for prefs_path in prefs_paths {
+        #[cfg(test)]
+        let timeout = crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+        #[cfg(not(test))]
+        let timeout = crate::app_runtime::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + timeout,
+        );
+        if let Err(error) =
+            gwt::issue_monitor::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+                let mut monitor = gwt::IssueMonitorState::with_prefs(
+                    gwt::IssueMonitorConfig::default(),
+                    prefs.clone(),
+                );
+                let mut changed = false;
+                for account in accounts {
+                    changed |= monitor.reconcile_provider_usage(account, &timestamp);
+                }
+                if changed {
+                    *prefs = monitor.prefs();
+                }
+                Ok(())
+            })
+        {
+            tracing::warn!(%error, "provider usage recovery could not be persisted; next poll retries");
+        }
     }
 }
 
@@ -142,16 +224,19 @@ struct Poller {
 
 impl Poller {
     /// Keep all synchronous work (settings/auth, directory scans, parsing and
-    /// publication) off async workers. HTTP futures still use the shared runtime.
+    /// publication/account recovery) off async workers and the GUI thread.
+    /// HTTP futures still use the shared runtime.
     async fn poll_in_background(
         mut self,
         now: DateTime<Utc>,
         force: bool,
+        project_roots: Vec<PathBuf>,
     ) -> Result<(Self, UsageSnapshot), tokio::task::JoinError> {
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
             let snapshot = runtime.block_on(self.poll_once(now, force));
             publish_accounts(&snapshot.accounts, now);
+            reconcile_project_accounts(&project_roots, &snapshot.accounts, now);
             (self, snapshot)
         })
         .await
@@ -466,6 +551,44 @@ mod performance_tests;
 mod tests {
     use super::*;
 
+    #[test]
+    fn account_notifications_ignore_poll_time_but_preserve_usage_changes() {
+        let mut previous = None;
+        let mut account = account_with_weekly_reset(UsageProvider::Codex, Some(now()));
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.fetched_at = Some(now() + chrono::Duration::seconds(30));
+        assert!(!account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.windows[0].used_percent = 100.0;
+        account.limit_reached = true;
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.state = UsageState::Stale { age_secs: 300 };
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.state = UsageState::Stale { age_secs: 330 };
+        assert!(!account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.account_id = Some("replacement".into());
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.windows[0].resets_at = Some(now() + chrono::Duration::days(7));
+        assert!(account_usage_changed(&mut previous, &[account]));
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // isolated env must survive the worker's reads
     async fn complete_poll_collects_on_a_blocking_thread_and_keeps_its_cache() {
@@ -482,16 +605,35 @@ mod tests {
             "CLAUDE_CONFIG_DIR",
             home.path().join("claude"),
         );
+        let codex_home = home.path().join("codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("auth.json"),
+            r#"{"tokens":{"account_id":"account-a"}}"#,
+        )
+        .unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir(&project).unwrap();
         let calling_thread = std::thread::current().id();
         let (poller, first) = Poller::default()
-            .poll_in_background(now(), false)
+            .poll_in_background(now(), false, vec![project.clone()])
             .await
             .unwrap();
         assert_ne!(poller.collection_thread, Some(calling_thread));
         assert_eq!(first.accounts.len(), 2);
         assert!(first.sessions.is_empty());
         assert_eq!(first.accounts[1].state, UsageState::Disabled);
-        let (poller, second) = poller.poll_in_background(now(), false).await.unwrap();
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+        let prefs = gwt::issue_monitor::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            prefs.provider_quota_accounts["codex"].account_id,
+            first.accounts[0].account_id.as_deref().unwrap(),
+            "the collection worker must persist the same account recovery observation"
+        );
+        let (poller, second) = poller
+            .poll_in_background(now(), false, vec![project])
+            .await
+            .unwrap();
         assert_eq!(first, second);
         assert_eq!(poller.last_consumption_at, Some(now()));
         assert_eq!(poller.transcripts.bytes_read(), 0);

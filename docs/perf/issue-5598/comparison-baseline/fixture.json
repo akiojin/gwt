@@ -1,0 +1,88 @@
+{
+  "captured_utc": "2026-10-16T04:49:39.675350+00:00",
+  "source_home": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-final-home",
+  "home": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-comparison-baseline-home",
+  "scope": "issues",
+  "document_count": 1622,
+  "source_snapshot_audit": "../final-snapshot-reuse-audit.json",
+  "source_cache_file_count": 9119,
+  "source_cache_tree_sha256": "05f16c59e2a15083e7278f843f1f6b1d827d1bc4f4e3d438e9e214041b7a2220",
+  "source_tree_matches_frozen_fixture": true,
+  "pointer": {
+    "schema_version": 1,
+    "generation": "gen-1792121126541-50828",
+    "scope": "issues",
+    "document_count": 1622,
+    "published_at": "2026-10-16T03:25:26.544017+00:00"
+  },
+  "copied_metadata": [
+    {
+      "relative_path": "issues.gen/active.json",
+      "sha256": "6a8dc96e4bdeacd3611acc18f79b729d07fa15440a06b1cb96778ea91de15aa5",
+      "matches_source_bytes": true
+    },
+    {
+      "relative_path": "issues/meta.json",
+      "sha256": "2fa90d2361630c89ddd6a192f4f2c075c4e83d43f987268b9488861a60383aea",
+      "matches_source_bytes": true
+    },
+    {
+      "relative_path": "manifest-issues.json",
+      "sha256": "3443fa0eb9a699c0c4f3dba798dd9c9ba82065e984ea137d787991376e67cd53",
+      "matches_source_bytes": true
+    }
+  ],
+  "copied_generation_files": [
+    {
+      "relative_path": "7358e4c2-1a46-4003-9dfd-e780d3c98481/data_level0.bin",
+      "bytes": 4933632,
+      "sha256": "47be9daeaa91de9b0149d603048a0cc46d7743f30a5ceaee0a280a92121273c3",
+      "source_sha256": "47be9daeaa91de9b0149d603048a0cc46d7743f30a5ceaee0a280a92121273c3",
+      "matches_source_bytes": true
+    },
+    {
+      "relative_path": "7358e4c2-1a46-4003-9dfd-e780d3c98481/header.bin",
+      "bytes": 100,
+      "sha256": "3dd960fbe0f4cccda374d1472d8ec35b01bd50355920658451ff3ed86dccfcbd",
+      "source_sha256": "3dd960fbe0f4cccda374d1472d8ec35b01bd50355920658451ff3ed86dccfcbd",
+      "matches_source_bytes": true
+    },
+    {
+      "relative_path": "7358e4c2-1a46-4003-9dfd-e780d3c98481/index_metadata.pickle",
+      "bytes": 43088,
+      "sha256": "1021ec55ebe100469f5261dcb944a10538a284c22237e5008b98d8a265102f03",
+      "source_sha256": "1021ec55ebe100469f5261dcb944a10538a284c22237e5008b98d8a265102f03",
+      "matches_source_bytes": true
+    },
+    {
+      "relative_path": "7358e4c2-1a46-4003-9dfd-e780d3c98481/length.bin",
+      "bytes": 6144,
+      "sha256": "8e1852da33c2eadce6b4a1a6a9b4e312132d67f0dd5c38b1428eeb01237249f5",
+      "source_sha256": "8e1852da33c2eadce6b4a1a6a9b4e312132d67f0dd5c38b1428eeb01237249f5",
+      "matches_source_bytes": true
+    },
+    {
+      "relative_path": "7358e4c2-1a46-4003-9dfd-e780d3c98481/link_lists.bin",
+      "bytes": 13624,
+      "sha256": "a3ca1201c49cadf25662d179cfb0e70a421e7fd0dfd1de9ec62cd6925721fb8d",
+      "source_sha256": "a3ca1201c49cadf25662d179cfb0e70a421e7fd0dfd1de9ec62cd6925721fb8d",
+      "matches_source_bytes": true
+    },
+    {
+      "relative_path": "chroma.sqlite3",
+      "bytes": 31719424,
+      "sha256": "898aae98ff855232c28a4b61d2ba9288b7ddca79eb6477fc655acf351a0027f1",
+      "source_sha256": "898aae98ff855232c28a4b61d2ba9288b7ddca79eb6477fc655acf351a0027f1",
+      "matches_source_bytes": true
+    }
+  ],
+  "native_ttl_metadata_unchanged": true,
+  "not_copied": [
+    "session identity",
+    "worker endpoints",
+    "coordinator",
+    "failure guards",
+    "logs"
+  ],
+  "boundary": "New isolated baseline HOME copies the current successful source/index tuple byte-for-byte; only runtime assets and private dependency scaffold are reused. The previous after HOME is not modified."
+}
