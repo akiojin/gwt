@@ -397,15 +397,15 @@ fn windows_ci_runs_the_real_resolver_pty_and_caller_regression_targets() {
 
     assert!(!workflow.contains("cargo test -p gwt-core terminal::pty"));
     for command in [
-        "node scripts/ci-windows-tests.mjs run gwt-core test windows_process_resolver",
-        "node scripts/ci-windows-tests.mjs run gwt-core test process_adapter_parity",
-        "node scripts/ci-windows-tests.mjs run gwt-core test windows_claude_user_agent",
-        "node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent real_bun_global_placeholder_fixture",
-        "node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent direct_runner_resolution_failure_still_emits_an_end_summary",
-        "node scripts/ci-windows-tests.mjs run gwt bin gwt real_bun_global_placeholder_fixture",
-        "node scripts/ci-windows-tests.mjs run gwt bin gwt command_prompt_agent_wrapper",
-        "node scripts/ci-windows-tests.mjs run gwt-terminal lib gwt_terminal pty::windows_spawn::tests",
-        "node scripts/ci-windows-tests.mjs run gwt test runtime_tests agent_process_resolution_contract_test::",
+        "node scripts/ci-windows-tests.mjs run-runtime gwt-core test windows_process_resolver",
+        "node scripts/ci-windows-tests.mjs run-runtime gwt-core test process_adapter_parity",
+        "node scripts/ci-windows-tests.mjs run-runtime gwt-core test windows_claude_user_agent",
+        "node scripts/ci-windows-tests.mjs run-lib gwt-agent lib gwt_agent real_bun_global_placeholder_fixture",
+        "node scripts/ci-windows-tests.mjs run-lib gwt-agent lib gwt_agent direct_runner_resolution_failure_still_emits_an_end_summary",
+        "node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt real_bun_global_placeholder_fixture",
+        "node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt command_prompt_agent_wrapper",
+        "node scripts/ci-windows-tests.mjs run-lib gwt-terminal lib gwt_terminal pty::windows_spawn::tests",
+        "node scripts/ci-windows-tests.mjs run-runtime gwt test runtime_tests agent_process_resolution_contract_test::",
     ] {
         assert!(
             workflow.contains(command),
@@ -452,48 +452,50 @@ fn windows_ci_runs_issue_monitor_launch_now_control_path_contracts() {
     let workflow = fs::read_to_string(&workflow_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", workflow_path.display()));
 
-    let windows_job = workflow
-        .split("\n  test-windows-rust:")
-        .nth(1)
-        .and_then(|tail| tail.split("\n  test-windows-agent-launch-e2e:").next())
-        .expect("test-windows-rust job body");
-    assert!(
-        windows_job
-            .lines()
-            .any(|line| line.trim() == "runs-on: windows-latest"),
-        "launch_now platform contracts must execute on a native Windows runner"
-    );
-    let marker = "      - name: Run Issue Monitor launch_now control-path contracts";
-    let (_, tail) = windows_job
-        .split_once(marker)
-        .unwrap_or_else(|| panic!("missing Windows CI step `{marker}`"));
-    let step = tail
-        .split_once("\n      - name:")
-        .map_or(tail, |(step, _)| step);
-    assert!(
-        step.contains("\n        shell: bash\n"),
-        "the multi-command Windows control-path step must fail fast"
-    );
-    assert!(
-        !step.contains("--ignored"),
-        "the Windows launch_now contracts must run in ordinary CI"
-    );
-    let command_lines = step.lines().map(str::trim).collect::<Vec<_>>();
-    for command in [
-        "node scripts/ci-windows-tests.mjs run gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_scan_now_ -- --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
-        "node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::agent_issue_monitor_scan_ -- --test-threads=1",
-    ] {
-        assert!(
-            command_lines.contains(&command),
-            "Windows CI must exercise launch_now control-path command `{command}`"
+    let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).expect("valid Test workflow");
+    let slices: [(&str, &[&str]); 2] = [
+        ("test-windows-rust-lib", &[
+            "node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1",
+            "node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
+            "node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
+            "node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
+        ]),
+        ("test-windows-rust", &[
+            "node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
+            "node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
+            "node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt authenticated_scan_now_ -- --test-threads=1",
+            "node scripts/ci-windows-tests.mjs run-runtime gwt test coordination_tests issue_monitor_protocol_test::frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1",
+            "node scripts/ci-windows-tests.mjs run-runtime gwt test coordination_tests issue_monitor_protocol_test::agent_issue_monitor_scan_ -- --test-threads=1",
+        ]),
+    ];
+    for (job_name, commands) in slices {
+        let job = &doc["jobs"][job_name];
+        assert_eq!(job["runs-on"].as_str(), Some("windows-latest"));
+        let step = job["steps"]
+            .as_sequence()
+            .expect("job steps")
+            .iter()
+            .find(|step| {
+                step["name"].as_str() == Some("Run Issue Monitor launch_now control-path contracts")
+            })
+            .expect("Windows launch_now control-path step");
+        assert_eq!(
+            step["shell"].as_str(),
+            Some("bash"),
+            "the multi-command Windows control-path step must fail fast"
         );
+        let run = step["run"].as_str().expect("launch_now commands");
+        assert!(
+            !run.contains("--ignored"),
+            "the Windows launch_now contracts must run in ordinary CI"
+        );
+        let command_lines = run.lines().map(str::trim).collect::<Vec<_>>();
+        for command in commands {
+            assert!(
+                command_lines.contains(command),
+                "Windows CI must exercise launch_now control-path command `{command}`"
+            );
+        }
     }
 }
 
@@ -503,24 +505,35 @@ fn windows_multi_command_test_steps_use_a_fail_fast_shell() {
     let workflow = fs::read_to_string(&workflow_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", workflow_path.display()));
 
-    for step_name in [
-        "Run real Claude probe caller regressions",
-        "Run Issue Monitor scheduled driver contracts",
+    let doc: serde_yaml::Value = serde_yaml::from_str(&workflow).expect("valid Test workflow");
+    for (job_name, step_name) in [
+        (
+            "test-windows-rust",
+            "Run real Claude probe caller regressions",
+        ),
+        (
+            "test-windows-rust-lib",
+            "Run real Claude probe caller regressions",
+        ),
+        (
+            "test-windows-rust",
+            "Run Issue Monitor scheduled driver contracts",
+        ),
     ] {
-        let marker = format!("      - name: {step_name}");
-        let (_, tail) = workflow
-            .split_once(&marker)
-            .unwrap_or_else(|| panic!("missing Windows CI step `{step_name}`"));
-        let step = tail
-            .split_once("\n      - name:")
-            .map_or(tail, |(step, _)| step);
-        assert!(
-            step.contains("\n        shell: bash\n"),
-            "Windows multi-command step `{step_name}` must stop at the first failed test command"
+        let step = doc["jobs"][job_name]["steps"]
+            .as_sequence()
+            .expect("job steps")
+            .iter()
+            .find(|step| step["name"].as_str() == Some(step_name))
+            .unwrap_or_else(|| panic!("missing Windows CI step `{job_name}/{step_name}`"));
+        assert_eq!(
+            step["shell"].as_str(), Some("bash"),
+            "Windows multi-command step `{job_name}/{step_name}` must stop at the first failed test command"
         );
         if step_name == "Run Issue Monitor scheduled driver contracts" {
+            let run = step["run"].as_str().expect("scheduled driver commands");
             assert!(
-                step.lines().any(|line| line.trim() == "node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1"),
+                run.lines().any(|line| line.trim() == "node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1"),
                 "Windows CI must exercise the non-Unix initial Auto-capacity admission regression"
             );
         }
