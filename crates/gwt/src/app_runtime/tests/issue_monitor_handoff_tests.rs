@@ -111,6 +111,14 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
 
     for (case, settlement, terminal_kind) in [
         (
+            "3287-done-resume-chain",
+            gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "previous holder child exited".to_string(),
+                missing_verification: None,
+            },
+            gwt_core::workspace_projection::WorkEventKind::Done,
+        ),
+        (
             "blocked-discarded",
             gwt::cli::execution_state::ExecutionSettlement::Blocked {
                 reason: "Monitor predecessor failed".to_string(),
@@ -275,6 +283,67 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
                 .unwrap()
                 .unwrap();
+        if case == "3287-done-resume-chain" {
+            use gwt_core::workspace_projection::{successor_work_id, WorkEventKind};
+            let mut start = history
+                .work_items
+                .iter()
+                .find(|work| work.id == predecessor_id)
+                .unwrap()
+                .events
+                .iter()
+                .find(|event| event.kind == WorkEventKind::Start)
+                .unwrap()
+                .clone();
+            start.execution_container.as_mut().unwrap().worktree_path =
+                Some(dunce::canonicalize(&fixture.worktree).unwrap());
+            start.owner = Some("SPEC-3165".to_string());
+            for index in 0..3 {
+                start.id = format!("3287-successor-{index}");
+                start.work_item_id = successor_work_id(&predecessor_id);
+                start.related_work_item_id = Some(predecessor_id.clone());
+                start.agent_session_id = None;
+                start.updated_at = Utc::now();
+                history.apply_event(start.clone());
+                let mut resume = start.clone();
+                resume.id = format!("3287-resume-{index}");
+                resume.kind = WorkEventKind::Resume;
+                resume.title = Some("Notification delivery".to_string());
+                resume.next_action = Some("Check Board for latest updates".to_string());
+                history.apply_event(resume);
+                predecessor_id = start.work_item_id.clone();
+                if index < 2 {
+                    history.apply_event(gwt_core::workspace_projection::WorkEvent::new(
+                        WorkEventKind::Done,
+                        &predecessor_id,
+                        Utc::now(),
+                    ));
+                }
+            }
+            // Earlier repair erased the active tail's owner. Fresh authority
+            // may restore it, but the next ordinary intake must preserve it.
+            history
+                .work_items
+                .iter_mut()
+                .find(|work| work.id == predecessor_id)
+                .unwrap()
+                .owner = None;
+            use sha2::Digest;
+            let canonical = format!(
+                "{{\"session_id\":{},\"result\":{{\"outcome\":\"deferred\",\"reason\":\"fixture\"}},\"recorded_at\":{},\"content_hash\":\"\"}}",
+                serde_json::to_string(&fixture.source_session_id).unwrap(),
+                serde_json::to_string(&Utc::now()).unwrap(),
+            );
+            let mut revival: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+            revival["content_hash"] =
+                format!("{:x}", sha2::Sha256::digest(canonical.as_bytes())).into();
+            gwt::cli::trusted_store::write(
+                &fixture.worktree,
+                "action-obligation-revival.json",
+                &serde_json::to_vec(&revival).unwrap(),
+            )
+            .unwrap();
+        }
         if case.contains("foreign-container") {
             let predecessor = history
                 .work_items
@@ -453,17 +522,19 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
         } else {
             None
         };
-        let terminal_history: Vec<_> =
-            if case == "4777-missing-historical-owner" || case.contains("ownerless") {
-                history
-                    .work_items
-                    .iter()
-                    .filter(|work| work.is_terminal())
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let terminal_history: Vec<_> = if case == "4777-missing-historical-owner"
+            || case.contains("ownerless")
+            || case == "3287-done-resume-chain"
+        {
+            history
+                .work_items
+                .iter()
+                .filter(|work| work.is_terminal())
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
             &works_path,
             &history,
@@ -640,6 +711,24 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
         );
 
         let _current_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session_id);
+        if case == "3287-done-resume-chain" {
+            gwt_core::workspace_projection::repair_resume_owner_bleed_for_repo(
+                &fixture.project_root,
+                Utc::now(),
+            )
+            .expect("ordinary intake owner repair");
+            let diagnosis = gwt::cli::execution_state::diagnose_owner(
+                &fixture.worktree,
+                fixture.execution_owner,
+            );
+            let revival = serde_json::to_value(diagnosis.obligation_revival.unwrap()).unwrap();
+            assert_eq!(revival["outcome"], "status_unreadable");
+            assert_eq!(revival["validation"]["check"], "identity");
+            assert_eq!(
+                revival["validation"]["expected_content_hash"],
+                revival["validation"]["actual_content_hash"]
+            );
+        }
         let mut env = gwt::cli::TestEnv::new(fixture.worktree.clone());
         gwt::cli::run(
             &mut env,

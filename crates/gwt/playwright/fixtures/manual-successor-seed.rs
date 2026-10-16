@@ -45,7 +45,7 @@ fn main() {
             .unwrap();
             let record = execution::load(worktree).unwrap().unwrap();
             let branch = format!("work/issue-{}", owner.number);
-            let work_id = canonical_work_id(worktree, Some(&branch), Some(worktree)).unwrap();
+            let mut work_id = canonical_work_id(worktree, Some(&branch), Some(worktree)).unwrap();
             let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, record.launched_at);
             start.title = Some("Manual successor retry fixture".into());
             // Issue #5332: real terminal history can lack its owner even
@@ -83,6 +83,29 @@ fn main() {
                 ))
             })
             .unwrap();
+            // Issue #5288 AC-R7: three legitimate same-branch Resume stamps
+            // must survive ordinary startup intake and owner-bleed repair.
+            for index in 0..3 {
+                let parent = work_id;
+                work_id = successor_work_id(&parent);
+                let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, record.launched_at);
+                start.title = Some("Manual successor retry fixture".into());
+                start.owner = Some(format!("Issue #{}", owner.number));
+                start.related_work_item_id = Some(parent);
+                start.execution_container = predecessor.execution_containers.first().cloned();
+                record_workspace_work_event(worktree, start.clone()).unwrap();
+                start.id = format!("fixture-resume-{index}");
+                start.kind = WorkEventKind::Resume;
+                start.next_action = Some("Check Board for latest updates".into());
+                record_workspace_work_event(worktree, start).unwrap();
+                let works = load_workspace_work_items(worktree).unwrap().unwrap();
+                let item = works.work_items.iter().find(|work| work.id == work_id).unwrap();
+                workspace.apply_work_item(item, item.updated_at);
+                save_workspace_projection(worktree, &workspace).unwrap();
+                transact_workspace_close_state_for_work_event_root(worktree, worktree, |_, _, _| {
+                    Ok(((), vec![WorkEvent::new(WorkEventKind::Done, &work_id, record.settled_at.unwrap())]))
+                }).unwrap();
+            }
             // Issue #5288: a stale Active successor can retain its owner and
             // container while losing its explicit predecessor link.
             let mut invalid = WorkEvent::new(

@@ -6406,11 +6406,11 @@ impl ResumeOwnerBleedRepairReport {
     }
 }
 
-/// #3065: minimum number of distinct Work items sharing one identical resume
-/// payload before it is treated as a bleed signature. Two branches may
-/// legitimately resume the same SPEC with the same wording; three or more
-/// identical (title, owner, next_action) stamps across different Work items
-/// only arise from the shared-projection replay bug.
+/// #3065: minimum number of distinct branches sharing one identical resume
+/// payload before it is treated as a bleed signature. Successive Work
+/// lifetimes of one branch legitimately retain the same resume payload.
+/// Work items without a branch remain distinct because their shared authority
+/// cannot be proven.
 const RESUME_OWNER_BLEED_MIN_ITEMS: usize = 3;
 
 fn resume_bleed_key(event: &WorkEvent) -> Option<(String, String, String)> {
@@ -6445,7 +6445,8 @@ fn bleed_identity_pair(event: &WorkEvent) -> Option<(String, String)> {
 
 /// #3065: detection-based, idempotent repair for the resume owner bleed.
 /// Detection: an identical (title, owner, next_action) resume payload stamped
-/// onto `RESUME_OWNER_BLEED_MIN_ITEMS`+ distinct Work items. Sanitization,
+/// onto `RESUME_OWNER_BLEED_MIN_ITEMS`+ distinct branches (or branchless Work
+/// items). Sanitization,
 /// in two strengths:
 ///
 /// - events carrying a contaminated (title, owner) identity pair — the same
@@ -6504,9 +6505,20 @@ fn repair_resume_owner_bleed_paths_locked(
 
     let mut stamped: HashMap<(String, String, String), HashSet<String>> = HashMap::new();
     for item in &works.work_items {
+        // Issue #5288: a reopened owner can have many Done successors on the
+        // same branch. Counting their IDs erased the whole chain's owners and
+        // made ordinary canonical lookup fall back to the terminal root.
+        let identity = item
+            .execution_containers
+            .iter()
+            .filter_map(|container| container.branch.as_deref())
+            .map(str::trim)
+            .find(|branch| !branch.is_empty())
+            .map(|branch| format!("branch:{}", canonical_work_branch_identity(branch)))
+            .unwrap_or_else(|| format!("work:{}", item.id));
         for event in &item.events {
             if let Some(key) = resume_bleed_key(event) {
-                stamped.entry(key).or_default().insert(item.id.clone());
+                stamped.entry(key).or_default().insert(identity.clone());
             }
         }
     }
