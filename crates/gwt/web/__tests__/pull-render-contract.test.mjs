@@ -138,6 +138,17 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
 });
 
+test("Index health receiver resolves only shared model updates", () => {
+  const file = 'crates/gwt/web/project-index-search-surface.js';
+  const source = readFileSync(new URL('../project-index-search-surface.js', import.meta.url), 'utf8');
+  assert.deepEqual(scanModule(source, file, { rootName: 'setIndexStatus' }), []);
+  const bypass = source.replace('function setIndexStatus(projectRoot, status) {',
+    'function setIndexStatus(projectRoot, status) { renderProjectIndexWindows();');
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file, { rootName: 'setIndexStatus' })
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
 test("Release notes receivers resolve only shared model updates", () => {
   const appFile = 'crates/gwt/web/app.js';
   const surfaceFile = 'crates/gwt/web/release-notes-window.js';

@@ -28,6 +28,75 @@ const settingsSurfaceSource = readFileSync(
   "utf8",
 );
 
+async function indexHealthFixture(t, onSettings = () => {}) {
+  const source = indexSurfaceSource.replace(/from "\/(.*?)"/g,
+    (_, name) => `from "${new URL(`../${name}`, import.meta.url).href}"`);
+  const { createProjectIndexSearchSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document } = parseHTML('<html><body><div data-id="index-1"><div id="body"></div></div></body></html>');
+  const previous = { document: globalThis.document, CSS: globalThis.CSS };
+  const selectPrototype = document.defaultView.HTMLSelectElement.prototype;
+  const previousValue = Object.getOwnPropertyDescriptor(selectPrototype, 'value');
+  globalThis.document = document;
+  globalThis.CSS = { escape: value => value };
+  // linkedom's select.value is getter-only; the browser supports assignment.
+  Object.defineProperty(selectPrototype, 'value', {
+    configurable: true, get() { return this.getAttribute('value') || ''; },
+    set(value) { this.setAttribute('value', value); },
+  });
+  t.after(() => {
+    Object.assign(globalThis, previous);
+    Object.defineProperty(selectPrototype, 'value', previousValue);
+  });
+  const makeEl = (tag, options = {}) => {
+    const node = document.createElement(tag);
+    node.className = options.className || '';
+    if (options.text) node.textContent = options.text;
+    for (const [key, value] of Object.entries(options.attrs || {})) node.setAttribute(key, value);
+    Object.assign(node.dataset, options.dataset);
+    return node;
+  };
+  let activeRoot = '/repo';
+  const controller = createProjectIndexSearchSurface({
+    send: () => {}, sendWindowFocus: () => {}, focusWindowLocally: () => {},
+    activeProjectTab: () => ({ project_root: activeRoot }), makeEl,
+    clearChildren: node => node.replaceChildren(),
+    renderIndexPanelInAllSettingsWindows: onSettings,
+    requestFullIndexStatusRefresh: () => {},
+  });
+  controller.mountProjectIndexSurface(document.getElementById('body'), { id: 'index-1' });
+  return { controller, document, activateProject: root => {
+    activeRoot = root;
+    controller.mountProjectIndexSurface(document.getElementById('body'), { id: 'index-1' });
+  } };
+}
+
+test("Index health commits an immutable project snapshot and ignores unrelated project updates", async t => {
+  let settingsRenders = 0;
+  const { controller, document, activateProject } = await indexHealthFixture(t, () => { settingsRenders += 1; });
+  const payload = { state: 'ready', scopes: { issues: { healthy: true, document_count: 12 } } };
+  controller.setIndexStatus('/repo', payload);
+  const committed = controller.getIndexStatus('/repo');
+  assert.ok(Object.isFrozen(committed.scopes.issues));
+  payload.scopes.issues.document_count = 99;
+  assert.equal(committed.scopes.issues.document_count, 12);
+  assert.match(document.querySelector('.index-search-health-summary').textContent, /1 ready/);
+  controller.setIndexStatus('/other', { state: 'error' });
+  assert.equal(settingsRenders, 1);
+  assert.strictEqual(controller.getIndexStatus('/repo'), committed);
+  activateProject('/other');
+  const summary = document.querySelector('.index-search-health-summary').firstChild;
+  controller.setIndexStatus('/repo', { state: 'repair_required' });
+  assert.equal(settingsRenders, 1, 'switching projects must not turn an unrelated update into a redraw');
+  assert.strictEqual(document.querySelector('.index-search-health-summary').firstChild, summary);
+});
+
+test("Index health still renders a committed snapshot when another view fails", async t => {
+  const { controller, document } = await indexHealthFixture(t, () => { throw new Error('settings failed'); });
+  assert.throws(() => controller.setIndexStatus('/repo', { state: 'ready', scopes: { issues: { healthy: true } } }), /settings failed/);
+  assert.match(document.querySelector('.index-search-health-summary').textContent, /1 ready/);
+  assert.equal(controller.getIndexStatus('/repo').scopes.issues.healthy, true);
+});
+
 test("project-bar Index badge has been withdrawn (SPEC-1939 Phase 13)", () => {
   const { document } = parseHTML(indexHtml);
   assert.equal(
