@@ -731,6 +731,9 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build default-runtime
         timeout-minutes: 30
+      - name: Run cross-process FIFO reservation contention regression
+        run: node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts verification_lease_cli_test::deferred_fifo_survives_status_read_contention_and_new_processes -- --exact --nocapture
+        timeout-minutes: 5
       - name: Run managed hook self-heal regressions
         shell: bash
         run: |
