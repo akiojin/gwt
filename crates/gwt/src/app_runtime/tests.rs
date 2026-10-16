@@ -7087,8 +7087,9 @@ fn take_monitor_launch_complete_event(
             )
         })
         .expect("launch complete event");
-    let UserEvent::LaunchComplete { window_id, result } =
-        into_recorded_project_payload(events.remove(index))
+    let UserEvent::LaunchComplete {
+        window_id, result, ..
+    } = into_recorded_project_payload(events.remove(index))
     else {
         unreachable!("matched launch complete above")
     };

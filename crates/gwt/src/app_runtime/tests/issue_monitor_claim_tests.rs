@@ -5741,6 +5741,103 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
 }
 
 #[test]
+fn issue_5642_delivery_replay_does_not_adopt_another_issue_reusing_its_window_id() {
+    assert_delivery_replay_preserves_foreign_window(true);
+}
+
+#[test]
+fn issue_5642_unmaterialized_delivery_replay_does_not_close_a_reused_window_id() {
+    assert_delivery_replay_preserves_foreign_window(false);
+}
+
+fn assert_delivery_replay_preserves_foreign_window(materialized: bool) {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let mut tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let raw_id = tab.workspace.persisted().windows[0].id.clone();
+    tab.workspace.set_linked_issue_number(&raw_id, Some(43));
+    let window_id = combined_window_id("tab-1", &raw_id);
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        max_active: 3,
+        ..Default::default()
+    });
+    let now = Utc::now().to_rfc3339();
+    monitor.terminal_queue_push(&[42], "operator", &now);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Replayed launch reservation".into(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(42, "claim-42", "host/session", "effect-42", &now));
+    let delivery_id = "launch:effect-42";
+    assert!(monitor.claim_launch_delivery(
+        42,
+        delivery_id,
+        &runtime.issue_monitor_materializer_id,
+        std::process::id(),
+        &window_id,
+        |_| true,
+    ));
+    if materialized {
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            delivery_id,
+            &runtime.issue_monitor_materializer_id,
+            &window_id,
+        ));
+    }
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.auto_launch_issue_monitor_delivery_events(
+        &runtime.test_context(),
+        42,
+        LinkedIssueKind::Issue,
+        Some(delivery_id.into()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    runtime.finish_queued_delivery_acks(&tasks);
+
+    assert!(
+        runtime.tracked_window_exists(&window_id),
+        "replaying an old reservation must preserve another Issue's replacement pane"
+    );
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .window(&raw_id)
+            .unwrap()
+            .linked_issue_number,
+        Some(43),
+    );
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    assert_ne!(
+        monitor.launched_window_issue(&window_id),
+        Some(42),
+        "a reused ID does not prove that the pane belongs to the old launch"
+    );
+}
+
+#[test]
 fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
     let _env_lock = env_test_lock()
         .lock()

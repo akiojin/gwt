@@ -3509,15 +3509,34 @@ impl AppRuntime {
             delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
         })?;
         let bound_window_id = delivery.materializer_window_id.as_deref()?;
-        let window_id = tab
+        let window = tab
             .workspace
             .persisted()
             .windows
             .iter()
-            .map(|window| combined_window_id(&tab_id, &window.id))
-            .find(|window_id| window_id == bound_window_id)?;
+            .find(|window| combined_window_id(&tab_id, &window.id) == bound_window_id)?;
+        // Window IDs can be reused after close. The old reservation alone
+        // cannot authorize adopting or closing its current occupant.
+        let owners = [
+            window.linked_issue_number,
+            self.issue_monitor_pending_feedback_for_window(bound_window_id, &tab.project_root)
+                .and_then(|feedback| feedback.issue_monitor_issue_number),
+            window.session_id.as_deref().and_then(|session_id| {
+                self.launch_wizard_cache
+                    .session_by_id(session_id)
+                    .and_then(|session| session.linked_issue_number)
+            }),
+        ];
+        if !owners.contains(&Some(issue_number))
+            || owners
+                .into_iter()
+                .flatten()
+                .any(|owner| owner != issue_number)
+        {
+            return None;
+        }
         Some((
-            window_id,
+            bound_window_id.to_string(),
             delivery.materialized_window_id.as_deref() == Some(bound_window_id),
             delivery.workspace_durable_window_id.as_deref() == Some(bound_window_id),
         ))
