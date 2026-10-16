@@ -389,3 +389,14 @@ test("cleanup progress/result receivers commit shared data and reject direct ren
   assert.ok(selected(scanModule(bypass, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' }))
     .some(finding => finding.kind.startsWith('dom-')));
 });
+
+
+test("Close Project receiver commits shared data and rejects direct rendering", () => {
+  const file = 'crates/gwt/web/close-project-confirm-modal.js';
+  const source = readFileSync(new URL('../close-project-confirm-modal.js', import.meta.url), 'utf8');
+  assert.deepEqual(scanModule(source, file), []);
+  const bypass = source.replace("if (event.kind === 'project_closed') {",
+    "if (event.kind === 'project_closed') { hide();");
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file).some(finding => finding.kind.startsWith('dom-')));
+});
