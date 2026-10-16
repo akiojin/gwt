@@ -50,7 +50,15 @@ URL_FILE="$CHECK_HOME/url"
 LOG_FILE="$CHECK_HOME/startup.log"
 mkdir -p "$CHECK_HOME/.gwt"
 if [ -d "$HOME/.gwt/runtime" ]; then
-  ln -s "$HOME/.gwt/runtime" "$CHECK_HOME/.gwt/runtime"
+  if command -v cygpath >/dev/null 2>&1; then
+    # MSYS ln can copy directories; a junction keeps this cache input linked.
+    CHECK_RUNTIME_SOURCE="$(cygpath -w "$HOME/.gwt/runtime")" \
+      CHECK_RUNTIME_LINK="$(cygpath -w "$CHECK_HOME/.gwt/runtime")" \
+      powershell.exe -NoProfile -Command \
+      'New-Item -ItemType Junction -Path $env:CHECK_RUNTIME_LINK -Target $env:CHECK_RUNTIME_SOURCE -ErrorAction Stop | Out-Null'
+  else
+    ln -s "$HOME/.gwt/runtime" "$CHECK_HOME/.gwt/runtime"
+  fi
 fi
 jq -n --arg root "$REPO_ROOT" \
   '{tabs:[{id:"issue-5023",title:"Issue 5023",project_root:$root,kind:"git"}],recent_projects:[]}' \
