@@ -2991,7 +2991,7 @@ fn embedded_web_profile_surface_uses_config_backed_contract() {
             && html.contains("state.draft && profileDraftIsDirty(state)")
             && html.contains("profileDraftIsDirty(state)")
             && html.contains(
-                "((wasSaveInFlight && profileHasEditableFocus(event.id)) || hasNewerDraft)",
+                "((wasSaveInFlight && profileHasEditableFocus(windowId)) || hasNewerDraft)",
             ),
         "expected delayed Profile save snapshots to preserve newer draft edits before re-rendering",
     );
