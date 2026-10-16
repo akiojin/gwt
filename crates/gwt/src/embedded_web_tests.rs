@@ -2137,10 +2137,7 @@ fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
             && knowledge_status_block.contains("Searching semantic index"),
         "expected semantic progress to stay invisible on the Issue/SPEC surface",
     );
-    let direct_send_block = html
-        .split("function sendKnowledgeSemanticSearchNow")
-        .nth(1)
-        .and_then(|tail| tail.split("const uiTraceWiring").next())
+    let direct_send_block = js_braced_block_after(html, "function sendKnowledgeSemanticSearchNow(")
         .expect("semantic direct-send helper");
     assert!(
         direct_send_block.contains("activeSocket.readyState !== WebSocket.OPEN")

@@ -1034,6 +1034,12 @@ pub enum FrontendEvent {
     /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend swaps
     /// the prepared binary via the helper subprocess and exits the parent.
     ApplyUpdateRestartNow,
+    /// Read current host activity before confirming an explicit restart.
+    GetUpdateRestartImpact {
+        request_id: String,
+    },
+    /// Explicitly schedule the staged update through the existing drain.
+    ApplyUpdateWhenIdle,
     /// Issue #3906 AC-7 / #4076 AC-2: the user cancelled the automatic apply
     /// during its grace. The `update_drain` hold is released, the staged
     /// update stays on disk for the manual button, and the tick never
@@ -2665,6 +2671,13 @@ pub enum BackendEvent {
         project_root: Option<String>,
         status: crate::update_settings::Status,
     },
+    UpdateRestartImpact {
+        request_id: String,
+        blocking: Vec<crate::update_drain::UpdateBlocker>,
+        issue_numbers: Vec<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
     /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
     /// (`auto` / `en` / `ja`). The frontend mirrors this value into the
@@ -3542,6 +3555,7 @@ impl BackendEvent {
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
             BackendEvent::UpdateSettings { .. } => "update_settings",
+            BackendEvent::UpdateRestartImpact { .. } => "update_restart_impact",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
             BackendEvent::ProjectBoardConfig { .. } => "project_board_config",
