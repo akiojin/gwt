@@ -1,0 +1,123 @@
+{
+  "captured_utc": "2026-10-16T03:28:46.823539+00:00",
+  "boundary": "Python source snapshot only; no embedding, admission, Rust transport, or browser",
+  "home": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home",
+  "baseline_binary": {
+    "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-baseline\\gwtd.exe",
+    "bytes": 65563136,
+    "sha256": "c42374da5699166bec520ecd94eea412176a1be9b802154eb987cf7585cfcafa"
+  },
+  "samples_per_component": 3,
+  "phases": [
+    "cold",
+    "warm_1",
+    "warm_2"
+  ],
+  "implementations": {
+    "baseline": {
+      "runner": {
+        "path": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\runners\\chroma_index_runner-2d0b4f30825a10ed.py",
+        "bytes": 390359,
+        "sha256": "2d0b4f30825a10edd9b3b8aa8ec0c9f25bf8e39f5f7ee0954b72981f4be93581"
+      },
+      "components": {
+        "issues_source_snapshot": [
+          {
+            "phase": "cold",
+            "wall_ms": 26394.274099999166,
+            "document_count": 1622,
+            "fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3"
+          },
+          {
+            "phase": "warm_1",
+            "wall_ms": 2214.712999999392,
+            "document_count": 1622,
+            "fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3"
+          },
+          {
+            "phase": "warm_2",
+            "wall_ms": 1879.753499999424,
+            "document_count": 1622,
+            "fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3"
+          }
+        ],
+        "specs_source_and_records": [
+          {
+            "phase": "cold",
+            "wall_ms": 1212.048099999265,
+            "source_count": 125,
+            "manifest_entries": 125,
+            "record_count": 2882
+          },
+          {
+            "phase": "warm_1",
+            "wall_ms": 1116.2444000001415,
+            "source_count": 125,
+            "manifest_entries": 125,
+            "record_count": 2882
+          },
+          {
+            "phase": "warm_2",
+            "wall_ms": 906.6390999996656,
+            "source_count": 125,
+            "manifest_entries": 125,
+            "record_count": 2882
+          }
+        ]
+      }
+    },
+    "after": {
+      "runner": {
+        "path": "E:\\gwt\\work\\issue-5598\\crates\\gwt-core\\runtime\\chroma_index_runner.py",
+        "bytes": 394145,
+        "sha256": "04eaf92932fa8080a40e1696ec647a612b3dd07d990439e8d5a28af76b47aaec"
+      },
+      "components": {
+        "issues_source_snapshot": [
+          {
+            "phase": "cold",
+            "wall_ms": 1768.7699999996767,
+            "document_count": 1622,
+            "fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3"
+          },
+          {
+            "phase": "warm_1",
+            "wall_ms": 0.5205000006753835,
+            "document_count": 1622,
+            "fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3"
+          },
+          {
+            "phase": "warm_2",
+            "wall_ms": 1.9644000003609108,
+            "document_count": 1622,
+            "fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3"
+          }
+        ],
+        "specs_source_and_records": [
+          {
+            "phase": "cold",
+            "wall_ms": 902.5445999996009,
+            "source_count": 125,
+            "manifest_entries": 125,
+            "record_count": 2882
+          },
+          {
+            "phase": "warm_1",
+            "wall_ms": 153.9323000006334,
+            "source_count": 125,
+            "manifest_entries": 125,
+            "record_count": 2882
+          },
+          {
+            "phase": "warm_2",
+            "wall_ms": 125.33840000014607,
+            "source_count": 125,
+            "manifest_entries": 125,
+            "record_count": 2882
+          }
+        ]
+      }
+    }
+  },
+  "fixture_cache_tree_sha256": "05f16c59e2a15083e7278f843f1f6b1d827d1bc4f4e3d438e9e214041b7a2220"
+}

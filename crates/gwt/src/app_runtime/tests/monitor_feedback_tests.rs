@@ -518,7 +518,7 @@ fn issue4803_monitor_preparation_rechecks_deleted_resume_session() {
 }
 
 #[test]
-fn issue5596_same_project_preparation_overlaps_only_after_materialization() {
+fn issue5596_same_project_preparation_overlaps_after_pane_registration() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -581,16 +581,16 @@ fn issue5596_same_project_preparation_overlaps_only_after_materialization() {
         take_monitor_launch_complete_event("serial-preparation", &fixture.recorded_events);
     assert!(result.is_ok(), "first launch: {result:?}");
     assert_eq!(
-        next_preparation_count, 0,
-        "the next facts preparation must wait for the worktree materialization worker"
+        next_preparation_count, 1,
+        "the next facts preparation must start after the first pane is registered"
     );
     assert!(
         first_pane_inflight,
         "the first pane must remain inflight until its completion is applied"
     );
     assert!(
-        !second_preparation_started,
-        "the second launch must not prepare while the first materialization is running"
+        second_preparation_started,
+        "different branches must prepare while the first materialization is running"
     );
     fixture
         .runtime
@@ -598,7 +598,7 @@ fn issue5596_same_project_preparation_overlaps_only_after_materialization() {
     assert_eq!(
         queued.lock().expect("PTY and facts preparation").len(),
         2,
-        "the first PTY preparation and next launch facts must overlap after materialization"
+        "the first PTY preparation and next launch facts must overlap"
     );
     assert!(
         fixture

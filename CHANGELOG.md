@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.128.0] - 2026-10-16
+
+### Bug Fixes
+
+- **monitor:** Scanの永続ログと期限付きの自動補充を修正する
+- **gc:** Protect active caches and restrict pressure volumes
+
+### Features
+
+- **board:** Create a discussion for each shared topic
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 4833 pull request
+- **work:** PR #5660の作成記録を配信する
+- **work:** Record cleanup pull request
+
+### Refactor
+
+- **ui:** Render cleanup lifecycle from shared state
+
+### Testing
+
+- **board:** Avoid cloning the expected synced entry
+
 ## [9.127.1] - 2026-10-16
 
 ### Bug Fixes

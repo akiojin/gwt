@@ -90,7 +90,7 @@ fn main() {
     while !home.join(format!("ready-{session}")).exists() {
         std::thread::sleep(Duration::from_millis(100));
     }
-    let mut success = true;
+    let mut cli_success = true;
     for event in ["SessionStart", "UserPromptSubmit"] {
         let mut child = Command::new(std::env::var_os("GWT_BIN_PATH").unwrap())
             .args(["hook", "event", event])
@@ -100,7 +100,7 @@ fn main() {
             .spawn()
             .unwrap();
         child.stdin.take().unwrap().write_all(serde_json::json!({"session_id":session,"hook_event_name":event,"source":"startup","cwd":std::env::current_dir().unwrap(),"prompt":args.last().unwrap()}).to_string().as_bytes()).unwrap();
-        success &= child.wait_with_output().unwrap().status.success();
+        cli_success &= child.wait_with_output().unwrap().status.success();
     }
     // Hook exit 0 is fail-open: the exact prompt event can still be journaled.
     // Forward flushes that existing event without submitting another prompt.
@@ -127,7 +127,9 @@ fn main() {
             })
     };
     let deadline = Instant::now() + Duration::from_secs(120);
-    while success && !drained() && Instant::now() < deadline {
+    // A transient CLI error must not prevent replay of the original journal.
+    // The E2E also requires the GUI's authenticated and matched prompt receipt.
+    while !drained() && Instant::now() < deadline {
         let mut child = Command::new(std::env::var_os("GWT_BIN_PATH").unwrap())
             .args(["hook", "forward"])
             .stdin(Stdio::piped())
@@ -145,14 +147,14 @@ fn main() {
                     .as_bytes(),
             )
             .unwrap();
-        success &= child.wait_with_output().unwrap().status.success();
+        cli_success &= child.wait_with_output().unwrap().status.success();
         std::thread::sleep(Duration::from_millis(100));
     }
     let journal_drained = drained();
     // Hook output may contain launch-scoped credentials; retain success only.
     std::fs::write(
         home.join(format!("hook-{session}.json")),
-        serde_json::json!({"success":success && journal_drained,"cli_success":success,"journal_drained":journal_drained}).to_string(),
+        serde_json::json!({"success":journal_drained,"cli_success":cli_success,"journal_drained":journal_drained}).to_string(),
     )
     .unwrap();
     println!("FIXTURE_SESSION_START_COMPLETE {session}");

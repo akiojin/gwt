@@ -3194,19 +3194,12 @@ impl AppRuntime {
             self.project_context(&key.0).is_some_and(|current| {
                 current.generation == key.1 && current.project_key == context.project_key
             })
-        }) || self.inflight_launches.values().any(|(window_id, _)| {
-            !self.pending_launch_completions.contains_key(window_id)
-                && self
-                    .window_lookup
-                    .get(window_id)
-                    .and_then(|address| self.project_context(&address.tab_id))
-                    .is_some_and(|current| current.project_key == context.project_key)
         })
     }
 
-    /// Capture the next sibling after worktree/assets/Session materialization.
-    /// Its final validation/PTY preparation may overlap; the Git writer lane
-    /// remains serial and pane registration has already advanced the preview.
+    /// Capture the next sibling after pane registration advances the preview.
+    /// Independent branches can materialize concurrently; shared Git config
+    /// writers and same-branch freshness are protected at their own boundaries.
     pub(super) fn advance_issue_monitor_launch_queue_events(&mut self) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
         for pending in std::mem::take(&mut self.issue_monitor_launch_queue) {

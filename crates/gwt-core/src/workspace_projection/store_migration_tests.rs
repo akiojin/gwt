@@ -76,3 +76,29 @@ fn transaction_temp_cleanup_retains_live_uncertain_and_nonempty_files() {
         .file_type()
         .is_symlink());
 }
+
+#[test]
+fn transaction_temp_cleanup_retains_data_written_before_writer_exit() {
+    let temp = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::ScopedGwtHome::set(temp.path().join("home"));
+    let directory = crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!(
+        ".{}.json.tmp-11-{}",
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+    ));
+    fs::write(&path, []).unwrap();
+
+    let removed = cleanup_abandoned_workspace_transaction_temps(|_| {
+        fs::write(&path, b"transaction data written before exit").unwrap();
+        Some(false)
+    })
+    .unwrap();
+
+    assert_eq!(removed, 0);
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"transaction data written before exit"
+    );
+}

@@ -1,5 +1,19 @@
 use super::*;
 
+/// Invoked in a child process so the sweep can observe a launch after its
+/// initial snapshot, without a timer or a platform-specific shell.
+#[test]
+fn gc_launch_child_fixture() {
+    if std::env::var_os("GWT_TEST_GC_CHILD").is_none() {
+        return;
+    }
+    println!("ready");
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .expect("release child");
+}
+
 fn git(cwd: &Path, args: &[&str]) {
     let output = gwt_core::process::hidden_command("git")
         .args(args)
@@ -139,6 +153,15 @@ fn disk_pressure_reclaims_idle_merged_and_unmerged_caches_from_project_container
         vec![4096, 16384, 8192],
         "merged first, then largest idle cache first"
     );
+    assert!(!record.pressure_volumes.is_empty());
+    assert_eq!(
+        record.reclaimed_volumes.values().sum::<u64>(),
+        record.reclaimed_bytes
+    );
+    assert!(record
+        .reclaimed_volumes
+        .keys()
+        .all(|volume| record.pressure_volumes.contains(volume)));
     for target in &targets {
         let expected = dunce::canonicalize(target.parent().expect("worktree"))
             .expect("worktree remains")
@@ -174,4 +197,82 @@ fn disk_pressure_reclaims_idle_merged_and_unmerged_caches_from_project_container
     assert!(!targets[0].exists());
     assert!(targets[1].exists());
     assert!(targets[2].exists());
+
+    std::fs::create_dir_all(&targets[0]).expect("restore merged cache");
+    std::fs::write(targets[0].join("cache.bin"), [7u8; 4096]).expect("cache");
+
+    // Issue #5624 AC-1/3: a healthy cache volume must not be reclaimed to
+    // relieve pressure on another volume. Inject the disk observation so
+    // this regression also runs on CI hosts with only one physical disk.
+    let mut foreign_disk = disk.clone();
+    for volume in &mut foreign_disk.volumes {
+        volume.volume_id = Some("other-volume".to_string());
+    }
+    let foreign = || foreign_disk.clone();
+    let report = worktree_gc::run_gc_with_pressure(
+        &project_root,
+        "develop",
+        AUTO_GC_OPTIONS,
+        false,
+        Some(&foreign),
+    )
+    .expect("foreign-volume pressure sweep");
+    assert!(report.removed.is_empty(), "{report:?}");
+    assert!(targets
+        .iter()
+        .all(|target| target.join("cache.bin").is_file()));
+
+    // AC-2/3: launch a process only after enumeration. Its working directory
+    // must protect the cache at the removal boundary.
+    use std::io::BufRead as _;
+    let child = std::cell::RefCell::new(None);
+    let launching_worktree = targets[0].parent().expect("worktree");
+    let launch = || {
+        if child.borrow().is_none() {
+            let mut process =
+                gwt_core::process::hidden_command(std::env::current_exe().expect("exe"))
+                    .args([
+                        "--exact",
+                        "worktree::gc::pressure_tests::gc_launch_child_fixture",
+                        "--nocapture",
+                    ])
+                    .env("GWT_TEST_GC_CHILD", "1")
+                    .current_dir(launching_worktree)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("launch child");
+            let mut output = std::io::BufReader::new(process.stdout.take().expect("stdout"));
+            let mut line = String::new();
+            while !line.contains("ready") {
+                assert!(
+                    output.read_line(&mut line).expect("child ready") > 0,
+                    "{line}"
+                );
+            }
+            // Keep the read end open until libtest prints its final result.
+            process.stdout = Some(output.into_inner());
+            child.replace(Some(process));
+        }
+        disk.clone()
+    };
+    let result = worktree_gc::run_gc_with_pressure(
+        &project_root,
+        "develop",
+        AUTO_GC_OPTIONS,
+        false,
+        Some(&launch),
+    );
+    let mut process = child.into_inner().expect("launched child");
+    drop(process.stdin.take());
+    assert!(process.wait().expect("child exits").success());
+    let report = result.expect("launch during sweep");
+    assert!(targets[0].join("cache.bin").is_file(), "{report:?}");
+    assert!(
+        report
+            .kept
+            .iter()
+            .any(|kept| kept.reason.starts_with("active process")),
+        "{report:?}"
+    );
 }
