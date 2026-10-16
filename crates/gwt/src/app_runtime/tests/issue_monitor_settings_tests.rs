@@ -1499,6 +1499,8 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
             .build(),
     ));
 
+    // This content assertion must not depend on fsync finishing within the GUI budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let events = runtime.save_issue_monitor_profile_from_launch_request(
         session,
         IssueMonitorProfileSaveContext {
@@ -1510,11 +1512,14 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
         request,
     );
 
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorToast { message, .. }
-            if message == "Issue Monitor settings saved"
-    )));
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, .. }
+                if message == "Issue Monitor settings saved"
+        )),
+        "profile save must commit successfully: {events:?}"
+    );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     let pool = persisted.launch_profile_pool();
     assert_eq!(
