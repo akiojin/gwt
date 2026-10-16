@@ -1035,6 +1035,7 @@ export function createKnowledgeKanbanSurface({
         label_excluded_count: 0,
         label_excluded_issues: [],
         quota_hold: null,
+        github_budget: null,
       }});
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
@@ -1109,6 +1110,7 @@ export function createKnowledgeKanbanSurface({
         if (["disabled", "error", "auth_required"].includes(state)) {
           return state;
         }
+        if (issueMonitorGitHubBudgetText(status)) return "github_budget_hold";
         if (
           quotaHold &&
           ["quota_hold", "active", "launching", "settings_required", "idle"].includes(state)
@@ -1118,10 +1120,22 @@ export function createKnowledgeKanbanSurface({
         return state === "quota_hold" ? "idle" : state;
       }
 
+      function issueMonitorGitHubBudgetText(status) {
+        const budget = status?.github_budget;
+        if (!status?.enabled || !budget || typeof budget !== "object" || Array.isArray(budget)) return "";
+        return Object.entries(budget).filter(([, resource]) => resource?.throttled === true)
+          .map(([name, resource]) => {
+            const reason = typeof resource.reason === "string" ? resource.reason.trim() : "";
+            const resume = typeof resource.backoff_until === "string" ? resource.backoff_until.trim() : "";
+            return `GitHub API reads limited: ${name}: ${reason || "GitHub budget throttled"} | Retry ${resume || "time unavailable"}`;
+          }).join("\n");
+      }
+
       // #5321: current backend failures remain red; history stays in the bell.
       function issueMonitorPillView(state) {
         const status = issueMonitorModel.read().status;
         if (state === "disabled") return { label: "Stopped", tone: "idle" };
+        if (state === "github_budget_hold") return { label: "Limited · GitHub", tone: "idle" };
         if (state === "error") return { label: "⚠ Error", tone: "blocked" };
         if (["quota_hold", "auth_required", "settings_required", "update_drain"].includes(state)) {
           return { label: "Waiting · Hold", tone: "idle" };
@@ -1244,8 +1258,11 @@ export function createKnowledgeKanbanSurface({
           pill.dataset.notificationKey = errorKey;
           pill.disabled = false;
           pill.setAttribute("aria-disabled", String(!errorKey));
-          pill.title = errorKey ? "Details in notifications" : state === "quota_hold"
-            ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "";
+          pill.title = [
+            errorKey ? "Details in notifications" : state === "quota_hold"
+              ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
+            issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
+          ].filter(Boolean).join(" | ");
           if (errorKey) pill.setAttribute("aria-haspopup", "dialog");
           else pill.removeAttribute("aria-haspopup");
           explainIssueControl(pill, `Issue Monitor status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
@@ -1309,6 +1326,7 @@ export function createKnowledgeKanbanSurface({
           max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
           agent_capacity: nextStatus?.agent_capacity ?? null,
           quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
+          github_budget: nextStatus?.github_budget ?? null,
           // Issue #4366 AC-6b: omitted once the hold clears, so it must not
           // survive from the previous status the way merged fields do.
           effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
