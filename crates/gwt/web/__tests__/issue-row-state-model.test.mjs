@@ -4,7 +4,7 @@
 // secondary information, and at most two visible action buttons that depend on
 // that state. Anything else moves into the row's overflow menu. The row's agent
 // status row carries no second badge, and once the agent is Windowized the same
-// slot shows a "Shown on canvas" face instead of a second input face.
+// slot shows a "Shown in Agents" face instead of a second input face.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -753,7 +753,7 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
 });
 
 // T-005 / FR-012: after Windowize the row keeps the Issue ↔ agent link as a
-// "Shown on canvas" face with no second input face for the PTY.
+// "Shown in Agents" face with no second input face for the PTY.
 test("after Windowize the row shows the agent as on the canvas and offers focus", async (t) => {
   const agent = agentWindow("agent-1", 3671);
   const fixture = await makeFixture({ workspaceWindows: [agent] });
@@ -778,7 +778,7 @@ test("after Windowize the row shows the agent as on the canvas and offers focus"
   assert.equal(face.dataset.windowId, "agent-1");
   assert.equal(face.querySelector(".terminal-root"), null, "no second input face for the PTY");
   assert.equal(fixture.calls.terminalMounts.length, 0, "nothing is mounted");
-  assert.match(face.textContent, /Shown on canvas/);
+  assert.match(face.textContent, /Shown in Agents/);
   assert.equal(face.querySelector('[data-action="windowize-issue-preview"]'), null);
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Running");
   assert.deepEqual(visibleActions(row), ["focus-canvas-window"]);

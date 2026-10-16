@@ -202,12 +202,6 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
   };
   for (const width of [900, 1440]) {
     await page.setViewportSize({ width, height: 1000 });
-    await page.locator(".workspace-window").evaluate((element, width) => {
-      // The fixture's initial wide window auto-fits the canvas. Use physical
-      // CSS pixels for the responsive acceptance instead of camera scaling.
-      document.getElementById("canvas-stage")!.style.transform = "none";
-      Object.assign((element as HTMLElement).style, { left: "8px", top: "8px", width: `${width - 80}px`, height: "860px" });
-    }, width);
     await capture(`${width}-default`);
     if (before) continue;
     await expect(root).toHaveAttribute("data-preview-hidden", "true");
@@ -267,7 +261,6 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
   await expect(statusPill).toHaveText("Waiting · Empty");
   await expect(statusPill).toHaveAttribute("data-tone", "idle");
   await page.setViewportSize({ width: 900, height: 1000 });
-  await page.locator(".workspace-window").evaluate(element => { (element as HTMLElement).style.width = "820px"; });
   await root.getByRole("button", { name: "Split", exact: true }).click();
   await expect(root).toHaveAttribute("data-view-mode", "split");
   const splitList = (await pane.boundingBox())!;
@@ -574,7 +567,7 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
   expect(hiddenWidth).toBeGreaterThan(visibleWidth+100);
   expect(Math.abs(hiddenWidth-(await page.locator(".issue-list-shell").boundingBox())!.width), "hidden preview gives the board full width").toBeLessThan(2);
   await expect(page.locator(".knowledge-detail-pane")).not.toBeVisible();
-  await page.locator(".workspace-window").evaluate(element => { (element as HTMLElement).style.width="850px"; });
+  await page.setViewportSize({ width: 900, height: 1000 });
   for (const phase of ["backlog","queued","active","done"]) {
     expect((await column(page,phase).boundingBox())!.width).toBeGreaterThanOrEqual(262);
   }

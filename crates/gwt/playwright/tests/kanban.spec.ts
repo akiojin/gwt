@@ -800,9 +800,6 @@ test.describe("Issue Related Work Resume", () => {
       theme,
     });
     await page.goto(APP_URL);
-    await page.addStyleTag({
-      content: "#fleet-minimap { pointer-events: none !important; }",
-    });
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await page
@@ -955,9 +952,6 @@ test.describe("Issue Related Work Resume", () => {
       theme,
     });
     await page.goto(APP_URL);
-    await page.addStyleTag({
-      content: "#fleet-minimap { pointer-events: none !important; }",
-    });
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await page

@@ -62,12 +62,8 @@ test("surface preset reopen focuses and reveals existing windows instead of crea
   );
 });
 
-// SPEC-2008 2026-06-20 Camera Focus Rework: manual maximize/minimize/restore
-// were removed. Reopening an existing surface now flies the LOCAL camera to
-// frame the window (frameWindow) instead of asking the backend to
-// restore/center it. `frameWindow` sends a bounds-less `focus_window` purely
-// for z-order/highlight; the camera move is per-viewer (FR-095).
-test("existing surface helper frames the window via the local camera (no restore, no centered bounds)", () => {
+// Reopening reuses the live view; saved geometry does not determine its placement.
+test("existing surface helper selects the live rail view without restoring geometry", () => {
   const helperBody = extractFunctionBody(appSource, "openExistingSurfaceWindow");
 
   assert.match(
@@ -77,7 +73,7 @@ test("existing surface helper frames the window via the local camera (no restore
   );
   assert.match(
     helperBody,
-    /frameWindow\(\s*windowData\.id,\s*\{\s*animate:\s*shouldAnimateWindowFrame\(\)\s*\}\s*\)/,
+    /frameWindow\(\s*windowData\.id,\s*\{\s*animate:\s*false\s*\}\s*\)/,
     "reopening an existing surface must frame locally and skip animation on compact viewports",
   );
   // The restore/minimize protocol is gone — the helper must not resurrect it.
@@ -93,118 +89,18 @@ test("existing surface helper frames the window via the local camera (no restore
   );
 });
 
-test("frameWindow sends a bounds-less focus_window for highlight only (per-viewer camera)", () => {
-  const frameBody = extractFunctionBody(appSource, "frameWindow");
 
-  assert.match(
-    frameBody,
-    /send\(\s*\{\s*kind:\s*"focus_window",\s*id:\s*windowId\s*\}\s*\)/,
-    "frameWindow must notify the backend of focus for z-order/highlight only",
-  );
-  // The camera is local; the backend focus must NOT carry viewport bounds, or
-  // it would drag every other viewer's camera (the bug FR-095 fixes).
-  assert.doesNotMatch(
-    frameBody,
-    /kind:\s*"focus_window"[\s\S]*bounds:/,
-    "frameWindow's focus_window must not include bounds (camera centers locally)",
-  );
-  assert.match(
-    frameBody,
-    /animateViewportTo\(\s*target/,
-    "frameWindow must move the local viewport to frame the window",
-  );
-});
 
-test("frameWindow reserves the local camera target before focus_window can echo stale viewport", () => {
-  const frameBody = extractFunctionBody(appSource, "frameWindow");
-  const reserveIndex = frameBody.indexOf("reserveLocalViewportTarget(target)");
-  const sendIndex = frameBody.indexOf('send({ kind: "focus_window", id: windowId })');
 
-  assert.ok(
-    reserveIndex !== -1,
-    "frameWindow must mark the target as a local viewport edit before sending focus_window",
-  );
-  assert.ok(
-    reserveIndex < sendIndex,
-    "local camera target reservation must happen before the backend focus echo can arrive",
-  );
-});
 
-test("frameWindow schedules a DOM-rect clamp after the camera lands", () => {
-  const frameBody = extractFunctionBody(appSource, "frameWindow");
 
-  assert.match(
-    frameBody,
-    /scheduleWindowFrameClamp\(\s*windowId,\s*\{\s*animate\s*\}\s*\)/,
-    "frameWindow must verify the rendered DOM rect after layout and clamp it into the camera frame",
-  );
-});
 
-test("window frame clamps ignore stale delayed framing callbacks", () => {
-  const scheduleBody = extractFunctionBody(appSource, "scheduleWindowFrameClamp");
 
-  assert.match(
-    appSource,
-    /let\s+windowFrameClampToken\s*=\s*0/,
-    "frame clamp scheduling must track generations across frame requests",
-  );
-  assert.match(
-    scheduleBody,
-    /windowFrameClampToken\s*\+=\s*1/,
-    "each frame request must invalidate older delayed clamps",
-  );
-  assert.match(
-    scheduleBody,
-    /const\s+clampToken\s*=\s*windowFrameClampToken/,
-    "scheduled callbacks must capture the current generation",
-  );
-  assert.match(
-    scheduleBody,
-    /clampToken\s*!==\s*windowFrameClampToken/,
-    "stale clamp callbacks must exit before mutating the viewport",
-  );
-  assert.match(
-    scheduleBody,
-    /clearTimeout\(\s*pendingWindowFrameClampTimer\s*\)/,
-    "a new frame request must cancel the previous delayed clamp timer",
-  );
-  assert.match(
-    scheduleBody,
-    /cancelAnimationFrame\(\s*pendingWindowFrameClampFrame\s*\)/,
-    "a new frame request must cancel the previous pending clamp frame",
-  );
-});
 
-test("host viewport resize reframes the focused window without broadcasting focus", () => {
-  const resizeBody = extractFunctionBody(appSource, "frameFocusedWindowAfterViewportResize");
 
-  assert.match(
-    appSource,
-    /window\.addEventListener\("resize",\s*scheduleFocusedWindowViewportReframe\)/,
-    "host resize must schedule a focused-window camera reframe",
-  );
-  assert.match(
-    resizeBody,
-    /frameWindow\(\s*focusedId,\s*\{\s*animate:\s*false,\s*notifyFocus:\s*false\s*\}\s*\)/,
-    "host resize reframe must be local-only and must not send focus_window",
-  );
-});
 
-test("existing grouped surface tabs are activated before the camera frames the window", () => {
-  const helperBody = extractFunctionBody(appSource, "openExistingSurfaceWindow");
-
-  assert.match(
-    helperBody,
-    /windowData\.tab_group_id[\s\S]*kind:\s*"activate_window_tab"[\s\S]*id:\s*windowData\.id/,
-    "inactive grouped surface tabs must be activated before framing",
-  );
-  // activate_window_tab is still sent BEFORE the frameWindow call so the
-  // requested tab is the one revealed when the camera lands on it.
-  assert.ok(
-    helperBody.indexOf('kind: "activate_window_tab"') <
-      helperBody.indexOf("frameWindow("),
-    "tab activation must be sent before frameWindow so the requested tab is revealed",
-  );
+test("existing grouped surfaces do not reactivate saved canvas groups", () => {
+  assert.doesNotMatch(extractFunctionBody(appSource, "openExistingSurfaceWindow"), /activate_window_tab/);
 });
 
 test("Add Window surface buttons use the same reopen path as rail and palette commands", () => {

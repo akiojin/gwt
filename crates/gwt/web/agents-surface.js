@@ -250,8 +250,8 @@ export function createAgentsSurface({ document, windowCatalogModel, getWindows, 
         setTitle(tab, title, name);
         tab.parentElement.querySelector(".agents-tab-close").setAttribute("aria-label", `Close ${title} tab`);
       }
-      const dedicatedShell = data.preset === "shell" && data.surface_owner === "agents";
-      const disabled = (!data.session_id && !dedicatedShell) || ["stopped", "error", "interrupted"].includes(data.status);
+      const shell = data.preset === "shell";
+      const disabled = (!data.session_id && !shell) || ["stopped", "error", "interrupted"].includes(data.status);
       tile.querySelector(".agent-tile__mode").textContent = disabled ? "Input unavailable" : "Interactive";
       mountTerminal(data.id, tile.querySelector(".terminal-root"));
     }

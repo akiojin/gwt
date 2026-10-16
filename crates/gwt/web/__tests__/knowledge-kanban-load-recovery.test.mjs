@@ -735,7 +735,13 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       const body = domDocument.createElement("div");
       domDocument.body.appendChild(body);
       const windowMap = new Map([["win-1", body]]);
-      const windowData = { id: "win-1", preset: "issue" };
+      const windowData = { id: "win-1", preset: "issue", minimized: true,
+        tab_group_id: "legacy-group", tab_group_active: false };
+      const cache = domDocument.createElement("section");
+      cache.className = "surface-cache";
+      cache.hidden = true;
+      cache.setAttribute("inert", "");
+      domDocument.body.appendChild(cache);
       let activeTab = true;
       const createNode = (tag, className, textContent = "") => {
         const node = domDocument.createElement(tag);
@@ -791,7 +797,8 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       }
 
       intervals[0].callback();
-      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1);
+      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
+        "visible legacy grouped windows refresh independently of saved canvas state");
       intervals[0].callback();
       intervals[0].callback();
       assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
@@ -804,9 +811,7 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       // Repeated hidden ticks coalesce to one revision check on activation.
       const hiddenCases = [
         [() => { body.hidden = true; }, () => { body.hidden = false; }],
-        [() => { windowData.minimized = true; }, () => { windowData.minimized = false; }],
-        [() => { windowData.tab_group_id = "group"; windowData.tab_group_active = false; },
-          () => { windowData.tab_group_active = true; }],
+        [() => { cache.appendChild(body); }, () => { domDocument.body.appendChild(body); }],
         [() => { activeTab = false; }, () => { activeTab = true; }],
         [() => { domDocument.hidden = true; }, () => { domDocument.hidden = false; }],
       ];
@@ -815,7 +820,7 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
         hide();
         intervals[0].callback();
         intervals[0].callback();
-        assert.equal(sent.length, before, "hidden/minimized/inactive surfaces do no reads");
+        assert.equal(sent.length, before, "hidden/cache/inactive-project surfaces do no reads");
         reveal();
         surface.refreshVisibleKnowledgeWindows();
         surface.refreshVisibleKnowledgeWindows();

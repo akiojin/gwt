@@ -25,6 +25,7 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
             viewport: { x: 0, y: 0, zoom: 1 },
             windows: [{
               id: "agent-1", title: "Codex", preset: "agent", agent_id: "codex",
+              agent_name: "Codex", session_id: "agent-1-session",
               agent_color: "cyan", status: "idle", z_index: 1,
               geometry: { x: 180, y: 120, width: 720, height: 360 }, geometry_revision: 0,
               minimized: false, maximized: false, pre_maximize_geometry: null, persist: true,
@@ -81,7 +82,11 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
     };
   });
   await page.goto(appUrl);
-  const terminal = page.locator(".workspace-window[data-id='agent-1'] .xterm-helper-textarea");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.getByRole("tab", { name: "Codex", exact: true }).click();
+  const tile = page.locator(".agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id='agent-1']");
+  await expect(tile).toBeVisible();
+  const terminal = tile.locator(".xterm-helper-textarea");
   await expect(terminal).toBeAttached();
   await terminal.focus();
   await page.keyboard.type("before");

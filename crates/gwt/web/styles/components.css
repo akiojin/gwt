@@ -162,7 +162,7 @@ body::after {
   grid-template-rows: 44px 1fr 28px;
   grid-template-areas:
     "projectbar projectbar"
-    "rail canvas"
+    "rail surface"
     "strip strip";
   background: var(--bg-depth-glow), transparent;
 }
@@ -602,7 +602,7 @@ body::after {
 .split-surfaces[hidden],
 .split-pane[hidden],
 .split-surfaces[data-split="false"] .split-pane__header,
-.canvas-area.has-surface-layout > :not(.split-surfaces) {
+.surface-area.has-surface-layout > :not(.split-surfaces) {
   display: none !important;
 }
 .split-pane {
@@ -667,7 +667,6 @@ body::after {
   border: 0;
   border-radius: 0;
 }
-.split-pane .resize-handle { display: none !important; }
 .split-pane .titlebar { cursor: default; }
 .split-pane__empty {
   padding: 16px;
@@ -891,7 +890,7 @@ body::after {
     grid-template-areas:
       "projectbar"
       "rail"
-      "canvas"
+      "surface"
       "strip";
   }
 
@@ -1427,73 +1426,11 @@ button.op-runtime-health-detail__process {
   font-variant-numeric: tabular-nums;
 }
 
-/* SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +) moved from the
-   right-bottom floating toolbar into the Status Strip. The buttons read as a
-   compact mono cluster matching the strip's typographic vocabulary. */
-.op-status-strip__cell--zoom {
-  gap: var(--space-1);
-}
-
-.op-status-strip__zoom-button {
-  appearance: none;
-  border: 1px solid var(--color-status-strip-divider);
-  background: transparent;
-  color: var(--color-status-strip-fg);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background var(--motion-fast) var(--motion-curve),
-    border-color var(--motion-fast) var(--motion-curve);
-}
-
-.op-status-strip__zoom-button:hover {
-  background: color-mix(in oklab, var(--color-status-strip-fg) 14%, transparent);
-}
-
-.op-status-strip__zoom-button:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 1px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .op-status-strip__zoom-button {
-    transition: none;
-  }
-}
-
-/* ============================================================
-   Canvas area — Operator overrides on existing layout
-   ============================================================ */
-
-.canvas-area {
-  grid-area: canvas;
+/* Fixed surface host for single panes, split panes, and the Agents grid. */
+.surface-area {
+  grid-area: surface;
   position: relative;
-  background: transparent;
-}
-
-.canvas {
-  background: var(--color-canvas);
-}
-
-/* SPEC-3038: the peek 帯 era is over — window operations live in the
-   always-visible Command Rail, so no resize-time peek suppression is needed. */
-
-.canvas-world-grid {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(to right, var(--bg-scan-grid) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--bg-scan-grid) 1px, transparent 1px),
-    linear-gradient(to right, var(--color-border) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--color-border) 1px, transparent 1px);
-  background-size: 32px 32px, 32px 32px, 128px 128px, 128px 128px;
-  background-position: 0 0;
-  opacity: 0.9;
+  background: var(--color-surface);
 }
 
 /* ============================================================
@@ -5961,259 +5898,11 @@ button.workspace-board-ref:focus-visible {
   }
 }
 
-/* SPEC-2008 camera-focus / FR-094 — Fleet Minimap.
-   The signature carrier: a collapsible map of every canvas window in world
-   position, with the live camera viewport overlaid. Docked in the canvas
-   corner, OUTSIDE the stage transform. This is the one bold element — window
-   chrome and telemetry stay restrained. */
-.fleet-minimap {
-  position: absolute;
-  right: var(--space-4, 16px);
-  bottom: var(--space-4, 16px);
-  width: 160px;
-  height: 120px;
-  z-index: 60;
-  pointer-events: auto;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md, 8px);
-  background: color-mix(in oklab, var(--color-surface-elevated) 92%, transparent);
-  box-shadow: var(--shadow-2, 0 8px 24px rgba(0, 0, 0, 0.35));
-  overflow: hidden;
-  backdrop-filter: blur(4px);
-}
-
-/* No windows yet — fade the carrier so it never looks broken on an empty
-   canvas, but keep it present (it is permanent). */
-.fleet-minimap[data-empty="true"] {
-  opacity: 0.45;
-}
-
-/* Issue #3795 — collapsing keeps the carrier reachable as one small button.
-   Its render consumers remain mounted and continue receiving telemetry; only
-   their presentation is suppressed. */
-.fleet-minimap[data-collapsed="true"] {
-  width: 28px;
-  height: 28px;
-  opacity: 1;
-}
-
-.fleet-minimap[data-collapsed="true"] > :not(.fleet-minimap__visibility-toggle) {
-  display: none;
-}
-
-/* Centered-radar world layer: holds the window cells at absolute world*scale
-   positions. Panning translates ONLY this layer (one transform), mirroring the
-   canvas `#canvas-stage`, while the camera frame stays fixed at the centre.
-   The transform layer hint is intentionally NOT pinned here (project policy
-   keeps that hint opt-in during motion only); the world layer is a tiny element
-   with a handful of cells, so a permanent GPU layer is not worth the memory. */
-.fleet-minimap__world {
-  position: absolute;
-  top: 0;
-  left: 0;
-  transform-origin: 0 0;
-}
-
-/* Each window, scaled to its world position. A plain rounded chip whose
-   accent follows the agent color via the shared data-agent-color map
-   (--current-agent). */
-.fleet-minimap__cell {
-  position: absolute;
-  margin: 0;
-  padding: 0;
-  border: 1px solid color-mix(in oklab, var(--current-agent, var(--color-text-muted)) 60%, var(--color-border));
-  border-radius: 2px;
-  background: color-mix(in oklab, var(--current-agent, var(--color-text-muted)) 26%, var(--color-surface));
-  cursor: pointer;
-  transition: background var(--motion-fast, 120ms) ease, border-color var(--motion-fast, 120ms) ease;
-}
-
-.fleet-minimap__cell:hover {
-  background: color-mix(in oklab, var(--current-agent, var(--color-text-muted)) 42%, var(--color-surface));
-  border-color: var(--current-agent, var(--color-focus-ring));
-}
-
-.fleet-minimap__cell:focus-visible {
-  outline: 1px solid var(--color-focus-ring);
-  outline-offset: 1px;
-}
-
-/* The framed window is emphasized with the focus ring so the minimap echoes
-   which window the camera is on. */
-.fleet-minimap__cell.is-focused {
-  border-color: var(--color-focus-ring);
-  box-shadow: 0 0 0 1px var(--color-focus-ring);
-}
-
-.fleet-minimap__cell[data-worktree-symbol]::before {
-  content: attr(data-worktree-symbol);
-  position: absolute;
-  left: 2px;
-  bottom: 2px;
-  min-width: 8px;
-  height: 8px;
-  padding: 0 2px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-pill);
-  background: var(--color-surface-elevated);
-  color: var(--color-text-strong);
-  font-family: var(--font-mono);
-  font-size: 7px;
-  font-weight: 700;
-  line-height: 8px;
-  text-align: center;
-}
-
-.fleet-minimap__cell[data-worktree-form="ephemeral"]::before {
-  border-color: var(--color-state-needs-input);
-  color: var(--color-state-needs-input);
-}
-
-.fleet-minimap__cell[data-worktree-form="branch-backed"]::before {
-  border-color: var(--color-state-active);
-  color: var(--color-state-active);
-}
-
-/* Living Telemetry dot — agent panes only. Color from the semantic state
-   tokens; running / waiting / error pulse via --motion-pulse (0ms under
-   reduced-motion, so the dot simply holds steady). */
-.fleet-minimap__cell[data-telemetry]::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--color-state-idle);
-}
-
-.fleet-minimap__cell[data-telemetry="running"]::after {
-  background: var(--color-state-active);
-  animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
-}
-
-.fleet-minimap__cell[data-telemetry="idle"]::after {
-  background: var(--color-state-idle);
-}
-
-.fleet-minimap__cell[data-telemetry="error"]::after {
-  background: var(--color-state-blocked);
-  animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
-}
-
-/* FR-039 (anshin) — waiting dot pulses (loud) in amber so the minimap
-   surfaces "this pane is waiting for you" the same way it surfaces errors. */
-.fleet-minimap__cell[data-telemetry="waiting"]::after {
-  background: var(--color-state-needs-input);
-  animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
-}
-
-.fleet-minimap__cell[data-telemetry="done"]::after {
-  background: var(--color-state-done);
-}
-
-/* The live camera viewport. A 1px cyan frame + faint cyan fill so the
-   operator always sees where the camera is pointed within the fleet. */
-.fleet-minimap__camera {
-  position: absolute;
-  pointer-events: none;
-  border: 1px solid var(--color-focus-ring);
-  border-radius: 2px;
-  background: color-mix(in oklab, var(--color-focus-ring) 12%, transparent);
-  box-shadow: 0 0 6px 0 color-mix(in oklab, var(--color-focus-ring) 40%, transparent);
-}
-
-/* Radar zoom controls (+ / −). Tiny stacked buttons in the top-right corner so
-   the operator can widen the radar to the whole fleet or tighten it. Kept
-   minimal so the glance widget stays uncluttered. */
-.fleet-minimap__zoom {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  z-index: 1;
-}
-
-.fleet-minimap__zoom-button {
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--color-border);
-  border-radius: 3px;
-  background: color-mix(in oklab, var(--color-surface-elevated) 86%, transparent);
-  color: var(--color-text-muted);
-  font-size: 12px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.fleet-minimap__zoom-button:hover {
-  color: var(--color-text-strong);
-  border-color: var(--color-focus-ring);
-}
-
-.fleet-minimap__zoom-button:focus-visible {
-  outline: 1px solid var(--color-focus-ring);
-  outline-offset: 1px;
-}
-
-.fleet-minimap__visibility-toggle {
-  position: absolute;
-  top: 4px;
-  left: 4px;
-  z-index: 2;
-  display: grid;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  place-items: center;
-  border: 1px solid var(--color-border);
-  border-radius: 3px;
-  background: var(--color-surface-elevated);
-  color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  line-height: 1;
-  cursor: pointer;
-}
-
-.fleet-minimap[data-collapsed="true"] .fleet-minimap__visibility-toggle {
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  border-radius: inherit;
-}
-
-.fleet-minimap__visibility-toggle:hover {
-  color: var(--color-text-strong);
-  border-color: var(--color-focus-ring);
-}
-
-.fleet-minimap__visibility-toggle:focus-visible {
-  outline: 1px solid var(--color-focus-ring);
-  outline-offset: -2px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .fleet-minimap__cell[data-telemetry="running"]::after,
-  .fleet-minimap__cell[data-telemetry="error"]::after,
-  .fleet-minimap__cell[data-telemetry="waiting"]::after {
-    animation: none;
-  }
-}
-
 /* ---------------------------------------------------------------------------
    SPEC-3431 — Project Manager surfaces.
 
    The PM is the user's single conversational window, so it gets one identity
-   colour (--color-role-pm) reused by all three surfaces: the rail launcher,
-   the canvas launcher, and the PM window chrome. The colour is a ROLE, not a
+   colour (--color-role-pm) shared by the rail launcher and PM window chrome. The colour is a ROLE, not a
    runtime state, so it never replaces the status chip or the agent colour.
    --------------------------------------------------------------------------- */
 
@@ -6277,50 +5966,6 @@ button.workspace-board-ref:focus-visible {
   background: var(--color-state-idle);
 }
 
-/* Canvas launcher (FR-018). Bottom-LEFT: .fleet-minimap owns bottom-right. */
-.canvas-pm-launcher {
-  position: absolute;
-  left: var(--space-4, 16px);
-  bottom: var(--space-4, 16px);
-  z-index: 60;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2, 8px);
-  padding: var(--space-2, 8px) var(--space-4, 16px);
-  appearance: none;
-  cursor: pointer;
-  border: 1px solid var(--color-role-pm);
-  border-radius: var(--radius-pill, 999px);
-  background: color-mix(in oklab, var(--color-surface-elevated) 92%, transparent);
-  color: var(--color-role-pm);
-  box-shadow: var(--shadow-2);
-  transition: background var(--motion-fast) var(--motion-curve),
-              transform var(--motion-fast) var(--motion-curve);
-}
-
-.canvas-pm-launcher:hover {
-  background: color-mix(in oklab, var(--color-role-pm) 16%, var(--color-surface-elevated));
-}
-
-.canvas-pm-launcher:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
-.canvas-pm-launcher[hidden] {
-  display: none;
-}
-
-.canvas-pm-launcher__icon {
-  font-size: 14px;
-  line-height: 1;
-}
-
-.canvas-pm-launcher__label {
-  font-weight: 600;
-  letter-spacing: 0.04em;
-}
-
 /* PM window chrome (FR-020). A left accent bar plus a filled role badge —
    form first, colour second — so the PM reads as distinct even for users who
    cannot separate the hue from the agent ramp. */
@@ -6347,12 +5992,6 @@ button.workspace-board-ref:focus-visible {
   background: var(--color-role-pm);
   color: var(--color-canvas);
   font-weight: 700;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .canvas-pm-launcher {
-    transition: none;
-  }
 }
 
 /* SPEC-3431 FR-026 / FR-132 — the rail gear routes to the shared Settings
@@ -6609,7 +6248,7 @@ button.workspace-board-ref:focus-visible {
   color: var(--color-text);
 }
 .agents-surface[hidden],
-.canvas-area.is-agents > :not(.agents-surface) { display: none !important; }
+.surface-area.is-agents > :not(.agents-surface) { display: none !important; }
 .agents-toolbar, .agent-tile__header {
   display: flex;
   align-items: center;
@@ -6703,6 +6342,7 @@ button.workspace-board-ref:focus-visible {
 .agent-tile[hidden] { display: flex; visibility: hidden; }
 .agents-toolbar label[hidden] { display: none; }
 .agent-tile {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -6724,7 +6364,7 @@ button.workspace-board-ref:focus-visible {
 /* Keep persistence diagnostics in the shell layout, above every workspace surface. */
 #app:has(> .workspace-state-notice) {
   grid-template-rows: 44px auto 1fr 28px;
-  grid-template-areas: "projectbar projectbar" "notice notice" "rail canvas" "strip strip";
+  grid-template-areas: "projectbar projectbar" "notice notice" "rail surface" "strip strip";
 }
 .workspace-state-notice {
   grid-area: notice;
@@ -6753,7 +6393,7 @@ button.workspace-board-ref:focus-visible {
 @media (max-width: 860px) {
   #app:has(> .workspace-state-notice) {
     grid-template-rows: 44px auto auto minmax(0, 1fr) 28px;
-    grid-template-areas: "projectbar" "notice" "rail" "canvas" "strip";
+    grid-template-areas: "projectbar" "notice" "rail" "surface" "strip";
   }
 }
 .terminal-text-preview { margin: 0; padding: var(--space-2); overflow: auto; height: 100%; white-space: pre; font-family: var(--font-mono); color: var(--color-text); background: var(--color-surface); }
