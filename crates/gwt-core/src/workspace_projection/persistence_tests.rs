@@ -13942,6 +13942,14 @@ fn audited_successor_supersession_survives_shared_intake_and_compaction() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("works.json");
     save_workspace_work_items_projection_to_path(&path, &projection).unwrap();
+    // Issue #5288: an earlier container repair remains authoritative even
+    // after supersession. Replaying its audit must not restore detached refs.
+    let detachments = BTreeMap::from([(
+        occupied_id.clone(),
+        vec![audit.execution_container.clone().unwrap()],
+    )]);
+    let detachment_bytes = serde_json::to_vec(&detachments).unwrap();
+    fs::write(container_detachments_path(&path), &detachment_bytes).unwrap();
     let content = [
         serde_json::to_string(&audit).unwrap(),
         serde_json::to_string(&start).unwrap(),
@@ -13981,6 +13989,7 @@ fn audited_successor_supersession_survives_shared_intake_and_compaction() {
         .iter()
         .find(|work| work.id == occupied_id)
         .unwrap();
+    assert!(occupied.execution_containers.is_empty());
     assert!(
         occupied.events.contains(&audit),
         "retain supersession even when an old Start exists"
@@ -14000,8 +14009,56 @@ fn audited_successor_supersession_survives_shared_intake_and_compaction() {
     let projection = load_workspace_work_items_from_path(&path).unwrap().unwrap();
     assert_eq!(
         current_work_id(&projection, project_root, Some(branch), None),
-        Some(successor_id)
+        Some(successor_id.clone())
     );
+    let mut ownerless_root = projection.clone();
+    ownerless_root
+        .work_items
+        .iter_mut()
+        .find(|work| work.id == audit.related_work_item_id.as_deref().unwrap())
+        .unwrap()
+        .owner = None;
+    assert_eq!(
+        current_work_id(&ownerless_root, project_root, Some(branch), None),
+        Some(successor_id.clone()),
+        "audit branch identity proves the first known owner after an ownerless root",
+    );
+    assert_eq!(
+        fs::read(container_detachments_path(&path)).unwrap(),
+        detachment_bytes
+    );
+    // Only the exact authenticated audit may bridge an empty terminal row.
+    // Ordinary closes and a foreign audit container cannot grant authority.
+    for invalid in ["ordinary-discard", "foreign-audit", "nonterminal"] {
+        let mut invalid_projection = projection.clone();
+        let occupied = invalid_projection
+            .work_items
+            .iter_mut()
+            .find(|work| work.id == occupied_id)
+            .unwrap();
+        let audit = occupied
+            .events
+            .iter_mut()
+            .find(|event| event.is_successor_supersession())
+            .unwrap();
+        match invalid {
+            "ordinary-discard" => audit.id = "ordinary-discard".to_string(),
+            "foreign-audit" => {
+                audit.execution_container.as_mut().unwrap().branch = Some("work/other".to_string())
+            }
+            "nonterminal" => {
+                occupied.status_category = WorkspaceStatusCategory::Idle;
+                occupied.completed_at = None;
+                occupied.discarded = false;
+            }
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            current_work_id(&invalid_projection, project_root, Some(branch), None),
+            Some(successor_id.clone()),
+            "{invalid} must not authorize the new successor",
+        );
+    }
     assert!(projection
         .work_items
         .iter()

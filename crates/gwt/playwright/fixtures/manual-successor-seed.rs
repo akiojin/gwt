@@ -93,12 +93,27 @@ fn main() {
             invalid.owner = Some(format!("Issue #{}", owner.number));
             invalid.execution_container = Some(WorkspaceExecutionContainerRef {
                 branch: Some(format!("work/issue-{}", owner.number)),
-                worktree_path: Some(worktree.to_path_buf()),
+                worktree_path: Some(std::fs::canonicalize(worktree).unwrap()),
                 pr_number: None,
                 pr_url: None,
                 pr_state: None,
             });
-            record_workspace_work_event(worktree, invalid).unwrap();
+            record_workspace_work_event(worktree, invalid.clone()).unwrap();
+            // Issue #5288: local detach receipts also remove the container
+            // carried by a later supersession audit. Preserve that real shape.
+            let works_path =
+                gwt_core::workspace_projection::gwt_workspace_work_items_path_for_repo_path(
+                    worktree,
+                );
+            std::fs::write(
+                works_path.with_extension("detachments.json"),
+                serde_json::to_vec(&std::collections::BTreeMap::from([(
+                    invalid.work_item_id,
+                    vec![invalid.execution_container.unwrap()],
+                )]))
+                .unwrap(),
+            )
+            .unwrap();
         }
         "inspect" => {}
         _ => panic!("unknown fixture action"),
