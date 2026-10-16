@@ -4252,6 +4252,14 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
             )
         })
         .unwrap_or_default();
+    let live_launch_owners = window_snapshot
+        .map(|snapshot| {
+            gwt::issue_monitor_worker::verified_live_launch_owners(project_root, snapshot, now)
+        })
+        .unwrap_or_default();
+    let live_launch_observed_at = window_snapshot
+        .map(|snapshot| snapshot.observed_at.as_str())
+        .unwrap_or(now);
 
     // A daemon may have started while the side-effect-free scan was running.
     // The second lease acquisition is the commit-time authority decision; the
@@ -4289,14 +4297,20 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         if let (Some(project_tab_id), Some(live_window_ids)) =
             (expected_project_tab_id, live_window_ids)
         {
-            let reconciliation =
-                latest.reconcile_launch_bindings(project_tab_id, live_window_ids, now);
+            let reconciliation = latest.reconcile_launch_bindings(
+                project_tab_id,
+                live_window_ids,
+                &live_launch_owners,
+                live_launch_observed_at,
+            );
             if !reconciliation.readopted.is_empty() {
                 tracing::warn!(
                     issues = ?reconciliation.readopted,
                     "issue monitor recovered launches whose agent windows were still running"
                 );
             }
+        } else {
+            latest.readopt_live_launch_bindings(&live_launch_owners, live_launch_observed_at);
         }
         if let Some(loaded) = &loaded_for_commit {
             gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(

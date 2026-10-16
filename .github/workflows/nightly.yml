@@ -45,7 +45,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
       # Compiling inside the timed loop would charge the first iteration for the
@@ -113,7 +113,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: develop
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-workspace
@@ -144,7 +144,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: develop
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-workspace

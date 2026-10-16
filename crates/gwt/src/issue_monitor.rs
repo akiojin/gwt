@@ -4800,6 +4800,9 @@ pub struct IssueMonitorState {
     window_snapshot_host: Option<(u32, u64)>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     window_snapshot_tabs: BTreeSet<String>,
+    /// Producing-owner proof belongs to one exact canvas observation, never prefs.
+    #[serde(skip)]
+    verified_live_window_owners: Option<(String, BTreeMap<String, u64>)>,
     /// Issue #4084 AC-1: idle windows keyed by window id, carrying the first
     /// scan at which each was seen idle.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -7250,6 +7253,7 @@ impl IssueMonitorState {
             window_snapshot: None,
             window_snapshot_host: None,
             window_snapshot_tabs: BTreeSet::new(),
+            verified_live_window_owners: None,
             review_windows: BTreeMap::new(),
             idle_windows: BTreeMap::new(),
             pending_idle_pane_closes: VecDeque::new(),
@@ -12054,16 +12058,21 @@ impl IssueMonitorState {
         let delivery = self.pending_launch_deliveries.iter().find(|delivery| {
             delivery.issue_number == issue_number && delivery.claim_id == claim_id
         })?;
+        let window_id = delivery
+            .materialized_window_id
+            .as_deref()
+            .or(delivery.materializer_window_id.as_deref())?;
+        if let Some(owner) = self.conflicting_launch_window_owner(issue_number, window_id) {
+            return Some(format!(
+                "issue #{issue_number}: launch binding refused: window {window_id} is already bound to issue #{owner}"
+            ));
+        }
         if self
             .window_snapshot_host
             .is_some_and(|(pid, _)| delivery.materializer_pid != Some(pid))
         {
             return None;
         }
-        let window_id = delivery
-            .materialized_window_id
-            .as_deref()
-            .or(delivery.materializer_window_id.as_deref())?;
         let snapshot = self.fresh_window_snapshot(now)?;
         snapshot
             .windows
@@ -15134,7 +15143,7 @@ impl IssueMonitorState {
         } else {
             self.label_excluded_issues.remove(&issue_number);
         }
-        let existing = self.inbox_item(issue_number).cloned();
+        let mut existing = self.inbox_item(issue_number).cloned();
         let exclusion = issue_monitor_candidate_exclusion(&issue)
             .or_else(|| {
                 (!allowed).then(|| {
@@ -15154,6 +15163,38 @@ impl IssueMonitorState {
                     },
                 )
             });
+        // Issue #4783 AC-R2: execution settlement ends one delivery, not the
+        // Issue's remaining acceptance criteria. Reconsider the fresh payload
+        // on the next scan without charging or resetting its retry budget.
+        if existing.as_ref().is_some_and(|item| {
+            item.state == MonitorInboxState::Launched && item.launched_window_id.is_none()
+        }) && issue.state == IssueMonitorIssueState::Open
+            && allowed
+            && exclusion.is_none()
+            && !self.issue_is_closed(issue_number)
+            && !self.merged_issues.contains(&issue_number)
+            && !self.failed_issues.contains_key(&issue_number)
+            && !self.active_launches.contains(&issue_number)
+            && !self.launched_windows.contains_key(&issue_number)
+            && !self.has_monitor_pane_for_issue(issue_number)
+            && !self.process_held_issues.contains(&issue_number)
+            && !self
+                .pending_launch_deliveries
+                .iter()
+                .any(|delivery| delivery.issue_number == issue_number)
+            && !self
+                .pending_launches
+                .iter()
+                .any(|launch| launch.issue_number == issue_number)
+        {
+            let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                issue.body.as_deref().unwrap_or(""),
+            );
+            if criteria.machine_checkable && !criteria.unchecked.is_empty() {
+                self.requeue_issue_for_relaunch(issue_number, QueuePosition::Tail);
+                existing = self.inbox_item(issue_number).cloned();
+            }
+        }
         let error_message = self.failed_issues.get(&issue_number).cloned().or_else(|| {
             existing.as_ref().and_then(|item| {
                 if matches!(
@@ -15368,12 +15409,9 @@ impl IssueMonitorState {
     /// blocking claim is ours when it is the exact claim we confirmed, or when
     /// it carries the same `<user>:<pid>` owner label we stamp.
     ///
-    /// Recognition alone is not repair. The binding ledger (#3883) survives the
-    /// lost slot projection, so the window that Issue is running in is restored
-    /// from it and the row goes back to `Launched` with its
-    /// `launched_window_id`. Without a ledger window there is nothing to repair
-    /// from and the block is recorded as before — a claim of ours whose window
-    /// is gone is a stale claim, not a running launch.
+    /// Authorship preserves an already accounted-for launch; it does not prove
+    /// which Session now occupies a recycled window id. Lost tracking is restored
+    /// only by the shared verified live-owner reconciliation before this check.
     fn reconcile_own_claim_binding(
         &mut self,
         issue_number: u64,
@@ -15411,30 +15449,7 @@ impl IssueMonitorState {
             // Already accounted for; never demote a live launch to a block.
             return true;
         }
-        // The last ACK names the window this Issue is actually running in; the
-        // ledger can still carry a superseded one alongside it (#4041).
-        let Some(window_id) = self
-            .launch_confirmations
-            .get(&issue_number)
-            .map(|ack| ack.window_id.clone())
-            .filter(|window_id| self.launch_bindings.get(window_id) == Some(&issue_number))
-            .or_else(|| {
-                self.launch_bindings
-                    .iter()
-                    .find(|(_, bound_issue)| **bound_issue == issue_number)
-                    .map(|(window_id, _)| window_id.clone())
-            })
-        else {
-            return false;
-        };
-        tracing::warn!(
-            issue_number,
-            window_id,
-            blocking_owner,
-            "issue monitor readopted its own claim instead of reporting a foreign block"
-        );
-        self.readopt_live_launch(issue_number, &window_id);
-        true
+        false
     }
 
     pub fn record_blocked_by_claim(
@@ -17007,9 +17022,6 @@ impl IssueMonitorState {
         confirmed_at: Option<&str>,
     ) -> bool {
         if let Some(owner) = self.conflicting_launch_window_owner(issue_number, &window_id) {
-            self.last_error = Some(format!(
-                "issue #{issue_number}: launch binding refused: window {window_id} is already bound to issue #{owner}"
-            ));
             tracing::warn!(
                 issue_number,
                 window_id,
@@ -17530,6 +17542,16 @@ impl IssueMonitorState {
         }
     }
 
+    fn verified_window_owner(&self, window_id: &str, issue_number: u64, observed_at: &str) -> bool {
+        self.verified_live_window_owners
+            .as_ref()
+            .is_some_and(|(proof_at, owners)| {
+                proof_at == observed_at
+                    && matching_live_launch_owner(owners, window_id) == Some(issue_number)
+            })
+            && self.window_observation_covers_launch(issue_number, window_id, observed_at)
+    }
+
     /// Issue #3883: restore slot accounting from the windows that are actually
     /// running, and drop the bindings of the ones that are not.
     ///
@@ -17558,11 +17580,11 @@ impl IssueMonitorState {
         &mut self,
         project_tab_id: &str,
         live_window_ids: &BTreeSet<String>,
+        live_launch_owners: &BTreeMap<String, u64>,
         observed_at: &str,
     ) -> IssueMonitorLaunchBindingReconciliation {
-        self.reconcile_duplicate_launch_bindings(observed_at);
         let mut outcome = IssueMonitorLaunchBindingReconciliation {
-            readopted: self.readopt_live_launch_bindings(live_window_ids),
+            readopted: self.readopt_live_launch_bindings(live_launch_owners, observed_at),
             pruned: Vec::new(),
         };
         let stale = self
@@ -17591,7 +17613,11 @@ impl IssueMonitorState {
     }
 
     /// Repair old ACK projections without taking a window away from its owner.
-    fn reconcile_duplicate_launch_bindings(&mut self, now: &str) {
+    fn reconcile_duplicate_launch_bindings(
+        &mut self,
+        live_launch_owners: &BTreeMap<String, u64>,
+        observed_at: &str,
+    ) {
         let bindings = self
             .launched_windows
             .iter()
@@ -17628,34 +17654,18 @@ impl IssueMonitorState {
                     issue_monitor_window_ids_match(bound, window).then_some(*issue)
                 })
                 .collect::<BTreeSet<_>>();
-            let observed_owner = self
-                .fresh_window_snapshot(now)
-                .filter(|snapshot| {
-                    owners.iter().all(|issue| {
-                        self.window_observation_covers_launch(*issue, window, &snapshot.observed_at)
-                    })
-                })
-                .and_then(|snapshot| {
-                    snapshot.windows.iter().find_map(|pane| {
-                        (pane.monitor_owned
-                            && !pane.review_dispatch
-                            && idle_window_is_alive(pane.status)
-                            && issue_monitor_window_ids_match(&pane.window_id, window))
-                        .then_some(pane.issue_number)
-                        .flatten()
-                    })
-                });
-            if owners.len() < 2 && observed_owner.is_none_or(|owner| owners.contains(&owner)) {
+            let Some(owner) = matching_live_launch_owner(live_launch_owners, window) else {
+                continue;
+            };
+            if !owners
+                .iter()
+                .all(|issue| self.window_observation_covers_launch(*issue, window, observed_at))
+            {
                 continue;
             }
-            let owner = observed_owner
-                .or_else(|| self.launch_bindings.get(window).copied())
-                .or_else(|| {
-                    self.launch_bindings.iter().find_map(|(bound, issue)| {
-                        issue_monitor_window_ids_match(bound, window).then_some(*issue)
-                    })
-                })
-                .unwrap_or_else(|| *owners.first().expect("binding has an owner"));
+            if owners.len() < 2 && owners.contains(&owner) {
+                continue;
+            }
             self.launch_bindings.retain(|bound, issue| {
                 !issue_monitor_window_ids_match(bound, window) || *issue == owner
             });
@@ -17704,7 +17714,11 @@ impl IssueMonitorState {
                         item.launched_window_id = None;
                     }
                 } else {
-                    self.requeue_released_launch(issue, "binding belongs to another Issue", now);
+                    self.requeue_released_launch(
+                        issue,
+                        "binding belongs to another Issue",
+                        observed_at,
+                    );
                 }
                 tracing::warn!(
                     issue,
@@ -17771,18 +17785,35 @@ impl IssueMonitorState {
         None
     }
 
-    /// Issue #3883 AC-6: the half of the reconciliation that only ever adds
-    /// tracking back, for callers that cannot prove a window is gone.
+    /// Retain producing-owner proof only for the exact current observation.
+    pub fn record_verified_live_launch_owners(
+        &mut self,
+        live_launch_owners: &BTreeMap<String, u64>,
+        observed_at: &str,
+    ) {
+        self.verified_live_window_owners = self
+            .window_snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.observed_at == observed_at)
+            .map(|_| (observed_at.to_string(), live_launch_owners.clone()));
+    }
+
+    /// Restore tracking from verified live owners. Missing or unreadable
+    /// Session evidence neither restores tracking nor proves a binding stale.
     ///
-    /// A live window id is positive evidence no matter which tab reports it, so
-    /// re-adoption needs no ownership check. Absence is the opposite: only the
+    /// Only a live owner verified against its durable Session and current
+    /// execution binding can authorize adoption. Absence is the opposite: only the
     /// owning tab's canvas can distinguish "this window closed" from "I cannot
     /// see that tab from here" (#3627). A PM running `issue.monitor.reconcile`
-    /// against one gwt instance is in exactly that position, so it re-adopts
-    /// and never prunes — which is also what makes the recovery safe to run
-    /// while six agents are working: no pane is touched and no slot is taken
-    /// away, tracking is only restored.
-    pub fn readopt_live_launch_bindings(&mut self, live_window_ids: &BTreeSet<String>) -> Vec<u64> {
+    /// against one gwt instance therefore cannot prune by absence. Positive
+    /// proof that an id now belongs to another owner retires the old binding
+    /// and projection; the current pane and its Session are never changed.
+    pub fn readopt_live_launch_bindings(
+        &mut self,
+        live_launch_owners: &BTreeMap<String, u64>,
+        observed_at: &str,
+    ) -> Vec<u64> {
+        self.record_verified_live_launch_owners(live_launch_owners, observed_at);
         let recoverable = self
             .launch_bindings
             .iter()
@@ -17791,12 +17822,15 @@ impl IssueMonitorState {
                 !self.active_launches.contains(issue_number)
                     && !self.merged_issues.contains(issue_number)
                     && !self.failed_issues.contains_key(issue_number)
-                    && live_window_ids
-                        .iter()
-                        .any(|live| issue_monitor_window_ids_match(window_id, live))
+                    && matching_live_launch_owner(live_launch_owners, window_id)
+                        == Some(*issue_number)
+                    && self.window_observation_covers_launch(*issue_number, window_id, observed_at)
             })
             .collect::<Vec<_>>();
 
+        // Positive owner evidence can retire stale projections of a reused id.
+        // Unknown observations neither authorize adoption nor contradict a binding.
+        self.reconcile_duplicate_launch_bindings(live_launch_owners, observed_at);
         let mut readopted = Vec::new();
         for (window_id, issue_number) in recoverable {
             if self.active_launches.contains(&issue_number) {
@@ -19219,10 +19253,10 @@ impl IssueMonitorState {
     /// ordinary completion probe (merged PR / closed Issue) can end it without
     /// the vanished-window reconciliation mistaking the runtime's own close for
     /// a failed attempt. When the probe never fires the row has nothing left to
-    /// wait for, and `record_candidate` preserves the label across every scan,
-    /// so it sat out of the queue indefinitely: four rows stranded between five
-    /// and nine hours in the reported snapshot, one of them the owner of the
-    /// blocker two other Issues were waiting on.
+    /// wait for. Rows without fresh unchecked acceptance criteria retain the
+    /// label across scans, so they sat out of the queue indefinitely: four rows
+    /// stranded between five and nine hours in the reported snapshot, one of
+    /// them the owner of the blocker two other Issues were waiting on.
     ///
     /// The grace period is what separates the two readings. Inside it the row
     /// is a settled delivery whose completion evidence has not landed yet;
@@ -20350,9 +20384,10 @@ impl IssueMonitorState {
     /// about to close the window itself. Unlike [`Self::requeue_exact_window`]
     /// — the `window_closed` contract, which says "this attempt failed, try
     /// again" — a settled delivery is a success: the active slot is released
-    /// in this mutation, no retry attempt is spent, and the row stays
-    /// `Launched` out of the queue until the ordinary completion probe (merged
-    /// PR / closed Issue) ends it. The window is unbound so the later
+    /// in this mutation, no retry attempt is spent, and the row initially stays
+    /// `Launched` out of the queue. The next scan reconsiders an Open Issue with
+    /// unchecked acceptance criteria; otherwise the ordinary completion probe
+    /// (merged PR / closed Issue) ends it. The window is unbound so the later
     /// vanished-window reconciliation cannot mistake the runtime's own close
     /// for a failed attempt.
     ///
@@ -20422,6 +20457,12 @@ impl IssueMonitorState {
             return;
         }
         project_tabs.insert(snapshot.project_tab_id.clone());
+        if self.window_snapshot.as_ref() != Some(&snapshot)
+            || self.window_snapshot_host != host
+            || self.window_snapshot_tabs != project_tabs
+        {
+            self.verified_live_window_owners = None;
+        }
         self.reconcile_review_windows(&snapshot, &project_tabs);
         self.window_snapshot = Some(snapshot);
         self.window_snapshot_host = host;
@@ -20480,7 +20521,7 @@ impl IssueMonitorState {
         self.pending_idle_pane_closes.drain(..).collect()
     }
 
-    fn fresh_window_snapshot(&self, now: &str) -> Option<&IssueMonitorWindowSnapshot> {
+    pub(crate) fn fresh_window_snapshot(&self, now: &str) -> Option<&IssueMonitorWindowSnapshot> {
         let snapshot = self.window_snapshot.as_ref()?;
         let age = rfc3339_elapsed_secs(&snapshot.observed_at, now)?;
         (age <= IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS).then_some(snapshot)
@@ -20668,6 +20709,11 @@ impl IssueMonitorState {
                                 .iter()
                                 .find(|other| {
                                     other.issue_number == Some(*issue_number)
+                                        && self.verified_window_owner(
+                                            &other.window_id,
+                                            *issue_number,
+                                            &snapshot.observed_at,
+                                        )
                                         && follows_execution_holder(*issue_number, other)
                                         && issue_monitor_qualified_window_id(&other.window_id)
                                             .is_some_and(|(tab, _)| tab == snapshot.project_tab_id)
@@ -20712,6 +20758,11 @@ impl IssueMonitorState {
                     .iter()
                     .find(|other| {
                         other.issue_number == Some(*issue_number)
+                            && self.verified_window_owner(
+                                &other.window_id,
+                                *issue_number,
+                                &snapshot.observed_at,
+                            )
                             && follows_execution_holder(*issue_number, other)
                             && issue_monitor_qualified_window_id(&other.window_id)
                                 .is_some_and(|(tab, _)| self.window_snapshot_tabs.contains(tab))
@@ -20865,23 +20916,8 @@ impl IssueMonitorState {
         settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
         now: &str,
     ) -> IssueMonitorIdleReconciliation {
-        self.reconcile_duplicate_launch_bindings(now);
-        // The daemon also repairs lost projections before planning admission.
-        // Only a live implementation window with the ledger's Issue identity
-        // can restore a slot; terminal and revoked launches remain excluded.
-        if let Some(snapshot) = self.fresh_window_snapshot(now) {
-            let live = snapshot
-                .windows
-                .iter()
-                .filter(|window| !window.review_dispatch && idle_window_is_alive(window.status))
-                .filter(|window| {
-                    self.launch_bindings.get(&window.window_id).copied() == window.issue_number
-                        && window.issue_number.is_some()
-                })
-                .map(|window| window.window_id.clone())
-                .collect();
-            self.readopt_live_launch_bindings(&live);
-        }
+        // Callers restore accounting only after verifying the producing Session
+        // and retaining the snapshot timestamp; raw canvas identity is not proof.
         let mut classified = self.classify_idle_windows(settlements, now);
         let mut missing = BTreeSet::new();
         if let Some(snapshot) = self.fresh_window_snapshot(now).cloned() {
@@ -21434,11 +21470,22 @@ impl IssueMonitorState {
         let Some(snapshot) = self.fresh_window_snapshot(now) else {
             return false;
         };
+        if revoked.as_deref().is_some_and(|window| {
+            !self.window_observation_covers_launch(issue_number, window, &snapshot.observed_at)
+        }) {
+            return false;
+        }
         let survivor = snapshot
             .windows
             .iter()
             .filter(|observed| {
                 !matches!(observed.status, WindowState::Stopped | WindowState::Error)
+                    && observed.issue_number == Some(issue_number)
+                    && self.verified_window_owner(
+                        &observed.window_id,
+                        issue_number,
+                        &snapshot.observed_at,
+                    )
             })
             .map(|observed| observed.window_id.clone())
             .find(|live| {
@@ -21773,7 +21820,6 @@ pub fn scan_issue_monitor_candidates(
     // `Launched` row whose launch is gone starves its issue exactly as a
     // lapsed claim block does, and unlike that one it is invisible to the
     // claim planner — the row holds no slot to notice.
-    monitor.reconcile_duplicate_launch_bindings(now);
     monitor.requeue_stranded_launched_rows(now);
     monitor.park_unbound_live_monitor_panes(now);
     monitor.reconcile_terminal_queue();
@@ -22005,7 +22051,7 @@ fn expiry_from_now_lexical(now: &str, ttl_secs: u64) -> String {
 }
 
 /// A pane that can make progress or retains ownership for exact recovery.
-fn idle_window_is_alive(status: WindowState) -> bool {
+pub(crate) fn idle_window_is_alive(status: WindowState) -> bool {
     matches!(
         status,
         WindowState::Running
@@ -22014,6 +22060,14 @@ fn idle_window_is_alive(status: WindowState) -> bool {
             | WindowState::Waiting
             | WindowState::Interrupted
     )
+}
+
+fn matching_live_launch_owner(owners: &BTreeMap<String, u64>, window_id: &str) -> Option<u64> {
+    let mut matches = owners
+        .iter()
+        .filter(|(live, _)| issue_monitor_window_ids_match(window_id, live));
+    let (_, owner) = matches.next()?;
+    matches.next().is_none().then_some(*owner)
 }
 
 fn issue_monitor_window_ids_match(stored: &str, incoming: &str) -> bool {
@@ -27777,12 +27831,18 @@ mod tests {
         );
 
         let mut recovered = restored;
-        let readopted = recovered.readopt_live_launch_bindings(&live_windows(
-            &cohort
-                .iter()
-                .map(|(_, window_id)| *window_id)
-                .collect::<Vec<_>>(),
-        ));
+        let readopted = recovered.readopt_live_launch_bindings(
+            &test_live_launch_owners(
+                &recovered,
+                &live_windows(
+                    &cohort
+                        .iter()
+                        .map(|(_, window_id)| *window_id)
+                        .collect::<Vec<_>>(),
+                ),
+            ),
+            "2026-09-01T22:47:53Z",
+        );
 
         assert_eq!(
             readopted.len(),
@@ -27810,12 +27870,18 @@ mod tests {
         );
         assert!(
             recovered
-                .readopt_live_launch_bindings(&live_windows(
-                    &cohort
-                        .iter()
-                        .map(|(_, window_id)| *window_id)
-                        .collect::<Vec<_>>(),
-                ))
+                .readopt_live_launch_bindings(
+                    &test_live_launch_owners(
+                        &recovered,
+                        &live_windows(
+                            &cohort
+                                .iter()
+                                .map(|(_, window_id)| *window_id)
+                                .collect::<Vec<_>>(),
+                        )
+                    ),
+                    "2026-09-01T22:47:53Z"
+                )
                 .is_empty(),
             "and it is idempotent — a second pass changes nothing"
         );
@@ -28091,6 +28157,20 @@ mod tests {
             .collect()
     }
 
+    fn test_live_launch_owners(
+        monitor: &IssueMonitorState,
+        live: &BTreeSet<String>,
+    ) -> BTreeMap<String, u64> {
+        live.iter()
+            .filter_map(|window| {
+                monitor.launch_bindings.iter().find_map(|(bound, owner)| {
+                    issue_monitor_window_ids_match(bound, window)
+                        .then_some((window.clone(), *owner))
+                })
+            })
+            .collect()
+    }
+
     #[test]
     fn issue_5415_launch_ack_refuses_a_window_bound_to_another_issue() {
         let shared = "project-a::agent-shared";
@@ -28151,7 +28231,12 @@ mod tests {
 
             let stale = monitor.prefs();
             scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
-            monitor.reconcile_launch_bindings("project-a", &live_windows(&[shared]), now);
+            monitor.reconcile_launch_bindings(
+                "project-a",
+                &live_windows(&[shared]),
+                &BTreeMap::from([(shared.to_string(), 43)]),
+                now,
+            );
 
             // The authoritative scan commits by rebasing on the pre-scan prefs.
             // Its repaired loser must not reclaim the true owner's pane there.
@@ -28177,13 +28262,23 @@ mod tests {
             launched_cohort(&[(42, "project-a::agent-1"), (43, "project-b::agent-1")]);
         let now = "2026-10-14T10:00:00Z";
         scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
-        monitor.reconcile_launch_bindings("project-a", &live_windows(&["project-a::agent-1"]), now);
+        monitor.reconcile_launch_bindings(
+            "project-a",
+            &live_windows(&["project-a::agent-1"]),
+            &test_live_launch_owners(&monitor, &live_windows(&["project-a::agent-1"])),
+            now,
+        );
         assert_eq!(monitor.active_count(), 2);
         monitor.complete_active_launch_at(42, "project-a::agent-2", now);
         let ack = monitor.launch_confirmations.get(&42).unwrap().clone();
         monitor.complete_active_launch_at(42, "project-a::agent-2", "2026-10-14T10:01:00Z");
         scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], now);
-        monitor.reconcile_launch_bindings("project-a", &live_windows(&["project-a::agent-2"]), now);
+        monitor.reconcile_launch_bindings(
+            "project-a",
+            &live_windows(&["project-a::agent-2"]),
+            &test_live_launch_owners(&monitor, &live_windows(&["project-a::agent-2"])),
+            now,
+        );
 
         assert_eq!(monitor.launch_confirmations.get(&42), Some(&ack));
         assert_eq!(
@@ -28250,6 +28345,7 @@ mod tests {
         let reconciliation = restored.reconcile_launch_bindings(
             "project-a",
             &live,
+            &test_live_launch_owners(&restored, &live),
             &chrono::Utc::now().to_rfc3339(),
         );
 
@@ -28282,6 +28378,210 @@ mod tests {
                 MonitorInboxState::Launched
             );
         }
+    }
+
+    #[test]
+    fn issue_4783_reused_agent_87_does_not_readopt_issue_5023() {
+        let window = "project-a::agent-87";
+        let mut prefs = launched_monitor(5023, window).prefs();
+        let stale_prefs = prefs.clone();
+        prefs.launched_issues.clear();
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let mut observed = idle_observation(window, Some(4783), WindowState::Running, false);
+        observed.session_id = Some("Elvor".into());
+        monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, vec![observed]));
+
+        assert!(monitor
+            .readopt_live_launch_bindings(&BTreeMap::from([(window.to_string(), 4783)]), IDLE_NOW)
+            .is_empty());
+        assert_eq!(monitor.launched_window_id(5023), None);
+        assert_eq!(monitor.conflicting_launch_window_owner(4783, window), None);
+        monitor.complete_active_launch_at(4783, window, IDLE_NOW);
+        assert_eq!(monitor.launched_window_id(4783).as_deref(), Some(window));
+        monitor.rebase_daemon_driver_prefs(&stale_prefs);
+        assert!(monitor
+            .readopt_live_launch_bindings(
+                &BTreeMap::from([(window.to_string(), 4783)]),
+                "2026-09-07T04:00:01Z"
+            )
+            .is_empty());
+        assert_eq!(monitor.launched_window_id(5023), None);
+        assert_eq!(monitor.launched_window_id(4783).as_deref(), Some(window));
+    }
+
+    #[test]
+    fn issue_4783_revoking_launch_cannot_rebind_to_a_reused_or_unproven_window() {
+        let window = "project-a::agent-87";
+        for observed_owner in [4783, 5023] {
+            let mut monitor = launched_monitor(5023, "project-a::old");
+            monitor.launch_bindings.insert(window.into(), 5023);
+            let observed_at = chrono::Utc::now().to_rfc3339();
+            let mut authenticated =
+                idle_observation(window, Some(5023), WindowState::Running, false);
+            authenticated.session_id = Some("authenticated-predecessor".into());
+            monitor.record_window_snapshot(idle_snapshot(&observed_at, vec![authenticated]));
+            monitor.record_verified_live_launch_owners(
+                &BTreeMap::from([(window.into(), 5023)]),
+                &observed_at,
+            );
+            // A changed observation must discard the old proof even when its
+            // timestamp is unchanged, including an unreadable replacement Session.
+            monitor.record_window_snapshot(idle_snapshot(
+                &observed_at,
+                vec![idle_observation(
+                    window,
+                    Some(observed_owner),
+                    WindowState::Running,
+                    false,
+                )],
+            ));
+
+            monitor.record_launch_failed(5023, "stopped: operator revoked the launch");
+
+            assert_eq!(
+                monitor.launched_window_id(5023),
+                None,
+                "raw window identity cannot prove a survivor for owner {observed_owner}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_4783_binding_refusal_is_a_row_diagnostic() {
+        let window = "project-a::agent-87";
+        let mut monitor = launched_monitor(5023, window);
+        monitor.config.max_active = 2;
+        monitor.terminal_queue_push(&[4783], "test", IDLE_NOW);
+        monitor.record_candidate(issue(4783));
+        assert!(monitor.apply_confirmed_claim(
+            4783,
+            "claim-4783",
+            "host/session",
+            "effect-4783",
+            IDLE_NOW
+        ));
+        let delivery = monitor.pending_launch_deliveries.front_mut().unwrap();
+        delivery.materialized_window_id = Some(window.into());
+        delivery.workspace_durable_window_id = Some(window.into());
+
+        assert!(!monitor.complete_active_launch_delivery(4783, window, Some("launch:effect-4783")));
+
+        assert_eq!(monitor.last_error, None);
+        assert!(monitor
+            .inbox_view_at(IDLE_NOW)
+            .into_iter()
+            .find(|item| item.issue.number == 4783)
+            .unwrap()
+            .error_message
+            .as_deref()
+            .is_some_and(|error| error.contains("already bound to issue #5023")));
+        let mut recovered_without_scan = monitor.clone();
+        recovered_without_scan
+            .readopt_live_launch_bindings(&BTreeMap::from([(window.to_string(), 4783)]), IDLE_NOW);
+        assert_eq!(
+            recovered_without_scan
+                .inbox_view_at(IDLE_NOW)
+                .into_iter()
+                .find(|item| item.issue.number == 4783)
+                .unwrap()
+                .error_message,
+            None,
+            "resolved binding conflicts disappear without waiting for another scan"
+        );
+        monitor.record_candidate(issue(4783));
+        assert!(
+            monitor
+                .inbox_view_at(IDLE_NOW)
+                .iter()
+                .find(|item| item.issue.number == 4783)
+                .unwrap()
+                .error_message
+                .is_some(),
+            "candidate refresh must retain a local refusal until recovery"
+        );
+        monitor
+            .readopt_live_launch_bindings(&BTreeMap::from([(window.to_string(), 4783)]), IDLE_NOW);
+        assert_eq!(
+            monitor
+                .inbox_view_at(IDLE_NOW)
+                .iter()
+                .find(|item| item.issue.number == 4783)
+                .unwrap()
+                .error_message,
+            None
+        );
+    }
+
+    #[test]
+    fn issue_4783_own_claim_without_session_proof_cannot_readopt() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launch_bindings: BTreeMap::from([("tab-1::agent-87".into(), 5023)]),
+                ..Default::default()
+            },
+        );
+        monitor.record_candidate(issue(5023));
+        assert_eq!(
+            monitor.inbox_item(5023).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(monitor.record_blocked_by_claim(
+            issue(5023),
+            owner_on_this_host(1),
+            "2026-10-16T01:00:00Z",
+            Some("old-claim")
+        ));
+        assert_eq!(monitor.launched_window_id(5023), None);
+        assert!(monitor.active_issue_numbers().is_empty());
+    }
+
+    #[test]
+    fn issue_4783_old_owner_observation_cannot_revoke_a_new_ack() {
+        let window = "tab-1::agent-87";
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_candidate(issue(4783));
+        monitor.complete_active_launch_at(4783, window, "2026-10-15T00:01:00Z");
+        monitor.record_window_snapshot(idle_snapshot(
+            "2026-10-15T00:00:00Z",
+            vec![idle_observation(
+                window,
+                Some(5023),
+                WindowState::Running,
+                false,
+            )],
+        ));
+
+        monitor.readopt_live_launch_bindings(
+            &BTreeMap::from([(window.to_string(), 5023)]),
+            "2026-10-15T00:00:00Z",
+        );
+
+        assert_eq!(monitor.launched_window_id(4783).as_deref(), Some(window));
+        assert_eq!(monitor.prefs().launch_bindings.get(window), Some(&4783));
+        assert_eq!(
+            monitor.inbox_item(4783).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        let mut prefs = monitor.prefs();
+        prefs.launched_issues.clear();
+        let mut recovered = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        recovered.record_window_snapshot(idle_snapshot(
+            "2026-10-15T00:02:00Z",
+            vec![idle_observation(
+                window,
+                Some(4783),
+                WindowState::Running,
+                false,
+            )],
+        ));
+        assert_eq!(
+            recovered.readopt_live_launch_bindings(
+                &BTreeMap::from([(window.to_string(), 4783)]),
+                "2026-10-15T00:02:00Z"
+            ),
+            vec![4783]
+        );
     }
 
     /// Issue #3883 AC-2 / Issue #4328: reducing the admission cap preserves
@@ -28317,6 +28617,7 @@ mod tests {
         let reconciliation = restored.reconcile_launch_bindings(
             "project-a",
             &live,
+            &test_live_launch_owners(&restored, &live),
             &chrono::Utc::now().to_rfc3339(),
         );
         assert!(reconciliation.readopted.is_empty());
@@ -28350,6 +28651,7 @@ mod tests {
         let reconciliation = restored.reconcile_launch_bindings(
             "project-a",
             &live_windows(&["project-a::agent-2"]),
+            &test_live_launch_owners(&restored, &live_windows(&["project-a::agent-2"])),
             &chrono::Utc::now().to_rfc3339(),
         );
 
@@ -28383,6 +28685,7 @@ mod tests {
         let foreign_outcome = foreign.reconcile_launch_bindings(
             "project-a",
             &BTreeSet::new(),
+            &test_live_launch_owners(&foreign, &BTreeSet::new()),
             &chrono::Utc::now().to_rfc3339(),
         );
         assert!(
@@ -28437,13 +28740,19 @@ mod tests {
         // judgement accepts, so the canvas reports both windows: the duplicate
         // has stopped, the implementing one is still running.
         let observed_at = chrono::Utc::now().to_rfc3339();
-        monitor.record_window_snapshot(pane_snapshot(
+        let snapshot = pane_snapshot(
             &observed_at,
             vec![
                 live_pane_observation("tab-1::agent-1343", 4777, WindowState::Running),
                 live_pane_observation("tab-1::agent-1345", 4777, WindowState::Stopped),
             ],
-        ));
+        );
+        monitor.record_window_snapshot(snapshot.clone());
+        monitor.record_verified_live_launch_owners(
+            &BTreeMap::from([("tab-1::agent-1343".into(), 4777)]),
+            &observed_at,
+        );
+        monitor.record_window_snapshot(snapshot);
 
         // The PM revokes the duplicate launch. `issue.monitor.stop` writes
         // `stopped: <reason>`; "duplicate" in the message would instead reach the
@@ -28504,6 +28813,7 @@ mod tests {
         monitor.reconcile_launch_bindings(
             "project-a",
             &live_windows(&["project-a::agent-1343"]),
+            &test_live_launch_owners(&monitor, &live_windows(&["project-a::agent-1343"])),
             now,
         );
 
@@ -28547,7 +28857,10 @@ mod tests {
         assert!(restored.prefs().launch_bindings.is_empty());
         assert!(restored.active_issue_numbers().is_empty());
         assert!(restored
-            .readopt_live_launch_bindings(&live_windows(&["project-a::agent-54"]))
+            .readopt_live_launch_bindings(
+                &test_live_launch_owners(&restored, &live_windows(&["project-a::agent-54"])),
+                "2026-09-10T02:52:15Z"
+            )
             .is_empty());
         assert!(restored.active_issue_numbers().is_empty());
     }
@@ -28599,7 +28912,12 @@ mod tests {
             "project-a::agent-3",
             "project-a::agent-4",
         ]);
-        restarted.reconcile_launch_bindings("project-a", &live, &chrono::Utc::now().to_rfc3339());
+        restarted.reconcile_launch_bindings(
+            "project-a",
+            &live,
+            &test_live_launch_owners(&restarted, &live),
+            &chrono::Utc::now().to_rfc3339(),
+        );
 
         restarted.clear_provider_quota_hold(
             "codex",
@@ -32513,7 +32831,10 @@ mod tests {
         );
         assert_eq!(monitor.queued_issue_numbers(), vec![42]);
         assert!(monitor
-            .readopt_live_launch_bindings(&live_windows(&["tab-1::agent-old"]))
+            .readopt_live_launch_bindings(
+                &test_live_launch_owners(&monitor, &live_windows(&["tab-1::agent-old"])),
+                "2026-09-12T00:00:01Z"
+            )
             .is_empty());
         assert_eq!(monitor.active_count(), 0);
         daemon.rebase_daemon_driver_prefs(&prefs);
@@ -32523,7 +32844,10 @@ mod tests {
             "a stale daemon cannot resurrect the revoked launch"
         );
         assert!(daemon
-            .readopt_live_launch_bindings(&live_windows(&["tab-1::agent-old"]))
+            .readopt_live_launch_bindings(
+                &test_live_launch_owners(&daemon, &live_windows(&["tab-1::agent-old"])),
+                "2026-09-12T00:00:01Z"
+            )
             .is_empty());
     }
 
@@ -33948,6 +34272,10 @@ mod tests {
         let mut holder = idle_observation("tab-1::holder", Some(42), WindowState::Running, false);
         holder.session_id = Some("holder-session".into());
         monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, vec![holder]));
+        monitor.record_verified_live_launch_owners(
+            &BTreeMap::from([("tab-1::holder".into(), 42)]),
+            IDLE_NOW,
+        );
 
         let outcome = monitor.reconcile_idle_windows(&observed, IDLE_NOW);
 
@@ -33970,6 +34298,10 @@ mod tests {
                 123,
                 1,
                 BTreeSet::new(),
+            );
+            monitor.record_verified_live_launch_owners(
+                &BTreeMap::from([("tab-1::survivor".into(), 42)]),
+                IDLE_NOW,
             );
 
             let outcome = monitor.reconcile_idle_windows(&observed, IDLE_NOW);
@@ -38385,6 +38717,53 @@ mod tests {
     }
 
     #[test]
+    fn issue_4783_next_scan_requeues_settled_delivery_with_unchecked_acceptance() {
+        let mut monitor = launched_monitor_for_issue(checked_issue(42), "tab-1::agent-42");
+        monitor.record_attempt(42);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+        monitor.record_autonomous_heartbeat(42, "2026-06-26T00:00:00Z");
+        let attempts = monitor.attempt_count(42);
+        let target = stop_target(&monitor, 42);
+
+        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+        assert!(monitor.queued_issue_numbers().is_empty());
+        let mut candidate = issue(42);
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: remaining work\n".into());
+        scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
+
+        assert_eq!(monitor.queued_issue_numbers(), vec![42]);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(monitor.attempt_count(42), attempts);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert_eq!(
+            monitor.prefs().queued_launch_session_strategies.get(&42),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+    }
+
+    #[test]
+    fn issue_4783_next_scan_does_not_requeue_checked_settled_delivery() {
+        let candidate = checked_issue(42);
+        let mut monitor = launched_monitor_for_issue(candidate.clone(), "tab-1::agent-42");
+        let target = stop_target(&monitor, 42);
+        assert_eq!(monitor.settle_exact_terminal_delivery(&target), Ok(42));
+
+        scan_issue_monitor_candidates(&mut monitor, &[candidate], "2026-06-26T00:01:00Z");
+
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+    }
+
+    #[test]
     fn settle_exact_terminal_delivery_refuses_stale_identity() {
         let window_id = "tab-1::agent-42";
         let mut monitor = launched_monitor(42, window_id);
@@ -42756,6 +43135,10 @@ mod tests {
                 idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
             ],
         ));
+        monitor.record_verified_live_launch_owners(
+            &BTreeMap::from([("tab-1::impl-41".into(), 41)]),
+            IDLE_NOW,
+        );
         let outcome = monitor.reconcile_idle_windows(&settlements(&[]), IDLE_NOW);
         assert_eq!(outcome.rebound, vec![(41, "tab-1::impl-41".to_string())]);
         assert!(outcome.released.is_empty());
@@ -43251,6 +43634,16 @@ mod tests {
         );
         assert_eq!(monitor.active_count(), 1);
 
+        // A fresh scan proves the live Session before claim authorship can
+        // preserve the recovered launch; the claim alone cannot restore it.
+        assert_eq!(
+            monitor.readopt_live_launch_bindings(
+                &BTreeMap::from([("tab-1::agent-348".to_string(), 4306)]),
+                next_scan_at,
+            ),
+            vec![4306]
+        );
+
         // AC-2: acquiring the claim again returns the comment this Monitor
         // wrote at 10:07:34 as the winner. It is not a foreign hold.
         assert!(
@@ -43267,7 +43660,7 @@ mod tests {
         assert_eq!(
             repaired.launched_window_id.as_deref(),
             Some("tab-1::agent-348"),
-            "the row is repaired from the binding ledger, not dropped"
+            "verified live ownership restores the row from its binding ledger"
         );
         assert_eq!(repaired.blocked_by_owner, None);
         assert_eq!(repaired.claim_expires_at, None);
@@ -43376,7 +43769,8 @@ mod tests {
 
     /// Issue #4852 AC-2: after a daemon restart the claim comment the earlier
     /// pid wrote comes back as the winner. Same host, same user: it is this
-    /// Monitor's own claim, so the bound launch is readopted, never parked.
+    /// Monitor's own claim. A launch restored from verified Session evidence
+    /// remains active rather than being parked as a foreign claim.
     #[test]
     fn issue_4852_a_claim_from_an_earlier_pid_of_this_host_is_own() {
         let mut monitor = IssueMonitorState::with_prefs(
@@ -43403,6 +43797,13 @@ mod tests {
         assert_eq!(
             monitor.requeue_window_at("tab-1::agent-348", "2026-10-01T10:10:09Z"),
             Some(4740)
+        );
+        assert_eq!(
+            monitor.readopt_live_launch_bindings(
+                &BTreeMap::from([("tab-1::agent-348".to_string(), 4740)]),
+                "2026-10-01T10:10:10Z",
+            ),
+            vec![4740]
         );
 
         assert!(
@@ -43720,6 +44121,10 @@ mod tests {
             )],
         ));
 
+        monitor.readopt_live_launch_bindings(
+            &BTreeMap::from([("tab-1::agent-353".to_string(), 4308)]),
+            &now,
+        );
         let outcome = monitor.reconcile_idle_windows(
             &settlements(&[(4308, IssueMonitorExecutionSettlement::Active)]),
             &now,

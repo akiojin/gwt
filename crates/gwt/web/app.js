@@ -824,7 +824,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         handleProjectIndexSearchResults,
         handleProjectIndexSearchError,
         mountProjectIndexSurface,
-        indexSearchStateMap,
+        disposeIndexSearchWindow,
         pendingIndexOpenTargetsByPreset,
         getIndexStatus,
       } = createProjectIndexSearchSurface({
@@ -4937,7 +4937,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                     branchListStateMap.delete(windowId);
                     boardStateMap.delete(windowId);
                     logStateMap.delete(windowId);
-                    indexSearchStateMap.delete(windowId);
+                    disposeIndexSearchWindow(windowId);
                     clearKnowledgeBridgeState(windowId);
                     workspaceOverviewSurface.deleteState(windowId);
                     clearBranchCleanupForWindow(windowId);

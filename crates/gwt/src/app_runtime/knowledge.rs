@@ -321,6 +321,48 @@ mod related_snapshot_cache_tests {
         }
     }
 
+    #[test]
+    fn related_session_dedupe_preserves_work_identity_without_remaining_agents() {
+        let mut older = related_work("work-session-older-ledger");
+        older.agents.push(gwt::KnowledgeRelatedAgentView {
+            session_id: "older-ledger".to_string(),
+            agent_id: Some("codex".to_string()),
+            display_name: None,
+            updated_at: older.updated_at.clone(),
+            sessions: vec![gwt::KnowledgeRelatedSessionView {
+                agent_session_id: "same-conversation".to_string(),
+                started_at: older.updated_at.clone(),
+                is_active: false,
+                resumable: true,
+            }],
+        });
+        let mut newer = older.clone();
+        newer.id = "newer-work".to_string();
+        newer.updated_at = "2026-08-04T00:00:00Z".to_string();
+        newer.agents[0].session_id = "newer-ledger".to_string();
+        let mut synthetic = older.clone();
+        synthetic.id = "work-session-synthetic-ledger".to_string();
+        let mut works = vec![older, newer, synthetic];
+
+        dedupe_related_work_sessions(
+            &mut works,
+            &HashMap::new(),
+            &HashSet::from(["work-session-older-ledger", "newer-work"]),
+        );
+
+        assert_eq!(
+            works
+                .iter()
+                .map(|work| work.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["work-session-older-ledger", "newer-work"],
+            "deduplicating conversations must not hide a persisted Work"
+        );
+        assert!(works[0].agents.is_empty());
+        assert_eq!(related_session_count(&works), 1);
+        assert_eq!(works[1].agents[0].session_id, "newer-ledger");
+    }
+
     fn search_view(number: u64) -> gwt::KnowledgeBridgeView {
         gwt::KnowledgeBridgeView {
             kind: KnowledgeKind::Issue,
@@ -1088,9 +1130,13 @@ fn augment_knowledge_bridge_related_works(
             .push(knowledge_related_work_from_session(session));
     }
 
+    let persisted_work_ids = work_items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<HashSet<_>>();
     for works in related_by_number.values_mut() {
         works.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-        dedupe_related_work_sessions(works, &session_index);
+        dedupe_related_work_sessions(works, &session_index, &persisted_work_ids);
     }
 
     apply_knowledge_bridge_related_works(view, &related_by_number);
@@ -1331,6 +1377,7 @@ struct RelatedSessionRank {
 fn dedupe_related_work_sessions(
     works: &mut Vec<gwt::KnowledgeRelatedWorkView>,
     session_index: &HashMap<&str, &gwt_agent::Session>,
+    persisted_work_ids: &HashSet<&str>,
 ) {
     let mut best_by_conversation: HashMap<String, (RelatedSessionRank, RelatedSessionSlot)> =
         HashMap::new();
@@ -1435,7 +1482,11 @@ fn dedupe_related_work_sessions(
             related_action_key_from_parts(&worktree, &branch, agent)
                 .is_none_or(|action_key| !action_keys_with_kept_sessions.contains(&action_key))
         });
-        !work_had_sessions || !work.agents.is_empty()
+        // Session dedupe must not erase a persisted Work's lifecycle identity.
+        // Synthetic Session-only rows may still disappear with their duplicates.
+        persisted_work_ids.contains(work.id.as_str())
+            || !work_had_sessions
+            || !work.agents.is_empty()
     });
 }
 
