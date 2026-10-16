@@ -42,6 +42,8 @@ pub(super) struct AttemptRecord {
     created_at: chrono::DateTime<chrono::Utc>,
     watchdog_token_hash: String,
     runner_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runner_started_at: Option<u64>,
     content_hash: String,
 }
 
@@ -291,6 +293,7 @@ pub(super) fn begin_for_caller(
             created_at: chrono::Utc::now(),
             watchdog_token_hash: digest(token.as_bytes()),
             runner_pid: std::process::id(),
+            runner_started_at: crate::process::host_process_start_time(std::process::id()),
             content_hash: String::new(),
         };
         save(worktree, &mut record)?;
@@ -348,6 +351,7 @@ fn settle_interrupted_under_lease(
             interruption::RunLifecycle {
                 status: interruption::RunStatus::Running,
                 runner_pid: record.runner_pid,
+                runner_started_at: record.runner_started_at,
                 watchdog_token_hash: record.watchdog_token_hash.clone(),
                 current_command: None,
                 reason: None,
@@ -467,7 +471,8 @@ fn bound_attempt(
     Ok(Some(attempt))
 }
 
-/// Call under the trusted lease before inferring death from the runner PID.
+/// Call under the trusted lease; settle the exact dead attempt and its queue
+/// reservation together with its VRR, including the final-write gap.
 pub(super) fn recover_unfinished_run(
     worktree: &Path,
     record: &super::VerificationRunRecord,
@@ -475,8 +480,12 @@ pub(super) fn recover_unfinished_run(
     let Some(mut attempt) = bound_attempt(worktree, record)? else {
         return Ok(false);
     };
-    if attempt.status == AttemptStatus::Running && record.lifecycle.is_none() {
-        if crate::process::is_host_process_alive(attempt.runner_pid) {
+    if attempt.status == AttemptStatus::Running {
+        if interruption::runner_is_alive(
+            attempt.runner_pid,
+            attempt.runner_started_at,
+            attempt.created_at,
+        ) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "the previous verification runner is unsettled; wait for its terminal result before retrying (its watchdog may still be recording an external termination)",
@@ -951,6 +960,64 @@ mod tests {
             super::super::load(repo.path()).unwrap().unwrap(),
             interrupted
         );
+    }
+
+    #[test]
+    fn successor_recovers_reused_runner_attempt_and_its_reservation() {
+        let repo = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(runtime.path());
+        let coordinator = crate::cli::verification_lease::open_coordinator().unwrap();
+        let key = TargetKey::verification("mine", "worktree");
+        // Both the ordinary running record and the final VRR/control write gap
+        // must settle after a restart without relying on the old watchdog.
+        for with_lifecycle in [true, false] {
+            let attempt =
+                begin_for_caller(repo.path(), "predecessor", &authority(), &key, &[], "token")
+                    .unwrap();
+            let mut record = super::super::tests::passing_record("predecessor", "unused");
+            record.format_version = Some(super::super::VERIFICATION_FORMAT_VERSION);
+            if with_lifecycle {
+                record.lifecycle = Some(interruption::RunLifecycle::running("token"));
+            }
+            let mut document = serde_json::to_value(record).unwrap();
+            document["verification_attempt_id"] = attempt.id().into();
+            let record = serde_json::from_value(document).unwrap();
+            attempt.mark_running("vr-test").unwrap();
+            let mut control = load(repo.path(), attempt.id()).unwrap().unwrap();
+            let mut document = serde_json::to_value(&control).unwrap();
+            document["runner_started_at"] =
+                (crate::process::host_process_start_time(std::process::id()).unwrap() + 1).into();
+            control = serde_json::from_value(document).unwrap();
+            save(repo.path(), &mut control).unwrap();
+            let check = || attempt.cancelled().map_err(Into::into);
+            coordinator
+                .reserve_heavy_for_attempt(
+                    &key,
+                    JobPriority::ManualRebuild,
+                    Duration::from_secs(600),
+                    None,
+                    &gwt_core::index_coordinator::HeavyAttempt {
+                        id: attempt.id(),
+                        check_cancelled: &check,
+                    },
+                )
+                .unwrap();
+            super::super::save(repo.path(), &record).unwrap();
+
+            let (completed, _) = super::super::run_verification(
+                repo.path(),
+                "successor",
+                &["git --version".to_string()],
+            )
+            .unwrap();
+            assert!(completed.all_passed);
+            assert_eq!(
+                load(repo.path(), attempt.id()).unwrap().unwrap().status,
+                AttemptStatus::Interrupted
+            );
+            assert!(!coordinator.heavy_reservation_path(&key).exists());
+        }
     }
 
     #[test]
