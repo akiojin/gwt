@@ -413,6 +413,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       let inputTraceSeq = 0;
 
       let socket = null;
+      let socketInputHandoff = null;
       let hubSocket = null;
       let hubReconnectTimer = null;
       const pendingHubMessages = [];
@@ -960,6 +961,15 @@ import { createUiStateStore } from "/ui-state-store.js";
           socket.send(JSON.stringify(message));
           return "sent";
         }
+        // Recovery fences the old receive path immediately, but input can
+        // still use that same live Project connection until replacement OPEN.
+        if ((message.kind === "terminal_input" || message.kind === "pane_send_input")
+          && socketInputHandoff?.projectKey === activeProjectKey()
+          && socketProjectKey === activeProjectKey()
+          && socketInputHandoff.socket.readyState === WebSocket.OPEN) {
+          socketInputHandoff.socket.send(JSON.stringify(message));
+          return "sent";
+        }
         // Keystrokes depend on the program's current prompt. Never replay
         // them after reconnecting into a potentially different prompt (#4941).
         if (message.kind === "terminal_input" || message.kind === "pane_send_input") {
@@ -1259,6 +1269,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // Project. Show the path-free not-found view and stop reconnecting.
       function showProjectRouteNotFound() {
         routeProjectMissing = true;
+        closeSocketInputHandoff();
         for (const connection of [socket, hubSocket]) {
           try { connection?.close(); } catch { /* already closed */ }
         }
@@ -1284,7 +1295,14 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (socketProjectKey) requestVisiblePmReports();
       }
 
+      function closeSocketInputHandoff() {
+        const handoff = socketInputHandoff;
+        socketInputHandoff = null;
+        handoff?.socket.close();
+      }
+
       function handleSocketOpen(recoverSnapshots = false) {
+        closeSocketInputHandoff();
         socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcherGeneration += 1;
         const ownGeneration = socketReceiveDispatcherGeneration;
@@ -1303,7 +1321,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             if (ownGeneration !== socketReceiveDispatcherGeneration) return;
             // A native receive backlog precedes snapshots on the old socket.
             // Replace the project transport on foreground recovery to discard it.
-            if (reason === "visible" && socketProjectKey) connectSocket(true);
+            if ((reason === "visible" || reason === "overflow") && socketProjectKey) connectSocket(true);
             else requestSocketSnapshots();
           },
           // Issue #3365 — a receive() failure keeps the event stream alive but
@@ -1489,6 +1507,12 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         const previousSocket = socket;
+        if (force === true && socketProjectKey === projectKey) {
+          if (previousSocket?.readyState === WebSocket.OPEN && previousSocket !== hubSocket) {
+            closeSocketInputHandoff();
+            socketInputHandoff = { socket: previousSocket, projectKey };
+          }
+        } else closeSocketInputHandoff();
         if (force === true) closeProjectController.connectionLost();
         socket = null;
         socketReceiveDispatcherGeneration += 1;
@@ -1496,7 +1520,8 @@ import { createUiStateStore } from "/ui-state-store.js";
         socketReceiveDispatcher = null;
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = null;
-        if (previousSocket && previousSocket !== hubSocket && socketProjectKey) previousSocket.close();
+        if (previousSocket && previousSocket !== hubSocket && socketProjectKey
+          && previousSocket !== socketInputHandoff?.socket) previousSocket.close();
         socketProjectKey = projectKey;
         socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;
         setConnectionState(false);
@@ -2101,6 +2126,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         onClosed: (projectKey) => {
           if (projectKey !== routeProjectKey) return;
           routeProjectMissing = true;
+          closeSocketInputHandoff();
           if (reconnectTimer) clearTimeout(reconnectTimer);
           if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
           const oldSocket = socket;

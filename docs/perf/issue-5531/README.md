@@ -13,12 +13,19 @@ requires 190, 766 and 3,070 operations for 64, 256 and 1,024 entries,
 preserving ordering and the existing scheduler without adding a deque.
 
 The receive queue now has a 2,048-entry cap. Overflow discards obsolete
-traffic and requests authoritative snapshots. Native foreground recovery
-also replaces the project connection: clearing the JavaScript queue alone
+traffic and requests authoritative snapshots. Both overflow and native
+foreground recovery replace the project connection: clearing the JavaScript queue alone
 leaves native WebSocket frames ahead of fresh snapshots. Existing socket
 identity and generation checks fence the abandoned transport. Recovery
 survives a replacement that fails before OPEN, and leaves the retained
 catalog connection in place.
+
+While the replacement connects, new terminal and pane input is sent immediately
+through the same project's still-open old connection. Its receive handlers are
+already fenced. Replacement OPEN closes that input handoff; failure before OPEN
+retains it for the recovery retry, and switching or closing projects closes it.
+Input is never queued or replayed against a later prompt. A real disconnection
+keeps the existing explicit input-drop behavior from Issue #4941.
 
 After OPEN, recovery reloads mounted read surfaces and preserves drafts.
 It does not replay sent mutations. An unconfirmed Board post remains
@@ -38,7 +45,9 @@ remain intact.
 - Run `scripts/diagnostics/issue-5531-browser-check.ps1` with `-Label before`
   or `-Label after`, `-BackgroundMilliseconds 1800000`, and
   `-BaselineRef bc175f05a2b730775e1f5302b3af0d588ba4470a`.
-  Both Operator themes run sequentially in real headed Chromium.
+  Both Operator themes run in real headed Chromium. Pass
+  `--project=chromium-dark` or `--project=chromium-light` to collect one theme
+  independently. Each accepted after theme has its own launch manifest.
 - Use this checkout's `target/debug/gwt.exe`, a fresh HOME, disabled PM and
   Issue Monitor, managed-hook fallback, and a recorded owned PID. Compare
   all ten measured frontend assets with the assets actually served.
@@ -66,8 +75,9 @@ remain intact.
   of snapshot/input recovery, which has a 15-second collection timeout.
 - Background/timed observations use CDP evaluation and trusted key events
   to avoid Playwright trace DOM snapshots delaying the measured operation.
-  Tracing remains enabled. Ordinary assertions and recovered screenshots
-  remain outside the timed interval.
+  Ordinary assertions and recovered screenshots remain outside the timed
+  interval. The local runner uses its configured `on-first-retry` trace policy
+  with zero retries; the archived successful runs do not claim an active trace.
 
 The comparison dispatcher is pinned to the baseline ref above, blob
 `e0f304b0131896cacc824027e2e70ed08ef5d1d1`. The archived before frontend and
@@ -98,14 +108,14 @@ updated harness to their exact digests.
 | --- | ---: | ---: | --- | --- |
 | Before, dark | 373,280 | 41,412 | unobserved / unobserved | timeout at 15,018 / unobserved |
 | Before, light | 647,408 | 98,951 | unobserved / unobserved | timeout at 15,008 / unobserved |
-| After, dark | 2,048 | 14,460 | 0 / 0 | 256 / 411 |
-| After, light | 2,048 | 2,695 | 0 / 0 | 458 / 621 |
+| After, dark | 2,048 | 14,503 | 0 / 0 | 455 / 605 |
+| After, light | 2,048 | 22,563 | 52 / 0 | 622 / 780 |
 
-Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,013ms (after-dark), 1,800,007ms (after-light).
-They sent 673,702, 686,642, 677,068, 699,203 frames respectively, including the final foreground-triggering burst.
+Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,018ms (after-dark), 1,800,018ms (after-light).
+They sent 673,702, 686,642, 671,400, 666,624 frames respectively, including the final foreground-triggering burst.
 
 The archived before observer gaps reached 55,033/100,924ms.
-Final after sender observation gaps stayed within 30,691/30,032ms.
+Final after sender observation gaps stayed within 30,882/30,507ms.
 Both final after runs passed, with zero console/page/fixture errors and no
 reported task of at least 50ms in either settled window.
 
@@ -124,7 +134,9 @@ evidence. The changed implementation must pass.
 Raw `before-dark.json`, `before-light.json`, `after-dark.json` and
 `after-light.json` contain durations, traffic counters, native visibility,
 long tasks, recovery timing and errors. Launch manifests bind each run to its
-owned PID, isolated HOME and LF-normalized input SHA-256 digests.
+owned PID, isolated HOME and LF-normalized input SHA-256 digests. The immutable
+baseline uses `before-launch.json`; accepted after themes use
+`after-dark-launch.json` and `after-light-launch.json` independently.
 
 `node docs/perf/issue-5531/verify.mjs` validates all four real 30-minute
 periods, source identity, continuing traffic and the after acceptance limits.
@@ -133,6 +145,16 @@ thread; its gaps are retained as negative evidence. All actual page samples
 must report hidden visibility. Canonical verification additionally executes
 fresh headed dark/light smoke and the existing Kanban auto-refresh regression.
 Short smokes record `acceptance_duration: false` and do not replace long runs.
+
+One post-review dark trial ended during background observation when CDP reported
+`Target page, context or browser has been closed`. It never reached foreground
+measurement. Its original stack, two hidden samples, and error counters are
+retained as `excluded-dark-target-closed*`; the closure cause is unknown. It is
+excluded from acceptance. The same inputs passed an independent two-minute
+diagnostic and the accepted full dark repeat. The accepted light and dark runs
+partly overlapped on the shared host, with independent browsers and fixtures.
+Each launch's exact input digests, continuing sender counters and physical
+foreground deadline are verified separately.
 
 Relaunch diagnostics reproduced late snapshots even with normal process
 priority. Passive timing showed native visibility at 146ms and backend

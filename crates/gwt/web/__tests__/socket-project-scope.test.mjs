@@ -25,7 +25,7 @@ function fixture({ routeProjectKey = null } = {}) {
   }
   const context = vm.createContext({
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
-    pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0,
+    pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0, socketInputHandoff: null,
     reconnectCallbacks: [],
     socketReceiveDispatcher: null, recoveryCenterController: null,
     closeResetCount: 0, attentionReportCount: 0,
@@ -76,6 +76,7 @@ function fixture({ routeProjectKey = null } = {}) {
   if (source.includes("function activeProjectKey(")) vm.runInContext(functionSource("activeProjectKey"), context);
   if (source.includes("function requestSocketSnapshots(")) vm.runInContext(functionSource("requestSocketSnapshots"), context);
   if (source.includes("function resyncSocketSurfaces(")) vm.runInContext(functionSource("resyncSocketSurfaces"), context);
+  if (source.includes("function closeSocketInputHandoff(")) vm.runInContext(functionSource("closeSocketInputHandoff"), context);
   const select = (key) => { context.appState = { active_tab_id: key, tabs: [{ id: key, project_key: key }] }; context.connectSocket(); };
   return { context, sockets, select, opened };
 }
@@ -200,14 +201,18 @@ test("receive recovery requests pane and open surface snapshots only on the owni
   context.recoveryCenterController = { reconnect() { recoveryLoads++; } };
   assert.equal(typeof old.onResync, "function", "overflow must have a snapshot recovery callback");
   old.onResync("overflow");
-  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "frontend_ready" }]);
+  assert.equal(sockets.length, 3, "overflow also fences the native receive backlog");
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
+  sockets.at(-1).open();
+  assert.equal(sockets[1].readyState, 3, "the input handoff ends when recovery opens");
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
   assert.deepEqual(context.resyncCalls, [
     ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
     ["profile", "pane-a"],
     ["index", "pane-a"], ["settings"],
   ]);
   assert.equal(recoveryLoads, 1, "a lost Recovery Center read is reissued");
-  sockets[1].close();
+  sockets.at(-1).close();
   context.connectSocket();
   sockets.at(-1).open();
   old.onResync("visible");
@@ -247,13 +252,19 @@ test("foreground recovery replaces the native backlog without replaying mutation
   const sentBeforeResume = oldSocket.sent.length;
   oldDispatcher.onResync("visible");
   assert.equal(sockets.length, 3, "fresh snapshots need a transport without native buffered frames");
-  assert.equal(oldSocket.readyState, 3);
+  assert.equal(oldSocket.readyState, 1, "keep the live input path until replacement OPEN");
   assert.equal(oldSocket.sent.length, sentBeforeResume, "do not append snapshots behind the native backlog");
   assert.equal(context.disposedDispatchers, 1);
   assert.equal(context.closeResetCount, 1, "the lost connection invalidates close preview authority");
   assert.equal(sockets[0].readyState, 0, "the retained catalog connection is untouched");
   const failedReplacement = sockets.at(-1);
   assert.equal(new URL(failedReplacement.url).searchParams.get("repo_hash"), projectA.project_key);
+  const input = { kind: "terminal_input", id: "pane-a", data: "x" };
+  const paneInput = { kind: "pane_send_input", session_id: "pane-a", text: "y" };
+  assert.equal(context.send(input), "sent");
+  assert.equal(context.send(paneInput), "sent");
+  assert.deepEqual(oldSocket.sent.slice(-2), [input, paneInput], "input is delivered live, never queued for another prompt");
+  assert.equal(context.pendingMessages.length, 0);
   oldSocket.handlers.message({ data: JSON.stringify({ kind: "terminal_output", id: "pane-a" }) });
   oldSocket.handlers.close();
   assert.deepEqual(context.received, [], "native messages from the old socket stay fenced");
@@ -262,7 +273,10 @@ test("foreground recovery replaces the native backlog without replaying mutation
   context.reconnectCallbacks.at(-1)();
   const replacement = sockets.at(-1);
   assert.notEqual(replacement, failedReplacement, "retry replaces a connection that failed before OPEN");
+  assert.equal(context.send(input), "sent", "a failed replacement keeps the same live input channel during retry");
   replacement.open();
+  assert.equal(oldSocket.readyState, 3, "release the old transport after the replacement opens");
+  assert.equal(context.droppedInputs, 0);
   assert.deepEqual(replacement.sent, [{ kind: "frontend_ready" }], "one full sync and no mutation replay");
   assert.deepEqual(context.resyncCalls, [
     ["board-logs", "pane-a"], ["branches", "pane-a"], ["knowledge", "pane-a"],
@@ -270,6 +284,23 @@ test("foreground recovery replaces the native backlog without replaying mutation
   ]);
   oldDispatcher.onResync("visible");
   assert.equal(sockets.length, 4, "a stale dispatcher cannot replace the new socket");
+});
+
+test("recovery input handoff closes on a project switch and never crosses scopes", () => {
+  const { context, sockets, select } = fixture();
+  select(projectA.project_key);
+  const old = sockets.at(-1);
+  old.open();
+  context.dispatcherOptions.at(-1).onResync("visible");
+  const pending = sockets.at(-1);
+  select("fedcba9876543210");
+  assert.equal(old.readyState, 3);
+  assert.equal(pending.readyState, 3);
+  const before = old.sent.length;
+  assert.equal(context.send({ kind: "terminal_input", id: "pane-b", data: "x" }), "unavailable");
+  assert.equal(old.sent.length, before, "the former project must never receive the new project's input");
+  sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
 });
 
 

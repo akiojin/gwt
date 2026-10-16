@@ -450,7 +450,7 @@ async function installBackend(page: Page, projectKey: string, root: string) {
   let timer: ReturnType<typeof setInterval> | undefined;
   const project = { id: "socket-load-project", project_key: projectKey, title: "Receive load", kind: "git" };
   const windows = paneIds.map((id, index) => ({
-    id, title: `Agent ${index + 1}`, preset: "agent", agent_id: "codex", agent_name: `Load${index + 1}`,
+    id, session_id: `load-session-${index + 1}`, title: `Agent ${index + 1}`, preset: "agent", agent_id: "codex", agent_name: `Load${index + 1}`,
     geometry: { x: 20 + index % 4 * 405, y: 70 + Math.floor(index / 4) * 420, width: 395, height: 390 },
     geometry_revision: 0, z_index: index + 1, status: "running", minimized: false, maximized: false,
     pre_maximize_geometry: null, persist: true, purpose_title: null, dynamic_title: null,

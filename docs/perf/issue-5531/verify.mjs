@@ -19,20 +19,20 @@ assert.equal(normalize(readFileSync(measuredHarness, "utf8"))
   .replace("26 controller", "per-event controller"), normalize(baselineSource(harnessPath)),
 "the archived multi-key harness differs from the pinned baseline only in its input probe and comment");
 for (const label of ["before", "after"]) {
-  const launch = read(`${label}-launch.json`);
-  assert.equal(launch.label, label);
-  assert.equal(launch.acceptance_duration, true);
-  for (const [path, hash] of Object.entries({
-    ...Object.fromEntries(Object.entries(launch.source_sha256).map(([name, hash]) => [`crates/gwt/web/${name}`, hash])),
-    ...launch.test_sha256,
-  })) {
-    const source = label === "before"
-      ? baselineSource(path)
-      : readFileSync(new URL(path, checkout), "utf8");
-    assert.equal(digest(source), hash,
-      `${label}: measured source changed: ${path}`);
-  }
   for (const theme of ["dark", "light"]) {
+    const launch = read(label === "before" ? "before-launch.json" : `after-${theme}-launch.json`);
+    assert.equal(launch.label, label);
+    assert.equal(launch.acceptance_duration, true);
+    for (const [path, hash] of Object.entries({
+      ...Object.fromEntries(Object.entries(launch.source_sha256).map(([name, hash]) => [`crates/gwt/web/${name}`, hash])),
+      ...launch.test_sha256,
+    })) {
+      const source = label === "before"
+        ? baselineSource(path)
+        : readFileSync(new URL(path, checkout), "utf8");
+      assert.equal(digest(source), hash,
+        `${label}: measured source changed: ${path}`);
+    }
     const run = read(`${label}-${theme}.json`);
     assert.equal(run.label, label);
     assert.equal(run.theme, theme);
@@ -75,7 +75,8 @@ for (const label of ["before", "after"]) {
       assert.equal(run.foreground_metrics_complete, true);
       assert.ok(Number.isFinite(run.input_ms) && run.input_ms <= 2000);
       assert.ok(Number.isFinite(run.snapshot_ms) && run.snapshot_ms <= 2000);
-      assert.ok(run.metrics.maxQueue <= 2048);
+      assert.ok(Number.isFinite(run.metrics.maxQueue) && run.metrics.maxQueue <= 2048);
+      assert.ok(Number.isFinite(run.metrics.resume_max_long_task_ms));
       assert.ok(Number.isFinite(run.metrics.settled_max_long_task_ms) && run.metrics.settled_max_long_task_ms < 200);
       assert.ok(run.ready_requests_after_resume > 0);
       assert.ok(run.metrics.resumes > 0);
