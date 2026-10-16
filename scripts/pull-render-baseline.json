@@ -43,7 +43,6 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_resume_agent_error\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_resume_agent_started\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_state\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_state_notice\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"applyBoardLogsReceiveEvent\",\"/board_entries\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"applyBoardLogsReceiveEvent\",\"/log_entries\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"applyBoardLogsReceiveEvent\",\"/log_entry_appended\"]",
@@ -134,6 +133,5 @@
   "[\"crates/gwt/web/settings-surface.js\",\"receive\",\"/custom_agent_error\"]",
   "[\"crates/gwt/web/settings-surface.js\",\"receive\",\"/custom_agent_saved\"]",
   "[\"crates/gwt/web/terminal-attachments.js\",\"receive\",\"/attachment_progress\"]",
-  "[\"crates/gwt/web/terminal-attachments.js\",\"receive\",\"/launch_progress\"]",
-  "[\"crates/gwt/web/workspace-state-notice.js\",\"receive\",\"\"]"
+  "[\"crates/gwt/web/terminal-attachments.js\",\"receive\",\"/launch_progress\"]"
 ]

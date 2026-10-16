@@ -1220,7 +1220,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // sync isolation). Console-only reporting left the user with a silently
       // stale minimap / window list until reload.
       const renderDegradationBanner = createRenderDegradationBanner({ document });
-      const workspaceStateNotice = createWorkspaceStateNotice({ document, send });
+      const { receive: applyWorkspaceStateNoticeReceiveEvent } = createWorkspaceStateNotice({ document, send });
 
       // Issue #3365 — owns renderedWorkspaceWindowsKey's lifecycle: the key is
       // committed only after a fully clean per-window sync, so a degraded
@@ -6296,7 +6296,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "workspace_state_notice":
-            workspaceStateNotice.receive(event.notice);
+            applyWorkspaceStateNoticeReceiveEvent(event.notice);
             break;
           case "workspace_state": {
             projectError = "";
