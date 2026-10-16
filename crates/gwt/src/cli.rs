@@ -85,6 +85,11 @@ pub use pr::types::{
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
 
+/// Dispatch already-read stdin through the standard JSON envelope path.
+pub fn dispatch_json_input<E: CliEnv>(env: &mut E, prog: &str, input: &str) -> i32 {
+    json_envelope::dispatch_input(env, prog, input, None)
+}
+
 /// Top-level argv parse result for the CLI. SPEC-1942 FR-088〜092: each top
 /// verb maps to one family-typed inner enum, so the parent enum stays compact
 /// variants and dispatch becomes a nested match.
@@ -768,6 +773,40 @@ mod tests {
     use gwt_github::{IssueNumber, IssueSnapshot, IssueState};
 
     use super::*;
+
+    #[test]
+    fn provided_json_input_keeps_envelope_validation_and_response_without_rereading_stdin() {
+        let temp = tempdir().unwrap();
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = "stdin was already read".to_string();
+
+        for input in [
+            "{",
+            r#"{"schema_version":1,"operation":"search","params":{"query":"admission","project_root":"/elsewhere"}}"#,
+        ] {
+            assert_eq!(dispatch_json_input(&mut env, "gwtd", input), 2);
+            assert!(env.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&env.stderr).starts_with("gwtd: "));
+            env.stderr.clear();
+        }
+
+        env.seed_run_log(273, "run log from provided JSON");
+        assert_eq!(
+            dispatch_json_input(
+                &mut env,
+                "gwtd",
+                r#"{"schema_version":1,"operation":"actions.logs","params":{"run_id":273}}"#,
+            ),
+            0
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["operation"], "actions.logs");
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["exit_code"], 0);
+        assert_eq!(payload["output"], "run log from provided JSON\n");
+        assert_eq!(env.run_log_call_log, vec![273]);
+        assert_eq!(env.stdin, "stdin was already read");
+    }
 
     #[test]
     fn render_helpers_include_issue_pr_and_review_details() {

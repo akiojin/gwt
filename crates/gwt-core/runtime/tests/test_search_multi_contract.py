@@ -1177,6 +1177,65 @@ class SearchMultiContractTests(unittest.TestCase):
 
 
 class SearchWorkerTests(unittest.TestCase):
+    def test_worker_retains_repo_generation_clients_and_closes_replaced_stores(self):
+        fake_chroma = mock.Mock()
+        clients = [mock.Mock() for _ in range(5)]
+        fake_chroma.PersistentClient.side_effect = clients
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(sys.modules, {"chromadb": fake_chroma}):
+            root = Path(tmp)
+            first = root / "memory.gen" / "gen-first"
+            second = root / "memory.gen" / "gen-second"
+            first.mkdir(parents=True)
+            second.mkdir()
+            with runner._search_worker_read_clients():
+                pair = runner._open_chroma_collection(first, runner.V2_MEMORY_COLLECTION)
+                runner._close_chroma_client(pair[0])
+                self.assertEqual(
+                    runner._open_chroma_collection(first, runner.V2_MEMORY_COLLECTION), pair
+                )
+                self.assertEqual(fake_chroma.PersistentClient.call_count, 1)
+                clients[0].close.assert_not_called()
+                replacement = runner._open_chroma_collection(
+                    second, runner.V2_MEMORY_COLLECTION
+                )
+                clients[0].close.assert_called_once()
+                runner._close_chroma_client(replacement[0])
+                clients[1].close.assert_not_called()
+                for store, collection in (
+                    (root / "memory", runner.V2_MEMORY_COLLECTION),
+                    (root / "file-index-v2" / "bases" / "base" / "store",
+                     runner.V2_FILES_CODE_COLLECTION),
+                ):
+                    client, _ = runner._open_chroma_collection(store, collection)
+                    runner._close_chroma_client(client)
+                    client.close.assert_called_once()
+            clients[1].close.assert_called_once()
+            direct, _ = runner._open_chroma_collection(second, runner.V2_MEMORY_COLLECTION)
+            runner._close_chroma_client(direct)
+            direct.close.assert_called_once()
+
+    def test_worker_retained_generation_clients_have_a_finite_limit(self):
+        fake_chroma = mock.Mock()
+        clients = [mock.Mock() for _ in range(3)]
+        fake_chroma.PersistentClient.side_effect = clients
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(sys.modules, {"chromadb": fake_chroma}), \
+             mock.patch.object(runner, "SEARCH_WORKER_READ_CLIENT_LIMIT", 2):
+            with runner._search_worker_read_clients():
+                for index in range(3):
+                    store = Path(tmp) / str(index) / "memory.gen" / "gen-active"
+                    store.mkdir(parents=True)
+                    client, _ = runner._open_chroma_collection(
+                        store, runner.V2_MEMORY_COLLECTION
+                    )
+                    runner._close_chroma_client(client)
+                clients[0].close.assert_called_once()
+                clients[1].close.assert_not_called()
+                clients[2].close.assert_not_called()
+            for client in clients:
+                client.close.assert_called_once()
+
     def test_worker_transport_failure_remains_retryable(self):
         args = argparse.Namespace(action="search-multi", qos=None,
                                   repo_hash=REPO_HASH, query="alpha")
@@ -1227,7 +1286,9 @@ class SearchWorkerTests(unittest.TestCase):
                            "--query", "alpha worker")
             cold_seconds = time.monotonic() - cold_started
             self.assertTrue(first["ok"])
-            self.assertTrue(first["scope_results"]["memory"]["memoryResults"])
+            self.assertTrue(
+                first.get("scope_results", {}).get("memory", {}).get("memoryResults"), first
+            )
             worker_pid = first["worker_pid"]
             try:
                 invoke("--action", "index-files")
@@ -1267,6 +1328,20 @@ class SearchWorkerTests(unittest.TestCase):
                                       "warm_model_load_ms": second["model_load_ms"]}), flush=True)
                     self.assertGreater(first["model_load_ms"], 0)
                     self.assertLessEqual(max(warm_seconds), 2.0)
+                db_path = runner.resolve_db_path(
+                    REPO_HASH, None, "memory", db_root=base / ".gwt" / "index"
+                )
+                client, collection = runner._open_chroma_collection(
+                    runner.resolve_active_store(db_path), runner.V2_MEMORY_COLLECTION
+                )
+                try:
+                    collection.delete(ids=collection.get()["ids"])
+                finally:
+                    runner._close_chroma_client(client)
+                corrupted = invoke("--action", "search-multi", "--scopes", "memory",
+                                   "--query", "beta update")
+                self.assertEqual(corrupted["worker_pid"], worker_pid)
+                self.assertEqual(corrupted["scopes"]["memory"]["state"], "corrupt")
             finally:
                 # This PID came from the worker launched by this isolated fixture.
                 import signal
