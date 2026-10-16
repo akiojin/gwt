@@ -14,7 +14,6 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"/hub_state\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/issue_monitor_toast\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/launch_progress\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/pm_status\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/project_agent_aggregate\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/project_not_found\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/project_open_error\"]",
