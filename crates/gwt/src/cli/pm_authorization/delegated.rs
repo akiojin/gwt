@@ -68,16 +68,16 @@ pub(super) fn validate(intent: &OperationIntent) -> io::Result<()> {
     crate::cli::json_envelope::parse_operation(&intent.operation, &intent.params)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     if intent.operation == "pr.close"
-        && !params
+        && params
             .get("number")
             .and_then(Value::as_u64)
-            .is_some_and(|number| number > 0)
+            .is_none_or(|number| number == 0)
         || intent.operation == "pm.message.send"
             && ["id", "text"].iter().any(|key| {
-                !params
+                params
                     .get(*key)
                     .and_then(Value::as_str)
-                    .is_some_and(|value| !value.trim().is_empty())
+                    .is_none_or(|value| value.trim().is_empty())
             })
     {
         return Err(io::Error::new(

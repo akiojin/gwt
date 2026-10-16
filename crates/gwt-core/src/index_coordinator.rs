@@ -2021,13 +2021,21 @@ fn try_acquire_heavy_storage(
     } else {
         None
     };
-    if heavy_claim_must_defer(root, me) {
+    if verification_pool && heavy_claim_must_defer(root, me) {
         return Ok(None);
     }
     let root_file = open_lock_file(&root.join("heavy.lock"))?;
     if !verification_pool {
         return match fs2::FileExt::try_lock_exclusive(&root_file) {
             Ok(()) => {
+                // A busy exclusive slot cannot grant anyone a turn. Inspect
+                // the queue only once it is free, avoiding a full registration
+                // scan on every poll by every waiting search. Enrollment has
+                // already happened, and the existing fairness rules still run
+                // under the physical lock before publishing any grant.
+                if heavy_claim_must_defer(root, me) {
+                    return Ok(None);
+                }
                 reconcile_orphaned_heavy_ticket(root, root);
                 if let Some(budgets) = disk_budgets {
                     if !disk_budgets_fit(budgets, &[])? {
@@ -3790,6 +3798,35 @@ mod tests {
         assert_eq!(verification.root(), verification_coordinator_root());
         assert_ne!(verification.heavy_lock_path(), index.heavy_lock_path());
         assert_ne!(verification.heavy_pending_dir(), index.heavy_pending_dir());
+    }
+
+    #[test]
+    fn busy_exclusive_heavy_probe_does_not_scan_pending_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::search("repo", None);
+        enroll_in_heavy_queue(
+            &coordinator.heavy_pending_dir(),
+            &key.file_stem(),
+            JobPriority::InteractiveSearch,
+        )
+        .unwrap();
+        let me = heavy_queue(&coordinator.heavy_pending_dir())
+            .unwrap()
+            .pop()
+            .unwrap();
+        let held = open_lock_file(&coordinator.heavy_lock_path()).unwrap();
+        fs2::FileExt::try_lock_exclusive(&held).unwrap();
+        REGISTRATION_SNAPSHOT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|_| panic!("busy slot must not scan the queue")));
+        });
+
+        assert!(
+            try_acquire_heavy_storage(coordinator.root(), &me, false, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(REGISTRATION_SNAPSHOT_HOOK.with(|hook| hook.borrow_mut().take().is_some()));
     }
 
     #[test]
