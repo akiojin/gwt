@@ -2179,7 +2179,7 @@ enum UserEvent {
     },
     IssueMonitorCapacityChanged {
         context: app_runtime::ProjectContext,
-        revision: u64,
+        revision: (u64, u64),
         update: gwt::agent_capacity::CapacityUpdate,
     },
     IssueMonitorDaemonStatus {
@@ -10585,7 +10585,7 @@ fn main() -> std::io::Result<()> {
     let usage_refresh = std::sync::Arc::new(tokio::sync::Notify::new());
     let capacity_projects = Arc::new(RwLock::new(Vec::<(
         app_runtime::ProjectContext,
-        u64,
+        (u64, u64),
         Option<gwt::agent_capacity::CapacityUpdate>,
     )>::new()));
     let usage_projects = Arc::new(RwLock::new(Vec::<PathBuf>::new()));
@@ -10645,8 +10645,14 @@ fn main() -> std::io::Result<()> {
                         .filter(|(old_context, _, _)| old_context == &context);
                     let update = gwt::agent_capacity::CapacityUpdate::read(&root, Some(&accepted));
                     let changed = prior
-                        .is_none_or(|(_, old_revision, _)| *old_revision != revision)
-                        || update.changed_from(prior.map(|(_, _, update)| update));
+                        .is_none_or(|(_, (control_revision, _), _)| *control_revision != revision.0)
+                        || update.changed_from(prior.map(|(_, _, update)| update))
+                        // A newer status may have rejected the preceding send.
+                        // Retry against that status, but not after our own
+                        // successful application already accepted this value.
+                        || prior.is_some_and(|(_, (_, status_revision), _)| {
+                            *status_revision != revision.1 && update.changed_from(Some(&accepted))
+                        });
                     if changed
                         && capacity_proxy
                             .send_event(UserEvent::IssueMonitorCapacityChanged {

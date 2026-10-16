@@ -1893,7 +1893,10 @@ fn issue_monitor_capacity_overlay_rejects_observations_before_control_or_reopen(
         state.issue_monitor_status_cache.borrow().as_ref(),
         Some(&initial)
     );
-    let revision = state.issue_monitor_list_revision.get();
+    let revision = (
+        state.issue_monitor_list_revision.get(),
+        state.issue_monitor_status_revision.get(),
+    );
     let mut replaced = context.clone();
     replaced.generation += 1;
     assert!(runtime
@@ -1908,6 +1911,91 @@ fn issue_monitor_capacity_overlay_rejects_observations_before_control_or_reopen(
     assert_eq!(
         state.issue_monitor_status_cache.borrow().as_ref(),
         Some(&measured)
+    );
+}
+
+#[test]
+fn issue_monitor_capacity_overlay_preserves_newer_daemon_limit_and_accepts_next_observation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![sample_project_tab(
+            "tab",
+            "Repo",
+            root.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab"),
+    );
+    let mut initial = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default()).status_view();
+    initial.max_active_agents = 7;
+    initial.max_active_agents_override = None;
+    initial.agent_capacity = gwt::agent_capacity::AgentCapacity {
+        measurement_complete: true,
+        recommended_worker_limit: 7,
+        ..Default::default()
+    };
+    runtime.issue_monitor_daemon_status_events(&root, Box::new(initial.clone()));
+    let (context, revision, accepted) = runtime.capacity_observation_contexts().pop().unwrap();
+    let old_update =
+        gwt::agent_capacity::CapacityUpdate::read_with(&root, accepted.as_ref(), |_| {
+            gwt::agent_capacity::AgentCapacity {
+                measurement_complete: false,
+                reason: "pending observation".into(),
+                ..initial.agent_capacity.clone()
+            }
+        });
+    assert_eq!(old_update.limits, Some((7, None)));
+
+    let mut newer = initial;
+    newer.max_active_agents = 4;
+    newer.agent_capacity.recommended_worker_limit = 4;
+    runtime.issue_monitor_daemon_status_events(&root, Box::new(newer));
+    runtime.issue_monitor_capacity_changed_events(&context, revision, old_update);
+    let state = runtime.project_state(&context).unwrap();
+    assert_eq!(
+        state
+            .issue_monitor_status_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .max_active_agents,
+        4,
+        "an old incomplete worker observation must not restore the prior Auto limit"
+    );
+
+    let (context, revision, accepted) = runtime.capacity_observation_contexts().pop().unwrap();
+    let next_update =
+        gwt::agent_capacity::CapacityUpdate::read_with(&root, accepted.as_ref(), |_| {
+            gwt::agent_capacity::AgentCapacity {
+                measurement_complete: true,
+                recommended_worker_limit: 5,
+                reason: "next observation".into(),
+                ..Default::default()
+            }
+        });
+    assert_eq!(
+        runtime
+            .issue_monitor_capacity_changed_events(&context, revision, next_update)
+            .len(),
+        1,
+        "the next worker observation must still be published"
+    );
+    assert_eq!(
+        state
+            .issue_monitor_status_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .max_active_agents,
+        5
     );
 }
 

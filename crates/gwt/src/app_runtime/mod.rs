@@ -10039,7 +10039,7 @@ impl AppRuntime {
         &self,
     ) -> Vec<(
         ProjectContext,
-        u64,
+        (u64, u64),
         Option<gwt::agent_capacity::CapacityUpdate>,
     )> {
         self.project_states
@@ -10048,7 +10048,10 @@ impl AppRuntime {
             .map(|state| {
                 (
                     state.context.clone(),
-                    state.issue_monitor_list_revision.get(),
+                    (
+                        state.issue_monitor_list_revision.get(),
+                        state.issue_monitor_status_revision.get(),
+                    ),
                     state
                         .issue_monitor_status_cache
                         .borrow()
@@ -10063,14 +10066,15 @@ impl AppRuntime {
     pub(crate) fn issue_monitor_capacity_changed_events(
         &self,
         context: &ProjectContext,
-        revision: u64,
+        revision: (u64, u64),
         update: gwt::agent_capacity::CapacityUpdate,
     ) -> Vec<OutboundEvent> {
         let Some(state) = self.project_state(context) else {
             return Vec::new();
         };
         if !self.project_context_is_current(context)
-            || state.issue_monitor_list_revision.get() != revision
+            || state.issue_monitor_list_revision.get() != revision.0
+            || state.issue_monitor_status_revision.get() != revision.1
         {
             return Vec::new();
         }
@@ -10121,11 +10125,11 @@ impl AppRuntime {
             read_capacity,
         );
         let context = self.project_context_for_root(project_root).unwrap();
-        let revision = self
-            .project_state(&context)
-            .unwrap()
-            .issue_monitor_list_revision
-            .get();
+        let state = self.project_state(&context).unwrap();
+        let revision = (
+            state.issue_monitor_list_revision.get(),
+            state.issue_monitor_status_revision.get(),
+        );
         self.issue_monitor_capacity_changed_events(&context, revision, update)
     }
 
