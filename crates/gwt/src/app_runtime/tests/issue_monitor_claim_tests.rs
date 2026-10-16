@@ -1030,6 +1030,8 @@ fn app_runtime_compatibility_claim_driver_defers_while_scheduled_lease_is_held()
 
 #[test]
 fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt_fence() {
+    // Assert the durable claim result, independently of filesystem speed.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
@@ -3340,6 +3342,8 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
 #[cfg(unix)]
 #[test]
 fn app_runtime_issue_monitor_reconciliation_error_survives_rebase_scan() {
+    // Assert error provenance, independently of the nominal commit budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
