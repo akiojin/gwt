@@ -8768,12 +8768,22 @@ exit 0
             Ok(()),
             "receipt reaches ACK after the durable transaction"
         );
-        let projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
+        let mut projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
             hub.issue_monitor_status()
                 .expect("ready daemon exposes agent projection"),
         )
         .expect("deserialize agent projection");
 
+        // The publisher enriches both views with one host-local observation;
+        // durable Monitor state does not own that budget snapshot.
+        let budget = projected.github_budget.take().expect("published budget");
+        assert_eq!(
+            projected
+                .gui_status
+                .as_mut()
+                .and_then(|gui| gui.github_budget.take()),
+            Some(budget),
+        );
         assert_eq!(projected, monitor.agent_status());
         assert_eq!(projected.max_active, 3);
     }
@@ -9079,11 +9089,21 @@ exit 0
             Ok(()),
             "the exact receipt ACKs only after the retry commits"
         );
-        let projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
+        let mut projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
             hub.issue_monitor_status()
                 .expect("retry ACK retains the live agent projection"),
         )
         .expect("deserialize retry projection");
+        // Compare the two published observations without rereading the ledger
+        // or recomputing its clock-sensitive retry countdown.
+        let budget = projected.github_budget.take().expect("published budget");
+        assert_eq!(
+            projected
+                .gui_status
+                .as_mut()
+                .and_then(|gui| gui.github_budget.take()),
+            Some(budget),
+        );
         // Issue #3633 AC-5: the published projection also carries the
         // scan-cadence check, which `agent_status` deliberately leaves out
         // because it needs a clock. This worker has never completed a scan.
