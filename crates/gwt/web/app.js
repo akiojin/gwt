@@ -871,7 +871,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         mountProjectIndexSurface,
         indexSearchStateMap,
         pendingIndexOpenTargetsByPreset,
-        indexStatusByProjectRoot,
+        getIndexStatus,
       } = createProjectIndexSearchSurface({
         send,
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
@@ -5625,7 +5625,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         activeProjectTab,
         focusOrSpawnPreset,
         renderUsagePanel,
-        indexStatusByProjectRoot,
+        getIndexStatus,
         pmSettingsPanel,
         mountIssues: (data, host) => {
           mountKnowledgeWindow(data, host);

@@ -98,7 +98,6 @@
   "[\"crates/gwt/web/operator-shell.js\",\"applyIssueMonitorStatus\",\"\"]",
   "[\"crates/gwt/web/project-index-search-surface.js\",\"receive\",\"/project_index_search_error\"]",
   "[\"crates/gwt/web/project-index-search-surface.js\",\"receive\",\"/project_index_search_results\"]",
-  "[\"crates/gwt/web/project-index-search-surface.js\",\"receive\",\"/project_index_status\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"applyCloneProjectReceiveEvent\",\"/clone_project_done\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"applyCloneProjectReceiveEvent\",\"/clone_project_error\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"applyCloneProjectReceiveEvent\",\"/clone_project_parent_selected\"]",
