@@ -4629,7 +4629,9 @@ mod tests {
             .expect("active tab for projection completion");
         let recorded_events = match &runtime.proxy {
             AppEventProxy::Stub(events) => events.clone(),
-            AppEventProxy::Real(_) | AppEventProxy::Project { .. } => {
+            AppEventProxy::Real(_)
+            | AppEventProxy::Project { .. }
+            | AppEventProxy::Notifying { .. } => {
                 panic!("test runtime must use a stub event proxy")
             }
         };
