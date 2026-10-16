@@ -1301,6 +1301,10 @@ mod tests {
         let notice = describe_holder_with_activity(&root.coordinator, |status| {
             assert!(status.held);
             drop(lease);
+            root.assert_locks_free(
+                &[root.coordinator.heavy_lock_path()],
+                "the released heavy lease must become observable",
+            );
             Some(sampled_activity())
         });
         assert!(
@@ -1340,6 +1344,48 @@ mod tests {
         verification_lease::observe_holder_activity_with(&mut snapshot, |status| {
             assert!(status.held);
             drop(lease);
+            root.assert_locks_free(
+                &[root.coordinator.heavy_lock_path()],
+                "the released heavy lease must become observable",
+            );
+            Some(sampled_activity())
+        })
+        .unwrap();
+        assert!(!snapshot.held);
+        assert!(snapshot.holder_state.is_none());
+        assert!(snapshot.holder_cpu_percent.is_none());
+    }
+
+    /// Issue #5613: fork/dup keeps a lock alive after the original FD drops.
+    #[cfg(unix)]
+    #[test]
+    fn lease_observation_refreshes_after_a_cloned_heavy_lock_releases() {
+        let root = IsolatedLeaseRoot::new();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.coordinator.heavy_lock_path())
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&holder).unwrap();
+        // A cloned FD shares the flock's open file description, just like a
+        // fork child, without inheriting locks from other parallel tests.
+        let retained = holder.try_clone().unwrap();
+        let mut snapshot = verification_lease::status().unwrap();
+        verification_lease::observe_holder_activity_with(&mut snapshot, |_| {
+            Some(sampled_activity())
+        })
+        .unwrap();
+        assert_eq!(snapshot.holder_cpu_percent, Some(0.0));
+
+        verification_lease::observe_holder_activity_with(&mut snapshot, |status| {
+            assert!(status.held);
+            drop(holder);
+            assert!(root.status().held, "the clone must retain the heavy lock");
+            root.assert_locks_free_with(
+                &[root.coordinator.heavy_lock_path()],
+                "the retained heavy lock must become free",
+                || drop(retained),
+            );
             Some(sampled_activity())
         })
         .unwrap();
@@ -1367,6 +1413,10 @@ mod tests {
         let notice = describe_holder_with_activity(&root.coordinator, |status| {
             assert_eq!(status.lease_id.as_deref(), Some(lease.id()));
             drop(lease);
+            root.assert_locks_free(
+                &[root.coordinator.heavy_lock_path()],
+                "the released heavy lease must become observable before reacquisition",
+            );
             replacement = Some(
                 guard
                     .acquire_heavy_with_ttl(Duration::ZERO, Duration::from_secs(60))
@@ -1607,10 +1657,26 @@ mod tests {
         }
 
         fn assert_locks_free(&self, paths: &[PathBuf], context: &str) {
+            self.assert_locks_free_with(paths, context, || {});
+        }
+
+        fn assert_locks_free_with(
+            &self,
+            paths: &[PathBuf],
+            context: &str,
+            on_contended: impl FnOnce(),
+        ) {
             let deadline = Instant::now() + RELEASE_OBSERVATION_BUDGET;
+            let mut on_contended = Some(on_contended);
             loop {
                 if self.locks_are_free(paths) {
                     return;
+                }
+                // Release the regression's retained FD only after a real
+                // contended probe, so scheduling cannot hide the retention.
+                if let Some(on_contended) = on_contended.take() {
+                    on_contended();
+                    continue;
                 }
                 assert!(
                     Instant::now() < deadline,
@@ -1785,6 +1851,10 @@ mod tests {
                 message: "host admission deferred".into(),
             })
             .unwrap();
+        lease_root.assert_target_free(
+            &key,
+            "the previous attempt must release its target before readmission",
+        );
         let reservation_path = lease_root.coordinator.heavy_reservation_path(&key);
         let original: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&reservation_path).unwrap()).unwrap();
@@ -2358,6 +2428,13 @@ mod tests {
                 Some("later arrival"),
             )
             .unwrap();
+        // Make this claimant later even if CLOCK_REALTIME moves backwards.
+        // This fixture checks rank preservation, not the host's clock order.
+        let later_path = lease_root.coordinator.heavy_reservation_path(&later);
+        let mut later_entry: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&later_path).unwrap()).unwrap();
+        later_entry["queued_at_ms"] = before[0].queued_at_ms.saturating_add(1).into();
+        std::fs::write(&later_path, serde_json::to_vec(&later_entry).unwrap()).unwrap();
         lease_root.assert_target_free(&key, "a deferred run must release its caller target");
         let again = super::admit(&mut env, worktree.path(), None, Duration::ZERO, recover)
             .unwrap_err()
@@ -2371,7 +2448,11 @@ mod tests {
         assert!(again.contains("next_turn_reserved: yes"), "{again}");
         let after = lease_root.coordinator.heavy_lease_status().unwrap().queue;
         assert_eq!(after.len(), 2);
-        assert_eq!(after[0].target.as_deref(), Some(key.file_stem().as_str()));
+        assert_eq!(
+            after[0].target.as_deref(),
+            Some(key.file_stem().as_str()),
+            "FIFO position must be preserved: before={before:?}; after={after:?}"
+        );
         assert_eq!(after[0].queued_at_ms, before[0].queued_at_ms);
         assert_eq!(after[1].target.as_deref(), Some(later.file_stem().as_str()));
         drop(_lease);
