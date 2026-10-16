@@ -637,6 +637,7 @@ fn the_flake_selector_limits_unit_tests_to_changed_source_functions() {
         }))
         .expect("resolve Python for the real selector")
         .args(["-c", code, "gwt|lib|", test_list.to_str().unwrap(), base])
+        .env("GWT_FLAKE_HEAD_SHA", "HEAD")
         .current_dir(repo.path())
         .output()
         .expect("run the real Python selector")

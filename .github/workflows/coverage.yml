@@ -9,13 +9,23 @@ on:
 # Issue #4119: a manual dispatch supersedes a still-running scheduled report.
 concurrency:
   # Called workflows inherit github.workflow from the caller. A distinct
-  # prefix prevents coverage from cancelling its own Lint workflow.
+  # prefix prevents coverage from cancelling its own caller workflow.
   group: coverage-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'report' || github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
   cancel-in-progress: true
 
+env:
+  # Only coverage artifacts omit backtrace line tables; instrumentation,
+  # debug assertions and the unoptimized test behavior stay unchanged.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
-  rust-coverage:
-    name: Rust Coverage
+  coverage-shard:
+    name: Coverage shard (${{ matrix.shard }}/6)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -58,10 +68,10 @@ jobs:
           # Develop writes the base-branch cache every PR can restore; reports
           # retain their existing save path. A miss still builds from source.
           # Separate this from earlier default-target/dependency-only caches.
-          key: coverage-instrumented-workspace-v1
+          key: coverage-instrumented-workspace-v2
           workspaces: . -> target/llvm-cov-target
           cache-workspace-crates: true
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          save-if: ${{ matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
         continue-on-error: true
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -78,28 +88,61 @@ jobs:
       # coverage-summary.mjs runs the tests, then reads every raw profile
       # before aggregating, so a truncated profile is reported apart from a
       # test failure and re-aggregated once, on record (Issue #4628).
-      - name: Generate workspace summary
+      - name: Run and export coverage shard
         env:
           # Nextest starts one process per test. Share eight online-merge
           # profiles per instrumented module instead of one copy per PID.
           LLVM_PROFILE_FILE_NAME: gwt-%8m.profraw
           NEXTEST_PROFILE: coverage
-        run: node scripts/coverage-summary.mjs --output-path target/coverage-summary.json --nextest -- --workspace --all-features
+        run: node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features
         timeout-minutes: 20
+      - name: Upload coverage shard
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-tests-${{ matrix.shard }}
+          path: target/coverage-export/
+          if-no-files-found: error
+          retention-days: 1
+
+  rust-coverage:
+    name: Rust Coverage
+    needs: coverage-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify coverage shards succeeded
+        env:
+          COVERAGE_SHARDS_RESULT: ${{ needs.coverage-shard.result }}
+        run: test "$COVERAGE_SHARDS_RESULT" = success
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || (github.event_name == 'schedule' && 'develop') || github.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Download coverage shards
+        uses: actions/download-artifact@v8
+        with:
+          pattern: workspace-tests-*
+          path: target/coverage-shards
+      - name: Verify the complete workspace test union
+        run: python3 scripts/ci_workspace_tests.py target/coverage-shards --shards 6
+      - name: Generate workspace summary
+        run: node scripts/coverage-summary.mjs --report-from target/coverage-shards --shards 6 --output-path target/coverage-summary.json
+        timeout-minutes: 5
       - name: Enforce coverage threshold (gwt-core + gwt @ 90%)
         run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"
       - name: Enforce coverage floor (domain crates @ 80%)
         run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude "crates/(gwt-core|gwt)/"
-      # Follow the summary's recorded recovery: the strict merge would refuse
-      # the same truncated profile the summary already left out.
+      # Reuse the same validated combined profiles and current objects.
       - name: Generate lcov
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: |
-          failure_mode=()
-          if [ -f target/coverage-summary.json.profiles.json ]; then
-            failure_mode=(--failure-mode all)
-          fi
-          cargo llvm-cov report "${failure_mode[@]}" --lcov --output-path lcov.info
+        run: node scripts/coverage-summary.mjs --report-from target/coverage-shards --shards 6 --output-path target/coverage-summary.json --lcov-output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
