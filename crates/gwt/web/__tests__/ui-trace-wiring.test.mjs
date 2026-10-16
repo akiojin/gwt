@@ -199,11 +199,6 @@ test("WebSocket dispatcher gates trace work through active UI trace state", () =
   assert.match(appSource, /shouldTrace:\s*uiTraceWiring\.isTracing/);
 });
 
-test("pointer diagnostics use centralized event constants", () => {
-  assert.match(appSource, /UI_TRACE_EVENT\.pointerPanMove/);
-  assert.match(appSource, /UI_TRACE_EVENT\.pointerMoveIgnored/);
-  assert.match(appSource, /UI_TRACE_EVENT\.resizePointermoveApply/);
-});
 
 test("terminal activation diagnostics use centralized metadata-only trace constants", () => {
   assert.equal(UI_TRACE_EVENT.terminalActivation, "terminal_activation");

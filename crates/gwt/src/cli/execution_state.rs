@@ -6605,6 +6605,17 @@ fn with_generation_activation_leases<T>(
     )
 }
 
+/// Fence an exact Work supersession against bound child launch without
+/// changing execution lifecycle or granting general Work mutation authority.
+#[doc(hidden)]
+pub fn with_workspace_successor_supersession_lease<T>(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    with_generation_activation_leases(worktree, owner, |_| operation())
+}
+
 fn with_resolved_generation_owner_lease<T>(
     context: &GenerationTransactionContext,
     operation: impl FnOnce(&GenerationTransactionContext) -> io::Result<T>,
@@ -12548,7 +12559,7 @@ fn gate_closed_refused_recoveries(
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 17] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 20] = [
     "execution.settle_delivered",
     "pr.create_from_ci",
     "execution.release_prepared",
@@ -12566,6 +12577,11 @@ pub const AGENT_RECOVERY_OPERATIONS: [&str; 17] = [
     "workspace.work_prune",
     "workspace.candidates",
     "workspace.join",
+    // Issue #5288: exact registered-PM supersession, live member stop, and
+    // Monitor retry are real operations named by successor repair refusals.
+    "workspace.close",
+    "pane.close",
+    "issue.monitor.requeue",
     "build.abort",
     "verify.plan",
     "verify.run",
@@ -16586,6 +16602,22 @@ fn run_impl<E: CliEnv>(
             }
         }
     };
+    if let SettleResult::Settled(record) | SettleResult::AlreadySettled(record) = &result {
+        if record.status == ExecutionControlStatus::Completed
+            && crate::cli::delivered_owner::trusted_no_action_for_session(&worktree, &session_id)
+                .is_none()
+        {
+            if let Ok(session) = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            ) {
+                crate::session_launch::record_named_issue_activity(
+                    env.client(),
+                    &session,
+                    crate::session_launch::NamedIssueActivity::Completed,
+                )?;
+            }
+        }
+    }
     match result {
         SettleResult::Settled(record) => {
             if record.status == ExecutionControlStatus::Blocked {
@@ -33776,6 +33808,14 @@ exit 1
                     mergeable: "MERGEABLE".to_string(),
                     merge_state_status: "CLEAN".to_string(),
                     review_status: "REVIEW_REQUIRED".to_string(),
+                },
+            );
+            env.pr_quarantine_contexts.insert(
+                4122,
+                crate::cli::pr::PrQuarantineContext {
+                    number: 4122,
+                    body: "Inherited PR description".to_string(),
+                    comments: Vec::new(),
                 },
             );
             let (pr_code, pr_out) = run_collect(

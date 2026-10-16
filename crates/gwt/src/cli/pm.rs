@@ -332,6 +332,18 @@ pub(super) fn run<E: CliEnv>(
                     "pm.report.post requires the registered PM or a direct user CLI call".into(),
                 ));
             }
+            if kind == PmReportKind::Qa
+                && (question
+                    .as_deref()
+                    .is_some_and(crate::pm_conversation::internal_prompt)
+                    || instruction.as_ref().is_some_and(|input| {
+                        crate::pm_conversation::internal_prompt(&input.original)
+                    }))
+            {
+                return Err(refusal(
+                    "Automatic PM prompts cannot be posted as Q&A. Report actions with progress, decision or blocker; if nothing changed, post nothing.".into(),
+                ));
+            }
             if ambient_session_id().is_some() && kind == PmReportKind::Qa && instruction.is_none() {
                 return Err(refusal(
                     "PM Q&A reports require instruction capture; resubmit with instruction.original, kind, actions and issue_numbers".into(),

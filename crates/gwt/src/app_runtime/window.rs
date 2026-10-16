@@ -20,6 +20,7 @@
 //! `workspace_state_broadcast` and `persist` helpers on `AppRuntime`.
 
 use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection, WindowSurfaceOwner};
+use std::time::Instant;
 
 use super::{
     close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowGeometry,
@@ -536,6 +537,7 @@ impl AppRuntime {
                 project_key,
                 BackendEvent::IssueMonitorToast {
                     notification_transition: None,
+                    notification_transition_id: None,
                     level: "warn".to_string(),
                     message: format!("Cannot return to list: {reason}."),
                     issue_number,
@@ -873,6 +875,8 @@ impl AppRuntime {
         // primitive that `close_window_events` uses, so no PTY management is
         // reimplemented. `stop_window_runtime` also persists the Paused Work
         // marker for an agent session via `mark_agent_session_stopped`.
+        // Qualify the transition while its exact runtime incarnation still exists.
+        self.observe_notification_transition_at(id, WindowProcessStatus::Stopped, Instant::now());
         self.stop_window_runtime(id);
         // Render the surviving window as Stopped. `stop_window_runtime` already
         // removed the pty/hook tracking, so the workspace record is the source

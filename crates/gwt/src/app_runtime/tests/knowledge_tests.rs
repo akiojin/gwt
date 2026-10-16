@@ -1,6 +1,87 @@
 use super::*;
 
 #[test]
+#[cfg(debug_assertions)]
+fn app_runtime_issue_cache_reply_precedes_related_work_decode() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _gate_env = ScopedEnvVar::set("GWT_PLAYWRIGHT_ACTIVE_WORK_RENDEZVOUS", "1");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Cached row",
+            &["bug"],
+            "body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .unwrap();
+    let works = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    fs::create_dir_all(works.parent().unwrap()).unwrap();
+    fs::write(
+        &works,
+        r#"{"updated_at":"2026-04-20T10:00:00Z","work_items":[]}"#,
+    )
+    .unwrap();
+    let gate = temp.path().join(".gwt/issue-3777-active-work-rendezvous");
+    fs::create_dir_all(&gate).unwrap();
+    struct ReleaseGate(PathBuf);
+    impl Drop for ReleaseGate {
+        fn drop(&mut self) {
+            let _ = fs::write(self.0.join("release"), b"release");
+        }
+    }
+    let _release = ReleaseGate(gate.clone());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Settings,
+        WindowProcessStatus::Ready,
+    );
+    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    fs::write(
+        gate.join("work-items-path"),
+        works.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
+    let id = combined_window_id("tab-1", "issue-1");
+    assert!(runtime
+        .load_knowledge_bridge_events(
+            "client-1",
+            KnowledgeLoadRequest {
+                id: &id,
+                kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(5543),
+                selected_number: Some(42),
+                refresh: false,
+            }
+        )
+        .is_empty());
+    let first = wait_for_knowledge_view_dispatch(&events, &id);
+    assert!(
+        matches!(&first[0].event, BackendEvent::KnowledgeEntries { request_id: Some(5543), entries, .. } if entries.iter().any(|entry| entry.number == 42))
+    );
+    wait_for_recorded_event("held related Work decode", &events, |_| {
+        gate.join("started").exists()
+    });
+    assert!(
+        !gate.join("resumed").exists(),
+        "cached rows must arrive before the held historical Work decode resumes"
+    );
+    fs::write(gate.join("release"), b"release").unwrap();
+    wait_for_recorded_event("related enrichment after cached rows", &events, |events| {
+        events.iter().filter(|event| matches!(recorded_project_payload(event), UserEvent::Dispatch(dispatched) if dispatched.iter().any(|outbound| matches!(&outbound.event, BackendEvent::KnowledgeEntries { request_id: Some(5543), .. })))).count() >= 2
+    });
+}
+
+#[test]
 fn app_runtime_report_knowledge_error_journals_only_valid_issue_window_failures() {
     let _lock = env_test_lock()
         .lock()

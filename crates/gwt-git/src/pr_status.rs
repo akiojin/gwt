@@ -2874,6 +2874,11 @@ pub fn fetch_merged_pr_deliveries(repo_path: &Path) -> Result<MergedPrDeliveries
     crate::merged_pr_sync::sync_merged_pr_deliveries(repo_path)
 }
 
+/// Bounded-staleness inventory for Monitor maintenance, never branch deletion.
+pub fn fetch_merged_pr_deliveries_for_monitor(repo_path: &Path) -> Result<MergedPrDeliveries> {
+    crate::merged_pr_sync::sync_merged_pr_deliveries_for_monitor(repo_path)
+}
+
 /// One merged head branch as a delivery source: the branch plus, when the
 /// row carried a PR number, its delivery identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3096,6 +3101,31 @@ where
 
 pub(crate) fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
     run_gh_command_with(repo_path, args, spawn_gh_command)
+}
+
+/// Reuse only Monitor list reads; callers of per-PR evidence stay live.
+pub(crate) fn run_cached_list_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
+    let cache_dir =
+        gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("rest-list-pages");
+    let stdout = crate::gh_rest::cached_list_response_with(
+        &cache_dir,
+        &args.join(" "),
+        chrono::Utc::now(),
+        || {
+            let output = run_gh_command(repo_path, args).map_err(|error| error.to_string())?;
+            if output.success {
+                Ok(output.stdout)
+            } else {
+                Err(output.stderr.trim().to_string())
+            }
+        },
+    )
+    .map_err(GwtError::Git)?;
+    Ok(GhCliOutput {
+        success: true,
+        stdout,
+        stderr: String::new(),
+    })
 }
 
 fn run_gh_command_with<F>(repo_path: &Path, args: &[&str], mut spawn_gh: F) -> Result<GhCliOutput>
@@ -3389,6 +3419,13 @@ pub fn try_fetch_open_pr_numbers_by_branch(
     repo_path: &Path,
 ) -> Result<std::collections::HashMap<String, u64>> {
     try_fetch_open_pr_numbers_by_branch_with(repo_path, run_gh_command)
+}
+
+/// Monitor discovery may lag one cache TTL; deletion guards use the live entry.
+pub fn try_fetch_open_pr_numbers_by_branch_for_monitor(
+    repo_path: &Path,
+) -> Result<std::collections::HashMap<String, u64>> {
+    try_fetch_open_pr_numbers_by_branch_with(repo_path, run_cached_list_command)
 }
 
 fn try_fetch_open_pr_numbers_by_branch_with<F>(
@@ -6802,9 +6839,12 @@ mod tests {
     }
 
     fn healthy_probe_payload() -> String {
-        r#"{"resources":{"core":{"limit":5000,"remaining":4990,"reset":1756777200},
-            "graphql":{"limit":5000,"remaining":4800,"reset":1756777200}}}"#
-            .to_string()
+        let reset = (now_3891() + chrono::Duration::hours(1)).timestamp();
+        serde_json::json!({"resources": {
+            "core": {"limit": 5000, "remaining": 4990, "reset": reset},
+            "graphql": {"limit": 5000, "remaining": 4800, "reset": reset}
+        }})
+        .to_string()
     }
 
     fn light_row(number: u64, updated_at: &str, merge_state: &str) -> serde_json::Value {

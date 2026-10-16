@@ -535,6 +535,19 @@ pub fn load_restored_workspace_state(
     project_root: &Path,
 ) -> std::io::Result<PersistedWindowCanvasState> {
     let mut workspace = load_workspace_state(&workspace_state_path(project_root))?;
+    let names = workspace
+        .windows
+        .iter()
+        .filter(|window| window.preset.is_agent_terminal() && !window.is_pm)
+        .filter_map(|window| window.agent_name.clone())
+        .collect();
+    // Reserve legacy identities before a restored window can be closed or renamed
+    // by any runtime action, including actions before the first naming tick.
+    crate::agent_names::remember(
+        &gwt_core::paths::gwt_project_dir_for_repo_path(project_root).join("agent-names.jsonl"),
+        &names,
+    )
+    .map_err(std::io::Error::other)?;
     pause_process_windows_for_restore(&mut workspace);
     Ok(workspace)
 }
@@ -1793,6 +1806,26 @@ mod tests {
         let path = workspace_state_path(dir.path());
         let hash = gwt_core::paths::project_scope_hash(dir.path());
         assert!(path.ends_with(format!("projects/{}/workspace.json", hash.as_str())));
+    }
+
+    #[test]
+    fn restored_legacy_agent_names_are_reserved_before_the_first_runtime_tick() {
+        let home = tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project_root = tempdir().unwrap();
+        let mut workspace = default_workspace_state();
+        let window = &mut workspace.windows[0];
+        window.preset = WindowPreset::Agent;
+        window.agent_name = Some("Alice".into());
+        let path = workspace_state_path(project_root.path());
+        save_workspace_state(&path, &workspace).unwrap();
+
+        let _restored = load_restored_workspace_state(project_root.path()).unwrap();
+        // Closing before the first tick may remove the only legacy name snapshot.
+        save_workspace_state(&path, &empty_workspace_state()).unwrap();
+        let history = gwt_core::paths::gwt_project_dir_for_repo_path(project_root.path())
+            .join("agent-names.jsonl");
+        assert_eq!(std::fs::read_to_string(history).unwrap(), "\"Alice\"\n");
     }
 
     #[test]

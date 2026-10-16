@@ -15,7 +15,7 @@ Issues, SPECs, search, and Board context rather than from branch management.
 
 - **Agent workspace** — launch, resume, and monitor `Claude Code`, `Codex`,
   `Grok Build`, `Antigravity CLI`, `OpenCode`, `Copilot`,
-  and custom agents from a shared canvas.
+  and custom agents from a shared workspace.
 - **Shared Board** — keep user and agent communication in one repo-scoped
   timeline with `status`, `claim`, `next`, `blocked`, `handoff`, `decision`,
   and `question` posts.
@@ -30,8 +30,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator canvas** — arrange Agent, Board, Logs, Profile, Index, and
-  Settings surfaces in one mission-control style workspace.
+- **Operator workspace** — switch between Issues, Agents, Board, and Settings
+  from the rail, with an optional Split view and a separate PM entry.
 
 ## Install
 
@@ -390,7 +390,7 @@ the daemon.
    project.
 2. Use `Board`, `Issue`, and Knowledge search surfaces to understand
    the current work, related owners, and prior decisions.
-3. In the **Curate** lane, choose `Intake` from the Command Rail or Command
+3. In the **Curate** lane, choose `Intake` from the Command
    Palette to shape new work: a branchless, throwaway session that discusses,
    plans, and registers a GitHub Issue. Work that needs design gets the
    `gwt-spec` design-required label and SPEC artifacts on that Issue. Intake
@@ -416,9 +416,9 @@ Common windows include:
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
-  open this same Work Item view. Issue Monitor launches do not open a window on
-  the canvas: the agent is mirrored read-only in the Issue window's right pane,
-  and `Windowize` promotes it to a normal window when you want to type into it.
+  open this same Work Item view. Issue Monitor agents are mirrored read-only in
+  the Issue window's right pane,
+  and `Windowize` opens the same session in an individual Agents tab for input.
   Each row also carries its Work's lifecycle, attention reason, and PR state,
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
@@ -451,11 +451,12 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 `Load earlier entries` to retrieve older posts. When browsing older history,
 choose `Back to latest entries` to resume the latest updates.
 
-Each worker Agent chooses a short memorable name when it starts. Its badge,
-window title, Fleet, and Kanban cards use that name; duplicate choices receive
-a numeric suffix. The name stays the same through restore and in-place restart.
-Until naming finishes, the badge reads `Naming…`. The resident PM keeps its own
-fixed identity.
+gwt assigns each worker Agent a random memorable name in the output language
+when it starts. Its badge, window title, Fleet, Kanban, and Board show that
+name, and the PM uses it when reporting work. Names are unique across the
+project's history and survive restore and in-place restart. Issue comments
+record assignments, handovers, PR creation, and completion; PR bodies also
+include the responsible name. The resident PM keeps its own fixed identity.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -489,8 +490,8 @@ queue limit. An empty queue starts no new work; already-running work continues.
 
 The Kanban board starts at full width. Select a card to open its preview and use
 **Issue / Output** to switch between the body and acceptance criteria and the
-agent's read-only output. **Windowize** moves the agent to Canvas. **Close preview**
-or Escape restores the full board. At narrow widths the preview overlays the
+agent's read-only output. **Windowize** opens the agent in an individual Agents
+tab. **Close preview** or Escape restores the full board. At narrow widths the preview overlays the
 board; columns scroll horizontally instead of shrinking. The legacy
 `issue_monitor` preset opens this same Issue surface.
 
@@ -527,6 +528,11 @@ Issue rows. Operators can stop a failed launch with `issue.monitor.stop`,
 `params.number`, and `params.reason`, even after its live claim/window identity
 was lost. The saved failed window is used only while it still belongs to that
 Issue; stopping records a persistent hold and returns any pane to close.
+The hold appears with its reason and removes the Issue from this host's launch
+queue by default. Set `params.remove_from_queue` to `false` to keep queue
+membership while holding the Issue. Launch failures show their category and
+the next recovery operation; repeated unchanged failures stop automatic retries
+after the configured attempt limit.
 
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent
@@ -654,7 +660,7 @@ is never enabled by gwt.
 confirmation dialog. Choose **Redeem free reset** to consume one free reset
 for that account; Cancel is the default. Confirmation is mandatory even in
 autonomous mode. JSON approval flags and past approvals cannot replace it.
-Only canvas windows using a directly installed Host Codex and its default
+Only standalone agent tabs using a directly installed Host Codex and its default
 provider are supported; Docker, package-runner launches and custom backends
 are refused. The dialog identifies the authentication root recorded when the
 target window launched and its source (host, profile or caller environment).
@@ -718,8 +724,9 @@ scrollable notification stack so nothing is lost while you are away.
 
 Agent state notices say **stopped**, **error**, or **needs human**; an idle agent
 is not evidence of completed work. Runtime desktop notices require five minutes
-of continuously observed Running and an unfocused/hidden page. A different state
-or reconnection resets that duration. Monitor NeedsHuman uses its existing notice
+of continuously observed Running in the same runtime incarnation. The server
+tracks this duration even while every browser tab is closed; a different runtime
+state or incarnation resets it. Monitor NeedsHuman uses its existing notice
 stream immediately, including issues without an agent window; it does not create
 another notice from inbox snapshots. Session Interrupted is outside this notice
 stream because the resume picker exposes historical snapshots only.
@@ -728,10 +735,19 @@ Native permission adapters distinguish macOS authorization settings, Windows
 notification settings, and Linux's unavailable authorization query. Unknown,
 default, denied, or failed queries do not authorize delivery, and permissions are
 never requested automatically. Linux GetCapabilities describes server features,
-not user consent. These adapters do not yet add zero-tab native delivery: that
-transport remains a separate part of SPEC #3287. Debug-binary tests cover policy
-and browser behavior; signed-bundle macOS permission/delivery and Windows/Linux
-native interaction require separate host verification.
+not user consent. A visible, focused Project tab suppresses desktop delivery.
+Otherwise the server chooses one granted Project tab using its latest received
+attention report. When no Project tab is connected, the last reported browser
+grant can permit native delivery, subject to GWT's own current OS permission.
+Default/denied reports revoke that cached grant; closing the Project or restarting
+GWT clears it. Clicks focus the receiving tab or open the stable Project URL.
+Delivery failure does not retry through another channel; unread/title/favicon/tray
+updates continue independently. macOS requires a granted signed GWT.app; Windows
+requires the installed AUMID shortcut supplied by the MSI (portable ZIPs do not
+register it). Linux native delivery is suppressed because authorization cannot
+be queried. Debug-binary tests cover policy and browser behavior; actual signed
+macOS/installed Windows notification delivery and click interaction require
+separate host verification.
 
 Tunable bounds (attempt cap, stuck/idle timeout, retry backoff, review model)
 persist per project. The human-gated baseline is SPEC
@@ -1230,20 +1246,20 @@ Selected text is copied into the existing generated `gwt-pm` skill during
 managed asset refresh; no project symlink is added to the runtime. Removing
 an entry removes its copied policy on the next refresh.
 
-## Canvas Operations
+## Surface Navigation
 
-- Zoom the canvas with the on-screen zoom buttons
-- Pan the canvas by dragging the background
-- Use `Tile` to arrange windows on a grid
-- Use `Stack` to cascade windows with overlap
-- Use `Align` to arrange windows on a grid without changing their size
+- Select **Issues**, **Agents**, **Board**, or **Settings** from the rail to fill the content area.
+- Open **PM** from its separate rail entry; PM uses a single pane.
+- Use **Split view** in the project bar to show two surfaces side by side, then choose each pane's surface independently.
+- Use **Close split** to keep the active surface in one pane.
+- In **Agents**, switch between **All agents** and individual tabs while keeping the same live terminals.
 
 ## Agent Navigation
 
 Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual
 Agent tabs by activity: running/starting first, waiting/idle next, then the
-remaining Agents. Agents shown inside Issues are included; PM and Shell
-windows are skipped. Cycling keeps the split view and focuses the selected
+remaining Agents. Agents shown inside Issues and Shell terminals are included;
+PM is skipped. Cycling keeps the split view and focuses the selected
 terminal for input. Closing the selected tab returns to All agents without stopping the
 agent; cycling can reopen the same terminal.
 
@@ -1260,7 +1276,7 @@ counters). The default type scale is tuned for developer readability, so
 terminal text, IDs, paths, counters, and dense work surfaces stay legible during
 long sessions while display typography remains reserved for headings and chrome
 labels. Every chrome surface — Project Bar, Command Rail, Status Strip,
-Command Palette, Hotkey Overlay, Drawer modals, floating windows — shares a
+Command Palette, Hotkey Overlay, Drawer modals, surface panels — shares a
 single token system that ships in two flagship themes:
 
 - **Dark Operator** (Mission Control / carbon + neon) — the default, optimized
@@ -1289,18 +1305,15 @@ falls back to system colors so accessibility is preserved.
 | --- | --- |
 | `⌘K` / `⌘P` | Open the Command Palette (fuzzy search over all surface actions) |
 | `⌘B` | Focus the Board surface |
-| `⌘G` | Focus the Git (Branches) surface |
+| `⌘G` | Focus the Issues surface |
 | `⌘L` | Focus the Logs surface |
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
 
-The Command Rail on the left edge is always visible: Intake (Curate lane) and
-Open Workspace (Execute lane) at the top, window operations (Tile / Stack /
-Align / window list / Add) in the middle, and the Command Palette at the bottom. Board and Logs are not rail
-items; reach them via the Add Window preset menu, the command palette, or the
-`⌘B` / `⌘L` hotkeys. Hovering a rail item reveals its label and real shortcut. Closing a
-window (titlebar × or tab ×) always asks for confirmation so a stray click
-can never kill a running agent.
+The rail keeps **PM** separate from the four labeled surfaces: **Issues**,
+**Agents**, **Board**, and **Settings**. The selected surface fills a fixed pane;
+**Split view** adds an optional second pane. The status strip remains below the
+content area. Reach other actions through the Command Palette or their hotkeys.
 
 ### Accessibility
 
@@ -1505,6 +1518,22 @@ cargo test -p gwt-core -p gwt --all-features --doc
 Nextest runs each test in a separate process, times out a test after 120 seconds, and continues with the remaining tests. Doctests use rustdoc separately.
 
 ### CI throughput measurements
+
+To separate queue delays from dependency scheduling in the latest 50 completed
+workflow runs (including failed/cancelled runs), without local Git history:
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --queue --save target/ci-queue.json
+python scripts/ci_throughput.py --input target/ci-queue.json
+```
+
+`--before` fixes the inclusive run creation cutoff; `--workflow test.yml` limits
+the workflows sampled. The report separates run admission, job admission, and
+the time from run start to job creation (dependencies and scheduling), and identifies each
+run's longest job. Job admission includes concurrency-group waits; API timestamps
+alone cannot attribute them to runner capacity. Skipped/cancelled jobs and reused
+attempt timestamps are excluded from job wait distributions. Rerun admission is
+unavailable because the run creation time belongs to the original attempt.
 
 With Python 3.11+, authenticated `gh`, and local Git history for the merged PRs,
 collect the latest 25 develop merges and save their input data:

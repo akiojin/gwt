@@ -508,7 +508,7 @@ fn pm_settings_operations_reach_loopback_http_through_the_production_env() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = tempfile::tempdir().unwrap();
     let _home = ScopedGwtHome::set(home.path());
-    let _session = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "pm-settings-loopback");
     let repo = tempfile::tempdir().unwrap();
     let git = |args: &[&str]| {
         assert!(gwt_core::process::hidden_command("git")
@@ -525,6 +525,17 @@ fn pm_settings_operations_reach_loopback_http_through_the_production_env() {
         "origin",
         "https://github.com/akiojin/gwt.git",
     ]);
+
+    let prefs = serde_json::from_value(json!({"registration":{
+        "session_id":"pm-settings-loopback", "agent_id":"codex",
+        "worktree_path":repo.path(),
+    }}))
+    .unwrap();
+    crate::pm_registry::save_pm_prefs(
+        &crate::pm_registry::pm_prefs_path_for_repo_path(repo.path()),
+        &prefs,
+    )
+    .unwrap();
 
     let checks_before = json!({"strict":true,"checks":[
         {"context":"Rust","app_id":73},{"context":"Old","app_id":-1}

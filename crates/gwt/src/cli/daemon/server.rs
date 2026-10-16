@@ -3147,6 +3147,9 @@ fn rebase_issue_monitor_control_candidate(
     control: &IssueMonitorControl,
 ) {
     match control {
+        IssueMonitorControl::Launched { issue_number, .. } => {
+            monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, *issue_number)
+        }
         IssueMonitorControl::WindowClosed {
             target: Some(target),
             ..
@@ -5656,26 +5659,27 @@ fn scan_issue_monitor_once_blocking(
         } else {
             std::collections::BTreeSet::new()
         };
-    // Issue #3928 AC-2: inside a rate-limit window the merged-PR readback is
-    // refused before it spawns. That is a wait, not a fault: the slots it
-    // would have freed stay occupied until the window ends, and the scan
-    // still reaches its inbox, status, and launch stages. Issue #3917's
-    // merged-issue settlement then runs on an empty delivery set: nothing was
-    // read, so nothing is proposed until the window ends.
+    // Merge discovery must leave the launch reserve intact. A later read or
+    // deadline check can fail after slots were reconciled, so adopt those
+    // changes only when the whole stage completes successfully.
     timing.next("merge-reconciliation");
-    let merge_reconciliation = match crate::issue_monitor_worker::run_scan_stage(
+    let mut reconciled_monitor = monitor.clone();
+    let merge_reconciliation = match crate::issue_monitor_worker::run_budgeted_readback_stage(
         IssueMonitorScanStage::MergeReconciliation,
         || {
             crate::issue_monitor_worker::reconcile_issue_monitor_merges(
-                &mut monitor,
+                &mut reconciled_monitor,
                 &scope.project_root,
                 &owner,
                 &repo,
             )
         },
     ) {
-        Ok(reconciliation) => reconciliation,
-        Err(failure) if crate::issue_monitor_worker::is_rate_limit_failure(&failure.detail) => {
+        Ok(reconciliation) => {
+            monitor = reconciled_monitor;
+            reconciliation
+        }
+        Err(failure) => {
             degradations.push(
                 crate::issue_monitor_worker::IssueMonitorScanDegradation::new(
                     failure,
@@ -5685,7 +5689,6 @@ fn scan_issue_monitor_once_blocking(
             );
             crate::issue_monitor_worker::IssueMonitorMergeReconciliation::default()
         }
-        Err(failure) => return Err(failure),
     };
     // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
     // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
@@ -5927,9 +5930,10 @@ fn refresh_issue_monitor_agent_status(hub: &BroadcastHub, monitor: &crate::Issue
     // daemon whose worker has stopped scanning cannot keep serving a snapshot
     // that reads healthy.
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut status = monitor.agent_status_at(&now);
+    crate::cli::issue::attach_github_budget(&mut status);
     hub.set_issue_monitor_status(
-        serde_json::to_value(monitor.agent_status_at(&now))
-            .expect("Issue Monitor agent status serializes"),
+        serde_json::to_value(status).expect("Issue Monitor agent status serializes"),
     );
 }
 
@@ -7270,6 +7274,21 @@ esac
 if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] && [ "$merged_pulls_query" = "1" ]; then
   printf '%s\n' 'gh merged query failed' >&2
   exit 1
+fi
+if [ "$GWT_FAKE_GH_MODE" = "merge_readback_hang" ] && [ "$merged_pulls_query" = "1" ]; then
+  # Issue #5603: only merge discovery hangs; unrelated candidate reads stay live.
+  sleep 30
+  exit 0
+fi
+if [ "$GWT_FAKE_GH_MODE" = "merge_fail" ] || [ "$GWT_FAKE_GH_MODE" = "merge_readback_hang" ]; then
+  case "$*" in
+    *"issue list"* | *"/issues?"*"&page=1 --include")
+      printf '%s\n' '[{"number":43,"title":"In-flight issue","body":"In-flight body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-08-15T00:00:00Z"},{"number":44,"title":"Queued issue","body":"Queued body","labels":[{"name":"bug"},{"name":"gwt-queued"}],"state":"OPEN","url":"https://example.test/issues/44","updatedAt":"2026-08-15T00:00:00Z"}]'
+      exit 0
+      ;;
+  esac
+  printf '%s\n' '[]'
+  exit 0
 fi
 if [ "$GWT_FAKE_GH_MODE" = "merge_success" ] && [ "$merged_pulls_query" = "1" ]; then
   if [ "$(git rev-parse --is-bare-repository 2>/dev/null)" != "true" ]; then
@@ -8767,12 +8786,22 @@ exit 0
             Ok(()),
             "receipt reaches ACK after the durable transaction"
         );
-        let projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
+        let mut projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
             hub.issue_monitor_status()
                 .expect("ready daemon exposes agent projection"),
         )
         .expect("deserialize agent projection");
 
+        // The publisher enriches both views with one host-local observation;
+        // durable Monitor state does not own that budget snapshot.
+        let budget = projected.github_budget.take().expect("published budget");
+        assert_eq!(
+            projected
+                .gui_status
+                .as_mut()
+                .and_then(|gui| gui.github_budget.take()),
+            Some(budget),
+        );
         assert_eq!(projected, monitor.agent_status());
         assert_eq!(projected.max_active, 3);
     }
@@ -9078,11 +9107,21 @@ exit 0
             Ok(()),
             "the exact receipt ACKs only after the retry commits"
         );
-        let projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
+        let mut projected: crate::IssueMonitorAgentStatus = serde_json::from_value(
             hub.issue_monitor_status()
                 .expect("retry ACK retains the live agent projection"),
         )
         .expect("deserialize retry projection");
+        // Compare the two published observations without rereading the ledger
+        // or recomputing its clock-sensitive retry countdown.
+        let budget = projected.github_budget.take().expect("published budget");
+        assert_eq!(
+            projected
+                .gui_status
+                .as_mut()
+                .and_then(|gui| gui.github_budget.take()),
+            Some(budget),
+        );
         // Issue #3633 AC-5: the published projection also carries the
         // scan-cadence check, which `agent_status` deliberately leaves out
         // because it needs a clock. This worker has never completed a scan.
@@ -12714,8 +12753,10 @@ exit 0
         );
     }
 
-    #[test]
-    fn daemon_scan_records_merge_reconciliation_error_and_preserves_active_slot() {
+    fn assert_merge_reconciliation_failure_preserves_slots_and_launches(
+        mode: &str,
+        expected_error: &str,
+    ) {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -12726,7 +12767,8 @@ exit 0
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
-        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "merge_fail");
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", mode);
+        let _budget = ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_READBACK_BUDGET_MS", "1000");
 
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -12740,30 +12782,44 @@ exit 0
             RuntimeTarget::Host,
         )
         .expect("scope");
-        let monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            crate::IssueMonitorPrefs {
-                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
-                    issue_number: 43,
-                    window_id: "window-43".to_string(),
-                }],
-                ..crate::IssueMonitorPrefs::default()
-            },
-        );
+        let prefs = crate::IssueMonitorPrefs {
+            max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            enabled: true,
+            max_active_agents: 2,
+            launch_profile: Some(sample_issue_monitor_profile()),
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "window-43".to_string(),
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let prefs = scheduled_issue_monitor_prefs(prefs, &[44]);
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+            &prefs,
+        )
+        .expect("seed issue monitor prefs");
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
 
-        let preserved = monitor.clone();
-        let failure = super::scan_issue_monitor_once_blocking(scope, monitor, false)
-            .expect_err("merge reconciliation failure stays typed");
-        assert_eq!(
-            failure.stage,
-            crate::issue_monitor_worker::IssueMonitorScanStage::MergeReconciliation
+        let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + Duration::from_secs(20),
         );
-        let error = failure.to_string();
-        assert!(error.contains("merge-reconciliation"), "{error}");
-        assert!(error.contains("gh merged query failed"), "{error}");
-        let monitor =
-            super::scan_failure_fallback(preserved, failure, "2026-07-28T00:00:00Z".to_string());
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, true)
+            .expect("merge discovery failure must leave time for the launch stage");
         let status = monitor.status_view();
+        let error = status
+            .last_error
+            .as_deref()
+            .expect("the degraded scan still reports merge discovery failure");
+        assert!(error.contains("merge-reconciliation"), "{error}");
+        assert!(error.contains(expected_error), "{error}");
+        assert!(
+            error.contains("continued_with_previous_candidates"),
+            "{error}"
+        );
+        assert!(!error.contains("launch_suppressed"), "{error}");
         assert_eq!(
             status.active_count, 1,
             "query failure keeps the active slot"
@@ -12774,6 +12830,40 @@ exit 0
             .iter()
             .any(|launched| launched.issue_number == 43));
         assert!(!monitor.prefs().merged_issues.contains(&43));
+        assert!(
+            monitor.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: 44,
+                    ..
+                }
+            )),
+            "the unrelated queued issue reaches the launch stage in the same scan: {:?}",
+            monitor.pending_effects()
+        );
+        assert!(
+            !monitor.pending_effects().iter().any(|effect| matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::SettleMergedIssue { .. }
+            )),
+            "a failed discovery cannot authorize a merged Issue settlement"
+        );
+    }
+
+    #[test]
+    fn daemon_scan_records_merge_reconciliation_error_and_preserves_active_slot() {
+        assert_merge_reconciliation_failure_preserves_slots_and_launches(
+            "merge_fail",
+            "gh merged query failed",
+        );
+    }
+
+    #[test]
+    fn daemon_scan_merge_reconciliation_deadline_preserves_active_slot_and_launches() {
+        assert_merge_reconciliation_failure_preserves_slots_and_launches(
+            "merge_readback_hang",
+            "deadline",
+        );
     }
 
     /// Issue #3933 AC-1/AC-4/AC-5 and Issue #3963 AC-3: the one open-PR
@@ -13718,9 +13808,10 @@ exit 0
     }
 
     /// SPEC #4093 AC-8 (Issue #3737 AC-1/AC-2/AC-6): once the persisted
-    /// window's `reset_at` has passed, the very next scan spends GraphQL
-    /// again — nothing is deferred, no toggle is needed — and the rate-limit
-    /// text left by the earlier scan is gone from `last_error`.
+    /// window's `reset_at` has passed, the very next scan loads live candidates
+    /// and prepares a claim without a toggle. Issue #5603 also expires an old
+    /// core reserve despite a recently refreshed shared probe timestamp. The
+    /// earlier rate-limit text is gone from `last_error`.
     #[test]
     fn an_expired_rate_limit_window_defers_nothing_on_the_next_scan() {
         let _env_lock = crate::env_test_lock()
@@ -13733,7 +13824,19 @@ exit 0
         let fake_gh = write_fake_gh_issue_list(temp.path());
         let _path = prepend_fake_gh_to_path(&fake_gh);
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
-        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "issue_list_fail");
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "open_pr_inventory");
+        let issue_list = temp.path().join("issues.json");
+        fs::write(
+            &issue_list,
+            serde_json::json!([{
+                "number": 44, "title": "Queued issue", "body": "Queued body",
+                "labels": [{"name": "bug"}, {"name": "gwt-queued"}],
+                "state": "OPEN", "updatedAt": "2026-08-15T00:00:00Z"
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let _issues = ScopedEnvVar::set("GWT_FAKE_GH_ISSUE_LIST_FILE", &issue_list);
 
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -13755,6 +13858,30 @@ exit 0
             .expect("seed the previous successful candidate result");
         // The window a previous scan persisted has already reset.
         let now = chrono::Utc::now();
+        // Issue #5603: GraphQL traffic may have refreshed the shared probe
+        // while the old core remaining=0 observation crossed its own reset.
+        let ledger = gwt_core::github_budget::BudgetLedger::global();
+        ledger.record_probe(&gwt_core::github_budget::ProbeSnapshot {
+            probed_at: now,
+            resources: std::collections::BTreeMap::from([(
+                "core".to_string(),
+                gwt_core::github_budget::ResourceWindow {
+                    limit: 5000,
+                    remaining: 0,
+                    reset_at: now - chrono::Duration::seconds(1),
+                },
+            )]),
+        });
+        assert!(
+            gwt_core::github_budget::throttle_reason(
+                &ledger.snapshot(now),
+                gwt_core::github_quota::GitHubQuota::Rest,
+                &gwt_core::github_budget::ThrottlePolicy::default(),
+                now,
+            )
+            .is_none(),
+            "the expired core window must not stop the first scan"
+        );
         gwt_core::github_budget::BudgetLedger::global().record_block(
             &gwt_core::github_quota::RateLimitBlock {
                 resource: "graphql".to_string(),
@@ -13794,6 +13921,16 @@ exit 0
 
         let scanned = super::scan_issue_monitor_once_blocking(scope, monitor, true)
             .expect("the scan after the window completes");
+        assert!(
+            scanned
+                .agent_status()
+                .inbox_coverage
+                .as_ref()
+                .is_some_and(|coverage| {
+                    coverage.source == crate::IssueMonitorCandidateSource::Live
+                }),
+            "the first scan after core reset loads the live candidate list"
+        );
 
         let last_error = scanned.status_view().last_error.unwrap_or_default();
         assert!(
@@ -13806,8 +13943,8 @@ exit 0
         );
         let snapshot = gwt_core::github_budget::BudgetLedger::global().snapshot(chrono::Utc::now());
         assert!(
-            snapshot.local["graphql"].calls_last_hour >= 1,
-            "the per-candidate readback spends GraphQL again: {:?}",
+            snapshot.local["core"].calls_last_hour >= 1,
+            "candidate loading spends the reset REST budget again: {:?}",
             snapshot.local
         );
         assert!(
@@ -20398,6 +20535,59 @@ exit 1
         );
     }
 
+    #[test]
+    fn issue_4862_scan_commit_does_not_resurrect_a_missing_pane() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("issue-monitor-prefs.json");
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "tab-1::gone".into(),
+            }],
+            ..crate::IssueMonitorPrefs::default()
+        };
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.record_candidate(sample_issue_monitor_issue(42));
+        monitor.record_attempt(42);
+        let observe = |at: &str| crate::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: at.into(),
+            windows: Vec::new(),
+        };
+        monitor.record_window_snapshot(observe("2026-10-16T00:00:00Z"));
+        monitor.reconcile_idle_windows(&std::collections::BTreeMap::new(), "2026-10-16T00:00:00Z");
+        crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+        let epoch = monitor.effect_authority_epoch();
+        let mut scanned = monitor.clone();
+        scanned.record_window_snapshot(observe("2026-10-16T00:01:00Z"));
+        assert_eq!(
+            scanned
+                .reconcile_idle_windows(&std::collections::BTreeMap::new(), "2026-10-16T00:01:00Z")
+                .requeued,
+            vec![42]
+        );
+        assert!(super::commit_issue_monitor_scan_if_current(
+            &path,
+            &mut monitor,
+            scanned,
+            epoch
+        ));
+        let mut restarted = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&path).unwrap(),
+        );
+        restarted.record_candidate(sample_issue_monitor_issue(42));
+        assert_eq!(restarted.launched_window_id(42), None);
+        assert_eq!(restarted.attempt_count(42), 1);
+        assert_eq!(
+            restarted.inbox_item(42).unwrap().state,
+            crate::MonitorInboxState::Queued
+        );
+    }
+
     /// Issue #3757 / SPEC #3165 Scenarios 102-103: `gwtd requeue` updates the
     /// shared preferences while the daemon can still hold the abandoned launch
     /// in memory. Persisting that stale daemon and then restarting must not
@@ -22370,6 +22560,36 @@ exit 1
             );
             assert_eq!(prefs.failed_issues, disk.failed_issues);
         }
+    }
+
+    #[test]
+    fn issue_4862_late_launch_control_cannot_restore_a_replaced_duplicate_binding() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut stale = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        stale.record_candidate(sample_issue_monitor_issue(42));
+        stale.complete_active_launch(42, "tab-1::duplicate");
+        let mut canonical = stale.clone();
+        assert!(canonical.bind_duplicate_runtime_holder(42, "tab-1::duplicate", "tab-1::holder"));
+        crate::save_issue_monitor_prefs(&prefs_path, &canonical.prefs()).unwrap();
+
+        let _ = apply_control_for_test(
+            &prefs_path,
+            &mut stale,
+            IssueMonitorControl::Launched {
+                issue_number: 42,
+                window_id: "tab-1::duplicate".into(),
+                delivery_id: None,
+            },
+        );
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(persisted.launched_issues, canonical.prefs().launched_issues);
+        assert_eq!(
+            stale.launched_window_id(42).as_deref(),
+            Some("tab-1::holder")
+        );
     }
 
     #[test]

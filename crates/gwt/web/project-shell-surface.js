@@ -44,7 +44,7 @@
 //   flies the local camera to frame a window (used by the switcher rows).
 // - scheduleTerminalFit(windowId, persist): terminal core scheduler.
 // - visibleBounds(): current visible canvas bounds in world space.
-// - addButton / tileButton / stackButton: toolbar buttons owned by app.js
+// - addButton: toolbar button owned by app.js
 //   (their click listeners stay there).
 // - cloneProjectModal / cloneProjectDialog / migrationModal /
 //   migrationDialog: modal elements owned by app.js because the focus
@@ -93,8 +93,8 @@ export function createProjectShellSurface({
   scheduleTerminalFit,
   visibleBounds,
   addButton,
-  tileButton,
-  stackButton,
+
+
   cloneProjectModal,
   cloneProjectDialog,
   migrationModal,
@@ -440,8 +440,6 @@ export function createProjectShellSurface({
         renderedActionAvailabilityKey = nextActionAvailabilityKey;
         const hasActiveTab = nextActionAvailabilityKey === "active";
         addButton.disabled = !hasActiveTab;
-        tileButton.disabled = !hasActiveTab;
-        stackButton.disabled = !hasActiveTab;
         windowListButton.disabled = !hasActiveTab;
         if (!hasActiveTab) {
           windowListOpen = false;

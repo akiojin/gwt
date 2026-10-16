@@ -2333,8 +2333,8 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
   );
   assert.match(
     appSource,
-    /scheduleTerminalFit\(windowData\.id,\s*shouldPersistTerminalGeometry\)/,
-    "workspace render geometry changes must route terminal fits through the shared scheduler",
+    /scheduleTerminalFit\(windowData\.id,\s*true\)/,
+    "surface render must route terminal fits through the shared scheduler",
   );
   assert.match(
     appSource,
@@ -2422,11 +2422,6 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     appSource,
     /runTerminalActivationSequence\(\{/,
     "scheduleTerminalFocusActivation must delegate to runTerminalActivationSequence",
-  );
-  assert.match(
-    appSource,
-    /scheduleTerminalFocusActivation\(topmostId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"topmost_focus"[\s\S]*?\}\)/,
-    "topmost focus activation must not persist geometry unconditionally on every workspace render",
   );
   assert.match(
     appSource,

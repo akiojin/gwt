@@ -1,6 +1,100 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.126.1] - 2026-10-16
+
+### Bug Fixes
+
+- **execution:** Resolve superseded work after container detachment
+
+### Miscellaneous Tasks
+
+- **work:** Record PM settings delivery gate handoff
+- **work:** Record Windows CI delivery continuation
+- **work:** Record Windows CI delivery recovery
+- **work:** Record PR 5622 delivery metadata
+
+### Performance
+
+- **ci:** Trim Windows test symbols and parallelize providers
+- **ci:** Compile Windows regression harness groups in parallel
+
+### Refactor
+
+- **ui:** Render PM settings from shared state
+- **ui:** Render workspace state notices from shared state
+
+### Testing
+
+- **workspace:** Isolate rebuild detachment fixture home
+- **ci:** Align native caller contracts with Windows slices
+- **execution:** Fix detached successor fixture path lookup
+
+## [9.126.0] - 2026-10-16
+
+### Bug Fixes
+
+- **pm:** Require a registered executor for scoped operations
+- **pm:** Keep automatic prompts out of Q&A reports
+- **verify:** Record TTL overruns and reclaim diagnostics
+- **index:** Retain query models across revision switches
+- **verify:** Bound exclusive command occupancy
+- **agent:** Preserve reused sessions after exact relaunch
+- **execution:** Supersede invalid successor work occupancy
+- **monitor:** Recover expired budgets and bound candidate reads
+- **monitor:** Preserve launches when merge discovery fails
+
+### Features
+
+- **ui:** Bound PM reports and version raw updates
+- **notifications:** Route project notices through the server
+
+### Miscellaneous Tasks
+
+- **work:** Preserve the restored pull request link
+- **work:** Issue #3287 の配信済みスライスを記録する
+- **work:** Settle the delivered tray slice successor
+- **ci:** Rust workspace テストを6 shardに分割して実行集合を検証
+- **work:** Record the delivered tray execution
+- **work:** Preserve issue 5016 delivery recovery records
+- **work:** Record SAFE-C performance handoff
+- **work:** Record Profiles delivery relaunch
+- **work:** Record the notification pull request
+
+### Performance
+
+- **ci:** Share Windows test artifacts and parallelize regressions
+- **ci:** Avoid Windows regression runner queues
+- **ui:** Avoid per-packet RAW and snapshot allocations
+- **reports:** Bound live history and expose older pages
+- **state:** Avoid mapped tuples in immutable snapshots
+
+### Refactor
+
+- **ui:** Share Profile state through subscriptions
+
+### Testing
+
+- **ci:** 分割コマンドに既存の対応テストを追従
+- **perf:** 現行の起動導線で計測ペインを開く
+- **perf:** Snapshot回復と区間時計同期を計測する
+- **perf:** Compare captures with measured baseline noise
+- **ui:** Verify Profile state disposal and remount
+- **ui:** Resize live Profile window before environment checks
+- **ui:** Align Profile contract with subscriber identity
+- **notifications:** Align the monitor protocol fixture
+- **notifications:** Preserve the socket readiness contract
+- **monitor:** Account for budget-enriched daemon projections
+
+### Ci
+
+- Separate workflow queue and dependency timing
+
+### Revert
+
+- **perf:** Remove unshipped preview and Reports changes
+- **perf:** Remove unshipped snapshot-copy change
+
 ## [9.125.0] - 2026-10-15
 
 ### Bug Fixes

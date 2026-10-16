@@ -363,8 +363,7 @@ fn a_corroborated_quota_notice_holds_immediately() {
     );
 }
 
-/// Issue #3616: the usage-poller tick is what reaches a pending candidate's
-/// settle deadline.
+/// Issue #5597: the periodic sweep must work without another account change.
 ///
 /// A blocked pane emits no further output, so the output path alone would leave
 /// the candidate pending forever — the launch would keep its slot for the whole
@@ -387,7 +386,16 @@ fn the_usage_snapshot_tick_promotes_a_settled_candidate() {
 
     // No screen is readable for a test window, so a pending candidate whose
     // notice cannot be re-confirmed is abandoned rather than promoted.
-    let _ = runtime.handle_provider_usage_snapshot(Vec::new(), instant("2026-08-17T09:25:00Z"));
+    let main = include_str!("../../main.rs");
+    let tick = main
+        .split("Event::UserEvent(UserEvent::TerminalConvergenceTick) =>")
+        .nth(1)
+        .unwrap()
+        .split("Event::UserEvent(")
+        .next()
+        .unwrap();
+    assert!(tick.contains("app.sweep_provider_quota_candidates"));
+    let _ = runtime.sweep_provider_quota_candidates(instant("2026-08-17T09:25:00Z"));
 
     assert!(
         !runtime.provider_quota_candidates.contains_key(&window_id),

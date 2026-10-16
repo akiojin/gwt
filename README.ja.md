@@ -13,7 +13,7 @@ Agent workspace を materialize するために worktree を使いますが、�
 
 - **Agent workspace** — `Claude Code` / `Codex` / `Grok Build` /
   `Antigravity CLI` / `OpenCode` / `Copilot` /
-  custom agent を共有 canvas から起動・再開・状態確認できます。
+  custom agent を共有 workspace から起動・再開・状態確認できます。
 - **Shared Board** — user と agent の communication を repo-scoped timeline に集約し、
   `status` / `claim` / `next` / `blocked` / `handoff` / `decision` /
   `question` を扱えます。
@@ -27,8 +27,8 @@ Agent workspace を materialize するために worktree を使いますが、�
 - **Managed workflow skills** — discussion、Issue routing、planning、
   TDD implementation、PR、architecture review、project search、agent 管理用の
   bundled `gwt-*` skills を使えます。
-- **Operator canvas** — Agent、Board、Logs、Profile、Index、Settings の
-  surface を mission-control 風 workspace に並べられます。
+- **Operator workspace** — レールから Issues、Agents、Board、Settings を切り替え、
+  必要に応じて Split view と独立した PM 入口を使えます。
 
 ## インストール
 
@@ -371,7 +371,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 1. プロジェクトを開く、GitHub から clone する、または前回のプロジェクトを復元する
 2. `Board`、`Issue`、Knowledge search surface で現在の作業、
    関連 owner、過去の判断を把握する
-3. **Curate** レーンでは、Command Rail または Command Palette の `Intake` を
+3. **Curate** レーンでは、Command Palette の `Intake` を
    選ぶ。branchless で使い捨ての session で、議論・計画し GitHub Issue を
    登録する。設計が必要な作業は同じ Issue に `gwt-spec` design-required label と
    SPEC artifact を付ける。Intake は branch を作らない
@@ -393,9 +393,9 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 - `Board` — reasoning と coordination のための user / agent shared timeline
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
-  Work Item view を開きます。Issue Monitor の自動起動はキャンバスにウィンドウを
-  開かず、Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
-  したいときは `Windowize` で通常のウィンドウにできます。各行には対応する Work
+  Work Item view を開きます。Issue Monitor が自動起動した Agent は、
+  Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
+  したいときは `Windowize` で同じセッションを Agents の個別タブに開けます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
@@ -427,9 +427,10 @@ Board は各ウィンドウで最大1,000件を保持します。先頭までス
 `Load earlier entries` を選ぶと、古い投稿を再取得できます。過去の履歴を閲覧中は
 `Back to latest entries` で最新の更新へ戻れます。
 
-作業 Agent は起動時に短く覚えやすい固有名を選び、バッジ・ウィンドウタイトル・
-Fleet・Kanban カードに表示します。候補が重複すると数字の接尾辞が付きます。
-名前は復元・その場での再起動をまたいで維持され、確定前のバッジは `Naming…` です。
+gwt は作業 Agent の起動時に、出力言語に合う覚えやすい名前をランダムに割り当てます。
+バッジ・ウィンドウタイトル・Fleet・Kanban・Board に表示し、PM も名前で状況を報告します。
+名前はプロジェクトの過去の担当名と重複せず、復元・その場での再起動をまたいで維持します。
+担当開始・引継ぎ・PR 作成・完了は担当名付きで Issue のコメントに残り、PR 本文にも担当名を載せます。
 常駐 PM は独自の固定表示を維持します。
 
 Windows の Host 起動では、Launch Agent で Command Prompt、Windows PowerShell、
@@ -462,7 +463,7 @@ Max active は **Manual** に切り替えると数値を編集でき、**Auto** 
 
 Kanban は既定で全幅です。カードを選ぶとプレビューが開き、**Issue / Output** で
 本文・受け入れ基準とエージェントの読み取り専用出力を切り替えます。
-**Windowize** でエージェントを Canvas へ移せます。**Close preview** または Escape で
+**Windowize** でエージェントを Agents の個別タブに開けます。**Close preview** または Escape で
 全幅に戻ります。狭い幅ではプレビューをボードの上に重ね、列は縮めず横スクロールします。
 従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
@@ -498,6 +499,10 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 `params.number` と `params.reason` を渡して失敗した launch を停止できます。
 保存済みの失敗 window は同じ Issue の所有である場合だけ使用し、永続的な停止状態と
 閉じる対象の pane を返します。
+停止した Issue は理由付きの保留として表示され、既定ではこの端末の起動キューから
+外れます。`params.remove_from_queue` を `false` にすると、保留したままキューへの
+所属を維持します。起動失敗には原因の分類と次の回復操作を表示し、同じ原因の失敗が
+続いた場合は設定済みの試行上限後に自動再試行を止めます。
 
 `urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
@@ -606,7 +611,7 @@ Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考�
 指定すると、無料枠を確認した後に OS の確認ダイアログを表示します。
 **Redeem free reset** を選ぶと、そのアカウントの無料リセットを1回消費します。
 既定は Cancel で、autonomous モードでも確認を省略しません。
-JSON の承認フラグや過去の承認は利用できません。canvas 上にある、直接インストールした
+JSON の承認フラグや過去の承認は利用できません。独立した Agent タブで動く、直接インストールした
 Host Codex と既定プロバイダの window に対応し、Docker・package runner・独自 backend は拒否します。
 確認画面には対象窓の起動時に記録した認証ルートと由来（host・profile・caller environment）を
 表示し、ヘルパーも同じルートを使用します。証跡のない古い窓は再起動してください。
@@ -665,18 +670,25 @@ NeedsHuman エスカレーション）はトーストとして表示され、永
 通知スタックに蓄積されるため、離席中のイベントも失われません。
 
 Agent の状態通知は **停止**・**エラー**・**人間の対応待ち**を伝えます。
-Idle を Work 完了とは扱いません。runtime のデスクトップ通知は、ページで連続した
-Running を5分以上観測し、ページが非表示またはフォーカス外の場合に限ります。
-別状態への遷移や再接続で計測をリセットします。Monitor の NeedsHuman は窓のない
+Idle を Work 完了とは扱いません。runtime のデスクトップ通知は、同じ runtime 世代で
+連続した Running をサーバーが5分以上観測した場合に限ります。全ブラウザタブを
+閉じても計測を続け、別状態への遷移や runtime 世代の変更でリセットします。Monitor の NeedsHuman は窓のない
 Issue も既存の通知ストリームで即時に伝え、inbox snapshot から二重に通知しません。
 Session Interrupted は再開候補の過去 snapshot としてしか公開されていないため対象外です。
 
 ネイティブ権限の adapter は macOS の認可設定、Windows の通知設定、Linux の
 認可照会不可を区別します。不明・未設定・拒否・照会失敗では配送を許可せず、権限を
 自動要求しません。Linux の GetCapabilities はサーバー機能であり、ユーザーの許可では
-ありません。この adapter 自体はタブなしのネイティブ配送を追加せず、その配送機構は
-SPEC #3287 の別の実装範囲です。debug binary では判定とブラウザ挙動を検証でき、
-署名済み macOS bundle の権限・配送と Windows/Linux のネイティブ操作は実機での別検証が必要です。
+ありません。同じ Project に表示中かつフォーカス中のタブがあればデスクトップ配送を
+抑止し、それ以外では許可済みタブのうち最後に注視情報を受信した1つへ配送します。
+Project の接続タブが0個の場合、最後に報告されたブラウザの許可と GWT 自身の現在の
+OS 許可があればネイティブ配送できます。未設定・拒否の報告は保持した許可を取り消し、
+Project の明示終了や GWT 再起動では許可を破棄します。クリックは受信タブへフォーカスするか、
+安定した Project URL を開きます。配送失敗時は別経路へ再送せず、未読・title・favicon・
+トレイ更新は継続します。macOS には許可済みの署名済み GWT.app、Windows には MSI が
+登録する AUMID 付きショートカットが必要です（portable ZIP は登録しません）。Linux は
+認可照会ができないためネイティブ配送を抑止します。debug binary では判定とブラウザ挙動を
+検証でき、署名済み macOS／インストール済み Windows の配送・クリック操作は別途実機検証が必要です。
 
 調整可能な上限（試行回数・stuck/idle タイムアウト・再試行バックオフ・レビュー
 モデル）はプロジェクト単位で永続化されます。human-gated の基礎は SPEC
@@ -1148,19 +1160,19 @@ project 固有の規約を明示的に渡すには、
 `gwt-pm` skill へコピーされ、runtime に project への symlink は作りません。
 指定を外した内容は次回の再生成で除去されます。
 
-## キャンバス操作
+## サーフェス操作
 
-- 画面上の zoom ボタンでキャンバスを拡大・縮小
-- 背景ドラッグでキャンバスを移動
-- `Tile` で表示中のウィンドウをグリッド整列
-- `Stack` でタイトルバーを残したまま重ねて表示
-- `Align` でウィンドウサイズを変えずにグリッド整列
+- レールから **Issues**、**Agents**、**Board**、**Settings** を選ぶと、コンテンツ領域全体に表示します。
+- **PM** は独立したレール入口から開き、単一ペインで表示します。
+- プロジェクトバーの **Split view** で左右のペインを表示し、それぞれのサーフェスを選びます。
+- **Close split** でアクティブなサーフェスを単一ペインに戻します。
+- **Agents** では同じライブターミナルを維持して、**All agents** と個別タブを切り替えます。
 
 ## Agent の巡回
 
 `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で、個別 Agent タブを
 状態順（running/starting → waiting/idle → その他）に選択します。
-Issue 内に表示された Agent も含み、PM と Shell はスキップします。
+Issue 内に表示された Agent と Shell のターミナルも含み、PM はスキップします。
 分割表示を維持し、選んだターミナルに入力フォーカスを移します。
 選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
 再び開けます。
@@ -1178,7 +1190,7 @@ Operator Design System 採用後、gwt は editorial-industrial 系タイポグ�
 counter、密度の高い作業サーフェスを長時間でも読み取りやすくします。
 一方で display typography は見出しと chrome label に限定して Operator らしさを
 保ちます。Project Bar / Command Rail / Status Strip / Command Palette /
-Hotkey Overlay / Drawer モーダル / フローティングウィンドウ の全クロームが
+Hotkey Overlay / Drawer モーダル / サーフェスパネル の全クロームが
 共通トークンを参照し、 2 つの旗艦テーマで提供されます:
 
 - **Dark Operator** (Mission Control / carbon + neon) — 既定、 長時間作業向け
@@ -1205,20 +1217,15 @@ Contrast) では system colors にフォールバックします。
 | --- | --- |
 | `⌘K` / `⌘P` | Command Palette を開く (全サーフェス アクションの fuzzy 検索) |
 | `⌘B` | Board サーフェスを focus |
-| `⌘G` | Git (Branches) サーフェスを focus |
+| `⌘G` | Issues サーフェスを focus |
 | `⌘L` | Logs サーフェスを focus |
 | `⌘?` | Hotkey Overlay (cheat sheet) を toggle |
 | `Esc` | 開いている Palette / Overlay / Drawer / Dropdown を閉じる |
 
-画面左端の Command Rail は常時表示です。上段に Intake (Curate レーン) と
-Open Workspace (Execute レーン)、
-中段にウィンドウ操作 (Tile / Stack / Align / ウィンドウ一覧 / Add)、
-下段に Command Palette が並びます。Board と Logs はレール項目ではなく、
-Add Window のプリセットメニュー・Command Palette・`⌘B` / `⌘L` のホットキー
-から開けます。レール項目にホバーするとラベルと実際のショートカットが
-表示されます。ウィンドウを閉じる操作
-(タイトルバーの × / タブの ×) は常に確認ダイアログを経由するため、誤クリック
-で実行中のエージェントが失われることはありません。
+レールには **PM** の独立した入口と、ラベル付きの **Issues**、**Agents**、
+**Board**、**Settings** が並びます。選択したサーフェスは固定ペインに表示し、
+**Split view** で必要に応じて2つ目のペインを追加できます。Status Strip は
+コンテンツ領域の下に表示します。その他の操作は Command Palette またはホットキーから使えます。
 
 ### アクセシビリティ
 
@@ -1410,6 +1417,21 @@ cargo test -p gwt-core -p gwt --all-features --doc
 nextest は各テストを別プロセスで実行し、120秒でタイムアウトしたテストを失敗として後続を継続します。doctest は rustdoc で別途実行します。
 
 ### CI スループットの計測
+
+ローカル Git 履歴なしで、直近 50 件の completed workflow run（失敗・取消も含む）の
+queue 待ちと依存スケジューリングを分けて計測できます。
+
+```bash
+python scripts/ci_throughput.py --repo akiojin/gwt --queue --save target/ci-queue.json
+python scripts/ci_throughput.py --input target/ci-queue.json
+```
+
+`--before` は run 作成時刻の上限（その時刻も含む）を固定し、`--workflow test.yml` は
+対象 workflow を絞ります。run 開始待ち、job 開始待ち、run 開始から job 作成までの時間（依存・
+スケジューリング）を分け、各 run の最長 job も示します。job 開始待ちには concurrency
+group 待ちも含まれ、API の時刻だけでは runner 容量不足と断定できません。skip・取消 job と
+再実行で再利用された時刻は job 待ち時間の分布から除外します。再実行の run 開始待ちは、
+作成時刻が元の attempt に属するため取得不能として扱います。
 
 Python 3.11 以上、認証済みの `gh`、対象 PR のマージ履歴を含むローカル Git
 履歴を用意し、develop の直近 25 マージを収集して入力データを保存します。
