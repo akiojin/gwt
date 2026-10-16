@@ -10034,75 +10034,99 @@ impl AppRuntime {
         }
     }
 
-    /// Capacity has its own cadence even while the Monitor is stopped. This
-    /// reads only the local machine observation, never a scan or control lane.
-    pub(crate) fn issue_monitor_capacity_changed_events(
+    /// Capture the accepted overlay without cloning the full Monitor queue.
+    pub(crate) fn capacity_observation_contexts(
         &self,
-        project_root: &Path,
-    ) -> Vec<OutboundEvent> {
-        self.issue_monitor_capacity_changed_events_with(project_root, |root| {
-            gwt::agent_capacity::project_capacity(root, &Default::default(), 0)
-        })
+    ) -> Vec<(
+        ProjectContext,
+        u64,
+        Option<gwt::agent_capacity::CapacityUpdate>,
+    )> {
+        self.project_states
+            .values()
+            .filter(|state| self.project_context_is_current(&state.context))
+            .map(|state| {
+                (
+                    state.context.clone(),
+                    state.issue_monitor_list_revision.get(),
+                    state
+                        .issue_monitor_status_cache
+                        .borrow()
+                        .as_ref()
+                        .map(gwt::agent_capacity::CapacityUpdate::from_status),
+                )
+            })
+            .collect()
     }
 
+    /// Apply an already-prepared overlay without filesystem or prefs access.
+    pub(crate) fn issue_monitor_capacity_changed_events(
+        &self,
+        context: &ProjectContext,
+        revision: u64,
+        update: gwt::agent_capacity::CapacityUpdate,
+    ) -> Vec<OutboundEvent> {
+        let Some(state) = self.project_state(context) else {
+            return Vec::new();
+        };
+        if !self.project_context_is_current(context)
+            || state.issue_monitor_list_revision.get() != revision
+        {
+            return Vec::new();
+        }
+        let Some(mut status) = state.issue_monitor_status_cache.borrow().clone() else {
+            return Vec::new();
+        };
+        let previous = gwt::agent_capacity::CapacityUpdate::from_status(&status);
+        status.agent_capacity = update.capacity.clone();
+        if let Some((limit, manual)) = update.limits {
+            status.max_active_agents = limit;
+            status.max_active_agents_override = manual;
+        }
+        state
+            .issue_monitor_status_revision
+            .set(state.issue_monitor_status_revision.get().wrapping_add(1));
+        state
+            .issue_monitor_status_cache
+            .replace(Some(status.clone()));
+        if !update.changed_from(Some(&previous)) {
+            return Vec::new();
+        }
+        vec![OutboundEvent::project(
+            state.context.project_key.clone(),
+            BackendEvent::IssueMonitorStatus {
+                status: Box::new(status),
+            },
+        )]
+    }
+
+    #[cfg(test)]
     fn issue_monitor_capacity_changed_events_with(
         &self,
         project_root: &Path,
         read_capacity: impl FnOnce(&Path) -> gwt::agent_capacity::AgentCapacity,
     ) -> Vec<OutboundEvent> {
-        let Some(context) = self.project_context_for_root(project_root) else {
+        let Some(previous) = self.project_state_for_root(project_root).and_then(|state| {
+            state
+                .issue_monitor_status_cache
+                .borrow()
+                .as_ref()
+                .map(gwt::agent_capacity::CapacityUpdate::from_status)
+        }) else {
             return Vec::new();
         };
-        let Some(mut status) = self
-            .project_state_for_root(project_root)
-            .and_then(|state| state.issue_monitor_status_cache.borrow().clone())
-        else {
-            // Initial List owns the full read model; do not invent queue data.
-            return Vec::new();
-        };
-        let mut previous_capacity = status.agent_capacity.clone();
-        let previous_fresh = previous_capacity.is_fresh();
-        let previous_limits = (status.max_active_agents, status.max_active_agents_override);
-        // An older live daemon can omit override provenance. Durable prefs,
-        // not that omission, own the Manual choice, just as in CLI status.
-        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
-        let mut capacity = match gwt::load_issue_monitor_prefs(&prefs_path) {
-            Ok(prefs) => {
-                gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
-            }
-            Err(error) => {
-                tracing::warn!(%error, "capacity display could not read Monitor prefs; retaining last valid mode");
-                let mut cached = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
-                cached.set_max_active_agents_override(status.max_active_agents_override);
-                cached
-            }
-        };
-        // Auto keeps the last published limit across this projection-only rebuild.
-        if capacity.max_active_agents_override().is_none() {
-            capacity.config.max_active = status.max_active_agents;
-        }
-        capacity.set_agent_capacity_for_project(project_root, read_capacity(project_root));
-        status.agent_capacity = capacity.status_view().agent_capacity;
-        status.max_active_agents_override = capacity.max_active_agents_override();
-        status.max_active_agents = capacity.effective_max_active_agents();
-        self.remember_issue_monitor_status(Some(project_root), &status);
-        // Retain renewed sensor timestamps locally without rebroadcasting the
-        // entire queue for an otherwise identical capacity projection.
-        let freshness_changed = previous_fresh != status.agent_capacity.is_fresh();
-        previous_capacity.observed_at = status.agent_capacity.observed_at;
-        previous_capacity.expires_at = status.agent_capacity.expires_at;
-        if !freshness_changed
-            && previous_capacity == status.agent_capacity
-            && previous_limits == (status.max_active_agents, status.max_active_agents_override)
-        {
-            return Vec::new();
-        }
-        vec![OutboundEvent::project(
-            context.project_key,
-            BackendEvent::IssueMonitorStatus {
-                status: Box::new(status),
-            },
-        )]
+        let update = gwt::agent_capacity::CapacityUpdate::read_with(
+            project_root,
+            Some(&previous),
+            read_capacity,
+        );
+        let context = self.project_context_for_root(project_root).unwrap();
+        let revision = self
+            .project_state(&context)
+            .unwrap()
+            .issue_monitor_list_revision
+            .get();
+        self.issue_monitor_capacity_changed_events(&context, revision, update)
     }
 
     pub(crate) fn issue_monitor_daemon_inbox_events(
@@ -14364,6 +14388,16 @@ impl AppRuntime {
         self.board_all_view_windows.remove(window_id);
     }
 
+    /// Snapshot only projects whose durable Monitor prefs may be updated by
+    /// the usage worker. Plain and migration-pending tabs remain untouched.
+    pub(crate) fn provider_usage_project_roots(&self) -> Vec<PathBuf> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
+            .map(|tab| tab.project_root.clone())
+            .collect()
+    }
+
     /// Issue #3616: record the newest account-level usage snapshot and act on
     /// any candidate it now corroborates.
     ///
@@ -14376,36 +14410,8 @@ impl AppRuntime {
         accounts: Vec<gwt_core::usage::ProviderUsage>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Vec<OutboundEvent> {
-        let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let prefs_paths = self
-            .tabs
-            .iter()
-            .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
-            .map(|tab| gwt::issue_monitor_prefs_path_for_repo_path(&tab.project_root))
-            .collect::<HashSet<_>>();
-        for prefs_path in prefs_paths {
-            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                std::time::Instant::now() + local_issue_monitor_prefs_timeout(),
-            );
-            if let Err(error) =
-                gwt::issue_monitor::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-                    let mut monitor = gwt::IssueMonitorState::with_prefs(
-                        gwt::IssueMonitorConfig::default(),
-                        prefs.clone(),
-                    );
-                    let mut changed = false;
-                    for account in &accounts {
-                        changed |= monitor.reconcile_provider_usage(account, &timestamp);
-                    }
-                    if changed {
-                        *prefs = monitor.prefs();
-                    }
-                    Ok(())
-                })
-            {
-                tracing::warn!(%error, "provider usage recovery could not be persisted; next poll retries");
-            }
-        }
+        // Issue #5597: collection workers own repository discovery and durable
+        // account recovery. This handler only projects the pane-local state.
         let released = self
             .provider_quota_holds
             .iter()
