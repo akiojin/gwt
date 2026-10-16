@@ -218,7 +218,7 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $anchor.ConnectAsync($anchorUrl.Uri, [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
   [void](Assert-Hooks (Invoke-IsolatedGwtd 'hook.health' $hookParams))
   $version = [IO.File]::ReadAllText("$repoRoot/scripts/playwright-version.txt").Trim()
-  $depsRoot = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path ([IO.Path]::GetTempPath()) "gwt-playwright-$version" }
+  $depsRoot = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Temp/gwt-playwright-$version" }
   $cli = Join-Path $depsRoot 'node_modules/playwright/cli.js'
   $resolver = Join-Path $depsRoot 'resolve-playwright.cjs'
   if (-not (Test-Path -LiteralPath $cli) -or -not (Test-Path -LiteralPath $resolver)) { throw "Pinned Playwright $version missing; bootstrap existing visual tests first." }
