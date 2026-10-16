@@ -257,6 +257,7 @@ fn hosted_windows_startup_selects_only_the_native_command_contract() {
         .expect("Windows startup contract step");
     assert!(step.contains("run: node scripts/ci-windows-tests.mjs run gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture"));
     assert_eq!(timeout_minutes(&step), Some(1));
+    assert!(!step.contains("if:"));
     assert!(
         !step.contains("--ignored"),
         "the selected test is not ignored"
@@ -417,22 +418,100 @@ fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
 
 #[test]
 fn windows_filters_use_prebuilt_targets_with_one_build_per_feature_set() {
+    use serde_yaml::Value;
+
     let workflow = read(TEST_WORKFLOW);
     let job = job_body(&workflow, "  test-windows-rust:");
-    assert_eq!(job.matches("ci-windows-tests.mjs build default").count(), 1);
-    assert_eq!(job.matches("ci-windows-tests.mjs build warm").count(), 1);
-    assert!(
-        !job.contains("cargo test"),
-        "filters must execute built binaries"
+    let warm = job_body(&workflow, "  test-windows-warm:");
+    assert_eq!(
+        workflow
+            .matches("ci-windows-tests.mjs build default")
+            .count(),
+        1
     );
-    let warm = job.find("ci-windows-tests.mjs build warm").unwrap();
-    assert!(job.rfind("ci-windows-tests.mjs run ").unwrap() < warm);
+    assert_eq!(job.matches("ci-windows-tests.mjs build default").count(), 1);
     assert!(
         job.find("ci-windows-tests.mjs build default").unwrap()
             < job.find("ci-windows-tests.mjs run ").unwrap()
     );
-    assert!(job.contains("ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget"));
+    assert!(!workflow.contains("test-windows-regression-build:"));
+    assert!(
+        !job.contains("cargo test"),
+        "regression filters must execute built binaries without recompiling"
+    );
+    assert_eq!(
+        workflow.matches("ci-windows-tests.mjs build warm").count(),
+        1
+    );
+    assert_eq!(warm.matches("ci-windows-tests.mjs build warm").count(), 1);
+    assert!(warm.contains("needs: source-sync"));
+    assert!(
+        warm.find("ci-windows-tests.mjs build warm").unwrap()
+            < warm.find("ci-windows-tests.mjs run-warm").unwrap()
+    );
+    assert!(warm.contains("ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget -- --exact --test-threads=1"));
     assert!(job.contains("ci-windows-tests.mjs run gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact"));
+
+    let doc: Value = serde_yaml::from_str(&workflow).expect("Test workflow");
+    let regressions = &doc["jobs"]["test-windows-rust"];
+    assert_eq!(regressions["needs"].as_str(), Some("source-sync"));
+    assert!(
+        regressions["strategy"].is_null(),
+        "one regression runner shares its build"
+    );
+    let steps = regressions["steps"].as_sequence().unwrap();
+    let driver = steps
+        .iter()
+        .find(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("verification_driver_cli_test::"))
+        })
+        .expect("five workers must retain all ten real-artifact repetitions");
+    assert!(driver["if"].is_null());
+    let driver_run = driver["run"].as_str().unwrap();
+    assert!(driver_run.contains("1..5 | ForEach-Object"));
+    assert!(driver_run.contains("Start-Job"));
+    assert!(driver_run.contains("$attempt -le 2"));
+    assert!(driver_run.contains("verification_driver_cli_test:: -- --test-threads=1"));
+    assert!(driver_run.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"));
+    assert!(driver_run.contains("cli::verification_record::driver:: -- --test-threads=1"));
+    assert_eq!(
+        driver_run
+            .matches("cli::verification_record::driver::")
+            .count(),
+        1
+    );
+    assert!(
+        driver_run
+            .find("cli::verification_record::driver::")
+            .unwrap()
+            < driver_run.find("Start-Job").unwrap()
+    );
+    assert!(
+        driver_run.contains("throw"),
+        "native command failures must fail their worker"
+    );
+    assert!(driver_run.contains("Wait-Job") && driver_run.contains("Receive-Job"));
+    assert!(
+        driver_run.contains(".State -ne 'Completed'")
+            || driver_run.contains("Where-Object State -ne Completed")
+    );
+    assert!(
+        driver_run.contains("exit 1"),
+        "any failed worker must fail the required job"
+    );
+    for step in steps {
+        let Some(run) = step["run"].as_str() else {
+            continue;
+        };
+        if run.contains("ci-windows-tests.mjs run ") {
+            assert!(
+                step["if"].is_null(),
+                "all regression contracts must run unconditionally"
+            );
+        }
+    }
 }
 
 /// Issue #4134 AC-1: the three-pass determinism loop is the single most
