@@ -187,7 +187,7 @@ test("app.js imports and instantiates the UI trace wiring module", () => {
     appSource,
     /import\s*\{\s*UI_TRACE_EVENT,\s*createUiTraceWiring\s*\}\s*from\s*["']\/ui-trace-wiring\.js["']/,
   );
-  assert.match(appSource, /uiTraceWiring\s*=\s*createUiTraceWiring\(/);
+  assert.match(appSource, /receive:\s*applyUiTraceReceiveEvent,\s*\.\.\.uiTraceWiring\s*\}\s*=\s*createUiTraceWiring\(/);
 });
 
 test("WebSocket dispatcher forwards timing trace events through the wiring facade", () => {
@@ -243,4 +243,28 @@ test("terminal input console traces use stage-local metadata-only exact allowlis
 test("backend UI trace save result is surfaced to the user", () => {
   assert.match(appSource, /case\s+"ui_trace_saved"/);
   assert.match(appSource, /case\s+"ui_trace_error"/);
+});
+
+test("UI trace save feedback preserves every result and ignores unrelated events", () => {
+  const alerts = [];
+  const wiring = createUiTraceWiring({
+    profiler: fakeProfiler(),
+    send: () => assert.fail("save feedback must not send a new request"),
+    alert: message => alerts.push(message),
+  });
+  assert.deepEqual(alerts, [], "mount must not show a notification");
+  assert.equal(typeof wiring.receive, "function", "save feedback needs a model receiver");
+  const saved = { kind: "ui_trace_saved", path: "/tmp/trace.json", entries: 7 };
+  assert.equal(wiring.receive(saved), true);
+  saved.path = "/tmp/caller-change.json";
+  wiring.receive({ kind: "ui_trace_error", message: "permission denied" });
+  wiring.receive({ kind: "ui_trace_saved", path: "/tmp/recovered.json", entries: 0 });
+  wiring.receive({ kind: "ui_trace_saved", path: "/tmp/recovered.json", entries: 0 });
+  assert.equal(wiring.receive({ kind: "unrelated", message: "ignored" }), false);
+  assert.deepEqual(alerts, [
+    "UI trace saved\n/tmp/trace.json\nentries: 7",
+    "UI trace error: permission denied",
+    "UI trace saved\n/tmp/recovered.json\nentries: 0",
+    "UI trace saved\n/tmp/recovered.json\nentries: 0",
+  ]);
 });
