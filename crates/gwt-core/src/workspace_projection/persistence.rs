@@ -1878,7 +1878,7 @@ pub fn transact_workspace_state_for_work_event_root_with_commit<T>(
 
 const WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 4;
 const MIN_WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 1;
-const WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR: &str =
+pub(super) const WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR: &str =
     ".gwt-pending-workspace-state-transactions";
 const WORKSPACE_STATE_TRANSACTION_RECEIPT_DIR: &str = ".gwt-workspace-state-transaction-receipts";
 const EXTERNAL_WORKSPACE_COMMIT_RECEIPT_VERSION: u32 = 1;
@@ -4737,9 +4737,11 @@ fn with_workspace_transaction_recovery_observed_profiled<T>(
                                 )));
                             }
                             return Err(GwtError::Other(format!(
-                            "workspace state transaction external commit is unresolved for operation {}",
-                            external_commit.operation_id
-                        )));
+                                "workspace state transaction {} external commit is unresolved for operation {} (owner {}); use JSON operation execution.release_prepared with the owning issue/spec, this exact operation_id, and a non-empty reason to reconcile its durable launch decision; do not delete the transaction markers",
+                                transaction.transaction_id.as_deref().unwrap_or("legacy"),
+                                external_commit.operation_id,
+                                transaction.events.first().and_then(|event| event.owner.as_deref()).unwrap_or("unknown")
+                            )));
                         }
                         if external_commit.reconciliation_work_items_path.is_some() {
                             return Err(GwtError::Other(format!(
@@ -4806,7 +4808,7 @@ fn find_pending_workspace_state_transaction(
         if !workspace_state_transactions_match_except_external_publication_state(
             existing,
             &transaction,
-        )? {
+        ) {
             return Err(malformed_workspace_state_transaction_error(
                 marker_path,
                 "transaction marker copies disagree",
@@ -4912,23 +4914,29 @@ fn malformed_workspace_state_transaction_error(marker_path: &Path, message: &str
 fn workspace_state_transactions_match_except_external_publication_state(
     left: &PendingWorkspaceStateTransaction,
     right: &PendingWorkspaceStateTransaction,
-) -> Result<bool> {
-    let mut left = serde_json::to_value(left)
-        .map_err(|error| GwtError::Other(format!("workspace state transaction json: {error}")))?;
-    let mut right = serde_json::to_value(right)
-        .map_err(|error| GwtError::Other(format!("workspace state transaction json: {error}")))?;
-    for value in [&mut left, &mut right] {
-        if let Some(phase) = value.pointer_mut("/external_commit/phase") {
-            *phase = serde_json::Value::String("prepared".to_string());
-        }
-        if let Some(external) = value
-            .pointer_mut("/external_commit")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            external.remove("reconciliation_work_items_path");
-        }
-    }
-    Ok(left == right)
+) -> bool {
+    // Compare every durable payload field without allocating JSON trees for
+    // the full Work history. Only publication phase/reconciliation may differ.
+    left.version == right.version
+        && left.transaction_id == right.transaction_id
+        && left.current_path == right.current_path
+        && left.work_items_path == right.work_items_path
+        && left.current_precondition == right.current_precondition
+        && left.work_items_precondition == right.work_items_precondition
+        && left.projection == right.projection
+        && left.work_items == right.work_items
+        && left.events_path == right.events_path
+        && left.events == right.events
+        && left.journal_path == right.journal_path
+        && left.journal_entries == right.journal_entries
+        && left
+            .external_commit
+            .as_ref()
+            .map(|external| &external.operation_id)
+            == right
+                .external_commit
+                .as_ref()
+                .map(|external| &external.operation_id)
 }
 
 fn quarantine_invalid_pending_workspace_state_transactions(
@@ -5039,6 +5047,75 @@ fn remove_workspace_state_transaction_markers(marker_paths: &[PathBuf]) -> Resul
     }
     for parent in parent_directories {
         sync_directory(&parent)?;
+    }
+    Ok(())
+}
+
+/// Exact launch identity proven by the external operation's durable owner ledger.
+pub struct ExternalWorkspaceCommitAuthority<'a> {
+    pub owner: &'a str,
+    pub session_id: &'a str,
+    pub worktree_path: &'a Path,
+    pub work_id: Option<&'a str>,
+}
+
+/// Recover a canonical launch publication only when its staged Work event
+/// matches the identity proven by the caller's durable owner ledger.
+/// Validation runs under the same state locks as resolution, before any
+/// receipt or marker is changed. Receipt-only retries are read-only.
+pub fn resolve_workspace_state_external_commit_for_authority(
+    repo_path: &Path,
+    operation_id: &str,
+    decision: ExternalWorkspaceCommitDecision,
+    authority: &ExternalWorkspaceCommitAuthority<'_>,
+) -> Result<ExternalWorkspaceCommitResolution> {
+    validate_external_workspace_operation_id(operation_id)?;
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let Some(_operation_lock) = try_acquire_external_workspace_operation_lock(
+        &current_path,
+        &work_items_path,
+        operation_id,
+    )?
+    else {
+        return Ok(ExternalWorkspaceCommitResolution::Busy);
+    };
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
+        &current_path,
+        &work_items_path,
+        operation_id,
+        decision,
+        &[],
+        None,
+        Some(authority),
+        |_| Ok(()),
+    )
+}
+
+fn validate_external_workspace_commit_authority(
+    transaction: &PendingWorkspaceStateTransaction,
+    authority: &ExternalWorkspaceCommitAuthority<'_>,
+) -> Result<()> {
+    let matches = if let [event] = transaction.events.as_slice() {
+        matches!(event.kind, WorkEventKind::Start | WorkEventKind::Resume)
+            && event.owner.as_deref() == Some(authority.owner)
+            && event.agent_session_id.as_deref() == Some(authority.session_id)
+            && authority.work_id.is_none_or(|id| event.work_item_id == id)
+            && session_bound_paths_match(
+                event
+                    .execution_container
+                    .as_ref()
+                    .and_then(|container| container.worktree_path.as_deref()),
+                Some(authority.worktree_path),
+            )?
+    } else {
+        false
+    };
+    if !matches {
+        return Err(GwtError::Other(
+            "external workspace transaction does not match the proven owner launch authority"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -5157,6 +5234,29 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
     decision: ExternalWorkspaceCommitDecision,
     additional_lock_targets: &[PathBuf],
     reconciliation_work_items_path: Option<&Path>,
+    on_committed: impl FnMut(Option<&PendingWorkspaceStateTransaction>) -> Result<()>,
+) -> Result<ExternalWorkspaceCommitResolution> {
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
+        current_path,
+        work_items_path,
+        operation_id,
+        decision,
+        additional_lock_targets,
+        reconciliation_work_items_path,
+        None,
+        on_committed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
+    current_path: &Path,
+    work_items_path: &Path,
+    operation_id: &str,
+    decision: ExternalWorkspaceCommitDecision,
+    additional_lock_targets: &[PathBuf],
+    reconciliation_work_items_path: Option<&Path>,
+    authority: Option<&ExternalWorkspaceCommitAuthority<'_>>,
     mut on_committed: impl FnMut(Option<&PendingWorkspaceStateTransaction>) -> Result<()>,
 ) -> Result<ExternalWorkspaceCommitResolution> {
     ensure_supported_workspace_layout(current_path)?;
@@ -5257,6 +5357,9 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
                 return Err(GwtError::ExternalWorkspacePathPairMismatch {
                     operation_id: operation_id.to_string(),
                 });
+            }
+            if let Some(authority) = authority {
+                validate_external_workspace_commit_authority(&transaction, authority)?;
             }
             if decision == ExternalWorkspaceCommitDecision::Commit {
                 let pending_reconciliation = transaction

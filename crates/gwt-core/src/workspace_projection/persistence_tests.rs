@@ -2928,6 +2928,17 @@ fn workspace_state_transaction_commit_refusal_blocks_until_explicit_rejection() 
     );
     let error = blocked.unwrap_err().to_string();
     assert!(error.contains("unresolved"), "{error}");
+    assert!(error.contains("execution.release_prepared"), "{error}");
+    let pending =
+        find_pending_workspace_state_transaction(&[pending_workspace_state_transaction_path(
+            &current,
+        )])
+        .unwrap()
+        .unwrap();
+    assert!(
+        error.contains(pending.transaction_id.as_deref().unwrap()),
+        "{error}"
+    );
     assert!(!error.contains("in flight"), "{error}");
     assert_eq!(
         fs::read(&current).expect("read current while blocked"),
@@ -3922,6 +3933,23 @@ fn transaction_marker_versions_fail_closed_on_mismatched_event_storage() {
 }
 
 #[test]
+fn transaction_marker_comparison_does_not_serialize_projections() {
+    // AC-3: a Value tree for 828 Work histories dominated workspace.ensure.
+    let source = include_str!("persistence.rs");
+    let comparison = source
+        .split_once("fn workspace_state_transactions_match_except_external_publication_state(")
+        .expect("transaction comparison")
+        .1
+        .split_once("\nfn ")
+        .expect("next function")
+        .0;
+    assert!(
+        !comparison.contains("serde_json::"),
+        "transaction comparison must compare typed fields without serializing projections"
+    );
+}
+
+#[test]
 fn workspace_state_transaction_preserves_conflicting_transaction_marker_sets() {
     let _guard = lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -4020,6 +4048,17 @@ fn workspace_state_transaction_recovers_committed_copy_from_mixed_external_phase
         .as_mut()
         .expect("external commit")
         .phase = ExternalWorkspaceCommitPhase::Committed;
+    assert!(
+        workspace_state_transactions_match_except_external_publication_state(&prepared, &committed)
+    );
+    let mut conflicting = committed.clone();
+    conflicting.work_items.as_mut().unwrap().work_items[0].title = "conflicting payload".into();
+    assert!(
+        !workspace_state_transactions_match_except_external_publication_state(
+            &prepared,
+            &conflicting
+        )
+    );
     let coordinator =
         pending_workspace_state_transaction_coordinator_path(&prepared).expect("coordinator");
     write_atomic(&coordinator, &serde_json::to_vec_pretty(&prepared).unwrap()).unwrap();
@@ -15321,6 +15360,74 @@ fn retired_layout_transaction_refuses_before_markers_receipts_or_events() {
     let error = save_workspace_projection_to_path(&current, &transaction.projection).unwrap_err();
     assert!(error.to_string().contains("v9.106.0"), "{error}");
     assert_eq!(std::fs::read(&marker).unwrap(), malformed);
+}
+
+#[test]
+fn guarded_external_recovery_rejects_foreign_owner_without_mutation() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(home.path());
+    let repo = home.path().join("repo");
+    init_test_git_repo(&repo);
+    let current = gwt_workspace_projection_path_for_repo_path(&repo);
+    let works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let operation_id = "guarded-recovery";
+    let projection = WorkspaceProjection::default_for_project(&repo);
+    let work_id = projection.id.clone();
+    save_workspace_projection(&repo, &projection).unwrap();
+    let mut event = WorkEvent::new(WorkEventKind::Resume, &work_id, Utc::now());
+    event.owner = Some("Issue #4854".into());
+    event.agent_session_id = Some("guarded-session".into());
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        worktree_path: Some(repo.clone()),
+        branch: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    let staged = transact_workspace_state_with_commit(
+        &repo,
+        operation_id,
+        |_, _, _| Ok(((), vec![event])),
+        || Err(GwtError::Other("lost external response".into())),
+    )
+    .unwrap_err();
+    assert!(
+        staged.to_string().contains("lost external response"),
+        "{staged}"
+    );
+    let marker = pending_workspace_state_transaction_path(&current);
+    let marker_before = fs::read(&marker).unwrap();
+    let authority = ExternalWorkspaceCommitAuthority {
+        owner: "Issue #4855",
+        session_id: "guarded-session",
+        worktree_path: &repo,
+        work_id: Some(&work_id),
+    };
+    let error = resolve_workspace_state_external_commit_for_authority(
+        &repo,
+        operation_id,
+        ExternalWorkspaceCommitDecision::Commit,
+        &authority,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("authority"), "{error}");
+    assert_eq!(fs::read(&marker).unwrap(), marker_before);
+    assert!(!external_workspace_commit_receipt_path(&current, &works, operation_id).exists());
+    let authority = ExternalWorkspaceCommitAuthority {
+        owner: "Issue #4854",
+        ..authority
+    };
+    assert_eq!(
+        resolve_workspace_state_external_commit_for_authority(
+            &repo,
+            operation_id,
+            ExternalWorkspaceCommitDecision::Commit,
+            &authority,
+        )
+        .unwrap(),
+        ExternalWorkspaceCommitResolution::Committed,
+    );
 }
 
 /// The CI flake behind `session_bound_board_origin_without_target_container_remains_board_only`:
