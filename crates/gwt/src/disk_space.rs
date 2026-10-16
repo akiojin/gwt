@@ -52,6 +52,10 @@ impl From<&gwt_config::BuildArtifactGcConfig> for DiskThresholds {
 pub struct DiskVolume {
     /// The path the volume was probed through.
     pub path: String,
+    /// Filesystem identity, rather than the path used to probe it. Missing
+    /// identities never authorize automatic cache deletion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_id: Option<String>,
     pub free_bytes: u64,
     pub total_bytes: u64,
 }
@@ -66,6 +70,46 @@ pub struct DiskSpaceStatus {
     /// the operation that reclaims space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+impl DiskSpaceStatus {
+    pub(crate) fn low_volume_ids(&self) -> std::collections::BTreeSet<String> {
+        let thresholds = DiskThresholds {
+            below_bytes: self.warn_below_bytes,
+            below_percent: self.warn_below_percent,
+        };
+        self.volumes
+            .iter()
+            .filter(|volume| is_low(volume, thresholds))
+            .map(|volume| {
+                volume
+                    .volume_id
+                    .clone()
+                    .unwrap_or_else(|| format!("unknown:{}", volume.path))
+            })
+            .collect()
+    }
+}
+
+/// Identify the actual filesystem after resolving junctions and symlinks.
+/// This matches verification admission's device / mount-point identity.
+pub(crate) fn volume_id(path: &Path) -> std::io::Result<String> {
+    let path = dunce::canonicalize(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(format!("device:{}", std::fs::metadata(path)?.dev()))
+    }
+    #[cfg(not(unix))]
+    {
+        let path = path.to_string_lossy().to_lowercase();
+        sysinfo::Disks::new_with_refreshed_list()
+            .iter()
+            .map(|disk| disk.mount_point().to_string_lossy().to_lowercase())
+            .filter(|mount| Path::new(&path).starts_with(Path::new(mount)))
+            .max_by_key(String::len)
+            .ok_or_else(|| std::io::Error::other(format!("cannot identify volume for {path}")))
+    }
 }
 
 /// Probe each path's volume and evaluate the thresholds. A path that does
@@ -91,6 +135,7 @@ pub fn probe_with(paths: &[&Path], thresholds: DiskThresholds) -> DiskSpaceStatu
         };
         let volume = DiskVolume {
             path: path.display().to_string(),
+            volume_id: volume_id(path).ok(),
             free_bytes,
             total_bytes,
         };
@@ -176,6 +221,7 @@ mod tests {
     fn volume(path: &str, free_bytes: u64, total_bytes: u64) -> DiskVolume {
         DiskVolume {
             path: path.to_string(),
+            volume_id: None,
             free_bytes,
             total_bytes,
         }
@@ -239,6 +285,10 @@ mod tests {
         let status = probe(&[existing.as_path(), missing.as_path()]);
         assert_eq!(status.volumes.len(), 1, "{status:?}");
         assert!(status.volumes[0].total_bytes > 0);
+        assert_eq!(
+            status.volumes[0].volume_id,
+            Some(volume_id(&existing).expect("volume identity"))
+        );
     }
 
     #[test]

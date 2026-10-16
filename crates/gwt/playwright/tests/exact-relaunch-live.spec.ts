@@ -160,16 +160,21 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(tomlString(await syncedResumeId(first.gwt_session_id!), "agent_session_id")).toBe(native);
       await attachScreenshot(page, testInfo, `launched-${theme}`);
 
-      // Window restart: the provider exits, then the public restart request
-      // exercises the same backend path as Restart agent. The current Agents
-      // grid owns presentation; the legacy canvas button is not visible there.
+      // Window restart: the provider exits, then an explicit runtime restart
+      // rebinds the same window. The Agents surface hides legacy canvas chrome.
       // Let the SessionStart runtime state land first so it cannot race the exit.
       await expect.poll(async () => (await codexWindows(page)).find((entry) => entry.id === firstWindow.id)?.status,
         { timeout: 60_000, message: "SessionStart runtime state reaches the window" }).toBe("idle");
-      // Add Agent focuses a live window, and opens the wizard after exit.
+      // A clean exit closes the window; a provider failure retains the tile.
+      const beforeExit = await cursor(page);
       process.kill(first.pid, "SIGTERM");
-      await expect(page.locator(`.workspace-window[data-id="${firstWindow.id}"]`))
-        .toHaveAttribute("data-agent-state", "error", { timeout: 60_000 });
+      await page.waitForFunction(({ after, id }) => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "terminal_status"
+        && entry.payload.id === id && entry.payload.status === "error"),
+      { after: beforeExit, id: firstWindow.id }, { timeout: 60_000 });
+      const tile = page.locator(`.agent-tile[data-agent-id="${firstWindow.id}"]`);
+      await expect(tile).toBeVisible();
+      await expect(tile.locator(".agent-tile__mode")).toHaveText("Input unavailable");
       const wizardCursor = await cursor(page);
       await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: fixture.branch });
       const { wizard } = await latestWizard(page, wizardCursor, true);
@@ -184,6 +189,8 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(second.resume_session_id).toBe(native);
       expect(second.provider_session_id).toBe(native);
       await liveCodexWindow(page, second.gwt_session_id!);
+      await expect(tile).toBeVisible();
+      await expect(tile.locator(".agent-tile__mode")).toHaveText("Interactive");
       const secondRecord = await syncedResumeId(second.gwt_session_id!);
       expect(tomlString(secondRecord, "agent_session_id")).toBe(native);
       expect(secondRecord, "the restarted Session stays eligible for the next app restore")

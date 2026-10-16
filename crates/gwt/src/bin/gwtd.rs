@@ -917,14 +917,38 @@ fn format_update_help() -> String {
 }
 
 fn run_json_envelope_cli(argv: &[String]) -> i32 {
+    let prog = argv
+        .first()
+        .and_then(|raw| std::path::Path::new(raw).file_stem())
+        .and_then(|stem| stem.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("gwt");
+    let mut input = String::new();
+    if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input) {
+        eprintln!("{prog}: failed to read JSON envelope: {error}");
+        return 1;
+    }
     let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut env = json_envelope_env(repo_path, &input);
+    gwt::cli::dispatch_json_input(&mut env, prog, &input)
+}
+
+fn json_envelope_env(repo_path: PathBuf, input: &str) -> gwt::cli::DefaultCliEnv {
+    // Local search needs only the resolved worktree. The canonical dispatcher
+    // still validates the full envelope and preserves its governance path.
+    if serde_json::from_str::<serde_json::Value>(input).is_ok_and(|envelope| {
+        envelope
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            == Some("search")
+    }) {
+        return gwt::cli::DefaultCliEnv::new_for_hooks_at(repo_path);
+    }
     if let Some((owner, repo)) = resolve_repo_coordinates(&repo_path) {
-        let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
-        return gwt::cli::dispatch(&mut env, argv);
+        return gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
     }
 
-    let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
-    gwt::cli::dispatch(&mut env, argv)
+    gwt::cli::DefaultCliEnv::new_for_hooks()
 }
 
 fn is_allowed_argv_exception(argv: &[String]) -> bool {
@@ -1058,7 +1082,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn search_json_uses_local_env_without_eager_repository_cache_resolution() {
+        use gwt::cli::CliEnv;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _repo = ScopedEnvVar::set("GWT_GITHUB_REPO", "fixture/local-search");
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "bound-search-session");
+        let project = tempfile::tempdir().unwrap();
+        let env = json_envelope_env(
+            project.path().to_path_buf(),
+            r#"{"schema_version":1,"operation":"search","params":{"query":"admission"}}"#,
+        );
+
+        assert_eq!(env.repo_path(), project.path());
+        assert_eq!(
+            env.cache_root(),
+            gwt::issue_cache::detached_issue_cache_root(),
+            "local search must not resolve the repository Issue cache before dispatch"
+        );
+    }
+
+    #[test]
     fn pm_runtime_remote_discovery_uses_explicit_project_directory() {
+        use gwt::cli::CliEnv;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _repo = ScopedEnvVar::unset("GWT_GITHUB_REPO");
+        let _remote = ScopedEnvVar::unset("GWT_REMOTE");
         let project = tempfile::tempdir().unwrap();
         assert!(gwt_core::process::hidden_command("git")
             .arg("init")
@@ -1086,6 +1146,18 @@ mod tests {
                 "https://github.com/fixture/pm-runtime.git".into()
             )]
         );
+        for input in [
+            r#"{"schema_version":1,"operation":"issue.view","params":{"number":42}}"#,
+            "{",
+        ] {
+            let env = json_envelope_env(project.path().to_path_buf(), input);
+            assert_eq!(env.repo_path(), project.path());
+            assert_eq!(
+                env.cache_root(),
+                gwt::issue_cache::issue_cache_root_for_repo_path(project.path()).unwrap(),
+                "non-search and malformed envelopes retain repository initialization"
+            );
+        }
     }
 
     #[test]

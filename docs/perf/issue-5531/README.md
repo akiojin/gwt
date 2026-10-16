@@ -40,6 +40,14 @@ through its existing update function. Its regression starts a real profile
 request before recovery, and verifies that drafts and in-flight save control
 remain intact.
 
+The later Branches model migration retains cleanup operation state in its
+canonical model. Recovery reads it there and limits re-subscription to the
+requested windows, preserving local selection and options. Index recovery
+invalidates the lost request and republishes through its canonical response
+model. Its existing DOM lifecycle regression covers retained results, query
+and scopes, stale-reply fencing and the fresh result without injecting a
+second mutable response state.
+
 ## Measurement method
 
 - Run `scripts/diagnostics/issue-5531-browser-check.ps1` with `-Label before`
@@ -108,14 +116,14 @@ updated harness to their exact digests.
 | --- | ---: | ---: | --- | --- |
 | Before, dark | 373,280 | 41,412 | unobserved / unobserved | timeout at 15,018 / unobserved |
 | Before, light | 647,408 | 98,951 | unobserved / unobserved | timeout at 15,008 / unobserved |
-| After, dark | 2,048 | 1,267 | 0 / 0 | 417 / 563 |
-| After, light | 2,048 | 1,008 | 0 / 0 | 410 / 552 |
+| After, dark | 2,048 | 5,813 | 0 / 0 | 356 / 504 |
+| After, light | 2,048 | 5,864 | 0 / 0 | 285 / 598 |
 
-Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,020ms (after-dark), 1,800,012ms (after-light).
-They sent 673,702, 686,642, 690,575, 690,302 frames respectively, including the final foreground-triggering burst.
+Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,024ms (after-dark), 1,800,053ms (after-light).
+They sent 673,702, 686,642, 689,278, 690,078 frames respectively, including the final foreground-triggering burst.
 
 The archived before observer gaps reached 55,033/100,924ms.
-Final after sender observation gaps stayed within 30,135/30,237ms.
+Final after sender observation gaps stayed within 30,036/30,160ms.
 Both final after runs passed, with zero console/page/fixture errors and no
 reported task of at least 50ms in either settled window.
 
@@ -153,7 +161,8 @@ retained as `excluded-dark-target-closed*`; the closure cause is unknown. It is
 excluded from acceptance. That earlier source and its successful diagnostic
 and repeat are preserved in commit `8c646a9929c45b7a9b748fc01ca26a4ef7a946a6`.
 The final accepted runs were collected again after consolidating transport calls
-through the existing send and close paths; the receiver baseline is unchanged.
+through the existing send and close paths and integrating the Branches and Index
+shared models; the receiver baseline is unchanged.
 The accepted light and dark runs
 partly overlapped on the shared host, with independent browsers and fixtures.
 Each launch's exact input digests, continuing sender counters and physical

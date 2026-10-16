@@ -345,6 +345,7 @@ impl ProjectSessionCensus {
             &mut snapshot,
         );
         let resources = capture_process_resources(&candidates, &inventory, false, snapshot);
+        inventory.check_deadline(&sessions_dir.join("runtime"));
         let uncertainties = inventory
             .uncertainties
             .into_iter()
@@ -429,8 +430,12 @@ fn observe_live_candidates(
     measure_resources: bool,
     require_host_absence: bool,
 ) -> MachineProcessResources {
+    if !inventory.check_deadline(Path::new("runtime")) {
+        return MachineProcessResources::default();
+    }
     let resources = capture_process_resources(&candidates, inventory, measure_resources, None);
     observe_candidate_resources(candidates, inventory, &resources, require_host_absence);
+    inventory.check_deadline(Path::new("runtime"));
     resources
 }
 
@@ -916,7 +921,11 @@ fn read_candidates_with_liveness(
         .and_then(gwt_core::repo_hash::detect_repo_identity)
         .map(|identity| identity.hash.as_str().to_string());
     let mut runtimes = Vec::new();
-    for namespace in read_paths(&sessions_dir.join("runtime"), inventory) {
+    let runtime_root = sessions_dir.join("runtime");
+    for namespace in read_paths(&runtime_root, inventory) {
+        if !inventory.check_deadline(&runtime_root) {
+            break;
+        }
         let Some(host_pid) = namespace
             .file_name()
             .and_then(|name| name.to_str())
@@ -926,6 +935,9 @@ fn read_candidates_with_liveness(
             continue;
         };
         for path in read_paths(&namespace, inventory) {
+            if !inventory.check_deadline(&runtime_root) {
+                break;
+            }
             if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
@@ -951,7 +963,9 @@ fn read_candidates_with_liveness(
             runtimes.push((host_pid, path, runtime));
         }
     }
-    if session_id.is_none() {
+    if session_id.is_none()
+        && gwt_core::operation_deadline::ensure_remaining("session census").is_ok()
+    {
         // Full sweeps drop files that GC or a Host removed. A filtered recovery
         // observation must not evict other Sessions' entries.
         let root = sessions_dir.join("runtime");
@@ -968,6 +982,9 @@ fn read_candidates_with_liveness(
     }
     let mut candidates = Vec::new();
     for (host_pid, path, runtime) in runtimes {
+        if !inventory.check_deadline(&runtime_root) {
+            break;
+        }
         let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -1003,10 +1020,14 @@ fn read_candidates_with_liveness(
             }
         }
     }
+    inventory.check_deadline(&runtime_root);
     candidates
 }
 
 fn read_paths(directory: &Path, inventory: &mut SessionInventory) -> Vec<PathBuf> {
+    if !inventory.check_deadline(directory) {
+        return Vec::new();
+    }
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -1021,6 +1042,9 @@ fn read_paths(directory: &Path, inventory: &mut SessionInventory) -> Vec<PathBuf
     };
     let mut paths = Vec::new();
     for entry in entries {
+        if !inventory.check_deadline(directory) {
+            break;
+        }
         match entry {
             Ok(entry) => paths.push(entry.path()),
             Err(error) => inventory.uncertain(
@@ -1193,6 +1217,18 @@ fn observe_candidates(
 }
 
 impl SessionInventory {
+    fn check_deadline(&mut self, path: &Path) -> bool {
+        match gwt_core::operation_deadline::ensure_remaining("session census") {
+            Ok(_) => true,
+            Err(error) => {
+                // No Session attribution: missing rows in a partial census are
+                // uncertain for every owner, never proof of process absence.
+                self.uncertain(path, None, error.to_string());
+                false
+            }
+        }
+    }
+
     fn uncertain(&mut self, path: &Path, session_id: Option<&str>, reason: String) {
         self.uncertainties.push(SessionObservationUncertainty {
             runtime_path: path.to_path_buf(),
@@ -1223,6 +1259,23 @@ impl SessionInventory {
 mod tests {
     use super::*;
     use gwt_agent::{AgentId, AgentStatus};
+
+    #[test]
+    fn issue_5644_expired_inventory_is_uncertain_instead_of_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let deadline = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(deadline);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        let inventory = observe_sessions(temp.path(), &temp.path().join("sessions"));
+        assert!(inventory.sessions.is_empty());
+        assert!(
+            inventory
+                .uncertainties
+                .iter()
+                .any(|row| row.reason.contains("deadline expired")),
+            "a partial census must not authorize releasing a running owner"
+        );
+    }
 
     #[test]
     fn project_census_keeps_scopes_and_uncertainties_without_rereading_the_tick() {

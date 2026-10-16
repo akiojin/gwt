@@ -1108,6 +1108,7 @@ fn attach_monitor_control_identity(
     let published_active = std::mem::take(&mut status.active_launches);
     status.active_launches = authority.active_issue_numbers();
     status.released = authority.agent_status().released;
+    let prefs = authority.prefs();
     let mut lifecycle = authority.clone();
     let mut changed = Vec::new();
     for row in &mut status.inbox {
@@ -1121,17 +1122,35 @@ fn attach_monitor_control_identity(
         let window_id = active
             .then(|| authority.launched_window_id(row.issue_number))
             .flatten();
-        if published_active.contains(&row.issue_number) != active
-            || (status.released.contains(&row.issue_number)
-                && row.state != crate::MonitorInboxState::Released)
-            || (!active
-                && matches!(
-                    row.state,
-                    crate::MonitorInboxState::Launched | crate::MonitorInboxState::Launching
-                ))
-            || row.claim_id != claim_id
-            || row.delivery_id != delivery_id
-            || row.launched_window_id != window_id
+        // Issue #4783 AC-R3: missing launch identity is not a queue decision.
+        // Keep the daemon's lifecycle unless durable state records a change.
+        let durable_decision = active
+            || status.released.contains(&row.issue_number)
+            || prefs
+                .queued_launch_session_strategies
+                .get(&row.issue_number)
+                == Some(&crate::IssueMonitorLaunchSessionStrategy::FreshRequired)
+            || prefs.merged_issues.contains(&row.issue_number)
+            || prefs
+                .failed_issues
+                .iter()
+                .any(|failed| failed.issue_number == row.issue_number)
+            || prefs
+                .released_failures
+                .iter()
+                .any(|release| release.issue_number == row.issue_number);
+        if durable_decision
+            && (published_active.contains(&row.issue_number) != active
+                || (status.released.contains(&row.issue_number)
+                    && row.state != crate::MonitorInboxState::Released)
+                || (!active
+                    && matches!(
+                        row.state,
+                        crate::MonitorInboxState::Launched | crate::MonitorInboxState::Launching
+                    ))
+                || row.claim_id != claim_id
+                || row.delivery_id != delivery_id
+                || row.launched_window_id != window_id)
         {
             lifecycle.record_candidate(crate::IssueMonitorIssue {
                 number: row.issue_number,
@@ -2006,11 +2025,9 @@ fn run_monitor_quota_hold_list<E: CliEnv>(
 ///
 /// The recovery the incident needed was six live panes against three slots,
 /// where the fix could not be "close something": all six were working. So this
-/// re-adopts the launches whose windows the canvas still shows, and never
-/// revokes or closes a live launch. Closed-Issue bindings are removed on load.
-/// Binding recovery is safe without the daemon control lane: additive bindings and
-/// launches are union-merged by every cross-process rebase, so a daemon that
-/// owns the state absorbs this commit instead of racing it.
+/// re-adopts launches only after proving their live Session and execution
+/// binding. Positive evidence of a different owner retires stale accounting;
+/// the live pane is never changed. Closed-Issue bindings are removed on load.
 ///
 /// Judgement comes from the live canvas, exactly as `pane.list` reads it,
 /// because the durable snapshot disagreeing with the running windows is the
@@ -2022,16 +2039,39 @@ fn run_monitor_reconcile<E: CliEnv>(
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
-    let live_window_ids = crate::cli::pane::live_window_ids(&project_root)
+    let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let live_windows = crate::cli::pane::live_windows(&project_root)
         .map_err(|error| SpecOpsError::from(ApiError::Network(error)))?;
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let snapshot = crate::IssueMonitorWindowSnapshot {
+        project_tab_id: String::new(),
+        observed_at: observed_at.clone(),
+        windows: live_windows
+            .iter()
+            .filter(|window| window.preset.requires_process() && !window.is_pm)
+            .map(|window| crate::IssueMonitorWindowObservation {
+                monitor_owned: true,
+                window_id: window.id.clone(),
+                issue_number: window.linked_issue_number,
+                status: window.status,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: window.session_id.clone(),
+            })
+            .collect(),
+    };
+    let live_launch_owners =
+        crate::issue_monitor_worker::verified_live_launch_owners(&project_root, &snapshot, &now);
     let (prefs, readopted) = crate::mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         let mut monitor = crate::IssueMonitorState::with_prefs(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        let readopted = monitor.readopt_live_launch_bindings(&live_window_ids);
-        if !readopted.is_empty() || monitor.prefs().launch_bindings != prefs.launch_bindings {
-            *prefs = monitor.prefs();
+        let readopted = monitor.readopt_live_launch_bindings(&live_launch_owners, &observed_at);
+        let reconciled = monitor.prefs();
+        if reconciled != *prefs {
+            *prefs = reconciled;
         }
         readopted
     })
@@ -2047,7 +2087,7 @@ fn run_monitor_reconcile<E: CliEnv>(
             "readopted": readopted,
             "active_launches": monitor.active_issue_numbers(),
             "max_active": prefs.max_active_agents,
-            "live_windows": live_window_ids.len(),
+            "live_windows": live_windows.len(),
             "source": "live_canvas",
             "scan_requested": delivery.scan_requested,
             "scan_delivery": delivery.scan_delivery,
@@ -10946,6 +10986,27 @@ mod tests {
         assert_eq!(released["state"], "queued");
         assert!(released["claim_id"].is_null());
         assert!(released["launched_window_id"].is_null());
+    }
+
+    #[test]
+    fn issue_4783_status_keeps_daemon_lifecycle_without_durable_decision() {
+        let authority = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let mut published = authority.agent_status();
+        published.inbox = vec![
+            mismatch_row(42, crate::MonitorInboxState::Launched, None),
+            mismatch_row(43, crate::MonitorInboxState::Launched, Some("tab-1::old")),
+        ];
+        published.inbox[1].claim_id = Some("old-claim".into());
+
+        attach_monitor_control_identity(&authority, &mut published);
+
+        assert!(published.queue.is_empty());
+        assert!(published.active_launches.is_empty());
+        for row in published.inbox {
+            assert_eq!(row.state, crate::MonitorInboxState::Launched);
+            assert_eq!(row.claim_id, None);
+            assert_eq!(row.launched_window_id, None);
+        }
     }
 
     /// Issue #4231 AC-5: `priority_order` is an ordering, not queue membership.

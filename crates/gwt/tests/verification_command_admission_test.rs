@@ -1,5 +1,5 @@
 //! Issue #4823: actual derived matrices share Light commands but serialize Heavy commands.
-//! A tiny Cargo stand-in keeps the production command lines and process boundaries,
+//! Tiny Cargo/rustc stand-ins keep the production command lines and process boundaries,
 //! while readiness/release handshakes make concurrency independent of machine speed.
 
 use std::io::Write;
@@ -15,6 +15,11 @@ const FIXTURE: &str = r#"
 use std::{env, fs, path::PathBuf, thread, time::{Duration, Instant}};
 fn main() {
     let command = env::args().nth(1).unwrap();
+    if command == "--version" {
+        assert_eq!(env::args().skip(1).collect::<Vec<_>>(), ["--version"]);
+        println!("rustc admission-fixture");
+        return;
+    }
     if command == "metadata" {
         assert_eq!(env::args().skip(1).collect::<Vec<_>>(),
             ["metadata", "--offline", "--no-deps", "--format-version", "1"]);
@@ -87,6 +92,11 @@ impl Arena {
             .output()
             .unwrap();
         assert!(output.status.success(), "compile Cargo fixture: {output:?}");
+        std::fs::copy(
+            bin.join(format!("cargo{}", std::env::consts::EXE_SUFFIX)),
+            bin.join(format!("rustc{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .unwrap();
 
         git(&first, &["init", "-q", "-b", "fixture-first"]);
         git(&first, &["config", "user.email", "test@example.com"]);
@@ -261,7 +271,8 @@ fn derived_matrices_overlap_light_commands_and_serialize_heavy_commands() {
     let first_commands = arena.plan(&arena.first, "a");
     let second_commands = arena.plan(&arena.second, "b");
     assert_eq!(first_commands, second_commands);
-    assert_eq!(first_commands.len(), 4, "{first_commands:?}");
+    assert_eq!(first_commands.len(), 5, "{first_commands:?}");
+    assert_eq!(first_commands[0], "rustc --version");
     let mut first = Run {
         arena: &arena,
         child: Some(arena.spawn(
