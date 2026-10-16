@@ -35,6 +35,16 @@ def sample():
 
 
 class ThroughputTests(unittest.TestCase):
+    def test_job_steps_attribute_cache_compile_test_and_artifact_time(self):
+        data = sample()
+        data["pull_requests"][0]["runs"][0]["jobs"][0]["steps"] = [
+            {"name": name, "conclusion": "success", "started_at": "2026-10-07T21:02:00Z",
+             "completed_at": "2026-10-07T21:03:00Z"}
+            for name in ["Restore cache", "Build tests", "Run tests", "Upload results"]]
+        report = throughput.summarize(data)["jobs"]["Test (Rust)"]["step_duration_minutes"]
+        self.assertEqual(set(report), {"Restore cache", "Build tests", "Run tests", "Upload results"})
+        self.assertTrue(all(value["p50"] == 1 and value["count"] == 1 for value in report.values()))
+
     def test_queue_report_separates_runner_admission_from_dependency_scheduling(self):
         run = copy.deepcopy(sample()["pull_requests"][0]["runs"][0])
         run.update(name="Test", head_sha="abc", head_branch="feature/test", event="pull_request")

@@ -79,31 +79,13 @@ test("FR-018: PM launcher はアクセシブルな名前を持つ", () => {
     "true",
   );
 
-  const floating = document.getElementById("canvas-pm-launcher");
-  assert.ok(floating, "キャンバス側のランチャーが必要");
-  assert.equal(floating.getAttribute("aria-label"), "Open Project Manager");
+  assert.equal(document.getElementById("canvas-pm-launcher"), null);
 });
 
-test("FR-018: キャンバスの PM ランチャーは既定で非表示", () => {
-  const document = doc();
-  const floating = document.getElementById("canvas-pm-launcher");
-  // PM が見えているときに重複 CTA を出さないため、初期状態は hidden。
-  assert.ok(floating.hasAttribute("hidden"));
-});
-
-test("FR-018: フローティング PM は minimap と同じ角を奪わない", () => {
-  // fleet-minimap は右下・z-index 60 を占有している。PM を同じ角に置くと
-  // 重なるので、左下に固定されていることを構造で固定する。
-  const minimap = /\.fleet-minimap\s*\{[^}]*\}/.exec(componentsCss)?.[0] ?? "";
-  assert.match(minimap, /right:/, "前提: minimap は右下にある");
-
-  const launcher = /\.canvas-pm-launcher\s*\{[^}]*\}/.exec(componentsCss)?.[0] ?? "";
-  assert.match(launcher, /left:/, "PM ランチャーは左端に置く");
-  assert.doesNotMatch(
-    launcher,
-    /\bright:/,
-    "右下は minimap のものなので PM は使わない",
-  );
+test("PM navigation uses the permanent rail without a floating canvas launcher", () => {
+  assert.ok(doc().getElementById("op-pm-entry"));
+  assert.equal(doc().getElementById("canvas-pm-launcher"), null);
+  assert.doesNotMatch(componentsCss, /\.canvas-pm-launcher/);
 });
 
 test("FR-020: PM の role トークンは両テーマに定義され raw color を使わない", () => {
@@ -114,7 +96,7 @@ test("FR-020: PM の role トークンは両テーマに定義され raw color �
   // PM の面は必ずトークン経由で塗る（生 hex/rgb の直書き禁止）。
   const pmRules = componentsCss
     .split("\n")
-    .filter((line) => /canvas-pm-launcher|op-rail__pm-dot|data-pm="true"|op-rail__item--pm/.test(line));
+    .filter((line) => /op-rail__pm-dot|data-pm="true"|op-rail__item--pm/.test(line));
   assert.ok(pmRules.length > 0, "PM の CSS が存在すること");
   const pmBlockStart = componentsCss.indexOf(".op-rail__item--pm");
   const pmBlock = componentsCss.slice(pmBlockStart);
@@ -195,7 +177,7 @@ test("FR-021: rail の PM 状態は running / stopped / absent を持つ", () =>
 test("#3812 AC-5: paused autonomy remains separate from PM residency", () => {
   const document = doc();
   const start = appJs.indexOf("      const pmLauncherModel = createUiStateStore(");
-  const end = appJs.indexOf("      // True when the window's rectangle", start);
+  const end = appJs.indexOf("      let pendingPmFrame = false;", start);
   assert.ok(start >= 0 && end > start);
   const { update, setPaused } = new Function("document", "createUiStateStore", "isWindowWithinViewport", `
     let pmWindowId;
@@ -216,7 +198,6 @@ test("#3812 AC-5: paused autonomy remains separate from PM residency", () => {
   update({ windows: [{ id: "pm", is_pm: true, status: "running" }] });
   assert.equal(entry.dataset.pmState, "running");
   assert.equal(entry.dataset.pmPaused, "true");
-  assert.equal(document.getElementById("canvas-pm-launcher").hidden, true);
   setPaused(false);
   assert.equal(entry.dataset.pmState, "running");
   assert.equal(entry.dataset.pmPaused, "false");

@@ -31,6 +31,10 @@ async function loadBranchesCleanupSurfaceForTest() {
     .replace(
       'from "/branch-list-state.js"',
       `from ${JSON.stringify(pathToFileURL(resolve(here, "../branch-list-state.js")).href)}`,
+    )
+    .replace(
+      'from "/ui-state-store.js"',
+      `from ${JSON.stringify(pathToFileURL(resolve(here, "../ui-state-store.js")).href)}`,
     );
   writeFileSync(modulePath, source);
   try {
@@ -714,7 +718,7 @@ test("Issue #4433: an interrupted cleanup can still be dismissed by the user", a
   assert.ok(dismiss, "an interrupted cleanup must offer a way out of the modal");
   dismiss.click();
   surface.renderBranchCleanupModal();
-  assert.equal(surface.ensureBranchListState(windowId).cleanupModal.open, false);
+  assert.equal(surface.readBranchCleanupState(windowId).open, false);
   void sent;
 });
 
@@ -740,7 +744,7 @@ test("Issue #4433: a reloaded client adopts a cleanup it never started", async (
   assert.equal(dialogEl.querySelector("h2").textContent, "Cleaning up branches");
   assert.match(dialogEl.textContent, /Cleaning 1 of 2: work\/old/);
   assert.equal(
-    surface.ensureBranchListState(windowId).cleanupModal.operationId,
+    surface.readBranchCleanupState(windowId).operationId,
     "op-from-before-the-reload",
   );
 });
@@ -783,4 +787,32 @@ test("Issue #4433: late progress does not reopen a finished cleanup", async () =
     "Cleanup result",
     "a progress frame that arrives after the result must not rewind the modal",
   );
+});
+
+
+test("cleanup snapshots own received data and release closed window state", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const windowId = "workspace-immutable";
+  const { surface, dialogEl } = mountCleanupSurface(surfaceModule, windowId);
+  const results = [{ branch: "work/old", status: "success", message: "Original result" }];
+  surface.applyBranchCleanupReceiveEvent({
+    kind: "branch_cleanup_result", id: windowId, operation_id: "immutable-op", results,
+  });
+  const previous = surface.readBranchCleanupState(windowId);
+  assert.ok(Object.isFrozen(previous));
+  assert.ok(Object.isFrozen(previous.results[0]));
+  results[0].message = "Mutated payload";
+  surface.renderBranchCleanupModal();
+  assert.match(dialogEl.textContent, /Original result/);
+  assert.doesNotMatch(dialogEl.textContent, /Mutated payload/);
+  surface.closeBranchCleanupModal(windowId);
+  assert.equal(previous.stage, "result", "old snapshots remain stable after a transition");
+  assert.equal(surface.readBranchCleanupState(windowId).open, false);
+  surface.applyBranchCleanupReceiveEvent({
+    kind: "branch_cleanup_result", id: "other-owner", operation_id: "other-op", results: [],
+  });
+  const activeHeading = dialogEl.querySelector("h2");
+  surface.clearBranchCleanupForWindow(windowId);
+  assert.equal(surface.readBranchCleanupState(windowId), null);
+  assert.equal(dialogEl.querySelector("h2"), activeHeading, "unrelated removal does not rebuild the active dialog");
 });

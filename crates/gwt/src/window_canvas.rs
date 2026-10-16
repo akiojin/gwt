@@ -94,46 +94,6 @@ impl WindowCanvasState {
         true
     }
 
-    /// Assign once; the runtime supplies reservations from every open tab.
-    pub fn assign_agent_name(
-        &mut self,
-        id: &str,
-        candidate: &str,
-        reserved: &std::collections::HashSet<String>,
-    ) -> Result<String, String> {
-        let window = self
-            .persisted
-            .windows
-            .iter_mut()
-            .find(|window| window.id == id)
-            .ok_or_else(|| "Agent window is missing".to_string())?;
-        if !window.preset.is_agent_terminal() || window.is_pm {
-            return Err("Only non-PM Agent windows can be named".to_string());
-        }
-        if let Some(name) = &window.agent_name {
-            return Ok(name.clone());
-        }
-        let candidate = candidate.trim();
-        if !(2..=24).contains(&candidate.len())
-            || !candidate.bytes().all(|byte| byte.is_ascii_alphabetic())
-        {
-            return Err("Choose one English word of 2 to 24 ASCII letters".to_string());
-        }
-        let mut base = candidate.to_ascii_lowercase();
-        base[..1].make_ascii_uppercase();
-        let mut assigned = base.clone();
-        let mut suffix = 2usize;
-        while reserved
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(&assigned))
-        {
-            assigned = format!("{base}-{suffix}");
-            suffix += 1;
-        }
-        window.agent_name = Some(assigned.clone());
-        Ok(assigned)
-    }
-
     pub fn set_agent_name(&mut self, id: &str, name: Option<String>) -> bool {
         let Some(window) = self
             .persisted
@@ -2412,80 +2372,5 @@ mod tests {
         assert_eq!(codex.geometry, new_geometry);
         assert_eq!(claude.geometry_revision, snapshot.geometry_revision);
         assert_eq!(codex.geometry_revision, snapshot.geometry_revision);
-    }
-}
-
-#[cfg(test)]
-mod agent_name_tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn agent_name_is_unique_idempotent_and_persisted() {
-        let mut canvas = WindowCanvasState::from_persisted(crate::empty_workspace_state());
-        let window = canvas.add_window(
-            WindowPreset::Agent,
-            WindowGeometry {
-                x: 0.0,
-                y: 0.0,
-                width: 1000.0,
-                height: 800.0,
-            },
-        );
-        let reserved = HashSet::from(["falcon".to_string(), "falcon-3".to_string()]);
-        assert_eq!(
-            canvas
-                .assign_agent_name(&window.id, " fALCON ", &reserved)
-                .unwrap(),
-            "Falcon-2"
-        );
-        assert_eq!(
-            canvas
-                .assign_agent_name(&window.id, "Mint", &reserved)
-                .unwrap(),
-            "Falcon-2"
-        );
-        let restored: PersistedWindowCanvasState =
-            serde_json::from_str(&serde_json::to_string(&canvas.persistable_state()).unwrap())
-                .unwrap();
-        let mut canvas = WindowCanvasState::from_persisted(restored);
-        assert_eq!(
-            canvas
-                .assign_agent_name(&window.id, "Onyx", &reserved)
-                .unwrap(),
-            "Falcon-2"
-        );
-    }
-
-    #[test]
-    fn agent_name_refuses_invalid_missing_and_non_agent_without_mutation() {
-        let mut canvas = WindowCanvasState::from_persisted(crate::empty_workspace_state());
-        let bounds = WindowGeometry {
-            x: 0.0,
-            y: 0.0,
-            width: 1000.0,
-            height: 800.0,
-        };
-        let agent = canvas.add_window(WindowPreset::Agent, bounds.clone());
-        let shell = canvas.add_window(WindowPreset::Shell, bounds);
-        let before = canvas.persisted().clone();
-        for (id, candidate) in [
-            (&agent.id[..], "Issue3824"),
-            (&agent.id, "A B"),
-            (&agent.id, ""),
-            (&shell.id, "Falcon"),
-            ("missing", "Falcon"),
-        ] {
-            assert!(canvas
-                .assign_agent_name(id, candidate, &HashSet::new())
-                .is_err());
-            assert_eq!(canvas.persisted(), &before);
-        }
-        assert_eq!(
-            canvas
-                .assign_agent_name(&agent.id, "Falcon", &HashSet::new())
-                .unwrap(),
-            "Falcon"
-        );
     }
 }

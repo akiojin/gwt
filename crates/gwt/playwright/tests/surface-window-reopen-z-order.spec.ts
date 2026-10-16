@@ -13,10 +13,10 @@ import {
 } from "./_helpers/live-gwt";
 
 
-test.describe("surface reopen z-order", () => {
+test.describe("surface reopen", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("reopening an existing surface raises it locally before backend focus ack", async ({
+  test("reopening an existing surface selects its fixed pane before backend focus ack", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -25,11 +25,8 @@ test.describe("surface reopen z-order", () => {
 
     const board = page.locator('.workspace-window[data-preset="board"]');
     const index = page.locator('.workspace-window[data-preset="index"]');
-    await expect(board).toBeVisible();
-    await expect(index).toBeVisible();
-    await expect(async () => {
-      expect(await zIndex(board)).toBeLessThan(await zIndex(index));
-    }).toPass();
+    await expect(page.locator("#split-surfaces")).toBeVisible();
+    await expect(page.locator("#canvas, #canvas-stage, #fleet-minimap")).toHaveCount(0);
 
     await page.locator("#add-button").click();
     await expect(page.locator("#preset-modal")).not.toHaveAttribute(
@@ -39,9 +36,9 @@ test.describe("surface reopen z-order", () => {
     await page.locator('#preset-modal [data-preset="board"]').click();
 
     await expect(board).toHaveClass(/focused/);
-    await expect(async () => {
-      expect(await zIndex(board)).toBeGreaterThan(await zIndex(index));
-    }).toPass({ timeout: 500 });
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "board");
+    await expect(board).toBeVisible();
+    await expect(index).toBeHidden();
 
     await expect
       .poll(async () => {
@@ -50,13 +47,6 @@ test.describe("surface reopen z-order", () => {
       .toEqual(["tab-1::board-1"]);
   });
 });
-
-async function zIndex(locator: any): Promise<number> {
-  const raw = await locator.evaluate((node: HTMLElement) => {
-    return Number.parseInt(node.style.zIndex || "0", 10);
-  });
-  return Number.isFinite(raw) ? raw : 0;
-}
 
 async function installWorkspaceFixture(page: any): Promise<void> {
   await page.addInitScript(() => {

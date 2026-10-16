@@ -443,6 +443,31 @@ pub struct HeavyLeaseStatus {
     pub holder_stale: bool,
 }
 
+impl HeavyLeaseStatus {
+    /// Preserve an observed overrun before an external reclaim ends the holder.
+    pub fn record_ttl_overrun(&self, holder_cpu_percent: Option<f64>) {
+        if !self.held || !self.expired || self.holder_kind != Some(HeavyHolderKind::Verification) {
+            return;
+        }
+        if let (Some(id), Some(deadline), Some(target), Some(owner)) = (
+            self.lease_id.as_deref(),
+            self.expires_at_ms,
+            self.target.as_deref(),
+            self.owner.as_ref(),
+        ) {
+            record_ttl_overrun(
+                id,
+                deadline,
+                target,
+                owner,
+                self.holder_context.as_ref(),
+                holder_cpu_percent,
+                Some(self.pending),
+            );
+        }
+    }
+}
+
 /// One verification slot, or the legacy exclusive root holder (`slot: None`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeavySlotStatus {
@@ -1450,6 +1475,7 @@ impl IndexCoordinator {
         owner: OwnerIdentity,
         reason: &str,
     ) {
+        let holder_pid = owner.pid;
         append_lease_event(
             &self.root,
             &LeaseEvent {
@@ -1462,6 +1488,22 @@ impl IndexCoordinator {
                 reason: Some(reason.to_string()),
             },
         );
+        let record = crate::error_ledger::ErrorRecord::new_host(
+            crate::error_ledger::ErrorKind::VerificationLeaseReclaimed,
+            reason,
+        )
+        .with_context(
+            [
+                ("lease_id".to_string(), lease_id.to_string()),
+                ("target".to_string(), target.to_string()),
+                ("holder_pid".to_string(), holder_pid.to_string()),
+                ("reason".to_string(), reason.to_string()),
+            ]
+            .into(),
+        );
+        if let Err(error) = crate::error_ledger::record(record) {
+            tracing::warn!(%error, "verification reclaim diagnostic failed");
+        }
     }
 }
 
@@ -2252,6 +2294,28 @@ impl HeavyLease {
         self.ticket.expires_at_ms.is_some_and(|at| now_ms() >= at)
     }
 
+    /// Record once per exceeded deadline, before renewal can hide it. Unknown
+    /// CPU or queue observations stay unknown rather than becoming zero.
+    pub fn record_ttl_overrun(&self, holder_cpu_percent: Option<f64>) {
+        if !self.records_events || !self.is_expired() {
+            return;
+        }
+        let pending = published_heavy_queue(&self.root.join("heavy.pending"))
+            .ok()
+            .map(|queue| queue.len());
+        if let Some(deadline) = self.expires_at_ms() {
+            record_ttl_overrun(
+                self.id(),
+                deadline,
+                self.target(),
+                &self.ticket.owner,
+                self.ticket.holder_context.as_ref(),
+                holder_cpu_percent,
+                pending,
+            );
+        }
+    }
+
     /// Publish this holder's progress, `done` of `total` units finished at
     /// `unit_ms` each (Issue #4280 AC-2). A `verify.run` holder reports its
     /// command matrix this way, so a refused claimant sees how many commands
@@ -2347,6 +2411,7 @@ impl HeavyLease {
         }
         self.released = true;
         if self.is_expired() {
+            self.record_ttl_overrun(None);
             self.record_event(LeaseEventKind::Expired, Some("ttl elapsed"));
         } else {
             self.record_event(LeaseEventKind::Released, None);
@@ -2660,6 +2725,58 @@ fn append_lease_event(root: &Path, event: &LeaseEvent) {
     let _ = handle.write_all(&line);
     let _ = handle.flush();
     let _ = fs2::FileExt::unlock(&file);
+}
+
+fn record_ttl_overrun(
+    lease_id: &str,
+    deadline: u64,
+    target: &str,
+    owner: &OwnerIdentity,
+    holder_context: Option<&HeavyHolderContext>,
+    holder_cpu_percent: Option<f64>,
+    pending: Option<usize>,
+) {
+    use crate::error_ledger::{self, ErrorKind, ErrorRecord, ErrorTarget};
+
+    let message = "verification lease exceeded its TTL";
+    let mut record = if let Some(context) = holder_context {
+        ErrorRecord::new(
+            ErrorKind::VerificationLeaseExpired,
+            message,
+            ErrorTarget {
+                project_root: Some(context.project_root.display().to_string()),
+                ..Default::default()
+            },
+        )
+    } else {
+        ErrorRecord::new_host(ErrorKind::VerificationLeaseExpired, message)
+    }
+    .with_context(
+        [
+            ("lease_id".to_string(), lease_id.to_string()),
+            ("target".to_string(), target.to_string()),
+            ("holder_pid".to_string(), owner.pid.to_string()),
+            ("expires_at_ms".to_string(), deadline.to_string()),
+            ("ttl_overrun_count".to_string(), "1".to_string()),
+            (
+                "holder_cpu_percent".to_string(),
+                holder_cpu_percent.map_or_else(|| "unavailable".to_string(), |cpu| cpu.to_string()),
+            ),
+            (
+                "pending".to_string(),
+                pending.map_or_else(|| "unavailable".to_string(), |count| count.to_string()),
+            ),
+            (
+                "queue_len".to_string(),
+                pending.map_or_else(|| "unavailable".to_string(), |count| count.to_string()),
+            ),
+        ]
+        .into(),
+    );
+    record.id = format!("verification-lease-expired:{lease_id}:{deadline}");
+    if let Err(error) = error_ledger::record_once(record) {
+        tracing::warn!(%error, "verification expiry diagnostic failed");
+    }
 }
 
 /// Path of a target's heavy queue entry: one file per claimant target, so a
@@ -3202,10 +3319,20 @@ fn sweep_heavy_queue_entry(
 }
 
 fn read_registration(path: &Path) -> Result<Option<Registration>, CoordinatorError> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(err) if registration_is_gone(path, &err) => return Ok(None),
-        Err(err) => return Err(CoordinatorError::Io(err)),
+    // Atomic reservation replacement can briefly reject opens on Windows.
+    // Keep gone entries immediate and range-lock contention nonblocking.
+    let Some(mut file) =
+        crate::atomic_file::retry_on_sharing_violation(|| match File::open(path) {
+            Ok(file) => Ok(Some(file)),
+            Err(err) if registration_is_gone(path, &err) => Ok(None),
+            Err(err) => {
+                #[cfg(all(test, windows))]
+                tests::before_status_retry();
+                Err(err)
+            }
+        })?
+    else {
+        return Ok(None);
     };
     // Preserve nonblocking admission budgets when a concurrent cleanup probe
     // owns this inode. The caller keeps the unreadable arrival for its retry.
@@ -3518,6 +3645,38 @@ mod tests {
         writer.join().unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn lease_status_rereads_a_reservation_during_a_sharing_conflict() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        coordinator
+            .reserve_heavy(&key, JobPriority::ManualRebuild, HANG_GUARD, None)
+            .unwrap();
+        let path = coordinator.heavy_reservation_path(&key);
+        let blocker = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        STATUS_RETRY_HOOK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || drop(blocker))));
+
+        let result = coordinator.heavy_lease_status();
+        STATUS_RETRY_HOOK.with(|hook| hook.borrow_mut().take());
+        let queue = result
+            .unwrap_or_else(|error| {
+                panic!(
+                    "reservation open at {} must recover: {error}",
+                    path.display()
+                )
+            })
+            .queue;
+        assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
+    }
+
     #[test]
     fn reservation_refreshed_after_snapshot_survives_sweep() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3721,8 +3880,26 @@ mod tests {
     }
 
     #[test]
+    fn reclaimed_lease_reason_is_readable_in_the_error_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(tmp.path());
+        let coordinator = open(tmp.path());
+        let reason = "orphaned holder pid 123 reclaimed by pid 456: no workload remains";
+        coordinator.record_lease_reclaimed("fixture", "target", OwnerIdentity::current(), reason);
+        let records = crate::error_ledger::list_since(None).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].context["lease_id"], "fixture");
+        assert_eq!(records[0].context["reason"], reason);
+        assert_eq!(
+            coordinator.lease_events().unwrap()[0].reason.as_deref(),
+            Some(reason)
+        );
+    }
+
+    #[test]
     fn lease_ttl_expires_and_records_the_reason() {
         let tmp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(tmp.path());
         let coordinator = open(tmp.path());
         let key = TargetKey::verification("repo-a", "wt-1");
         let guard = own(&coordinator, &key, JobPriority::ManualRebuild);
@@ -3763,6 +3940,12 @@ mod tests {
             Some("ttl elapsed"),
             "the expiry event must record why the lease lapsed"
         );
+        let records = crate::error_ledger::list_since(None).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].context["lease_id"], lease_id);
+        assert_eq!(records[0].context["ttl_overrun_count"], "1");
+        assert_eq!(records[0].context["holder_cpu_percent"], "unavailable");
+        assert_eq!(records[0].context["pending"], "0");
     }
 
     #[test]
@@ -4265,6 +4448,51 @@ mod tests {
         let path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
         let file = publish_live_registration(&path, &registration).unwrap();
         (file, path)
+    }
+
+    #[test]
+    fn successive_exclusive_batches_yield_to_an_earlier_legacy_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 3).unwrap();
+        let holder_key = TargetKey::verification("project-a", "holder");
+        let holder = own(&coordinator, &holder_key, JobPriority::ManualRebuild);
+        let first = holder
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .unwrap();
+        let first_id = first.id().to_string();
+        let earlier_key = TargetKey::verification("project-b", "earlier");
+        let earlier = own(&coordinator, &earlier_key, JobPriority::ManualRebuild);
+        // The helper decodes a legacy registration with no command mode.
+        let (pending, path) =
+            resident_verification_claim(&coordinator, &earlier_key, Duration::ZERO);
+        let arrival = coordinator.heavy_pool_status().unwrap().queue[0].queued_at_ms;
+
+        first.release().unwrap();
+        assert!(matches!(
+            holder.acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[]),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+        let queue = coordinator.heavy_pool_status().unwrap().queue;
+        assert_eq!(
+            queue[0].target.as_deref(),
+            Some(earlier_key.file_stem().as_str())
+        );
+        assert_eq!(queue[0].queued_at_ms, arrival);
+        assert_eq!(queue[0].mode, HeavyQueueMode::Exclusive);
+        let predecessor = earlier
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .expect("the earlier legacy claim must run before the holder's next batch");
+        drop(pending);
+        fs::remove_file(path).unwrap();
+        predecessor.release().unwrap();
+        earlier.complete(JobOutcome::Completed).unwrap();
+
+        let next = holder
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .expect("the next exclusive batch runs after its predecessor releases");
+        assert_ne!(next.id(), first_id);
+        next.release().unwrap();
+        holder.complete(JobOutcome::Completed).unwrap();
     }
 
     #[test]

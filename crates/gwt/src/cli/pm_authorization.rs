@@ -38,7 +38,9 @@ struct DiscussionInput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingInput {
+    #[serde(default)]
     github_discussion: u64,
+    category: Option<String>,
     provider: Option<String>,
 }
 #[derive(Deserialize)]
@@ -88,7 +90,9 @@ fn validate(intent: &OperationIntent) -> io::Result<()> {
         }
         "board.config.set" => {
             let p: BindingInput = decode(&intent.params)?;
-            if p.github_discussion == 0
+            if p.category
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
                 || p.provider.as_deref().is_some_and(|value| value != "local")
             {
                 return Err(invalid());
@@ -380,6 +384,7 @@ fn bind_board(
     owner: String,
     name: String,
     number: u64,
+    category: Option<String>,
     switch_to_local: bool,
 ) -> io::Result<Value> {
     let work_dir = gwt_core::paths::gwt_repo_local_work_dir(repo);
@@ -397,6 +402,7 @@ fn bind_board(
         owner,
         repo: name,
         number,
+        category: category.unwrap_or_else(|| "General".into()),
     });
     let path = work_dir.join(gwt_config::board_config::PROJECT_BOARD_FILE);
     gwt_github::cache::write_atomic(
@@ -525,7 +531,14 @@ fn execute<E: CliEnv>(
         "board.config.set" => {
             let p: BindingInput = decode(&intent.params)?;
             let (owner, name) = coordinates.clone().expect("repo preflight");
-            bind_board(repo, owner, name, p.github_discussion, p.provider.is_some())
+            bind_board(
+                repo,
+                owner,
+                name,
+                p.github_discussion,
+                p.category,
+                p.provider.is_some(),
+            )
         }
         "discussion.create" => {
             let p: DiscussionInput = decode(&intent.params)?;
@@ -539,6 +552,7 @@ fn execute<E: CliEnv>(
                     owner,
                     name,
                     discussion.number,
+                    Some(p.category),
                     p.board_provider.is_some(),
                 ) {
                     Ok(binding) => json!({"status":"bound","binding":binding}),
@@ -797,6 +811,46 @@ mod tests {
         assert_eq!(config.channel.as_deref(), Some("existing"));
         assert_eq!(config.github_discussion.unwrap().number, 17);
         assert_eq!(env.discussion_create_call_log.len(), 1);
+    }
+
+    #[test]
+    fn board_topics_can_be_enabled_with_category_without_creating_a_discussion() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let _session = registered_pm(&repo);
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let intent = OperationIntent {
+            operation: "board.config.set".into(),
+            params: json!({"category":"Announcements"}),
+        };
+        let approval = pm_authorization::record_approval(
+            &repo,
+            &intent,
+            "Enable Board topics",
+            "Remove opt-in",
+            false,
+        )
+        .unwrap();
+        let mut params = intent.params.clone();
+        params["approval_id"] = approval.id.into();
+        env.stdin = json!({"operation":intent.operation,"params":params}).to_string();
+        assert_eq!(
+            crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let config = gwt_config::ProjectBoardConfig::load_from_work_dir(
+            &gwt_core::paths::gwt_repo_local_work_dir(&repo),
+        );
+        let serialized = serde_json::to_value(config.github_discussion.unwrap()).unwrap();
+        assert_eq!(serialized["category"], "Announcements");
+        assert!(env.discussion_create_call_log.is_empty());
     }
 
     #[test]

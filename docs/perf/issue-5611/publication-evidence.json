@@ -1,0 +1,252 @@
+{
+  "owner_issue": 5611,
+  "source_base": "c15895969",
+  "classification": "IMPLEMENTATION-GAP in SPEC #1939 atomic generation contract",
+  "cause": "Chroma 1.5.5 Client.close drops native Bindings; SQLx 0.8.3 SQLite connection Drop signals a background worker and does not await handle release.",
+  "native_dependency_source": "https://raw.githubusercontent.com/launchbadge/sqlx/v0.8.3/sqlx-sqlite/src/connection/mod.rs",
+  "baseline": {
+    "rows": 1622,
+    "dimensions": 768,
+    "upsert_batch_size": 256,
+    "attempts": 8,
+    "permission_denied": 6,
+    "success": 2,
+    "boundary": "native upsert, count, Client.close, immediate os.replace directory"
+  },
+  "handle_observation": {
+    "boundary": "Capture own file handles before Client.close; query cached handle IDs with GetFileType immediately after close and after rename, without another system-wide snapshot. HNSW files close, SQLite workers lag.",
+    "attempts": [
+      {
+        "attempt": 0,
+        "result": "OK",
+        "live_after_close": [
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\0.staging\\chroma.sqlite3",
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\0.staging\\chroma.sqlite3"
+        ],
+        "live_after_rename": [],
+        "elapsed_us": 417654.6
+      },
+      {
+        "attempt": 1,
+        "result": "OK",
+        "live_after_close": [
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\1.staging\\chroma.sqlite3",
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\1.staging\\chroma.sqlite3"
+        ],
+        "live_after_rename": [],
+        "elapsed_us": 1841.3
+      },
+      {
+        "attempt": 2,
+        "result": "[WinError 5] \u30a2\u30af\u30bb\u30b9\u304c\u62d2\u5426\u3055\u308c\u307e\u3057\u305f\u3002: 'E:\\\\gwt\\\\work\\\\issue-5611\\\\target\\\\issue-5611\\\\livehandles-0nrbz_4k\\\\2.staging' -> 'E:\\\\gwt\\\\work\\\\issue-5611\\\\target\\\\issue-5611\\\\livehandles-0nrbz_4k\\\\2.gen'",
+        "live_after_close": [
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\2.staging\\chroma.sqlite3"
+        ],
+        "live_after_rename": [],
+        "elapsed_us": 1735.5
+      },
+      {
+        "attempt": 3,
+        "result": "[WinError 5] \u30a2\u30af\u30bb\u30b9\u304c\u62d2\u5426\u3055\u308c\u307e\u3057\u305f\u3002: 'E:\\\\gwt\\\\work\\\\issue-5611\\\\target\\\\issue-5611\\\\livehandles-0nrbz_4k\\\\3.staging' -> 'E:\\\\gwt\\\\work\\\\issue-5611\\\\target\\\\issue-5611\\\\livehandles-0nrbz_4k\\\\3.gen'",
+        "live_after_close": [
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\3.staging\\chroma.sqlite3",
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\3.staging\\chroma.sqlite3"
+        ],
+        "live_after_rename": [
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\3.staging\\chroma.sqlite3"
+        ],
+        "elapsed_us": 1218.5
+      },
+      {
+        "attempt": 4,
+        "result": "[WinError 5] \u30a2\u30af\u30bb\u30b9\u304c\u62d2\u5426\u3055\u308c\u307e\u3057\u305f\u3002: 'E:\\\\gwt\\\\work\\\\issue-5611\\\\target\\\\issue-5611\\\\livehandles-0nrbz_4k\\\\4.staging' -> 'E:\\\\gwt\\\\work\\\\issue-5611\\\\target\\\\issue-5611\\\\livehandles-0nrbz_4k\\\\4.gen'",
+        "live_after_close": [
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\4.staging\\chroma.sqlite3",
+          "\\\\?\\E:\\gwt\\work\\issue-5611\\target\\issue-5611\\livehandles-0nrbz_4k\\4.staging\\chroma.sqlite3"
+        ],
+        "live_after_rename": [],
+        "elapsed_us": 1655.0
+      }
+    ]
+  },
+  "unchanged_real_corpus_baseline": {
+    "runner": "E:\\gwt\\work\\issue-5611\\crates\\gwt-core\\runtime\\chroma_index_runner.py",
+    "sha256": "2d0b4f30825a10edd9b3b8aa8ec0c9f25bf8e39f5f7ee0954b72981f4be93581",
+    "wall_s": 74.74793350000255,
+    "result": {
+      "ok": true,
+      "scope": "issues",
+      "indexed": 1622,
+      "newly_embedded": 0,
+      "mode": "incremental"
+    },
+    "publications": [
+      {
+        "ok": true,
+        "generation": "gen-1792158233274-52884"
+      }
+    ],
+    "closes": [
+      {
+        "identifier": "E:\\gwt\\work\\issue-5611\\target\\issue-5611\\real-1792158159065203400\\index\\99a8660247f5bc49\\issues.gen\\gen-1792121126541-50828",
+        "refs_before": 2,
+        "closed": true,
+        "refs_after": null
+      },
+      {
+        "identifier": "E:\\gwt\\work\\issue-5611\\target\\issue-5611\\real-1792158159065203400\\index\\99a8660247f5bc49\\issues.gen\\gen-1792121126541-50828",
+        "refs_before": 2,
+        "closed": true,
+        "refs_after": null
+      },
+      {
+        "identifier": "E:\\gwt\\work\\issue-5611\\target\\issue-5611\\real-1792158159065203400\\index\\99a8660247f5bc49\\issues.staging",
+        "refs_before": 2,
+        "closed": true,
+        "refs_after": null
+      },
+      {
+        "identifier": "E:\\gwt\\work\\issue-5611\\target\\issue-5611\\real-1792158159065203400\\index\\99a8660247f5bc49\\issues.gen\\gen-1792158233274-52884",
+        "refs_before": 2,
+        "closed": true,
+        "refs_after": null
+      }
+    ],
+    "db_root": "E:\\gwt\\work\\issue-5611\\target\\issue-5611\\real-1792158159065203400\\index"
+  },
+  "fixed_native_publication": {
+    "platform": "Windows-11-10.0.26300-SP0",
+    "python": "3.14.0 (tags/v3.14.0:ebf955d, Oct  7 2025, 10:15:03) [MSC v.1944 64 bit (AMD64)]",
+    "chroma": "1.5.5",
+    "runner_sha256": "c3893c4dcae578ad340792b5fc5ecd4b05a9670b832887369a1984cdae04ef9c",
+    "rows": 1622,
+    "dimensions": 768,
+    "upsert_batch_size": 256,
+    "results": [
+      {
+        "attempt": 0,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 11.807099996076431
+      },
+      {
+        "attempt": 1,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 25.108000001637265
+      },
+      {
+        "attempt": 2,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 0.7912000000942498
+      },
+      {
+        "attempt": 3,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 16.702900000382215
+      },
+      {
+        "attempt": 4,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 12.70450000447454
+      },
+      {
+        "attempt": 5,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 12.009199999738485
+      },
+      {
+        "attempt": 6,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 12.585200005560182
+      },
+      {
+        "attempt": 7,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 12.523999997938517
+      },
+      {
+        "attempt": 8,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 1.166699999885168
+      },
+      {
+        "attempt": 9,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 4.902499997115228
+      },
+      {
+        "attempt": 10,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 1.455600002373103
+      },
+      {
+        "attempt": 11,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 14.399799998500384
+      },
+      {
+        "attempt": 12,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 12.539399998786394
+      },
+      {
+        "attempt": 13,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 11.781499997596256
+      },
+      {
+        "attempt": 14,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 11.90389999828767
+      },
+      {
+        "attempt": 15,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 12.226700004248414
+      },
+      {
+        "attempt": 16,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 18.620900002133567
+      },
+      {
+        "attempt": 17,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 94.14519999700133
+      },
+      {
+        "attempt": 18,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 11.84790000115754
+      },
+      {
+        "attempt": 19,
+        "ok": true,
+        "published_count": 1622,
+        "rename_ms": 12.539000003016554
+      }
+    ]
+  },
+  "regression_test": "test_issue_ttl.IssueTtlTests.test_native_incremental_refresh_publishes_1622_issues_after_ttl: native Chroma/SQLx/HNSW, 768-dimensional deterministic vectors, 1622 documents, expired TTL, one changed/one deleted/one added issue; 2 newly embedded; new generation and healthy count. Model inference is outside the publication failure boundary.",
+  "scope_boundary": "Issue #5609 concerns Rust managed text/byte asset readers and publisher; this change concerns Python native SQLite worker shutdown and staging-directory publication only.",
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "n/a (no UI surface)"
+}

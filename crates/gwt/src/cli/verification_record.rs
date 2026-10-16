@@ -3551,6 +3551,14 @@ fn execute_command_cancellable(
     )
 }
 
+fn command_timeout(
+    command: &str,
+    progress: Option<&CommandProgress>,
+) -> Option<std::time::Duration> {
+    crate::cli::verification_lease::short_non_cargo_timeout(command)
+        .or_else(|| progress.and_then(CommandProgress::timeout))
+}
+
 #[cfg(test)]
 fn execute_command_with_artifact_guard(
     worktree: &Path,
@@ -3707,7 +3715,7 @@ fn execute_command_with_artifact_guard_cancellable(
                 &mut process,
                 temp.path(),
                 command,
-                crate::cli::verification_lease::short_non_cargo_timeout(command),
+                command_timeout(command, progress),
                 progress,
                 output_worktree,
                 std::time::Instant::now,
@@ -4061,7 +4069,7 @@ fn execute_command_on_daemon(
         endpoint,
         request,
         |pid| progress.map(|progress| progress.start(pid)),
-        crate::cli::verification_lease::short_non_cargo_timeout(command),
+        command_timeout(command, progress),
         check,
     );
     let (exit_code, signal, mut tail, mut output_streams) = match delegated {
@@ -8131,6 +8139,26 @@ pub(crate) mod tests {
         }
         if let Some(grandchild) = &mut grandchild {
             grandchild.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn command_timeout_bounds_unknown_exclusive_work_and_preserves_short_gates() {
+        use std::time::Duration;
+
+        let shared = CommandProgress::default();
+        let exclusive = CommandProgress::with_exclusive_timeout();
+        assert_eq!(command_timeout("python runner.py", None), None);
+        assert_eq!(command_timeout("python runner.py", Some(&shared)), None);
+        assert_eq!(
+            command_timeout("python runner.py", Some(&exclusive)),
+            Some(Duration::from_secs(20 * 60))
+        );
+        for progress in [None, Some(&shared), Some(&exclusive)] {
+            assert_eq!(
+                command_timeout("git diff --check", progress),
+                Some(Duration::from_secs(60))
+            );
         }
     }
 
@@ -12466,6 +12494,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -12502,6 +12531,44 @@ mod tests {
             evaluate_evidence(dir.path(), "session-predecessor", Some(2359)),
             EvidenceStatus::WrongGeneration,
             "same owner/session/fingerprint predecessor evidence must not satisfy the successor"
+        );
+
+        // Simulate a GUI restart that lost both runner and watchdog, followed
+        // by another host process reusing the old runner's PID.
+        let mut unfinished = run;
+        unfinished.lifecycle = Some(interruption::RunLifecycle::running("old-runner"));
+        let mut document = serde_json::to_value(unfinished).unwrap();
+        document["lifecycle"]["runner_started_at"] =
+            (crate::process::host_process_start_time(std::process::id()).unwrap() + 1).into();
+        save(dir.path(), &serde_json::from_value(document).unwrap()).unwrap();
+        persist_generation_scoped_session(dir.path(), "session-successor", successor.clone(), 1);
+        run_verify_cli_as(
+            dir.path(),
+            "session-successor",
+            VerifyCommand::Plan {
+                commands: commands.clone(),
+                derive: false,
+            },
+        )
+        .unwrap();
+        let (code, output) = run_verify_cli_as(
+            dir.path(),
+            "session-successor",
+            VerifyCommand::Run {
+                commands,
+                max_wait_secs: Some(0),
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        let completed = load(dir.path()).unwrap().unwrap();
+        assert_eq!(completed.execution_binding.as_ref(), Some(&successor));
+        assert!(completed.all_passed);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-successor", Some(2359)),
+            EvidenceStatus::Fresh
         );
     }
 

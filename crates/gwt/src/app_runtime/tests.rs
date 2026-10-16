@@ -1389,6 +1389,7 @@ fn sample_runtime_with_events(
         project_states: super::initial_project_states(&project_tab_incarnations),
         project_aggregates: HashMap::new(),
         next_project_aggregate_revision: 0,
+        notification_coordinator: Default::default(),
         project_tab_incarnations,
         next_project_incarnation,
         project_navigation_request: 0,
@@ -5450,7 +5451,7 @@ fn leave_fresh_execution_activated_before_projection_commit(
                 .get(&fixture.window_id)
                 .expect("active fresh candidate");
             let live_session_ids = HashSet::from([fixture.candidate_session_id.clone()]);
-            let event = super::workspace::apply_workspace_launch_for_current_work(
+            let events = super::workspace::apply_workspace_launch_for_current_work(
                 &fixture.repo,
                 projection,
                 work_items,
@@ -5465,8 +5466,9 @@ fn leave_fresh_execution_activated_before_projection_commit(
                     live_session_ids: &live_session_ids,
                     now: Utc::now(),
                 },
+                true,
             )?;
-            Ok(((), vec![event]))
+            Ok(((), events))
         },
         || {
             gwt::cli::execution_state::activate_successor(
@@ -6021,6 +6023,7 @@ fn bound_runtime_launch_completion(
         false,
         AgentLaunchRuntimeContext {
             agent_project_root: repo.display().to_string(),
+            predecessor_session_id: None,
             expected_execution_identity: Some(expected_identity),
             active_launch_handshake: None,
         },

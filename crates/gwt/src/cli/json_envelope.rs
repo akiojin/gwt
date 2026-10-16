@@ -492,10 +492,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "workspace.close" => {
             reject_unknown_params(params, &["work_id", "close_kind"], "workspace.close")?;
             let close_kind = required_string(params, "close_kind")?;
-            if !matches!(close_kind.as_str(), "done" | "discarded") {
+            if !matches!(close_kind.as_str(), "done" | "discarded" | "superseded") {
                 return Err(CliParseError::InvalidValue {
                     flag: "close_kind",
-                    reason: "expected done or discarded",
+                    reason: "expected done, discarded, or superseded",
                 });
             }
             CliCommand::Workspace(WorkspaceCommand::Close {
@@ -738,6 +738,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
             // FR-031: an unexplained stop is not auditable.
             reason: required_string(params, "reason")?,
+            remove_from_queue: optional_bool(params, "remove_from_queue")?.unwrap_or(true),
             // Which identity components are required is a property of the live
             // launch, not of the request shape, so the state layer decides.
             claim_id: optional_string(params, "claim_id")?,
@@ -1566,7 +1567,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.name" => {
             reject_unknown_params(params, &["candidate"], "pane.name")?;
             CliCommand::Pane(PaneCommand::Name {
-                candidate: required_string(params, "candidate")?,
+                candidate: optional_string(params, "candidate")?.unwrap_or_default(),
             })
         }
         "pane.read" => CliCommand::Pane(PaneCommand::Read {
@@ -4534,6 +4535,11 @@ mod tests {
             CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
                 if work_id == "work-1" && close_kind == "done"
         ));
+        assert!(matches!(
+            ok("workspace.close", json!({"work_id":"work-1","close_kind":"superseded"})),
+            CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
+                if work_id == "work-1" && close_kind == "superseded"
+        ));
         for params in [
             json!({"close_kind":"done"}),
             json!({"work_id":"work-1"}),
@@ -5126,6 +5132,7 @@ mod tests {
                 project_root: None,
                 number: 42,
                 reason: "provider rate limit".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -5138,6 +5145,7 @@ mod tests {
                     "project_root": "/tmp/project",
                     "number": 7,
                     "reason": "switch provider",
+                    "remove_from_queue": false,
                     "claim_id": "claim-1",
                     "delivery_id": "launch:effect-1",
                 })
@@ -5146,6 +5154,7 @@ mod tests {
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
                 reason: "switch provider".to_string(),
+                remove_from_queue: false,
                 claim_id: Some("claim-1".to_string()),
                 delivery_id: Some("launch:effect-1".to_string()),
                 window_id: None,
@@ -8080,14 +8089,13 @@ mod tests {
     }
 
     #[test]
-    fn pane_name_parses_only_an_ai_candidate() {
+    fn pane_name_gets_assigned_identity_with_optional_legacy_candidate() {
         let command = ok("pane.name", json!({"candidate": "Aster"}));
         assert!(matches!(command,
             CliCommand::Pane(PaneCommand::Name { candidate }) if candidate == "Aster"
         ));
-        assert!(matches!(
-            err("pane.name", json!({})),
-            CliParseError::MissingFlag("candidate")
+        assert!(matches!(ok("pane.name", json!({})),
+            CliCommand::Pane(PaneCommand::Name { candidate }) if candidate.is_empty()
         ));
         for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
             let mut params = json!({"candidate": "Aster"});

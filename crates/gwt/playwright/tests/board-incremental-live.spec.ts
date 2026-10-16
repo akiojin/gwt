@@ -71,7 +71,11 @@ test("Issue #5402 live Board sends one new entry, retains existing entries, and 
   const expectedMentionLabel = `For you (${initialMentions + 1})`;
 
   const markdown = `${token} **incremental Markdown** and \`inline code\``;
-  await post(markdown, ["user:you"]);
+  // Human mentions belong to the GUI author path; sessionless CLI posts are
+  // agent-authored and cannot impersonate the registered PM.
+  await sendLiveGwtEvent(page, { kind: "post_board_entry", id, entry_kind: "status",
+    body: markdown, topics: [], owners: [],
+    mentions: [{ target_kind: "user", target: "you" }], broadcast: true });
   const newCard = cards.filter({ hasText: token }).filter({ hasText: "incremental Markdown" });
   await expect(newCard).toHaveCount(1);
   await expect(newCard.locator(".board-message-body strong")).toHaveText("incremental Markdown");

@@ -187,24 +187,6 @@
           </div>
           <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group" role="group" aria-label="Windows">
-            <button class="op-rail__item" id="tile-button" aria-label="Tile windows" title="Tile windows">
-              <span class="op-rail__icon" aria-hidden="true">⊞</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Tile</span>
-              </span>
-            </button>
-            <button class="op-rail__item" id="stack-button" aria-label="Stack windows" title="Stack windows">
-              <span class="op-rail__icon" aria-hidden="true">⊟</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Stack</span>
-              </span>
-            </button>
-            <button class="op-rail__item" id="align-button" aria-label="Align windows without resizing" title="Align windows">
-              <span class="op-rail__icon" aria-hidden="true">⊜</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Align</span>
-              </span>
-            </button>
             <div class="window-list-shell">
               <button
                 class="op-rail__item"
@@ -276,34 +258,8 @@
             </button>
           </div>
         </aside>
-        <div class="canvas-area">
+        <div class="surface-area">
           <div class="split-surfaces" id="split-surfaces" hidden></div>
-          <!-- SPEC-3038 US-4: the permanent hint bar is retired. Canvas
-               guidance lives in the ⌘? hotkey overlay; connection state has
-               one home — the Status Strip ONLINE cell. -->
-          <div class="canvas" id="canvas">
-            <div class="canvas-world-grid" id="canvas-world-grid" aria-hidden="true"></div>
-            <div class="canvas-stage" id="canvas-stage"></div>
-          </div>
-          <!-- SPEC-2008 camera-focus / FR-094: the always-on Fleet Minimap.
-               Lives in canvas-area, OUTSIDE #canvas-stage, so the camera
-               transform never scales it. Cells + camera frame are built by
-               fleet-minimap.js. -->
-          <!-- SPEC-3431 FR-018: shown only while the PM pane is absent from the
-               canvas or scrolled out of view, so it never competes with a
-               visible PM. Bottom-LEFT because the fleet minimap owns the
-               bottom-right corner. -->
-          <button
-            class="canvas-pm-launcher"
-            type="button"
-            id="canvas-pm-launcher"
-            hidden
-            aria-label="Open Project Manager"
-          >
-            <span class="canvas-pm-launcher__icon" aria-hidden="true">◎</span>
-            <span class="canvas-pm-launcher__label">PM</span>
-          </button>
-          <div class="fleet-minimap" id="fleet-minimap" data-empty="true" aria-label="Fleet minimap"></div>
           <div class="project-picker" id="project-picker">
             <div class="project-picker-card">
               <h2 class="project-picker-title">Open a project</h2>
@@ -321,23 +277,6 @@
               <div class="project-recent-list" id="recent-project-list"></div>
             </div>
           </div>
-          <!-- SPEC-3038 AS-4.5: empty-canvas call to action. app.js toggles
-               `hidden` from the live window count (updateCanvasEmptyState). -->
-          <div class="canvas-empty-state" id="canvas-empty-state" hidden>
-            <p class="canvas-empty-state__kicker"><span aria-hidden="true">▸</span> OPERATOR READY</p>
-            <h2 class="canvas-empty-state__title">No windows on canvas</h2>
-            <p class="canvas-empty-state__copy">
-              Open Issues to continue work, or add a surface window.
-            </p>
-            <div class="canvas-empty-state__actions">
-              <button class="wizard-button primary" id="canvas-empty-open-workspace" type="button">
-                Open Issues
-              </button>
-              <button class="wizard-button" id="canvas-empty-add-window" type="button">
-                Add window
-              </button>
-            </div>
-          </div>
           <div class="project-onboarding" id="project-onboarding">
             <div class="project-onboarding-card">
               <h2 class="project-onboarding-title" id="project-onboarding-title">
@@ -349,9 +288,6 @@
               </button>
             </div>
           </div>
-          <!-- SPEC-3038: the sidebar peek band is retired — the Command Rail
-               is grid-docked and always visible. Zoom lives in the Status
-               Strip; the bottom-right canvas corner stays empty. -->
         </div>
         <footer
           class="op-status-strip"
@@ -425,16 +361,6 @@
               id="op-strip-runtime-health-value"
               aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
             >CPU -- MEM --</span>
-          </div>
-          <!-- SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +)
-               moves from the right-bottom floating toolbar into the Status Strip
-               so it is always visible. IDs are unchanged so app.js handlers stay
-               wired by id. -->
-          <div class="op-status-strip__cell op-status-strip__cell--zoom">
-            <span class="op-status-strip__label">ZOOM</span>
-            <button type="button" class="op-status-strip__zoom-button" id="zoom-out-button" aria-label="Zoom out">-</button>
-            <button type="button" class="op-status-strip__zoom-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
-            <button type="button" class="op-status-strip__zoom-button" id="zoom-in-button" aria-label="Zoom in">+</button>
           </div>
           <button
             type="button"
@@ -529,27 +455,6 @@
             <div class="op-hotkey-card__row">
               <span>Logs surface</span>
               <kbd class="op-kbd">⌘ L</kbd>
-            </div>
-          </div>
-          <!-- SPEC-3038 US-4: canvas guidance moved here from the retired
-               permanent hint bar. -->
-          <div class="op-hotkey-card__group">
-            <h3 class="op-hotkey-card__group-title">Canvas</h3>
-            <div class="op-hotkey-card__row">
-              <span>Pan canvas</span>
-              <kbd class="op-kbd">Scroll / drag</kbd>
-            </div>
-            <div class="op-hotkey-card__row">
-              <span>Pan anywhere</span>
-              <kbd class="op-kbd">Middle-drag</kbd>
-            </div>
-            <div class="op-hotkey-card__row">
-              <span>Zoom canvas</span>
-              <kbd class="op-kbd">Ctrl/⌘ + wheel</kbd>
-            </div>
-            <div class="op-hotkey-card__row">
-              <span>Move window</span>
-              <kbd class="op-kbd">Drag titlebar</kbd>
             </div>
           </div>
           <div class="op-hotkey-card__group">

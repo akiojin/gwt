@@ -61,8 +61,8 @@ function agentFocusPriority(windowData, runtimeStateForWindow) {
   return 2;
 }
 
-// Issue #3551 — focus navigation uses a deterministic Agent-only projection
-// of the Agents view, including off-canvas and hidden saved-group members.
+// Focus navigation uses the same agent and Shell projection as the Agents
+// view, including restored and hidden saved-group members, while excluding PM.
 // Sorting by the original index after
 // the runtime bucket makes the order independent of z-index and render state.
 export function selectNextAgentFocusWindowId(

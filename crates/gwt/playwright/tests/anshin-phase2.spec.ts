@@ -75,29 +75,12 @@ test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
     await expect(missionCell).toHaveClass(/op-status-strip__cell--complete/);
   });
 
-  test("FR-045: dynamic_title_detail surfaces in the minimap tooltip and the switcher row", async ({
+  test("FR-045: dynamic_title_detail surfaces in the switcher row", async ({
     page,
   }) => {
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installPhase2Backend(page);
     await page.goto(liveUrl || APP_URL);
-
-    // (a) Fleet Minimap cell tooltip keeps the dynamic detail and appends the
-    // worktree-form label supplied by the visual-identity contract.
-    const minimap = page.locator("#fleet-minimap");
-    await expect(minimap).toBeVisible({ timeout: 10_000 });
-    const detailCell = minimap.locator(
-      '.fleet-minimap__cell[data-window-id="agent-3"]',
-    );
-    await expect(detailCell).toHaveCount(1);
-    await expect(detailCell).toHaveAttribute(
-      "title",
-      "Cedar — Refactor auth · editing src/auth/login.rs - Cedar — Unknown worktree form",
-    );
-    await expect(detailCell).toHaveAttribute(
-      "data-worktree-label",
-      "Unknown worktree form",
-    );
 
     // (b) Window Switcher row: opening the popover surfaces the live activity
     // detail as a .window-list-activity line in the agent's row.

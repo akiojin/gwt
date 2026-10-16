@@ -460,7 +460,14 @@ mod tests {
             crate::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE,
             crate::pm_registry::PM_CYCLE_REPORTING_CLAUSE,
         );
-        for prompt in ["$gwt-pm", tick.as_str()] {
+        let notification = "<task-notification>\n<task-id>background-1</task-id>\n<tool-use-id>tool-1</tool-use-id>\n<output-file>/tmp/result</output-file>\n<status>completed</status>\n<summary>Background task completed</summary>\n</task-notification>";
+        let extended_notification = notification.replace("</task-notification>", "<note>Read the result</note>\n<result>Done</result>\n<usage><tool_uses>1</tool_uses></usage>\n</task-notification>");
+        for prompt in [
+            "$gwt-pm",
+            tick.as_str(),
+            notification,
+            extended_notification.as_str(),
+        ] {
             handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
                 .unwrap();
             assert_eq!(
@@ -473,15 +480,23 @@ mod tests {
             handle_stop(&worktree, Some("pm-session")),
             HookOutput::Silent
         );
-        handle_user_prompt_submit(
-            &worktree,
-            r#"{"prompt":"[gwt] Scheduled supervision tick について説明して"}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            handle_stop(&worktree, Some("pm-session")),
-            HookOutput::StopBlock { .. }
-        ));
+        for prompt in [
+            "[gwt] Scheduled supervision tick について説明して".to_owned(),
+            "$gwt-pm の使い方を教えて".to_owned(),
+            format!("Explain this notification: {notification}"),
+            format!("{notification}\n何が完了しましたか？"),
+            format!("{notification}\nこの二つの通知を比較してください\n{notification}"),
+        ] {
+            handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
+                .unwrap();
+            assert!(
+                matches!(
+                    handle_stop(&worktree, Some("pm-session")),
+                    HookOutput::StopBlock { .. }
+                ),
+                "human question must still require QA: {prompt}"
+            );
+        }
     }
 
     #[test]
@@ -524,6 +539,27 @@ mod tests {
             instruction: (kind == gwt_core::pm_report::PmReportKind::Qa).then(instruction_capture),
         };
         handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
+        for (question, original) in [("$gwt-pm", "状況は？"), ("定期指示の照合", "$gwt-pm")]
+        {
+            let mut instruction = instruction_capture();
+            instruction.original = original.into();
+            let result = crate::cli::pm::run(
+                &mut env,
+                crate::cli::pm::PmCommand::ReportPost {
+                    project_root: None,
+                    kind: gwt_core::pm_report::PmReportKind::Qa,
+                    question: Some(question.into()),
+                    body: "変化なし".into(),
+                    instruction: Some(instruction),
+                },
+                &mut String::new(),
+            );
+            assert!(result.is_err(), "automatic QA must be refused");
+            assert!(gwt_core::pm_report::load_reports(&home.path().join("repo"))
+                .unwrap()
+                .is_empty());
+            assert!(capture_qa_turn(&worktree).unwrap().is_some());
+        }
         assert!(crate::cli::pm::run(
             &mut env,
             post(gwt_core::pm_report::PmReportKind::Qa, ""),
@@ -555,6 +591,7 @@ mod tests {
             HookOutput::Silent
         );
     }
+
     #[test]
     fn monitor_changes_remind_until_current_status_acknowledges_them() {
         let _env = gwt_core::test_support::env_lock()
@@ -691,8 +728,13 @@ mod tests {
         for prompt in [
             format!("{tick}{escalations}\r"),
             format!("{delta}{escalations}\r"),
+            format!("{tick}{escalations} quoted: UNRESOLVED BLOCKED ESCALATIONS (1)\r"),
             format!("{idle}\r"),
             format!("{idle}{escalations}\r"),
+            format!(
+                "{}{escalations}\r",
+                idle.replace("修正担当", "UNRESOLVED BLOCKED ESCALATIONS (1) 修正担当")
+            ),
             format!("{truncated_idle}\r"),
         ] {
             handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
