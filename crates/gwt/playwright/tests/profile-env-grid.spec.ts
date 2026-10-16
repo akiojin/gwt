@@ -257,6 +257,22 @@ test.describe("Profile environment variable grid", () => {
       const pane = page.locator('.workspace-window[data-preset="profile"]');
       const profile = pane;
       await expect(profile.getByText("Environment Variables", { exact: true })).toBeVisible();
+      // The default window is shorter than the fixed metadata plus env editor.
+      // Use normal window gestures to give the live case the fixture's height.
+      const titlebar = await pane.locator(".titlebar").boundingBox();
+      expect(titlebar).not.toBeNull();
+      await page.mouse.move(titlebar!.x + 20, titlebar!.y + 10);
+      await page.mouse.down();
+      await page.mouse.move(120, 90, { steps: 5 });
+      await page.mouse.up();
+      const handle = await pane.locator(".resize-handle").boundingBox();
+      const frame = await pane.boundingBox();
+      expect(handle).not.toBeNull();
+      expect(frame).not.toBeNull();
+      await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + handle!.height / 2 + 680 - frame!.height, { steps: 5 });
+      await page.mouse.up();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       const id = await pane.getAttribute("data-id");
       expect(id).toBeTruthy();
