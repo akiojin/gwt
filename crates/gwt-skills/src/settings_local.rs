@@ -261,7 +261,7 @@ fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
 /// (returns `true`) on any non-absent read/parse ambiguity so nothing is
 /// destroyed; only a genuinely absent file returns `false` (nothing to lose).
 pub fn managed_hook_config_has_user_content(path: &Path) -> bool {
-    let content = match fs::read_to_string(path) {
+    let content = match crate::asset_io::read_to_string(path) {
         Ok(content) => content,
         // Absent: nothing to preserve here.
         Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
@@ -353,12 +353,10 @@ fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> 
 
 /// Publish a fully written staging file as `destination` in one step.
 ///
-/// `fs::rename` replaces an existing destination atomically on every
-/// supported platform (Windows uses `MOVEFILE_REPLACE_EXISTING` /
-/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS`), so the destination is never
-/// missing between two writes. A former Windows-only remove-then-rename left
-/// exactly that window, and the in-process lock that guarded it could not see
-/// writers in other processes (PR #3520 review).
+/// Atomic rename preserves complete old/new contents. The shared asset reader
+/// and publisher retry transient Windows sharing failures within a bounded budget.
+/// A former remove-then-rename left a missing-file window (PR #3520 review);
+/// Windows' legacy replacement also raced path opens (Issue #5609).
 fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
     Ok(crate::asset_io::rename(staging_path, destination)?)
 }
@@ -1142,9 +1140,9 @@ mod tests {
     /// PR #3520 review (PRRT_kwDOPLof2M6YcffP): the in-process mutex cannot
     /// protect writers running in independent processes, and a Windows-only
     /// remove-then-rename left a window in which the destination did not
-    /// exist. `fs::rename` replaces an existing destination atomically on
-    /// every supported platform, so concurrent processes must never observe a
-    /// missing or partially written file.
+    /// exist. Publication must preserve uninterrupted reads on every supported
+    /// platform, including Windows replacement (Issue #5609), so concurrent
+    /// processes must never observe a missing or partially written file.
     #[test]
     fn concurrent_codex_hook_regeneration_from_independent_processes_never_drops_the_destination() {
         const CHILD_ENV: &str = "GWT_SETTINGS_LOCAL_CHILD_WORKTREE";
@@ -1183,7 +1181,7 @@ mod tests {
             let all_done = children
                 .iter_mut()
                 .all(|child| child.try_wait().expect("poll child").is_some());
-            match fs::read_to_string(&hooks_path) {
+            match crate::asset_io::read_to_string(&hooks_path) {
                 Ok(rendered) => {
                     serde_json::from_str::<Value>(&rendered)
                         .expect("destination must always hold a complete hooks.json");
