@@ -37,6 +37,10 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use gwt_core::workspace_projection::{
+    ExternalWorkspaceCommitAuthority, ExternalWorkspaceCommitDecision,
+    ExternalWorkspaceCommitResolution,
+};
 use gwt_github::{client::ApiError, SpecOpsError};
 use serde::{Deserialize, Serialize};
 
@@ -9344,6 +9348,216 @@ pub struct PreparedTransactionReleaseOutcome {
     pub generation_id: Option<String>,
     pub released: Vec<PreparedTransactionReleaseEntry>,
     pub retained: Vec<PreparedTransactionReleaseEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_commit_resolution: Option<ExternalWorkspaceCommitResolution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalWorkspaceCommitRecovery {
+    worktree_binding_hash: String,
+    session_id: String,
+    work_id: Option<String>,
+    generation_id: String,
+    decision: ExternalWorkspaceCommitDecision,
+}
+
+fn terminal_workspace_commit_recovery(
+    ledger: &ExecutionGenerationLedger,
+    operation_id: &str,
+) -> io::Result<Option<TerminalWorkspaceCommitRecovery>> {
+    let successor = ledger
+        .continuation_attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.request.operation_id == operation_id);
+    let takeover = ledger
+        .takeover_attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.request.operation_id == operation_id);
+    let recovery = match (successor, takeover) {
+        (Some(_), Some(_)) => {
+            return Err(generation_conflict(
+                "external operation has ambiguous ledger authority",
+            ))
+        }
+        (Some(attempt), None) => {
+            if attempt.status == ContinuationAttemptStatus::Prepared {
+                return Ok(None);
+            }
+            if !is_owner_launch_successor_attempt(attempt)
+                && !matches!(
+                    attempt.request.source.as_str(),
+                    "continue-work:resume" | "continue-work:handoff"
+                )
+            {
+                return Err(generation_conflict(
+                    "operation is not a Work launch transaction",
+                ));
+            }
+            let committed = attempt.status == ContinuationAttemptStatus::Activated;
+            if committed
+                && ledger.current_generation().is_none_or(|current| {
+                    attempt.activated_generation.as_ref() != Some(&current.identity)
+                })
+            {
+                return Err(generation_conflict(
+                    "external operation's Activated generation is no longer current",
+                ));
+            }
+            TerminalWorkspaceCommitRecovery {
+                worktree_binding_hash: attempt.worktree_binding_hash.clone(),
+                session_id: attempt.request.initial_session_id.clone(),
+                work_id: attempt.request.work_id.clone(),
+                generation_id: if committed {
+                    attempt.candidate_generation_id.clone()
+                } else {
+                    attempt.predecessor.generation_id.clone()
+                },
+                decision: if committed {
+                    ExternalWorkspaceCommitDecision::Commit
+                } else {
+                    ExternalWorkspaceCommitDecision::Reject
+                },
+            }
+        }
+        (None, Some(attempt)) => {
+            if attempt.status == GenerationTakeoverAttemptStatus::Prepared {
+                return Ok(None);
+            }
+            if !matches!(
+                attempt.request.source.as_deref(),
+                Some("continue-work:resume" | "continue-work:handoff")
+            ) {
+                return Err(generation_conflict(
+                    "operation is not a Work takeover transaction",
+                ));
+            }
+            let committed = attempt.status == GenerationTakeoverAttemptStatus::Activated;
+            if committed
+                && ledger.current_generation().is_none_or(|current| {
+                    current.identity.generation_id != attempt.generation_id
+                        || attempt.activated_binding.as_ref().is_none_or(|binding| {
+                            !execution_binding_authorizes_lifecycle_descendant(
+                                ledger,
+                                current,
+                                &attempt.request.to_session_id,
+                                binding,
+                            )
+                        })
+                })
+            {
+                return Err(generation_conflict(
+                    "external operation's Activated takeover is no longer current",
+                ));
+            }
+            TerminalWorkspaceCommitRecovery {
+                worktree_binding_hash: attempt.worktree_binding_hash.clone(),
+                session_id: attempt.request.to_session_id.clone(),
+                work_id: attempt.request.work_id.clone(),
+                generation_id: attempt.generation_id.clone(),
+                decision: if committed {
+                    ExternalWorkspaceCommitDecision::Commit
+                } else {
+                    ExternalWorkspaceCommitDecision::Reject
+                },
+            }
+        }
+        (None, None) => return Ok(None),
+    };
+    if recovery.decision == ExternalWorkspaceCommitDecision::Commit {
+        let current = ledger
+            .current_generation()
+            .ok_or_else(|| generation_conflict("current generation is missing"))?;
+        let projection: ExecutionControlRecord =
+            serde_json::from_str(ledger.effective_projection_for(current)).map_err(|error| {
+                invalid_generation_data(format!(
+                    "current generation projection is malformed: {error}"
+                ))
+            })?;
+        if projection.primary_session_id != recovery.session_id
+            || current.identity.worktree_binding_hash != recovery.worktree_binding_hash
+        {
+            return Err(generation_conflict(
+                "external operation no longer owns the current Work authority",
+            ));
+        }
+    }
+    Ok(Some(recovery))
+}
+
+fn recover_terminal_workspace_commit(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    operation_id: &str,
+) -> io::Result<Option<(String, ExternalWorkspaceCommitResolution)>> {
+    let caller = GenerationTransactionContext::resolve(worktree, owner)?;
+    let Some(ledger) = load_owner_generation_ledger_from_context(&caller)? else {
+        return Ok(None);
+    };
+    let Some(expected) = terminal_workspace_commit_recovery(&ledger, operation_id)? else {
+        return Ok(None);
+    };
+    let mut candidates = gwt_git::worktree::WorktreeManager::new(worktree)
+        .list()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .into_iter()
+        .filter_map(|entry| dunce::canonicalize(entry.path).ok())
+        .filter(|path| worktree_binding_hash(path) == expected.worktree_binding_hash)
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    let [target] = candidates.as_slice() else {
+        return Err(generation_conflict(
+            "external operation's exact worktree is missing or ambiguous",
+        ));
+    };
+    // Use the target's global -> owner order even when the PM calls from
+    // another worktree. Never take a global lease while holding an owner lease.
+    with_generation_activation_leases(target, owner, |context| {
+        if context.owner_dir != caller.owner_dir {
+            return Err(generation_conflict(
+                "external operation resolves outside the caller's repository",
+            ));
+        }
+        let ledger = load_owner_generation_ledger_from_context(context)?
+            .ok_or_else(|| generation_conflict("external operation's owner ledger disappeared"))?;
+        if terminal_workspace_commit_recovery(&ledger, operation_id)?.as_ref() != Some(&expected) {
+            return Err(generation_conflict(
+                "external operation's authority changed before recovery",
+            ));
+        }
+        if expected.decision == ExternalWorkspaceCommitDecision::Commit {
+            validate_generation_activation_owner(context, true)?;
+        }
+        let owner_label = match owner.kind {
+            ExecutionOwnerKind::Issue => format!("Issue #{}", owner.number),
+            ExecutionOwnerKind::Spec => format!("SPEC-{}", owner.number),
+        };
+        let resolution =
+            gwt_core::workspace_projection::resolve_workspace_state_external_commit_for_authority(
+                &context.worktree,
+                operation_id,
+                expected.decision,
+                &ExternalWorkspaceCommitAuthority {
+                    owner: &owner_label,
+                    session_id: &expected.session_id,
+                    worktree_path: &context.worktree,
+                    work_id: expected.work_id.as_deref(),
+                },
+            )
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        match resolution {
+            ExternalWorkspaceCommitResolution::Busy => Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                "external operation is still in flight; retry after its finalizer completes",
+            )),
+            ExternalWorkspaceCommitResolution::Missing => Ok(None),
+            _ => Ok(Some((expected.generation_id.clone(), resolution))),
+        }
+    })
 }
 
 /// How long a still-Prepared transaction is left alone before a blanket
@@ -9421,6 +9635,10 @@ pub fn blocking_prepared_transactions(
 /// of the diagnosis. Releasing is always safe for a launch that does come
 /// back: an Aborted attempt fails its own activation CAS instead of corrupting
 /// the owner.
+/// An exact terminal launch operation may also finish its matching canonical
+/// Workspace publication using its durable Activated/Aborted decision, without
+/// requiring the original Host or Session. A newly released Prepared fence
+/// retains its external marker until the same operation is retried.
 pub fn release_blocking_prepared_transactions(
     worktree: &Path,
     owner: ExecutionOwnerKey,
@@ -9437,6 +9655,22 @@ pub fn release_blocking_prepared_transactions(
     let operation_id = operation_id
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    if let Some(operation_id) = operation_id {
+        if let Some((generation_id, resolution)) =
+            recover_terminal_workspace_commit(worktree, owner, operation_id)?
+        {
+            return Ok(PreparedTransactionReleaseOutcome {
+                status: "external_commit_resolved",
+                owner_kind: owner.kind,
+                owner_number: owner.number,
+                generation_id: Some(generation_id),
+                released: Vec::new(),
+                retained: Vec::new(),
+                external_operation_id: Some(operation_id.to_string()),
+                external_commit_resolution: Some(resolution),
+            });
+        }
+    }
     with_generation_owner_lease(worktree, owner, |context| {
         let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
             io::Error::new(
@@ -9452,6 +9686,8 @@ pub fn release_blocking_prepared_transactions(
                 generation_id: None,
                 released: Vec::new(),
                 retained: Vec::new(),
+                external_operation_id: None,
+                external_commit_resolution: None,
             });
         };
         let generation_id = current.identity.generation_id.clone();
@@ -9515,6 +9751,8 @@ pub fn release_blocking_prepared_transactions(
             generation_id: Some(generation_id),
             released,
             retained,
+            external_operation_id: None,
+            external_commit_resolution: None,
         })
     })
 }
@@ -19064,6 +19302,127 @@ mod tests {
         );
         prepare_exact_manual_launch_successor(dir.path(), owner, &successor, predecessor)
             .expect("the launch the diagnosis recommends must be accepted after the release");
+    }
+
+    #[test]
+    fn owner_release_recovers_terminal_external_commit_without_candidate_session() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        for activated in [true, false] {
+            let iteration_home = home
+                .path()
+                .join(if activated { "activated" } else { "aborted" });
+            let _home = ScopedEnvVar::set("HOME", &iteration_home);
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", &iteration_home);
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            let worktree = dir.path().join("owner-worktree");
+            gwt_git::worktree::WorktreeManager::new(dir.path())
+                .create_detached("HEAD", &worktree)
+                .unwrap();
+            let owner = generation_owner();
+            let mut active = active_record("external-recovery-predecessor");
+            active.owner_number = owner.number;
+            save(&worktree, &active).unwrap();
+            ensure_generation_ledger(&worktree, owner, LegacyActiveDisposition::Live).unwrap();
+            let projection =
+                gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                    dir.path(),
+                );
+            let work_id = projection.id.clone();
+            gwt_core::workspace_projection::save_workspace_projection(dir.path(), &projection)
+                .unwrap();
+            let mut request = successor_request(
+                if activated {
+                    "external-recovery-activated"
+                } else {
+                    "external-recovery-aborted"
+                },
+                "host",
+                "continue-work:resume",
+            );
+            request.work_id = Some(work_id.clone());
+            prepare_active_continuation_successor(&worktree, owner, &request).unwrap();
+            let mut event = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Resume,
+                &work_id,
+                Utc::now(),
+            );
+            event.owner = Some(format!("SPEC-{}", owner.number));
+            event.agent_session_id = Some(request.initial_session_id.clone());
+            event.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    worktree_path: Some(worktree.clone()),
+                    branch: None,
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            let staged = gwt_core::workspace_projection::transact_workspace_state_with_commit(
+                dir.path(),
+                &request.operation_id,
+                |_, _, _| Ok(((), vec![event])),
+                || {
+                    if activated {
+                        activate_successor(&worktree, owner, &request).unwrap();
+                    } else {
+                        abort_successor(&worktree, owner, &request, "launch failed").unwrap();
+                    }
+                    Err(gwt_core::GwtError::Other("lost external response".into()))
+                },
+            )
+            .unwrap_err();
+            assert!(
+                staged.to_string().contains("lost external response"),
+                "{staged}"
+            );
+            let authority_before = generation_authority_bytes(&worktree, owner);
+            let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+            assert!(!sessions_dir
+                .join(format!("{}.toml", request.initial_session_id))
+                .exists());
+            let result = release_blocking_prepared_transactions(
+                dir.path(),
+                owner,
+                &sessions_dir,
+                Some(&request.operation_id),
+                "recover the exact abandoned external transaction",
+                Utc::now(),
+            )
+            .expect("terminal ledger decision must recover the matching Work transaction");
+            assert_eq!(result.status, "external_commit_resolved");
+            assert_eq!(
+                generation_authority_bytes(&worktree, owner),
+                authority_before
+            );
+            assert_eq!(
+                gwt_core::workspace_projection::workspace_state_external_commit_resolution(
+                    dir.path(),
+                    &request.operation_id,
+                )
+                .unwrap(),
+                if activated {
+                    gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Committed
+                } else {
+                    gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Rejected
+                },
+            );
+            release_blocking_prepared_transactions(
+                dir.path(),
+                owner,
+                &sessions_dir,
+                Some(&request.operation_id),
+                "repeat the exact recovery",
+                Utc::now(),
+            )
+            .expect("terminal receipt makes repeated recovery safe");
+        }
     }
 
     #[test]

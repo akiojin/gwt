@@ -3012,8 +3012,11 @@ export function createKnowledgeKanbanSurface({
         const list = createNode("div", "knowledge-related-work-list");
         const liveSessionWindowsByConversation =
           buildKnowledgeRelatedLiveSessionWindowsByConversation(works);
+        const projectedWorks = (getActiveWorkProjection?.()?.active_works || [])
+          .flatMap(workspace => workspace.works || []);
         for (const work of works) {
           const card = createNode("article", "knowledge-related-work");
+          card.dataset.workId = work.id;
           const head = createNode("div", "knowledge-related-work-head");
           head.appendChild(
             createNode("div", "knowledge-related-work-title", work.title || "Untitled work"),
@@ -3028,6 +3031,34 @@ export function createKnowledgeKanbanSurface({
             );
           }
           card.appendChild(head);
+
+          // Closing targets a launch-scoped Work, never its branch Workspace.
+          const projectedWork = projectedWorks.find(item => item.id === work.id);
+          if (projectedWork && !["done", "discarded"].includes(projectedWork.lifecycle_state) &&
+              (projectedWork.manual_close_allowed === true || projectedWork.close_blocked_reason)) {
+            const actions = createNode("div", "workspace-detail-work-actions");
+            for (const [action, label, closeKind] of [
+              ["close-work-done", "Done", "done"],
+              ["close-work-discard", "Discard", "discarded"],
+            ]) {
+              const button = createNode("button", "wizard-button is-compact", label);
+              button.type = "button";
+              button.dataset.action = action;
+              button.dataset.workId = projectedWork.id;
+              if (closeKind === "discarded") button.classList.add("destructive");
+              if (projectedWork.manual_close_allowed !== true) {
+                button.disabled = true;
+                button.title = projectedWork.close_blocked_reason;
+                button.setAttribute("aria-label", `${label} unavailable: ${projectedWork.close_blocked_reason}`);
+              } else {
+                button.addEventListener("click", () =>
+                  send({ kind: "close_work", work_id: projectedWork.id, close_kind: closeKind }),
+                );
+              }
+              actions.appendChild(button);
+            }
+            card.appendChild(actions);
+          }
 
           const meta = createNode("div", "knowledge-related-work-meta");
           if (work.branch) {
@@ -4219,7 +4250,7 @@ export function createKnowledgeKanbanSurface({
           issueWindowViewModel.update(() => ({ windowId, detailOnly: true, focusPreview }));
           return;
         }
-        renderKnowledgeDetailView(windowId, state);
+        knowledgeBoardViewModel.update(() => ({ windowId, detailOnly: true }));
       }
 
       function renderKnowledgeDetailView(windowId, state) {
@@ -5591,10 +5622,12 @@ export function createKnowledgeKanbanSurface({
         if (kind === "resume") resumeVisibleKnowledgeEventRefresh();
       });
       knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
-      knowledgeBoardViewModel.subscribe(model => model, ({ windowId }) => {
+      knowledgeBoardViewModel.subscribe(model => model, ({ windowId, detailOnly }) => {
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
-        if (element && state) renderKnowledgeBoardView(windowId, element, state);
+        if (!element || !state) return;
+        if (detailOnly) renderKnowledgeDetailView(windowId, state);
+        else renderKnowledgeBoardView(windowId, element, state);
       });
       // List completion publishes data in receive; the synchronous view owns
       // both the full rebuild and revision-preserving selection updates.
