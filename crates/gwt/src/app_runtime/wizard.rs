@@ -3635,7 +3635,7 @@ impl AppRuntime {
         }) {
             self.issue_monitor_launch_preparations.remove(&key);
             return vec![OutboundEvent::project(failure_context.project_key.clone(), BackendEvent::IssueMonitorToast {
-                notification_transition: None, level: "error".to_string(),
+                notification_transition: None, notification_transition_id: None, level: "error".to_string(),
                 message: format!("Issue Monitor could not schedule launch failure settlement: {schedule_error}"),
                 issue_number: Some(failure_issue_number),
             }).with_error_project_root(&failure_context.project_root)];
@@ -3710,7 +3710,7 @@ impl AppRuntime {
                         self.issue_monitor_launch_deliveries.remove(delivery_id);
                     }
                     vec![OutboundEvent::project(context.project_key.clone(), BackendEvent::IssueMonitorToast {
-                        notification_transition: None, level: "error".to_string(),
+                        notification_transition: None, notification_transition_id: None, level: "error".to_string(),
                         message: format!("Issue Monitor could not continue the exact answered session;{disposition}: {error}"),
                         issue_number: Some(request.issue_number),
                     }).with_error_project_root(&context.project_root)]
