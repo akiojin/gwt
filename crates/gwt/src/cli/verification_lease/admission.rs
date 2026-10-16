@@ -888,15 +888,19 @@ fn admit_inner<E: CliEnv>(
     // Reuse the lease's exact runner context so status can distinguish a current
     // exclusive command from an older binary holding the compatibility lock.
     let resource_reason = if target.is_some() {
-        "resolved Cargo target uses one shared slot"
+        "resolved build directory uses one shared slot (Cargo metadata or inline CARGO_TARGET_DIR)"
     } else {
-        "unknown or unbounded command without a resolved Cargo target"
+        "no resolved build directory; exclusive command execution limited to 1200s"
     };
     lease.record_runner_context(&worktree, command.unwrap_or("unknown"), resource_reason);
     let lease_id = lease.id().to_string();
     let queue_wait_ms = lease.queue_wait_ms();
     let lease = Arc::new(Mutex::new(lease));
-    let commands = Arc::new(super::CommandProgress::default());
+    let commands = Arc::new(if target.is_some() {
+        super::CommandProgress::default()
+    } else {
+        super::CommandProgress::with_exclusive_timeout()
+    });
     let renewal = super::renewal::Renewal::start(
         Arc::clone(&lease),
         coordinator,
@@ -1696,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn independent_worktrees_use_two_slots_but_a_shared_cargo_target_waits() {
+    fn declared_wrapper_and_other_project_use_two_slots_but_shared_artifacts_wait() {
         let _lock = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1719,6 +1723,11 @@ mod tests {
         .unwrap();
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
+        assert_ne!(
+            gwt_core::paths::project_scope_hash(first.path()),
+            gwt_core::paths::project_scope_hash(second.path()),
+            "the declared wrapper holder belongs to another project"
+        );
         for directory in [first.path(), second.path()] {
             std::fs::create_dir_all(directory.join("src")).unwrap();
             std::fs::write(
@@ -1735,7 +1744,7 @@ mod tests {
             _home_guard: _home,
         };
         let command = format!(
-            "cargo test --workspace --target-dir \"{}\"",
+            "CARGO_TARGET_DIR=\"{}\" make -j1 quality-checks",
             shared.display()
         );
         let mut first_env = crate::cli::TestEnv::new(first.path().to_path_buf());
@@ -1843,6 +1852,8 @@ mod tests {
             .unwrap();
         assert_eq!(pool.capacity, 2);
         assert_eq!(pool.used, 2);
+        assert_eq!(first_admission.command_progress().timeout(), None);
+        assert_eq!(second_admission.command_progress().timeout(), None);
         let context = pool
             .slots
             .iter()
@@ -1854,7 +1865,7 @@ mod tests {
             .expect("status must retain the admitted command and its resource reason");
         assert_eq!(context.action, command);
         assert_eq!(context.project_root, first.path());
-        assert_eq!(context.qos, "resolved Cargo target uses one shared slot");
+        assert_eq!(context.qos, "resolved build directory uses one shared slot (Cargo metadata or inline CARGO_TARGET_DIR)");
         assert!(verification_lease::try_lock_build_artifacts(&shared)
             .unwrap()
             .is_none());
@@ -1881,6 +1892,10 @@ mod tests {
             });
 
         let status = lease_root.assert_held("admission must hold the host-wide lease");
+        assert_eq!(
+            admission.command_progress().timeout(),
+            Some(Duration::from_secs(20 * 60))
+        );
         assert_eq!(
             status.target.as_deref(),
             Some(verification_key_for(worktree.path()).file_stem().as_str()),
@@ -2227,7 +2242,7 @@ mod tests {
             let result = std::panic::catch_unwind(|| {
                 for iteration in 0..20 {
                     admit_defers_when_another_target_holds_the_lease();
-                    independent_worktrees_use_two_slots_but_a_shared_cargo_target_waits();
+                    declared_wrapper_and_other_project_use_two_slots_but_shared_artifacts_wait();
                     eprintln!("deferred readmission iteration {} passed", iteration + 1);
                 }
             });

@@ -1147,7 +1147,18 @@ pub(super) fn effective_cargo_target(
         crate::cli::verification_record::split_command_line(command)?,
     )?;
     if Path::new(&args[0]).file_stem().and_then(|s| s.to_str()) != Some("cargo") {
-        return Ok(None);
+        // Wrappers may build Cargo without invoking it directly. Only an inline
+        // declaration opts in: ambient variables do not establish a wrapper's
+        // artifact contract, and isolated baselines remove this assignment.
+        if isolated_baseline {
+            return Ok(None);
+        }
+        return Ok(assignments
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "CARGO_TARGET_DIR")
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(_, value)| worktree.join(value)));
     }
     let cargo_args: Vec<_> = args[1..]
         .iter()
@@ -1557,7 +1568,23 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
             "capacity: {capacity}\nrunning: {}\navailable: {}\n",
             status.running, status.available
         ));
-        out.push_str("exclusive_commands: headed Playwright, coverage, and other commands without a resolved Cargo target; legacy root locks also exclude all slots\n");
+        out.push_str("exclusive_commands: commands without a resolved build directory (Cargo metadata or inline CARGO_TARGET_DIR); legacy root locks also exclude all slots\n");
+        let exclusive_held = status
+            .slots
+            .iter()
+            .any(|slot| slot.slot.is_none() && (slot.status.held || slot.status.holder_stale));
+        let (count, oldest, total) = status
+            .queue
+            .iter()
+            .filter(|entry| exclusive_held && entry.bypass_reason.is_none())
+            .fold((0usize, 0u64, 0u64), |(count, oldest, total), entry| {
+                (
+                    count + 1,
+                    oldest.max(entry.waiting_ms),
+                    total.saturating_add(entry.waiting_ms),
+                )
+            });
+        out.push_str(&format!("exclusive_blocked_count: {count}\nexclusive_blocked_oldest_wait_ms: {oldest}\nexclusive_blocked_total_wait_ms: {total}\n"));
         for slot in &status.slots {
             let label = slot
                 .slot
@@ -1950,6 +1977,38 @@ mod tests {
         assert!(error.contains("Cargo.toml"), "{error}");
     }
 
+    #[test]
+    fn wrappers_declare_build_directories_without_cargo_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        for command in [
+            "CARGO_TARGET_DIR=build make -j1 quality-checks",
+            "CARGO_TARGET_DIR=old CARGO_TARGET_DIR=build python quality.py",
+        ] {
+            assert_eq!(
+                super::effective_cargo_target(dir.path(), command, false).unwrap(),
+                Some(dir.path().join("build")),
+                "{command}"
+            );
+        }
+        for command in [
+            "make -j1 quality-checks",
+            "CARGO_TARGET_DIR= make quality-checks",
+            "CARGO_TARGET_DIR=build cargo llvm-cov",
+        ] {
+            assert_eq!(
+                super::effective_cargo_target(dir.path(), command, false).unwrap(),
+                None,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            super::effective_cargo_target(dir.path(), "CARGO_TARGET_DIR=build make check", true)
+                .unwrap(),
+            None,
+            "isolated baselines remove the declared environment variable"
+        );
+    }
+
     fn command_strings(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
     }
@@ -2301,6 +2360,57 @@ mod tests {
         assert!(out.contains("executable: unknown"), "{out}");
         assert!(out.contains("worktree: unknown"), "{out}");
         assert!(out.contains("command: unknown"), "{out}");
+    }
+
+    #[test]
+    fn status_counts_waiters_blocked_by_an_exclusive_holder() {
+        let entries = [
+            (true, None, 90_000),
+            (false, None, 80_000),
+            (false, Some("reservation expired"), 120_000),
+        ]
+        .into_iter()
+        .map(|(resident, bypass_reason, waiting_ms)| {
+            serde_json::from_value(serde_json::json!({
+                "priority": "manual-rebuild", "queued_at_ms": 1,
+                "waiting_ms": waiting_ms, "resident": resident,
+                "bypass_reason": bypass_reason
+            }))
+            .unwrap()
+        })
+        .collect();
+        let mut status = LeaseStatusSnapshot {
+            capacity: Some(2),
+            slots: vec![HeavySlotStatus {
+                slot: None,
+                status: HeavyLeaseStatus {
+                    held: true,
+                    ..Default::default()
+                },
+            }],
+            queue: entries,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 2\n"), "{out}");
+        assert!(
+            out.contains("exclusive_blocked_oldest_wait_ms: 90000\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("exclusive_blocked_total_wait_ms: 170000\n"),
+            "{out}"
+        );
+        status.slots[0].status.held = false;
+        status.slots[0].status.holder_stale = true;
+        out.clear();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 2\n"), "{out}");
+        status.slots[0].slot = Some(0);
+        out.clear();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 0\n"), "{out}");
     }
 
     #[test]
