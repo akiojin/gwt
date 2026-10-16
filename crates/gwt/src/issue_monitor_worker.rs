@@ -3400,6 +3400,14 @@ mod tests {
                     && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)
             })
             .expect("autonomous notice surfaces as a toast payload");
+        assert!(
+            toast
+                .payload
+                .get("notification_transition_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()),
+            "typed transitions must carry a replay-stable source identity"
+        );
         assert_eq!(
             toast.payload.get("level").and_then(|v| v.as_str()),
             Some("error")
