@@ -4672,7 +4672,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       // entries, and the window-cleanup call sites, wired through this
       // factory.
       const {
-        profileStateMap,
         ensureProfileState,
         requestProfile,
         renderProfile,
@@ -4683,7 +4682,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         updateProfileStatus,
         profileHasEditableFocus,
         syncProfileDraftFromSelection,
-        clearProfileSaveTimer,
+        disposeProfileWindow,
         mountProfileWindow,
         applyProfileReceiveEvent,
       } = createProfileWindowSurface({
@@ -6101,12 +6100,8 @@ import { createUiStateStore } from "/ui-state-store.js";
                     pendingOutputMap.delete(windowId);
                     pendingSnapshotMap.delete(windowId);
                     terminalOutputBatcher.clear(windowId);
-                    const profileState = profileStateMap.get(windowId);
-                    if (profileState) {
-                      clearProfileSaveTimer(profileState);
-                    }
+                    disposeProfileWindow(windowId);
                     branchListStateMap.delete(windowId);
-                    profileStateMap.delete(windowId);
                     boardStateMap.delete(windowId);
                     logStateMap.delete(windowId);
                     indexSearchStateMap.delete(windowId);
