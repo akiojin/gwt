@@ -64,6 +64,8 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
+    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await page.getByRole("tab", { name: "All agents", exact: true }).click();
     await expect(page.locator(".agent-tile[data-agent-id='shell-1']")).toBeVisible();
 
     await dropTextFileOn(page, ".agent-tile[data-agent-id='shell-1'] .agent-tile__header", {
@@ -85,6 +87,8 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
+    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await page.getByRole("tab", { name: "All agents", exact: true }).click();
     await expect(page.locator(".agent-tile[data-agent-id='shell-1']")).toBeVisible();
 
     await dropTextFileOn(page, ".agent-tile[data-agent-id='shell-1'] .terminal-root", {
@@ -163,6 +167,7 @@ test.describe("Browser file drop attachments", () => {
 
     await page.goto(fileDropAppUrl);
     await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await page.getByRole("tab", { name: "All agents", exact: true }).click();
     await expect(page.locator(".agent-tile[data-agent-id='shell-1']")).toBeVisible();
 
     await dropTextFileOn(page, ".agent-tile[data-agent-id='agent-1'] .agent-tile__header", {
