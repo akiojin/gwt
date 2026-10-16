@@ -192,7 +192,7 @@ def _write_heavy_progress(
         # CAS hits do not load a model. Only the expected cached revision
         # makes the current runner warm (Issue #5431).
         "model_state": "warm" if (
-            _MODEL_CACHE is not None and _MODEL_CACHE_REVISION == model_revision
+            _MODEL_CACHE is not None and model_revision in _MODEL_CACHE
         ) else "warming",
         "model_load_ms": _MODEL_LOAD_MS,
         "updated_at_ms": int(time.time() * 1000),
@@ -1841,8 +1841,7 @@ class _FakeEmbeddingModel:
         return out
 
 
-_MODEL_CACHE: Optional[Any] = None
-_MODEL_CACHE_REVISION: Optional[str] = None
+_MODEL_CACHE: Optional[dict[Optional[str], Any]] = None
 # Issue #4698: milliseconds this process spent importing and constructing the
 # embedding model. The one-shot runner pays it on every search, so the caller
 # subtracts it to hold the warm remainder to its own budget.
@@ -1851,30 +1850,31 @@ _model_load_clock = time.monotonic
 
 
 def _get_embedding_model(revision: Optional[str] = None) -> Any:
-    """Lazily load (and cache) the embedding model.
+    """Lazily load and retain each model revision for this process.
 
     Honors GWT_INDEX_FAKE_EMBEDDING=1 to substitute a deterministic
     hash-based fake. Otherwise loads ``intfloat/multilingual-e5-base``.
     """
-    global _MODEL_CACHE, _MODEL_CACHE_REVISION, _MODEL_LOAD_MS
-    if _MODEL_CACHE is not None and _MODEL_CACHE_REVISION == revision:
-        return _MODEL_CACHE
+    global _MODEL_CACHE, _MODEL_LOAD_MS
+    if _MODEL_CACHE is None:
+        _MODEL_CACHE = {}
+    if revision in _MODEL_CACHE:
+        return _MODEL_CACHE[revision]
 
     if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
-        _MODEL_CACHE = _FakeEmbeddingModel()
-        _MODEL_CACHE_REVISION = revision
-        return _MODEL_CACHE
+        _MODEL_CACHE[revision] = _FakeEmbeddingModel()
+        return _MODEL_CACHE[revision]
 
     started = _model_load_clock()
     from sentence_transformers import SentenceTransformer  # type: ignore
 
     if revision is None:
-        _MODEL_CACHE = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
+        model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
     else:
-        _MODEL_CACHE = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
+        model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
     _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
-    _MODEL_CACHE_REVISION = revision
-    return _MODEL_CACHE
+    _MODEL_CACHE[revision] = model
+    return model
 
 
 class E5EmbeddingFunction:
