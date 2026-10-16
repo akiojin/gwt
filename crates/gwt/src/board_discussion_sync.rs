@@ -926,8 +926,12 @@ mod tests {
         synchronize(a.path(), &mut sa, &remote).unwrap();
         synchronize(b.path(), &mut sb, &remote).unwrap();
         assert_eq!(
-            coordination::load_snapshot(b.path()).unwrap().board.entries,
-            [decision.clone()]
+            coordination::load_snapshot(b.path())
+                .unwrap()
+                .board
+                .entries
+                .as_slice(),
+            std::slice::from_ref(&decision)
         );
         let response = reply(b.path(), &decision, BoardEntryKind::Handoff, "引き継ぎ");
         synchronize(b.path(), &mut sb, &remote).unwrap();
