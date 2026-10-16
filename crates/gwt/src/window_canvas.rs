@@ -94,46 +94,6 @@ impl WindowCanvasState {
         true
     }
 
-    /// Assign once; the runtime supplies reservations from every open tab.
-    pub fn assign_agent_name(
-        &mut self,
-        id: &str,
-        candidate: &str,
-        reserved: &std::collections::HashSet<String>,
-    ) -> Result<String, String> {
-        let window = self
-            .persisted
-            .windows
-            .iter_mut()
-            .find(|window| window.id == id)
-            .ok_or_else(|| "Agent window is missing".to_string())?;
-        if !window.preset.is_agent_terminal() || window.is_pm {
-            return Err("Only non-PM Agent windows can be named".to_string());
-        }
-        if let Some(name) = &window.agent_name {
-            return Ok(name.clone());
-        }
-        let candidate = candidate.trim();
-        if !(2..=24).contains(&candidate.len())
-            || !candidate.bytes().all(|byte| byte.is_ascii_alphabetic())
-        {
-            return Err("Choose one English word of 2 to 24 ASCII letters".to_string());
-        }
-        let mut base = candidate.to_ascii_lowercase();
-        base[..1].make_ascii_uppercase();
-        let mut assigned = base.clone();
-        let mut suffix = 2usize;
-        while reserved
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(&assigned))
-        {
-            assigned = format!("{base}-{suffix}");
-            suffix += 1;
-        }
-        window.agent_name = Some(assigned.clone());
-        Ok(assigned)
-    }
-
     pub fn set_agent_name(&mut self, id: &str, name: Option<String>) -> bool {
         let Some(window) = self
             .persisted
@@ -1102,32 +1062,34 @@ impl WindowCanvasState {
     }
 
     fn normalize_group(&mut self, group_id: &str) {
-        let group_indices = self
-            .persisted
-            .windows
-            .iter()
-            .enumerate()
-            .filter_map(|(index, window)| {
-                (window.tab_group_id.as_deref() == Some(group_id)).then_some(index)
-            })
-            .collect::<Vec<_>>();
-        if group_indices.len() <= 1 {
-            for index in group_indices {
-                let window = &mut self.persisted.windows[index];
-                window.tab_group_id = None;
-                window.tab_group_active = false;
-            }
-            return;
+        normalize_window_group(&mut self.persisted.windows, group_id);
+    }
+}
+
+pub(crate) fn normalize_window_group(windows: &mut [PersistedWindowState], group_id: &str) {
+    let group_indices = windows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, window)| {
+            (window.tab_group_id.as_deref() == Some(group_id)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if group_indices.len() <= 1 {
+        for index in group_indices {
+            let window = &mut windows[index];
+            window.tab_group_id = None;
+            window.tab_group_active = false;
         }
-        if group_indices
-            .iter()
-            .any(|index| self.persisted.windows[*index].tab_group_active)
-        {
-            return;
-        }
-        if let Some(index) = group_indices.first() {
-            self.persisted.windows[*index].tab_group_active = true;
-        }
+        return;
+    }
+    if group_indices
+        .iter()
+        .any(|index| windows[*index].tab_group_active)
+    {
+        return;
+    }
+    if let Some(index) = group_indices.first() {
+        windows[*index].tab_group_active = true;
     }
 }
 
@@ -1171,11 +1133,11 @@ mod tests {
     fn workspace_with_five_logical_windows_in_three_physical_slots() -> WindowCanvasState {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell, arrange_bounds());
-        let file_tree = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+        let board = workspace.add_window(WindowPreset::Board, arrange_bounds());
         let branches = workspace.add_window(WindowPreset::Branches, arrange_bounds());
 
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
-        assert!(workspace.dock_window_tab(&branches.id, &file_tree.id));
+        assert!(workspace.dock_window_tab(&branches.id, &board.id));
 
         workspace
     }
@@ -1248,11 +1210,11 @@ mod tests {
     }
 
     #[test]
-    fn adding_file_tree_window_marks_it_running_without_process() {
+    fn adding_board_window_marks_it_running_without_process() {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        let window = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
-        assert_eq!(window.title, "File Tree");
-        assert_eq!(window.preset, WindowPreset::FileTree);
+        let window = workspace.add_window(WindowPreset::Board, arrange_bounds());
+        assert_eq!(window.title, "Board");
+        assert_eq!(window.preset, WindowPreset::Board);
         assert_eq!(window.status, WindowProcessStatus::Running);
     }
 
@@ -1868,22 +1830,22 @@ mod tests {
     #[test]
     fn tile_arrangement_places_windows_on_a_grid() {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+        workspace.add_window(WindowPreset::Board, arrange_bounds());
         workspace.add_window(WindowPreset::Branches, arrange_bounds());
 
         assert!(workspace.arrange_windows(ArrangeMode::Tile, arrange_bounds()));
 
         let claude = workspace.window("claude-1").expect("claude");
         let codex = workspace.window("codex-1").expect("codex");
-        let file_tree = workspace.window("file-tree-1").expect("file tree");
+        let board = workspace.window("board-1").expect("board");
         let branches = workspace.window("branches-1").expect("branches");
 
         assert_eq!(claude.geometry.x, 124.0);
         assert_eq!(claude.geometry.y, 64.0);
         assert_eq!(codex.geometry.x, 612.0);
         assert_eq!(codex.geometry.y, 64.0);
-        assert_eq!(file_tree.geometry.x, 124.0);
-        assert_eq!(file_tree.geometry.y, 432.0);
+        assert_eq!(board.geometry.x, 124.0);
+        assert_eq!(board.geometry.y, 432.0);
         assert_eq!(branches.geometry.x, 612.0);
         assert_eq!(branches.geometry.y, 432.0);
         assert_eq!(branches.z_index, 4);
@@ -1893,20 +1855,20 @@ mod tests {
     #[test]
     fn stack_arrangement_overlaps_windows_with_offsets() {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+        workspace.add_window(WindowPreset::Board, arrange_bounds());
 
         assert!(workspace.arrange_windows(ArrangeMode::Stack, arrange_bounds()));
 
         let claude = workspace.window("claude-1").expect("claude");
         let codex = workspace.window("codex-1").expect("codex");
-        let file_tree = workspace.window("file-tree-1").expect("file tree");
+        let board = workspace.window("board-1").expect("board");
 
         assert_eq!(claude.geometry.x, 148.0);
         assert_eq!(claude.geometry.y, 88.0);
         assert_eq!(codex.geometry.x, 176.0);
         assert_eq!(codex.geometry.y, 112.0);
-        assert_eq!(file_tree.geometry.x, 204.0);
-        assert_eq!(file_tree.geometry.y, 136.0);
+        assert_eq!(board.geometry.x, 204.0);
+        assert_eq!(board.geometry.y, 136.0);
         assert!(codex.geometry.x < claude.geometry.x + claude.geometry.width);
         assert!(codex.geometry.y < claude.geometry.y + claude.geometry.height);
         assert_eq!(workspace.persisted().next_z_index, 4);
@@ -1915,7 +1877,7 @@ mod tests {
     #[test]
     fn align_arrangement_places_windows_on_grid_without_resizing() {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+        workspace.add_window(WindowPreset::Board, arrange_bounds());
 
         let original = workspace
             .persisted()
@@ -1946,17 +1908,17 @@ mod tests {
 
         let claude = workspace.window("claude-1").expect("claude");
         let codex = workspace.window("codex-1").expect("codex");
-        let file_tree = workspace.window("file-tree-1").expect("file tree");
+        let board = workspace.window("board-1").expect("board");
 
         // bounds: x=100, y=40, width=1000, height=760, padding=24
-        // columns=2, rows=2; column 0 max width = max(claude=720, file-tree=420) = 720
+        // columns=2, rows=2; column 0 max width = max(claude=720, board=420) = 720
         // column 1 max width = codex=720; row 0 max height = 420; row 1 max height = 520.
         assert_eq!(claude.geometry.x, 124.0);
         assert_eq!(claude.geometry.y, 64.0);
         assert_eq!(codex.geometry.x, 868.0);
         assert_eq!(codex.geometry.y, 64.0);
-        assert_eq!(file_tree.geometry.x, 124.0);
-        assert_eq!(file_tree.geometry.y, 508.0);
+        assert_eq!(board.geometry.x, 124.0);
+        assert_eq!(board.geometry.y, 508.0);
     }
 
     #[test]
@@ -2145,13 +2107,13 @@ mod tests {
         let codex = workspace.window("codex-1").expect("codex");
         let claude = workspace.window("claude-1").expect("claude");
         let branches = workspace.window("branches-1").expect("branches");
-        let file_tree = workspace.window("file-tree-1").expect("file tree");
+        let board = workspace.window("board-1").expect("board");
 
         assert_eq!((shell.geometry.x, shell.geometry.y), (124.0, 64.0));
         assert_eq!((codex.geometry.x, codex.geometry.y), (612.0, 64.0));
         assert_eq!((branches.geometry.x, branches.geometry.y), (124.0, 432.0));
         assert_eq!(codex.geometry, claude.geometry);
-        assert_eq!(branches.geometry, file_tree.geometry);
+        assert_eq!(branches.geometry, board.geometry);
     }
 
     #[test]
@@ -2164,13 +2126,13 @@ mod tests {
         let codex = workspace.window("codex-1").expect("codex");
         let claude = workspace.window("claude-1").expect("claude");
         let branches = workspace.window("branches-1").expect("branches");
-        let file_tree = workspace.window("file-tree-1").expect("file tree");
+        let board = workspace.window("board-1").expect("board");
 
         assert_eq!((shell.geometry.x, shell.geometry.y), (148.0, 88.0));
         assert_eq!((codex.geometry.x, codex.geometry.y), (176.0, 112.0));
         assert_eq!((branches.geometry.x, branches.geometry.y), (204.0, 136.0));
         assert_eq!(codex.geometry, claude.geometry);
-        assert_eq!(branches.geometry, file_tree.geometry);
+        assert_eq!(branches.geometry, board.geometry);
     }
 
     #[test]
@@ -2210,7 +2172,7 @@ mod tests {
         let codex = workspace.window("codex-1").expect("codex");
         let claude = workspace.window("claude-1").expect("claude");
         let branches = workspace.window("branches-1").expect("branches");
-        let file_tree = workspace.window("file-tree-1").expect("file tree");
+        let board = workspace.window("board-1").expect("board");
 
         assert_eq!((shell.geometry.x, shell.geometry.y), (124.0, 64.0));
         assert_eq!(
@@ -2228,7 +2190,7 @@ mod tests {
             (420.0, 520.0)
         );
         assert_eq!(codex.geometry, claude.geometry);
-        assert_eq!(branches.geometry, file_tree.geometry);
+        assert_eq!(branches.geometry, board.geometry);
     }
 
     #[test]
@@ -2306,13 +2268,13 @@ mod tests {
     fn docking_active_tab_to_another_group_normalizes_source_group() {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let shell = workspace.add_window(WindowPreset::Shell, arrange_bounds());
-        let file_tree = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+        let board = workspace.add_window(WindowPreset::Board, arrange_bounds());
 
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
         assert!(workspace.dock_window_tab(&shell.id, "codex-1"));
         assert!(workspace.window(&shell.id).expect("shell").tab_group_active);
 
-        assert!(workspace.dock_window_tab(&shell.id, &file_tree.id));
+        assert!(workspace.dock_window_tab(&shell.id, &board.id));
 
         let remaining_source_group = ["claude-1", "codex-1"]
             .iter()
@@ -2410,80 +2372,5 @@ mod tests {
         assert_eq!(codex.geometry, new_geometry);
         assert_eq!(claude.geometry_revision, snapshot.geometry_revision);
         assert_eq!(codex.geometry_revision, snapshot.geometry_revision);
-    }
-}
-
-#[cfg(test)]
-mod agent_name_tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn agent_name_is_unique_idempotent_and_persisted() {
-        let mut canvas = WindowCanvasState::from_persisted(crate::empty_workspace_state());
-        let window = canvas.add_window(
-            WindowPreset::Agent,
-            WindowGeometry {
-                x: 0.0,
-                y: 0.0,
-                width: 1000.0,
-                height: 800.0,
-            },
-        );
-        let reserved = HashSet::from(["falcon".to_string(), "falcon-3".to_string()]);
-        assert_eq!(
-            canvas
-                .assign_agent_name(&window.id, " fALCON ", &reserved)
-                .unwrap(),
-            "Falcon-2"
-        );
-        assert_eq!(
-            canvas
-                .assign_agent_name(&window.id, "Mint", &reserved)
-                .unwrap(),
-            "Falcon-2"
-        );
-        let restored: PersistedWindowCanvasState =
-            serde_json::from_str(&serde_json::to_string(&canvas.persistable_state()).unwrap())
-                .unwrap();
-        let mut canvas = WindowCanvasState::from_persisted(restored);
-        assert_eq!(
-            canvas
-                .assign_agent_name(&window.id, "Onyx", &reserved)
-                .unwrap(),
-            "Falcon-2"
-        );
-    }
-
-    #[test]
-    fn agent_name_refuses_invalid_missing_and_non_agent_without_mutation() {
-        let mut canvas = WindowCanvasState::from_persisted(crate::empty_workspace_state());
-        let bounds = WindowGeometry {
-            x: 0.0,
-            y: 0.0,
-            width: 1000.0,
-            height: 800.0,
-        };
-        let agent = canvas.add_window(WindowPreset::Agent, bounds.clone());
-        let shell = canvas.add_window(WindowPreset::Shell, bounds);
-        let before = canvas.persisted().clone();
-        for (id, candidate) in [
-            (&agent.id[..], "Issue3824"),
-            (&agent.id, "A B"),
-            (&agent.id, ""),
-            (&shell.id, "Falcon"),
-            ("missing", "Falcon"),
-        ] {
-            assert!(canvas
-                .assign_agent_name(id, candidate, &HashSet::new())
-                .is_err());
-            assert_eq!(canvas.persisted(), &before);
-        }
-        assert_eq!(
-            canvas
-                .assign_agent_name(&agent.id, "Falcon", &HashSet::new())
-                .unwrap(),
-            "Falcon"
-        );
     }
 }

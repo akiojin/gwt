@@ -1884,6 +1884,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
 #[derive(Debug, Clone)]
 pub struct AgentLaunchRuntimeContext {
     pub(crate) agent_project_root: String,
+    pub(crate) predecessor_session_id: Option<String>,
     pub(crate) expected_execution_identity: Option<gwt_agent::SessionExecutionIdentity>,
     pub(crate) active_launch_handshake: Option<gwt_agent::SessionActiveLaunchHandshake>,
 }
@@ -1892,6 +1893,7 @@ impl From<String> for AgentLaunchRuntimeContext {
     fn from(agent_project_root: String) -> Self {
         Self {
             agent_project_root,
+            predecessor_session_id: None,
             expected_execution_identity: None,
             active_launch_handshake: None,
         }
@@ -2116,6 +2118,7 @@ struct PreparedAgentLaunchSuccess {
     )>,
     cached_session: Option<gwt_agent::Session>,
     session_snapshot: Option<gwt_agent::Session>,
+    predecessor_session_id: Option<String>,
     materialized_genesis: Option<MaterializedGenesisLaunch>,
 }
 
@@ -2437,6 +2440,7 @@ fn prepare_agent_launch_inner(
     ) = launch;
     let AgentLaunchRuntimeContext {
         agent_project_root,
+        predecessor_session_id,
         expected_execution_identity,
         active_launch_handshake,
     } = runtime_context;
@@ -2640,7 +2644,11 @@ fn prepare_agent_launch_inner(
         .ok()?;
         (prefs.registration?.session_id == *source).then(|| input.project_root.clone())
     });
-    if let Some(source) = input.auto_resume_source_session_id.as_ref() {
+    if let Some(source) = input
+        .auto_resume_source_session_id
+        .as_ref()
+        .filter(|source| *source != &session_id)
+    {
         mark_auto_resume_source_completed(&input.sessions_dir, source);
     }
     emit_agent_launch_stage(
@@ -2871,6 +2879,7 @@ fn prepare_agent_launch_inner(
         pm_registration,
         cached_session,
         session_snapshot,
+        predecessor_session_id,
         materialized_genesis: genesis,
     })
 }
@@ -3268,6 +3277,7 @@ impl AgentWindowPlacement {
 
 #[derive(Debug, Clone)]
 struct AgentWindowSpawnOptions {
+    inherited_agent_name: Option<String>,
     placement: AgentWindowPlacement,
     workspace_resume_context: Option<WorkspaceResumeContext>,
     launch_feedback_context: Option<LaunchFeedbackContext>,
@@ -4616,6 +4626,147 @@ pub(super) fn register_codex_managed_project_trust_for_resolved_launch_with_host
     }
 }
 
+/// Choose one actual checkout whose repository and checked-out branch prove
+/// the owner being repaired. Historical foreign or missing paths grant no
+/// local mutation authority.
+fn pm_successor_recovery_checkout(
+    project_root: &Path,
+    parent: &gwt_core::workspace_projection::WorkItem,
+    target: &gwt_core::workspace_projection::WorkItem,
+    sessions_dir: &Path,
+) -> Result<
+    (
+        gwt::cli::execution_state::ExecutionOwnerKey,
+        String,
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
+    ),
+    String,
+> {
+    use gwt_core::workspace_projection as work;
+    let project_hash = gwt_core::paths::project_scope_hash(project_root);
+    let mut containers = Vec::new();
+    for item in [target, parent] {
+        containers.extend(item.execution_containers.iter().cloned());
+        containers.extend(
+            item.events
+                .iter()
+                .filter_map(|event| event.execution_container.clone()),
+        );
+        for agent in &item.agents {
+            if gwt_agent::validate_session_id_path_component(&agent.session_id).is_err() {
+                return Err("Work member Session identity is invalid".into());
+            }
+            if let Ok(session) =
+                gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", agent.session_id)))
+            {
+                containers.push(work::WorkspaceExecutionContainerRef {
+                    branch: Some(session.branch),
+                    worktree_path: Some(session.worktree_path),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                });
+            }
+        }
+    }
+    let mut selected = None;
+    for candidate in containers {
+        let Some(path) = candidate
+            .worktree_path
+            .as_deref()
+            .and_then(|path| dunce::canonicalize(path).ok())
+        else {
+            continue;
+        };
+        let Ok(repo) = gwt_git::repository::Repository::discover(&path) else {
+            continue;
+        };
+        if dunce::canonicalize(repo.path()).ok().as_ref() != Some(&path)
+            || gwt_core::repo_hash::detect_repo_hash(&path).as_ref() != Some(&project_hash)
+        {
+            continue;
+        }
+        let Some(branch) = repo.current_branch().ok().flatten() else {
+            continue;
+        };
+        let Some(expected_owner) = work::work_owner_for_branch(&branch) else {
+            continue;
+        };
+        if work::canonical_work_id(project_root, Some(&branch), Some(&path))
+            != work::canonical_work_id(
+                project_root,
+                candidate.branch.as_deref(),
+                candidate.worktree_path.as_deref(),
+            )
+        {
+            continue;
+        }
+        let number = expected_owner
+            .strip_prefix("Issue #")
+            .and_then(|number| number.parse().ok())
+            .ok_or_else(|| "canonical branch owner is invalid".to_string())?;
+        let container = work::WorkspaceExecutionContainerRef {
+            branch: Some(branch),
+            worktree_path: Some(path),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        };
+        let owner = match gwt::cli::execution_state::load(
+            container.worktree_path.as_deref().expect("local checkout"),
+        )
+        .map_err(|error| format!("execution owner is unavailable: {error}"))?
+        {
+            Some(record) => {
+                if !gwt::cli::execution_state::integrity_ok(&record)
+                    || record.owner_number != number
+                {
+                    return Err("execution owner conflicts with the canonical branch".into());
+                }
+                gwt::cli::execution_state::ExecutionOwnerKey {
+                    kind: record.owner_kind,
+                    number,
+                }
+            }
+            None => gwt::cli::execution_state::ExecutionOwnerKey {
+                kind: if [parent, target].iter().any(|item| {
+                    item.owner.as_deref().is_some_and(|owner| {
+                        owner == format!("SPEC-{number}") || owner == format!("SPEC #{number}")
+                    })
+                }) {
+                    gwt::cli::execution_state::ExecutionOwnerKind::Spec
+                } else {
+                    gwt::cli::execution_state::ExecutionOwnerKind::Issue
+                },
+                number,
+            },
+        };
+        let expected_owner = super::workspace::workspace_owner_label(owner);
+        if [parent, target].iter().any(|item| {
+            item.owner.as_deref().is_some_and(|known| {
+                known != expected_owner
+                    && !work::can_upgrade_work_owner(Some(known), Some(&expected_owner))
+            })
+        }) {
+            return Err("known Work owner conflicts with the execution owner".into());
+        }
+        let resolved = (owner, expected_owner, container);
+        if selected
+            .as_ref()
+            .is_some_and(|previous| previous != &resolved)
+        {
+            return Err(
+                "local owner checkout is ambiguous; workspace.close requires one exact checkout"
+                    .into(),
+            );
+        }
+        selected = Some(resolved);
+    }
+    selected.ok_or_else(|| {
+        "cannot prove a local checkout of the canonical owner branch; workspace.close did not change Work history".into()
+    })
+}
+
 impl AppRuntime {
     pub(super) fn latest_resumable_branch_session(
         &self,
@@ -5240,6 +5391,16 @@ impl AppRuntime {
             .project_root
             .clone();
         let is_fresh = success.pending_fresh_execution.is_some();
+        let named_assignment = success
+            .session_snapshot
+            .clone()
+            .or_else(|| success.cached_session.clone());
+        let assignment_predecessor = success
+            .pending_continue_work
+            .as_ref()
+            .map(|pending| pending.predecessor_session_id.clone())
+            .or_else(|| success.predecessor_session_id.clone())
+            .or_else(|| pending.prior_session_id.clone());
         if let Some(token) = success.capability_token {
             if let Some(previous) = self
                 .agent_capability_tokens
@@ -5274,6 +5435,7 @@ impl AppRuntime {
             success.initial_prompt_file,
             success.session_snapshot.as_ref(),
         );
+        self.queue_named_issue_assignment(named_assignment, assignment_predecessor);
         if !self.pending_continue_work.contains_key(&window_id) {
             if let Some(context) = feedback.as_ref() {
                 let _ = self.arm_issue_monitor_startup(&window_id, context);
@@ -5511,6 +5673,48 @@ impl AppRuntime {
         }
     }
 
+    fn queue_named_issue_assignment(
+        &self,
+        session: Option<gwt_agent::Session>,
+        predecessor_session_id: Option<String>,
+    ) {
+        let Some(session) = session.filter(|session| {
+            session.agent_name.is_some()
+                && session.linked_issue_number.is_some()
+                && !session.review_dispatch
+        }) else {
+            return;
+        };
+        let sessions_dir = self.sessions_dir.clone();
+        let issue_client_factory = Arc::clone(&self.issue_client_factory);
+        let predecessor_session_id =
+            predecessor_session_id.or_else(|| session.restore_source_session_id.clone());
+        let project_root = session
+            .project_state_root
+            .clone()
+            .unwrap_or_else(|| session.worktree_path.clone());
+        let issue_number = session.linked_issue_number;
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = (|| -> Result<(), String> {
+                let previous_name = predecessor_session_id.as_ref().and_then(|id| {
+                    gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                        .filter(|previous| previous.id == *id && previous.linked_issue_number == session.linked_issue_number)
+                        .and_then(|previous| previous.agent_name)
+                });
+                let (owner, repo) = gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root).map_err(|error| error.to_string())?;
+                let client = issue_client_factory(&owner, &repo).map_err(|error| error.to_string())?;
+                gwt::session_launch::record_named_issue_assignment(client.as_ref(), &session, previous_name.as_deref())
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                tracing::warn!(?issue_number, session_id = %session.id, %error, "named Issue assignment could not be recorded");
+            }
+        }) {
+            tracing::warn!(?issue_number, %error, "named Issue assignment worker could not start");
+        }
+    }
+
     pub(crate) fn start_window(
         &mut self,
         tab_id: &str,
@@ -5628,7 +5832,25 @@ impl AppRuntime {
         }
         // Legacy direct presets bypass the Launch Wizard, but their PTYs
         // still belong in the same Session observation and stop lifecycle.
+        let mut named_assignment = None;
         if matches!(preset, WindowPreset::Claude | WindowPreset::Codex) {
+            let previous_session_id = self
+                .tab(tab_id)
+                .and_then(|tab| tab.workspace.window(raw_id))
+                .and_then(|window| window.session_id.clone());
+            let agent_name = match self.ensure_window_agent_name(tab_id, raw_id) {
+                Ok(name) => name,
+                Err(error) => {
+                    self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                    self.window_details.insert(window_id.clone(), error.clone());
+                    return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
+                }
+            };
+            if let Some(name) = &agent_name {
+                env.insert("GWT_AGENT_NAME".into(), name.clone());
+            } else {
+                env.remove("GWT_AGENT_NAME");
+            }
             let agent_id = if preset == WindowPreset::Claude {
                 gwt_agent::AgentId::ClaudeCode
             } else {
@@ -5639,6 +5861,12 @@ impl AppRuntime {
                 .and_then(|repo| repo.current_branch().ok().flatten())
                 .unwrap_or_default();
             let mut session = gwt_agent::Session::new(&project_root, &branch, agent_id.clone());
+            session.agent_name = agent_name;
+            session.linked_issue_number = self
+                .tab(tab_id)
+                .and_then(|tab| tab.workspace.window(raw_id))
+                .and_then(|window| window.linked_issue_number);
+            session.restore_source_session_id = previous_session_id;
             session.project_state_root = Some(project_root.clone());
             session.launch_command = launch.command.clone();
             session.launch_args = launch.args.clone();
@@ -5650,6 +5878,7 @@ impl AppRuntime {
                     .insert(window_id.clone(), detail.clone());
                 return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
+            named_assignment = Some(session.clone());
             if let Some(tab) = self.tab_mut(tab_id) {
                 let _ = tab
                     .workspace
@@ -5685,6 +5914,7 @@ impl AppRuntime {
             console_kind,
         ) {
             Ok(()) => {
+                self.queue_named_issue_assignment(named_assignment, None);
                 if let Some(id) = stage_id {
                     emit_agent_launch_stage(id, "ready", "PTY handoff complete");
                 }
@@ -5751,7 +5981,7 @@ impl AppRuntime {
         Ok(())
     }
 
-    fn install_process_window(
+    pub(crate) fn install_process_window(
         &mut self,
         id: &str,
         incarnation: u64,
@@ -5785,6 +6015,11 @@ impl AppRuntime {
         // status event exposes the pane. The registry owns only a cloned Arc;
         // the process owner remains WindowRuntime.
         self.runtimes.insert(id.to_string(), runtime);
+        // PTY liveness alone is not Agent Running. Use the same composed state
+        // as later hooks/status events, with the installed runtime incarnation.
+        if let Some(status) = self.window_status(id) {
+            self.observe_notification_transition_at(id, status, std::time::Instant::now());
+        }
         self.register_pty_writer(id, session_snapshot);
         // Issue #4143 (AC-3): the PTY is live, so this restore no longer needs
         // the pre-PTY failure guard.
@@ -5872,6 +6107,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context: None,
@@ -5893,6 +6129,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
@@ -5914,6 +6151,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
@@ -5936,6 +6174,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context,
@@ -5951,11 +6190,13 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         geometry: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
+        inherited_agent_name: Option<String>,
     ) -> Result<Vec<OutboundEvent>, String> {
         self.spawn_agent_window_with_placement(
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name,
                 placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: None,
@@ -5977,6 +6218,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                inherited_agent_name: None,
                 placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context: Some(workspace_resume_context),
                 launch_feedback_context: None,
@@ -6071,7 +6313,7 @@ impl AppRuntime {
     fn spawn_agent_window_with_placement(
         &mut self,
         tab_id: &str,
-        config: gwt_agent::LaunchConfig,
+        mut config: gwt_agent::LaunchConfig,
         options: AgentWindowSpawnOptions,
     ) -> Result<Vec<OutboundEvent>, String> {
         if self.agent_maintenance.busy {
@@ -6081,6 +6323,7 @@ impl AppRuntime {
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let AgentWindowSpawnOptions {
+            inherited_agent_name,
             placement,
             workspace_resume_context,
             launch_feedback_context,
@@ -6293,6 +6536,23 @@ impl AppRuntime {
                 message
             })?
         };
+        // Name the window before its first snapshot and before SessionStart can run.
+        // Only the restore path supplies an inherited identity; fresh launch env
+        // inputs cannot choose or rename an Agent.
+        let agent_name = if config
+            .working_dir
+            .as_deref()
+            .is_some_and(gwt::pm_registry::is_canonical_pm_worktree)
+        {
+            config.env_vars.remove("GWT_AGENT_NAME");
+            None
+        } else {
+            let name = self.allocate_agent_name(&project_root_path, inherited_agent_name)?;
+            config
+                .env_vars
+                .insert("GWT_AGENT_NAME".into(), name.clone());
+            Some(name)
+        };
         let prepared_manual_launch_claim = claim_prepared_manual_successor_launch(
             &self.sessions_dir,
             &project_root_path,
@@ -6310,6 +6570,9 @@ impl AppRuntime {
                 .workspace
                 .add_window_at_geometry_with_title(WindowPreset::Agent, title, true, geometry),
         };
+        if let Some(name) = agent_name {
+            tab.workspace.set_agent_name(&window.id, Some(name));
+        }
         if let Some(purpose_title) = purpose_title {
             let _ = tab
                 .workspace
@@ -6962,6 +7225,7 @@ impl AppRuntime {
                 had_prepared_execution,
                 AgentLaunchRuntimeContext {
                     agent_project_root,
+                    predecessor_session_id: config.predecessor_session_id.clone(),
                     expected_execution_identity,
                     active_launch_handshake: active_launch_handshake_cleanup.take(),
                 },
@@ -7114,23 +7378,7 @@ impl AppRuntime {
 
         // Record the terminal close in the work history. Idempotent against an
         // already-closed Work, so a duplicate close emits no new event.
-        let now = chrono::Utc::now();
-        let recorded = match close_kind {
-            gwt_core::workspace_projection::WorkCloseKind::Done => {
-                gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
-                    &project_root,
-                    work_id,
-                    now,
-                )
-            }
-            gwt_core::workspace_projection::WorkCloseKind::Discarded => {
-                gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
-                    &project_root,
-                    work_id,
-                    now,
-                )
-            }
-        };
+        let recorded = Self::record_work_close(&project_root, work_id, close_kind);
         if let Err(error) = recorded {
             tracing::warn!(
                 work_id = %work_id,
@@ -7144,6 +7392,258 @@ impl AppRuntime {
         self.active_work_projection_broadcast_for_tab(&context.tab_id)
             .into_iter()
             .collect()
+    }
+
+    fn record_work_close(
+        project_root: &Path,
+        work_id: &str,
+        close_kind: gwt_core::workspace_projection::WorkCloseKind,
+    ) -> Result<bool, String> {
+        use gwt_core::workspace_projection as work;
+        let changed = match close_kind {
+            work::WorkCloseKind::Done => {
+                work::emit_workspace_done_event_if_absent(project_root, work_id, chrono::Utc::now())
+            }
+            work::WorkCloseKind::Discarded => work::emit_workspace_discard_event_if_absent(
+                project_root,
+                work_id,
+                chrono::Utc::now(),
+            ),
+        }
+        .map_err(|error| error.to_string())?;
+        let items = work::load_workspace_work_items(project_root)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Work state is unavailable after close".to_string())?;
+        let target = items
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)
+            .ok_or_else(|| "Work no longer exists".to_string())?;
+        let matches = match close_kind {
+            work::WorkCloseKind::Done => {
+                target.status_category == work::WorkspaceStatusCategory::Done && !target.discarded
+            }
+            work::WorkCloseKind::Discarded => target.discarded,
+        };
+        if !matches {
+            return Err("Work did not reach the requested terminal state; inspect Work state before retrying".into());
+        }
+        Ok(changed)
+    }
+
+    pub(super) fn close_work_for_agent(
+        &mut self,
+        principal: &gwt::agent_capability::AgentSessionPrincipal,
+        work_id: &str,
+        close_kind: &str,
+    ) -> Result<bool, (String, bool)> {
+        use gwt_core::workspace_projection as work;
+        let kind = match close_kind {
+            "done" => Some(work::WorkCloseKind::Done),
+            "discarded" => Some(work::WorkCloseKind::Discarded),
+            "superseded" => None,
+            _ => {
+                return Err((
+                    "close_kind must be done, discarded, or superseded".into(),
+                    false,
+                ))
+            }
+        };
+        if work_id.is_empty() || work_id.trim() != work_id {
+            return Err(("an exact nonempty work_id is required".into(), false));
+        }
+        let context = self
+            .project_context_for_root(principal.canonical_project_root())
+            .ok_or_else(|| ("authenticated project is not open".into(), false))?;
+        let window_id = self
+            .agent_principal_session_window(principal)
+            .map_err(|error| (error, false))?;
+        if !gwt::pm_registry::session_is_registered_pm(
+            &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+            principal.session_id(),
+        ) || self.live_pm_window_id(principal.session_id()).as_deref()
+            != Some(window_id.as_str())
+        {
+            return Err((
+                "workspace.close requires the live registered PM of this project".into(),
+                false,
+            ));
+        }
+        let Some(kind) = kind else {
+            return self.supersede_invalid_work_for_pm(&context, work_id);
+        };
+        let items = work::load_workspace_work_items(&context.project_root)
+            .map_err(|error| (error.to_string(), false))?
+            .ok_or_else(|| ("current Work state is unavailable".into(), false))?;
+        let mut matches = items.work_items.iter().filter(|item| item.id == work_id);
+        let target = matches
+            .next()
+            .ok_or_else(|| ("Work no longer exists in this project".into(), false))?;
+        if matches.next().is_some() || target.is_terminal() {
+            return Err((
+                "current Work identity is ambiguous or already terminal".into(),
+                false,
+            ));
+        }
+        // The canonical membership may have changed since the accepted cache.
+        // Check the exact child, allowing a live sibling on the same branch.
+        if self.active_agent_sessions.values().any(|session| {
+            self.tab(&session.tab_id)
+                .is_some_and(|tab| principal.authorizes_project_root(&tab.project_root))
+                && (target
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == session.session_id)
+                    || work_id.strip_prefix("work-session-") == Some(session.session_id.as_str()))
+        }) {
+            return Err((
+                "Work close refused: a current member agent is live; stop it before closing".into(),
+                false,
+            ));
+        }
+        self.cached_work_close_target(&context, work_id)?;
+        if !self.project_context_is_current(&context) {
+            return Err(("project changed before Work close".into(), false));
+        }
+        let changed = Self::record_work_close(&context.project_root, work_id, kind)
+            .map_err(|error| (error, false))?;
+        let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
+        Ok(changed)
+    }
+
+    fn supersede_invalid_work_for_pm(
+        &mut self,
+        context: &super::ProjectContext,
+        work_id: &str,
+    ) -> Result<bool, (String, bool)> {
+        use gwt_core::workspace_projection as work;
+        let items = work::load_workspace_work_items(&context.project_root)
+            .map_err(|error| (error.to_string(), false))?
+            .ok_or_else(|| ("current Work state is unavailable".into(), false))?;
+        let exact_target = |items: &work::WorkItemsProjection| {
+            let mut matches = items.work_items.iter().filter(|item| item.id == work_id);
+            let target = matches.next().ok_or_else(|| {
+                gwt_core::GwtError::Other("Work no longer exists in this project".into())
+            })?;
+            if matches.next().is_some() {
+                return Err(gwt_core::GwtError::Other(
+                    "exact Work identity is ambiguous; workspace.close cannot repair duplicate identities".into(),
+                ));
+            }
+            Ok(target.clone())
+        };
+        let target = exact_target(&items).map_err(|error| (error.to_string(), false))?;
+        let mut parents = items
+            .work_items
+            .iter()
+            .filter(|item| work::successor_work_id(&item.id) == work_id);
+        let parent = parents
+            .next()
+            .filter(|item| item.is_terminal())
+            .cloned()
+            .ok_or_else(|| ("an exact terminal predecessor is required".into(), false))?;
+        if parents.next().is_some() {
+            return Err(("exact predecessor identity is ambiguous".into(), false));
+        }
+        let (owner, expected_owner, container) = pm_successor_recovery_checkout(
+            &context.project_root,
+            &parent,
+            &target,
+            &self.sessions_dir,
+        )
+        .map_err(|error| (error, false))?;
+        let worktree = container
+            .worktree_path
+            .as_deref()
+            .expect("recovery checkout has a proven local path");
+        let live_session_ids = self
+            .active_agent_sessions
+            .values()
+            .map(|session| session.session_id.clone())
+            .collect();
+        if !self.project_context_is_current(context) {
+            return Err(("project changed before Work supersession".into(), false));
+        }
+        // Match fresh activation's global -> owner -> Work order. Acquiring
+        // the owner inside the Work transaction would invert that hierarchy.
+        let changed = gwt::cli::execution_state::with_workspace_successor_supersession_lease(
+            worktree,
+            owner,
+            || {
+                work::transact_workspace_successor_supersession_for_work_event_root(
+                    &context.project_root,
+                    worktree,
+                    |_, locked, _| {
+                        let locked_target = exact_target(locked)?;
+                        let mut parents = locked
+                            .work_items
+                            .iter()
+                            .filter(|item| item.id == parent.id);
+                        let locked_parent = parents.next().ok_or_else(|| {
+                            gwt_core::GwtError::Other("predecessor disappeared before Work supersession".into())
+                        })?;
+                        if parents.next().is_some()
+                            || locked_parent != &parent
+                            || locked_target != target
+                        {
+                            return Err(gwt_core::GwtError::Other(
+                                "exact Work or predecessor changed; retry workspace.close".into(),
+                            ));
+                        }
+                        let (locked_owner_key, locked_owner, locked_container) = pm_successor_recovery_checkout(
+                            &context.project_root,
+                            locked_parent,
+                            &locked_target,
+                            &self.sessions_dir,
+                        )
+                        .map_err(gwt_core::GwtError::Other)?;
+                        if locked_owner_key != owner || locked_owner != expected_owner || locked_container != container {
+                            return Err(gwt_core::GwtError::Other(
+                                "local owner checkout changed before Work supersession".into(),
+                            ));
+                        }
+                        if self.sessions_dir != gwt_core::paths::gwt_sessions_dir() {
+                            super::workspace::validate_superseded_member_runtimes(
+                                &self.sessions_dir,
+                                &locked_target,
+                            )?;
+                        }
+                        let audit = super::workspace::invalid_successor_supersession_event(
+                            &context.project_root,
+                            locked_parent,
+                            &locked_target,
+                            container.clone(),
+                            &expected_owner,
+                            &live_session_ids,
+                            chrono::Utc::now(),
+                        )?;
+                        if locked_target.events.iter().any(|event| {
+                            event.work_item_id == locked_target.id
+                                && event.is_successor_supersession()
+                        }) {
+                            return Ok((false, Vec::new()));
+                        }
+                        let current = work::current_work_id_for_launch(
+                            locked,
+                            &context.project_root,
+                            container.branch.as_deref(),
+                            container.worktree_path.as_deref(),
+                            Some(&expected_owner),
+                        )?;
+                        if current.as_deref() != Some(locked_parent.id.as_str()) {
+                            return Err(gwt_core::GwtError::Other(
+                                "Work already belongs to a valid successor lineage; use issue.monitor.requeue".into(),
+                            ));
+                        }
+                        Ok((true, vec![audit]))
+                    },
+                )
+                .map_err(std::io::Error::other)
+            },
+        )
+        .map_err(|error| (error.to_string(), false))?;
+        let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
+        Ok(changed)
     }
 
     pub(crate) fn mark_agent_session_stopped(&mut self, window_id: &str) {

@@ -80,29 +80,19 @@ test.describe("Issue Bridge load recovery", () => {
     }), work);
     await expect(page.locator(".knowledge-related-work-title")).toHaveText("After snapshot");
     expect(await loads()).toBe(beforeStatus);
-    for (const hiddenBy of ["minimized", "inactive tab"]) {
+    {
+      await page.locator('.op-rail__surface[data-surface="settings"]').click();
+      await expect(page.locator(".surface-knowledge")).toBeHidden();
       const beforeHidden = await loads();
-      await page.evaluate(hiddenBy => {
-        const state = window.__issueBridgeWorkspaceState;
-        const issue = state.workspace.tabs[0].workspace.windows[0];
-        issue.minimized = hiddenBy === "minimized";
-        issue.tab_group_id = hiddenBy === "inactive tab" ? "knowledge-tabs" : null;
-        issue.tab_group_active = false;
-        window.__issueBridgeFixtureSocket.emit(state);
+      await page.evaluate(() => {
         for (let agent = 0; agent < 8; agent++) {
           window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_launch_failed" });
           window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_inbox", items: [] });
         }
-      }, hiddenBy);
+      });
       await page.waitForTimeout(2200); // observe the complete real two-second debounce
       expect(await loads()).toBe(beforeHidden);
-      await page.evaluate(() => {
-        const state = window.__issueBridgeWorkspaceState;
-        const issue = state.workspace.tabs[0].workspace.windows[0];
-        issue.minimized = false;
-        issue.tab_group_active = true;
-        window.__issueBridgeFixtureSocket.emit(state);
-      });
+      await page.locator('.op-rail__surface[data-surface="issues"]').click();
       await expect.poll(loads).toBe(beforeHidden + 1);
     }
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
@@ -222,8 +212,9 @@ test.describe("Issue Bridge load recovery", () => {
 
     // Repeated hidden ticks perform neither probes nor list loads. A changed
     // revision is consumed once on restoration through the real receive path.
-    for (const mode of ["hidden", "minimized", "inactive-tab", "document"]) {
-      await page.evaluate(mode => window.__setKnowledgeVisibility(mode, false), mode);
+    for (const mode of ["hidden", "rail", "document"]) {
+      if (mode === "rail") await page.locator('.op-rail__surface[data-surface="settings"]').click();
+      else await page.evaluate(mode => window.__setKnowledgeVisibility(mode, false), mode);
       await settle();
       const before = await counts();
       await page.evaluate(() => {
@@ -231,7 +222,8 @@ test.describe("Issue Bridge load recovery", () => {
         for (let tick = 0; tick < 3; tick++) window.__triggerKnowledgeAutoRefresh();
       });
       expect(await counts()).toEqual(before);
-      await page.evaluate(mode => window.__setKnowledgeVisibility(mode, true), mode);
+      if (mode === "rail") await page.locator('.op-rail__surface[data-surface="issues"]').click();
+      else await page.evaluate(mode => window.__setKnowledgeVisibility(mode, true), mode);
       await expect.poll(async () => (await counts()).loads).toBe(before.loads + 1);
       await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
       expect((await counts()).loads).toBe(before.loads + 1);
@@ -800,9 +792,6 @@ test.describe("Issue Related Work Resume", () => {
       theme,
     });
     await page.goto(APP_URL);
-    await page.addStyleTag({
-      content: "#fleet-minimap { pointer-events: none !important; }",
-    });
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await page
@@ -955,9 +944,6 @@ test.describe("Issue Related Work Resume", () => {
       theme,
     });
     await page.goto(APP_URL);
-    await page.addStyleTag({
-      content: "#fleet-minimap { pointer-events: none !important; }",
-    });
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await page
@@ -1016,32 +1002,6 @@ const SELECTION_SURFACES = [
 const SELECTION_FIRST_NUMBER = 4001;
 const SELECTION_ROW_COUNT = 500;
 const SELECTION_P95_BUDGET_MS = 50;
-
-test("Issue #5401 PR Kanban retains focus across phase columns and virtual destinations", async ({ page }, testInfo) => {
-  const errors: string[] = [];
-  page.on("pageerror", error => errors.push(error.message));
-  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
-  await installEmbeddedRoutes(page);
-  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
-  await installKnowledgeSelectionBackend(page, { preset: "pr", rowCount: 201, theme });
-  await page.goto(APP_URL);
-  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-  await expect(page.locator(".kanban-card").first()).toBeVisible();
-  const number = SELECTION_FIRST_NUMBER + 200;
-  const card = page.locator(`.kanban-card[data-issue-number="${number}"]`);
-  const move = (phase: string) => page.evaluate(({ number, phase }) =>
-    window.__kbFixture.moveEntry(number, phase), { number, phase });
-  await move("review");
-  await expect(card).toBeVisible();
-  await card.focus();
-  for (const phase of ["backlog", "review"]) {
-    await move(phase);
-    await expect(page.locator(`.kanban-column[data-phase="${phase}"]`).locator(card)).toHaveCount(1);
-    await expect(card).toBeFocused();
-    expect(await page.locator(".kanban-card").count()).toBeLessThan(200);
-  }
-  expect(errors, "zero console/page errors").toEqual([]);
-});
 
 test.describe("SPEC #3170 immediate selection under delayed and reversed responses", () => {
   test.use({
@@ -1568,12 +1528,6 @@ async function installKnowledgeSelectionBackend(
         socketOpenCount: 0,
         workspaceSent: false,
         activeSocket: null,
-        moveEntry(number, phase) {
-          entries.find(entry => entry.number === number).phase = phase;
-          fixture.activeSocket.emit({ kind: "knowledge_entries", id: fixtureWindowId,
-            knowledge_kind: "pr", request_id: fixture.loadRequests.at(-1).requestId,
-            entries, selected_number: null, refresh_enabled: true });
-        },
         closeSocketSilently() {
           // No `close` event: the frontend still believes it is online, so the
           // next retry hop has to detect the dead socket through readyState.
@@ -2239,19 +2193,8 @@ async function installIssueBridgeBackend(
       };
 
       window.__setKnowledgeVisibility = (mode, visible) => {
-        const data = workspaceState.workspace.tabs[0].workspace.windows[0];
         if (mode === "hidden") document.querySelector(".surface-knowledge").hidden = !visible;
         if (mode === "document") Object.defineProperty(document, "hidden", { configurable: true, value: !visible });
-        if (mode === "minimized") data.minimized = !visible;
-        if (mode === "inactive-tab") {
-          data.tab_group_id = "knowledge-tabs";
-          data.tab_group_active = visible;
-        }
-        if (mode === "minimized" || mode === "inactive-tab") {
-          window.__issueBridgeFixtureSocket.dispatchEvent(new MessageEvent("message", {
-            data: JSON.stringify(workspaceState),
-          }));
-        }
         document.dispatchEvent(new Event("visibilitychange"));
       };
 

@@ -4,6 +4,9 @@
 // The controller owns every PM settings event so entry points and Settings
 // rendering cannot grow separate mutation paths.
 
+import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
+import { createUiStateStore } from "./ui-state-store.js";
+
 const DEFAULT_LOOP_INTERVAL_SECS = 60;
 const MIN_LOOP_INTERVAL_SECS = 10;
 const MAX_U64 = 18446744073709551615n;
@@ -118,7 +121,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     ? confirm
     : (message) => Boolean(document.defaultView?.confirm?.(message));
 
-  let state = emptyStatus();
+  const model = createUiStateStore(emptyStatus());
   const mounts = new Map();
   const boundDocuments = new Set();
   let nextErrorId = 0;
@@ -130,13 +133,26 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     return node;
   }
 
+  function releaseMount(container) {
+    const view = mounts.get(container);
+    view?.unsubscribe?.();
+    view?.explanations.dispose();
+    mounts.delete(container);
+  }
+
   function pruneDetachedMounts() {
-    for (const [container] of mounts) {
-      if (!container.isConnected) mounts.delete(container);
+    for (const container of mounts.keys()) {
+      if (!container.isConnected) {
+        releaseMount(container);
+      }
     }
   }
 
-  function renderView(view) {
+  // Prune before notifying mounted views. Initial mount rendering also works
+  // while Settings is still building its detached DOM.
+  model.subscribe(state => state, pruneDetachedMounts);
+
+  function renderView(view, state) {
     const runningName = agentLabel(state, state.runningAgentId);
     const runningProfile = [runningName];
     if (state.runningModel) runningProfile.push(`Model: ${state.runningModel}`);
@@ -153,6 +169,8 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
       : state.paused ? "Autonomous loop paused" : "Autonomous loop active";
     view.pauseToggle.textContent = state.paused ? "Resume" : "Pause";
     view.pauseToggle.setAttribute("aria-pressed", String(state.paused));
+    setControlExplanation(view.autonomyStatus,
+      `${view.autonomyStatus.textContent}. Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.`, "pm-autonomy-status");
 
     view.pendingChip.hidden = !(
       state.isRunning
@@ -219,23 +237,20 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     view.intervalError.hidden = true;
     view.intervalError.textContent = "";
     view.intervalInput.setAttribute("aria-invalid", "false");
-  }
-
-  function renderAll() {
-    pruneDetachedMounts();
-    for (const view of mounts.values()) renderView(view);
+    view.explanations.refresh();
   }
 
   function sendProfile(view) {
+    const state = model.read();
     if (!state.available) return;
     const agentId = view.agentSelect.value || state.configuredAgentId;
     if (!agentId) return;
-    const model = view.modelInput.value.trim();
+    const configuredModel = view.modelInput.value.trim();
     const reasoning = view.effortSelect.value.trim();
     dispatch({
       kind: "set_pm_launch_profile",
       agent_id: agentId,
-      model: model === "" ? null : model,
+      model: configuredModel === "" ? null : configuredModel,
       reasoning: reasoning === "" ? null : reasoning,
     });
   }
@@ -248,6 +263,7 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
   }
 
   function sendLoopInterval(view) {
+    const state = model.read();
     if (!state.available) return;
     const decimal = view.intervalInput.value.trim();
     if (!/^\d+$/.test(decimal)) {
@@ -372,11 +388,25 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     section.appendChild(restart);
     container.appendChild(section);
 
+    for (const [control, text, key] of [
+      [runningLine, "The agent, model and effort of the current Project Manager session. Saved profile changes apply after restart.", "pm-running-as"],
+      [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.", "pm-pause-toggle"],
+      [pendingChip, PROFILE_HELP, "pm-pending-chip"],
+      [agentSelect, PROFILE_HELP, "pm-agent-select"],
+      [modelInput, PROFILE_HELP, "pm-model-input"],
+      [effortSelect, PROFILE_HELP, "pm-effort-select"],
+      [intervalInput, LOOP_INTERVAL_HELP, "pm-loop-interval"],
+      [autoStartInput, AUTO_START_HELP, "pm-auto-start"],
+      [restart, RESTART_CONFIRM, "pm-restart"],
+    ]) setControlExplanation(control, text, key);
+    const explanations = bindControlExplanations({ document, root: container, id: `pm-control-explanation-${intervalError.id}` });
+
     const view = {
       agentSelect,
       autoStartInput,
       autonomyStatus,
       effortSelect,
+      explanations,
       intervalError,
       intervalInput,
       modelInput,
@@ -392,17 +422,19 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     effortSelect.addEventListener("change", () => sendProfile(view));
     intervalInput.addEventListener("change", () => sendLoopInterval(view));
     autoStartInput.addEventListener("change", () => {
-      if (!state.available) return;
+      if (!model.read().available) return;
       dispatch({
         kind: "set_pm_auto_start",
         enabled: Boolean(autoStartInput.checked),
       });
     });
     pauseToggle.addEventListener("click", () => {
+      const state = model.read();
       if (!state.available) return;
       dispatch({ kind: "set_pm_paused", paused: !state.paused });
     });
     restart.addEventListener("click", () => {
+      const state = model.read();
       if (!state.available) return;
       // Guard the action as well as the control: a stale render or a
       // programmatic click must not spend a restart on a block it cannot clear.
@@ -423,21 +455,27 @@ export function createPmSettingsPanel({ document, send, confirm } = {}) {
     );
   }
 
+  function applyPmSettingsReceiveEvent(status) {
+    model.update(() => normalizeStatus(status));
+  }
+
   return {
     mount(container) {
       if (!container) {
         throw new TypeError("pmSettingsPanel.mount requires a container");
       }
       pruneDetachedMounts();
+      releaseMount(container);
       const view = build(container);
       mounts.set(container, view);
-      renderView(view);
+      view.unsubscribe = model.subscribe(state => state, state => renderView(view, state));
       return this;
     },
-    applyStatus(status) {
-      state = normalizeStatus(status);
-      renderAll();
+    unmount(container) {
+      releaseMount(container);
+      return this;
     },
+    applyStatus: applyPmSettingsReceiveEvent,
     bindEntryPoints({ document: entryDocument = document } = {}) {
       if (!entryDocument || boundDocuments.has(entryDocument)) return this;
       boundDocuments.add(entryDocument);

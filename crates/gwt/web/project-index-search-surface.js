@@ -10,6 +10,7 @@ import {
   buildIndexHealthSummary,
   renderIndexSettingsPanel,
 } from "/index-settings-panel.js";
+import { createUiStateStore } from "/ui-state-store.js";
 
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
@@ -20,6 +21,7 @@ import {
 // - makeEl / clearChildren: DOM helpers owned by app.js.
 // - focusOrSpawnPreset / knowledgeKindForPreset / requestKnowledgeDetail:
 //   knowledge-window integration owned by app.js.
+// - openReports(): focus the PM's existing Reports view.
 // - renderIndexPanelInAllSettingsWindows / refreshProjectTabStateCues: status
 //   fan-out hooks owned by app.js (Settings panel + project tab state cues).
 // - requestFullIndexStatusRefresh(): Health tab refresh request owned by
@@ -32,6 +34,7 @@ export function createProjectIndexSearchSurface({
   makeEl,
   clearChildren,
   focusOrSpawnPreset,
+  openReports,
   knowledgeKindForPreset,
   requestKnowledgeDetail,
   renderIndexPanelInAllSettingsWindows,
@@ -39,7 +42,21 @@ export function createProjectIndexSearchSurface({
 }) {
       const indexSearchStateMap = new Map();
       const pendingIndexOpenTargetsByPreset = new Map();
-      const indexStatusByProjectRoot = new Map();
+      const indexStatusModel = createUiStateStore({ byProjectRoot: {}, lastChangedProjectRoot: null });
+      function getIndexStatus(projectRoot) {
+        const statuses = indexStatusModel.read().byProjectRoot;
+        return Object.hasOwn(statuses, projectRoot) ? statuses[projectRoot] : null;
+      }
+      // Independent subscriptions keep both surfaces on the committed snapshot,
+      // even if one renderer fails. Initial null avoids late-bound Settings calls.
+      const selectActiveIndexStatus = snapshot => snapshot.lastChangedProjectRoot === activeProjectTab()?.project_root
+        ? snapshot.byProjectRoot[snapshot.lastChangedProjectRoot] : null;
+      indexStatusModel.subscribe(selectActiveIndexStatus, status => {
+        if (status) renderIndexPanelInAllSettingsWindows();
+      });
+      indexStatusModel.subscribe(selectActiveIndexStatus, status => {
+        if (status) renderProjectIndexWindows();
+      });
 
       // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The
       // aggregated payload now feeds only the Index Health tab and the
@@ -50,16 +67,17 @@ export function createProjectIndexSearchSurface({
         if (!projectRoot) {
           return;
         }
-        indexStatusByProjectRoot.set(projectRoot, {
-          state: status?.state || "",
-          detail: status?.detail || "",
-          repair_started_at: status?.repair_started_at || null,
-          progress: status?.progress || null,
-          scopes: status?.scopes || {},
-          worktrees: status?.worktrees || {},
-        });
-        renderIndexPanelInAllSettingsWindows();
-        renderProjectIndexWindows();
+        indexStatusModel.update(snapshot => ({
+          lastChangedProjectRoot: projectRoot,
+          byProjectRoot: { ...snapshot.byProjectRoot, [projectRoot]: {
+            state: status?.state || "",
+            detail: status?.detail || "",
+            repair_started_at: status?.repair_started_at || null,
+            progress: status?.progress || null,
+            scopes: status?.scopes || {},
+            worktrees: status?.worktrees || {},
+          } },
+        }));
       }
 
       const INDEX_SEARCH_SCOPES = Object.freeze([
@@ -70,6 +88,7 @@ export function createProjectIndexSearchSurface({
         // SPEC-2359 US-80: past Work (incl. completed/discarded) is searchable
         // so similar prior work can be found before starting duplicate work.
         { id: "works", label: "Work" },
+        { id: "reports", label: "Reports" },
         { id: "files", label: "Files" },
         { id: "files-docs", label: "Docs" },
         { id: "memory", label: "Memory" },
@@ -80,6 +99,7 @@ export function createProjectIndexSearchSurface({
         "board",
         "discussions",
         "works",
+        "reports",
         "memory",
       ]);
       function ensureIndexSearchState(windowId) {
@@ -131,7 +151,7 @@ export function createProjectIndexSearchSurface({
 
       function activeIndexStatus() {
         const activeProjectRoot = activeProjectTab()?.project_root || "";
-        return (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+        return getIndexStatus(activeProjectRoot);
       }
 
       function ensureIndexStatusRefresh(state, status) {
@@ -534,12 +554,14 @@ export function createProjectIndexSearchSurface({
           detail.appendChild(makeEl("div", { className: "index-detail-meta", text: evidence }));
         }
         detail.appendChild(makeEl("p", { className: "index-detail-preview", text: selected.preview || "No preview available" }));
-        detail.appendChild(makeEl("button", {
-          className: "wizard-button primary",
-          attrs: { type: "button" },
-          dataset: { action: "open-index-result" },
-          text: "Open",
-        }));
+        if (selected.target?.kind !== "file") {
+          detail.appendChild(makeEl("button", {
+            className: "wizard-button primary",
+            attrs: { type: "button" },
+            dataset: { action: "open-index-result" },
+            text: "Open",
+          }));
+        }
       }
 
       function makeIndexSearchLoadingState(label = "Searching semantic index") {
@@ -616,8 +638,8 @@ export function createProjectIndexSearchSurface({
           case "board":
             focusOrSpawnPreset("board");
             return;
-          case "file":
-            focusOrSpawnPreset("file_tree");
+          case "report":
+            openReports();
             return;
           case "memory":
           case "discussion":
@@ -827,6 +849,6 @@ export function createProjectIndexSearchSurface({
         mountProjectIndexSurface,
         indexSearchStateMap,
         pendingIndexOpenTargetsByPreset,
-        indexStatusByProjectRoot,
+        getIndexStatus,
       };
 }

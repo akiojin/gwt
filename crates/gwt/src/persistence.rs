@@ -444,9 +444,25 @@ pub fn pause_process_windows_for_restore(state: &mut PersistedWindowCanvasState)
 }
 
 fn normalize_loaded_workspace_state(state: &mut PersistedWindowCanvasState) {
+    let affected_groups: std::collections::HashSet<_> = state
+        .windows
+        .iter()
+        .filter(|window| window.preset.is_removed_legacy())
+        .filter_map(|window| window.tab_group_id.clone())
+        .collect();
     state
         .windows
-        .retain(|window| !window.preset.is_removed_legacy());
+        .retain(|window| {
+            if window.preset.is_removed_legacy() {
+                tracing::info!(id = %window.id, preset = ?window.preset, "Dropping retired legacy surface during workspace restore");
+                false
+            } else {
+                true
+            }
+        });
+    for group_id in affected_groups {
+        crate::window_canvas::normalize_window_group(&mut state.windows, &group_id);
+    }
     for window in &mut state.windows {
         let canonical = window.preset.canonical_surface_preset();
         if window.preset != canonical {
@@ -519,6 +535,19 @@ pub fn load_restored_workspace_state(
     project_root: &Path,
 ) -> std::io::Result<PersistedWindowCanvasState> {
     let mut workspace = load_workspace_state(&workspace_state_path(project_root))?;
+    let names = workspace
+        .windows
+        .iter()
+        .filter(|window| window.preset.is_agent_terminal() && !window.is_pm)
+        .filter_map(|window| window.agent_name.clone())
+        .collect();
+    // Reserve legacy identities before a restored window can be closed or renamed
+    // by any runtime action, including actions before the first naming tick.
+    crate::agent_names::remember(
+        &gwt_core::paths::gwt_project_dir_for_repo_path(project_root).join("agent-names.jsonl"),
+        &names,
+    )
+    .map_err(std::io::Error::other)?;
     pause_process_windows_for_restore(&mut workspace);
     Ok(workspace)
 }
@@ -1407,6 +1436,56 @@ mod tests {
     }
 
     #[test]
+    fn load_workspace_state_drops_retired_surfaces_and_preserves_other_windows() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let presets = ["board", "file_tree", "console", "pr", "logs", "shell"];
+        let windows: Vec<_> = presets
+            .iter()
+            .enumerate()
+            .map(|(index, preset)| {
+                serde_json::json!({
+                    "id": preset,
+                    "title": preset,
+                    "preset": preset,
+                    "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
+                    "z_index": index + 1,
+                    "status": "running",
+                    "persist": true,
+                    "tab_group_id": if *preset == "shell" || *preset == "console" { "shell-group" } else { "board-group" },
+                    "tab_group_active": *preset == "file_tree" || *preset == "console"
+                })
+            })
+            .collect();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({ "windows": windows, "next_z_index": 7 }))
+                .expect("serialize workspace"),
+        )
+        .expect("write legacy workspace");
+
+        let loaded = load_workspace_state(&path).expect("retired surfaces must not fail restore");
+        assert_eq!(
+            loaded
+                .windows
+                .iter()
+                .map(|window| window.id.as_str())
+                .collect::<Vec<_>>(),
+            ["board", "logs", "shell"]
+        );
+        assert_eq!(loaded.next_z_index, 7);
+        assert!(loaded.windows.iter().any(|window| {
+            window.tab_group_id.as_deref() == Some("board-group") && window.tab_group_active
+        }));
+        let shell = loaded
+            .windows
+            .iter()
+            .find(|window| window.id == "shell")
+            .unwrap();
+        assert_eq!(shell.tab_group_id, None);
+    }
+
+    #[test]
     fn load_workspace_state_drops_legacy_memo_windows_without_failing_restore() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("workspace.json");
@@ -1730,6 +1809,26 @@ mod tests {
     }
 
     #[test]
+    fn restored_legacy_agent_names_are_reserved_before_the_first_runtime_tick() {
+        let home = tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project_root = tempdir().unwrap();
+        let mut workspace = default_workspace_state();
+        let window = &mut workspace.windows[0];
+        window.preset = WindowPreset::Agent;
+        window.agent_name = Some("Alice".into());
+        let path = workspace_state_path(project_root.path());
+        save_workspace_state(&path, &workspace).unwrap();
+
+        let _restored = load_restored_workspace_state(project_root.path()).unwrap();
+        // Closing before the first tick may remove the only legacy name snapshot.
+        save_workspace_state(&path, &empty_workspace_state()).unwrap();
+        let history = gwt_core::paths::gwt_project_dir_for_repo_path(project_root.path())
+            .join("agent-names.jsonl");
+        assert_eq!(std::fs::read_to_string(history).unwrap(), "\"Alice\"\n");
+    }
+
+    #[test]
     fn load_restored_workspace_state_pauses_process_windows() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -1772,9 +1871,9 @@ mod tests {
                     is_pm: false,
                 },
                 PersistedWindowState {
-                    id: "file-tree-1".to_string(),
+                    id: "board-1".to_string(),
                     title: "Files".to_string(),
-                    preset: WindowPreset::FileTree,
+                    preset: WindowPreset::Board,
                     geometry: WindowGeometry {
                         x: 0.0,
                         y: 0.0,

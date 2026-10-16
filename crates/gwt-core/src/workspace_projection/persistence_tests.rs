@@ -566,6 +566,7 @@ fn issue_5335_rebuild_refuses_local_ledger_only_change_and_retries() {
 #[test]
 fn issue_5335_rebuild_refuses_detachments_only_change_and_retries() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(&temp.path().join("home"));
     let works = temp.path().join("works.json");
     let receipt = container_detachments_path(&works);
     let at = Utc.with_ymd_and_hms(2026, 10, 12, 0, 0, 0).unwrap();
@@ -767,6 +768,7 @@ fn assert_launch_preserves_foreign_authority(recovering: bool) {
         &works_path,
         &gwt_repo_local_work_events_dir(&repo),
         &repo,
+        false,
         |projection, _, _| {
             if !recovering {
                 projection
@@ -14123,6 +14125,178 @@ fn find_work_item_for_container_prefers_successor_after_predecessor_heartbeat() 
 }
 
 #[test]
+fn audited_successor_supersession_survives_shared_intake_and_compaction() {
+    let project_root = Path::new("/repo");
+    let branch = "work/issue-4074";
+    let now = Utc.timestamp_opt(9_000, 0).unwrap();
+    let predecessor_id = canonical_work_id(project_root, Some(branch), None).unwrap();
+    let occupied_id = successor_work_id(&predecessor_id);
+    let successor_id = successor_work_id(&occupied_id);
+    let mut projection = WorkItemsProjection::empty(now);
+    let mut start = sample_work_event(&predecessor_id, now);
+    start.owner = Some("Issue #4074".to_string());
+    start.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some(branch.to_string()),
+        worktree_path: Some(PathBuf::from("/wt/issue-4074")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    projection.apply_event(start.clone());
+    projection.apply_event(WorkEvent::new(WorkEventKind::Done, &predecessor_id, now));
+    start.id = "invalid-start".to_string();
+    start.work_item_id = occupied_id.clone();
+    start.related_work_item_id = Some(predecessor_id.clone());
+    projection.apply_event(start.clone());
+    projection
+        .work_items
+        .iter_mut()
+        .find(|work| work.id == occupied_id)
+        .unwrap()
+        .execution_containers
+        .clear();
+    projection.apply_event(WorkEvent::new(WorkEventKind::Done, &occupied_id, now));
+    let mut audit = WorkEvent::new(
+        WorkEventKind::Discard,
+        &occupied_id,
+        now + chrono::Duration::seconds(1),
+    );
+    audit.id = format!("superseded-{occupied_id}");
+    audit.related_work_item_id = Some(predecessor_id);
+    audit.execution_container = start.execution_container.clone();
+    start.id = "new-successor".to_string();
+    start.work_item_id = successor_id.clone();
+    start.related_work_item_id = Some(occupied_id.clone());
+    start.updated_at = now + chrono::Duration::seconds(2);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("works.json");
+    save_workspace_work_items_projection_to_path(&path, &projection).unwrap();
+    // Issue #5288: an earlier container repair remains authoritative even
+    // after supersession. Replaying its audit must not restore detached refs.
+    let detachments = BTreeMap::from([(
+        occupied_id.clone(),
+        vec![audit.execution_container.clone().unwrap()],
+    )]);
+    let detachment_bytes = serde_json::to_vec(&detachments).unwrap();
+    fs::write(container_detachments_path(&path), &detachment_bytes).unwrap();
+    let content = [
+        serde_json::to_string(&audit).unwrap(),
+        serde_json::to_string(&start).unwrap(),
+    ]
+    .join("\n");
+    let report = crate::work_events_intake::ingest_work_events_content(&path, &content).unwrap();
+    assert_eq!(
+        report.skipped_close_kind, 0,
+        "structural supersession is shared lineage"
+    );
+    let mut projection = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+    assert!(projection
+        .work_items
+        .iter()
+        .find(|work| work.id == occupied_id)
+        .unwrap()
+        .is_terminal());
+    assert_eq!(
+        projection
+            .work_items
+            .iter()
+            .find(|work| work.id == occupied_id)
+            .unwrap()
+            .completed_at,
+        Some(now)
+    );
+    for index in 0..MAX_INLINE_WORK_EVENTS + 1 {
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Update,
+            &occupied_id,
+            now + chrono::Duration::seconds(index as i64 + 3),
+        ));
+    }
+    projection.compact_inline_events();
+    let occupied = projection
+        .work_items
+        .iter()
+        .find(|work| work.id == occupied_id)
+        .unwrap();
+    assert!(occupied.execution_containers.is_empty());
+    assert!(
+        occupied.events.contains(&audit),
+        "retain supersession even when an old Start exists"
+    );
+    assert!(occupied.events.len() <= MAX_INLINE_WORK_EVENTS);
+    save_workspace_work_items_projection_to_path(&path, &projection).unwrap();
+    let heartbeat = WorkEvent::new(
+        WorkEventKind::Update,
+        &successor_id,
+        now + chrono::Duration::seconds(100),
+    );
+    crate::work_events_intake::ingest_work_events_content(
+        &path,
+        &serde_json::to_string(&heartbeat).unwrap(),
+    )
+    .unwrap();
+    let projection = load_workspace_work_items_from_path(&path).unwrap().unwrap();
+    assert_eq!(
+        current_work_id(&projection, project_root, Some(branch), None),
+        Some(successor_id.clone())
+    );
+    let mut ownerless_root = projection.clone();
+    ownerless_root
+        .work_items
+        .iter_mut()
+        .find(|work| work.id == audit.related_work_item_id.as_deref().unwrap())
+        .unwrap()
+        .owner = None;
+    assert_eq!(
+        current_work_id(&ownerless_root, project_root, Some(branch), None),
+        Some(successor_id.clone()),
+        "audit branch identity proves the first known owner after an ownerless root",
+    );
+    assert_eq!(
+        fs::read(container_detachments_path(&path)).unwrap(),
+        detachment_bytes
+    );
+    // Only the exact authenticated audit may bridge an empty terminal row.
+    // Ordinary closes and a foreign audit container cannot grant authority.
+    for invalid in ["ordinary-discard", "foreign-audit", "nonterminal"] {
+        let mut invalid_projection = projection.clone();
+        let occupied = invalid_projection
+            .work_items
+            .iter_mut()
+            .find(|work| work.id == occupied_id)
+            .unwrap();
+        let audit = occupied
+            .events
+            .iter_mut()
+            .find(|event| event.is_successor_supersession())
+            .unwrap();
+        match invalid {
+            "ordinary-discard" => audit.id = "ordinary-discard".to_string(),
+            "foreign-audit" => {
+                audit.execution_container.as_mut().unwrap().branch = Some("work/other".to_string())
+            }
+            "nonterminal" => {
+                occupied.status_category = WorkspaceStatusCategory::Idle;
+                occupied.completed_at = None;
+                occupied.discarded = false;
+            }
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            current_work_id(&invalid_projection, project_root, Some(branch), None),
+            Some(successor_id.clone()),
+            "{invalid} must not authorize the new successor",
+        );
+    }
+    assert!(projection
+        .work_items
+        .iter()
+        .find(|work| work.id == occupied_id)
+        .unwrap()
+        .is_terminal());
+}
+
+#[test]
 fn current_work_preserves_owner_authority_across_missing_historical_owner() {
     let project_root = Path::new("/repo");
     let worktree = Path::new("/wt/issue-4777");
@@ -15033,6 +15207,34 @@ fn session_bound_board_store_rejects_cross_work_non_attach_mutation_byte_equival
         after == before,
         "a rejected cross-Work mutation must preserve current/work/event/journal bytes"
     );
+}
+
+#[test]
+fn ordinary_transaction_rejects_reserved_supersession_payload_without_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = session_bound_board_seed_fixture(temp.path());
+    let before = session_bound_board_work_bytes(&fixture);
+    let id = successor_work_id(SESSION_BOUND_BOARD_CURRENT_WORK_ID);
+    let mut audit = WorkEvent::new(WorkEventKind::Discard, &id, fixture.base_at);
+    audit.id = format!("superseded-{id}");
+    audit.related_work_item_id = Some(SESSION_BOUND_BOARD_CURRENT_WORK_ID.to_string());
+    audit.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-4074".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    assert!(audit.is_successor_supersession());
+    let result = transact_workspace_state_at(
+        &fixture.current_path,
+        &fixture.work_items_path,
+        &fixture.events_path,
+        &fixture.project_root,
+        |_, _, _| Ok(((), vec![audit])),
+    );
+    assert!(result.is_err());
+    assert_eq!(session_bound_board_work_bytes(&fixture), before);
 }
 
 #[test]

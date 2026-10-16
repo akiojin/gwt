@@ -8,9 +8,87 @@
 //! the queue label collection opts into complete pagination (#5080 AC-1).
 //! Both paths spend zero GraphQL points.
 
-use std::collections::HashSet;
+use std::{
+    collections::{hash_map::DefaultHasher, HashSet},
+    hash::{Hash, Hasher},
+    path::Path,
+};
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Bound unchanged Monitor inventories to one live read per four 30s scans.
+/// Queue-labelled Issue pages and authoritative per-resource reads bypass it.
+const LIST_CACHE_TTL_SECS: i64 = 120;
+
+#[derive(Serialize, Deserialize)]
+struct CachedListResponse {
+    key: String,
+    fetched_at: DateTime<Utc>,
+    stdout: String,
+}
+
+pub(crate) fn cached_list_response_with(
+    cache_dir: &Path,
+    key: &str,
+    now: DateTime<Utc>,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    let path = cache_dir.join(format!("{:016x}.json", hasher.finish()));
+    if let Some(cached) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CachedListResponse>(&bytes).ok())
+    {
+        let age = now.signed_duration_since(cached.fetched_at).num_seconds();
+        if cached.key == key
+            && (0..LIST_CACHE_TTL_SECS).contains(&age)
+            && valid_list_response(&cached.stdout)
+        {
+            return Ok(cached.stdout);
+        }
+    }
+    // Expired or unreadable entries never hide a failed live read. Cache only
+    // valid array payloads, with or without the `gh api --include` headers.
+    let stdout = fetch()?;
+    if valid_list_response(&stdout) {
+        let cached = CachedListResponse {
+            key: key.to_string(),
+            fetched_at: now,
+            stdout: stdout.clone(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&cached) {
+            let _ = std::fs::create_dir_all(cache_dir);
+            let _ = gwt_core::atomic_file::write_atomic(&path, &bytes);
+        }
+    }
+    Ok(stdout)
+}
+
+fn valid_list_response(stdout: &str) -> bool {
+    let body = match stdout
+        .split_once("\n\r\n")
+        .or_else(|| stdout.split_once("\n\n"))
+    {
+        Some((headers, body)) => {
+            let status = headers.lines().next().unwrap_or_default();
+            if !status.starts_with("HTTP/")
+                || status
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|code| code.parse::<u16>().ok())
+                    .is_none_or(|code| !(200..300).contains(&code))
+            {
+                return false;
+            }
+            body
+        }
+        None => stdout,
+    };
+    serde_json::from_str::<Value>(body).is_ok_and(|value| value.is_array())
+}
 
 /// Rows per REST page (GitHub's maximum).
 pub const REST_PAGE_SIZE: usize = 100;
@@ -219,6 +297,90 @@ fn text(row: &Value, keys: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_5603_unchanged_lists_halve_hourly_rest_consumption() {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-16T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for implementing in [false, true] {
+            let cache = tempfile::tempdir().unwrap();
+            let mut calls = 0;
+            for tick in 0..120 {
+                let now = start + chrono::Duration::seconds(tick * 30);
+                for key in ["general-issues", "closed-pulls"]
+                    .into_iter()
+                    .chain(implementing.then_some("open-pulls"))
+                {
+                    let response = cached_list_response_with(cache.path(), key, now, || {
+                        calls += 1;
+                        Ok("[]".to_string())
+                    })
+                    .unwrap();
+                    assert_eq!(response, "[]");
+                }
+                // Queue membership and payloads remain live on every scan.
+                calls += 1;
+            }
+            let baseline = if implementing { 480 } else { 360 };
+            assert_eq!(calls, if implementing { 210 } else { 180 });
+            assert!(calls <= baseline / 2);
+            println!("unchanged Monitor lists: implementing={implementing}, {baseline} -> {calls} requests/hour");
+
+            // HTTP Link continuations are distinct cached pages too.
+            let mut continuation_calls = 0;
+            for tick in 0..120 {
+                cached_list_response_with(
+                    cache.path(),
+                    "https://api.github.com/repos/o/r/issues?per_page=100&page=2",
+                    start + chrono::Duration::seconds(tick * 30),
+                    || {
+                        continuation_calls += 1;
+                        Ok("HTTP/2.0 200 OK\n\r\n[]".into())
+                    },
+                )
+                .unwrap();
+            }
+            assert_eq!(continuation_calls, 30);
+            assert!(calls + continuation_calls <= (baseline + 120) / 2);
+        }
+    }
+
+    #[test]
+    fn issue_5603_expired_list_cache_does_not_hide_a_failed_refresh() {
+        let cache = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        cached_list_response_with(cache.path(), "issues", now, || Ok("[]".into())).unwrap();
+        let fresh = cached_list_response_with(cache.path(), "issues", now, || {
+            Err("cache should answer".to_string())
+        });
+        assert_eq!(fresh.unwrap(), "[]");
+        let expired = cached_list_response_with(
+            cache.path(),
+            "issues",
+            now + chrono::Duration::seconds(LIST_CACHE_TTL_SECS),
+            || Err("live read failed".to_string()),
+        );
+        assert_eq!(expired.unwrap_err(), "live read failed");
+    }
+
+    #[test]
+    fn issue_5603_invalid_http_response_never_enters_list_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        let mut calls = 0;
+        for _ in 0..2 {
+            cached_list_response_with(cache.path(), "issues", now, || {
+                calls += 1;
+                Ok("HTTP/2.0 503 Service Unavailable\n\r\n[]".into())
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            calls, 2,
+            "an invalid HTTP status cannot become a cached observation"
+        );
+    }
 
     fn rows(count: usize, offset: usize) -> String {
         let rows = (0..count)

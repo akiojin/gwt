@@ -180,9 +180,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CreateWindow { preset, .. } => {
             FrontendUserActionLog::new("create_window", "window").target(format!("{preset:?}"))
         }
-        FrontendEvent::LoadProcessConsole { id } => {
-            FrontendUserActionLog::new("load_process_console", "console").window(id)
-        }
         FrontendEvent::FocusWindow { id, .. } => {
             FrontendUserActionLog::new("focus_window", "window").window(id)
         }
@@ -248,31 +245,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::RestartWindow { id } => {
             FrontendUserActionLog::new("restart_window", "window").window(id)
-        }
-        FrontendEvent::LoadFileTree { id, path } => {
-            FrontendUserActionLog::new("load_file_tree", "file")
-                .window(id)
-                .target(path.as_deref().unwrap_or_default())
-        }
-        FrontendEvent::ListFileTreeWorktrees { id } => {
-            FrontendUserActionLog::new("list_file_tree_worktrees", "file").window(id)
-        }
-        FrontendEvent::SelectFileTreeWorktree { id, worktree_id } => {
-            FrontendUserActionLog::new("select_file_tree_worktree", "file")
-                .window(id)
-                .target(worktree_id)
-        }
-        FrontendEvent::LoadFileContent { id, path, mode, .. } => {
-            FrontendUserActionLog::new("load_file_content", "file")
-                .window(id)
-                .target(path)
-                .mode(format!("{mode:?}"))
-        }
-        FrontendEvent::SaveFileContent { id, path, mode, .. } => {
-            FrontendUserActionLog::new("save_file_content", "file")
-                .window(id)
-                .target(path)
-                .mode(format!("{mode:?}"))
         }
         FrontendEvent::LoadBranches { id } => {
             FrontendUserActionLog::new("load_branches", "branches").window(id)
@@ -792,6 +764,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
         | FrontendEvent::ProjectAggregateAck { .. }
+        | FrontendEvent::ProjectClientAttention { .. }
         | FrontendEvent::StartupFirstFrame { .. }
         | FrontendEvent::StartupTerminalReady { .. }
         | FrontendEvent::AgentIssueMonitorScanNow { .. }

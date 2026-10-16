@@ -1,6 +1,226 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.126.1] - 2026-10-16
+
+### Bug Fixes
+
+- **execution:** Resolve superseded work after container detachment
+
+### Miscellaneous Tasks
+
+- **work:** Record PM settings delivery gate handoff
+- **work:** Record Windows CI delivery continuation
+- **work:** Record Windows CI delivery recovery
+- **work:** Record PR 5622 delivery metadata
+
+### Performance
+
+- **ci:** Trim Windows test symbols and parallelize providers
+- **ci:** Compile Windows regression harness groups in parallel
+
+### Refactor
+
+- **ui:** Render PM settings from shared state
+- **ui:** Render workspace state notices from shared state
+
+### Testing
+
+- **workspace:** Isolate rebuild detachment fixture home
+- **ci:** Align native caller contracts with Windows slices
+- **execution:** Fix detached successor fixture path lookup
+
+## [9.126.0] - 2026-10-16
+
+### Bug Fixes
+
+- **pm:** Require a registered executor for scoped operations
+- **pm:** Keep automatic prompts out of Q&A reports
+- **verify:** Record TTL overruns and reclaim diagnostics
+- **index:** Retain query models across revision switches
+- **verify:** Bound exclusive command occupancy
+- **agent:** Preserve reused sessions after exact relaunch
+- **execution:** Supersede invalid successor work occupancy
+- **monitor:** Recover expired budgets and bound candidate reads
+- **monitor:** Preserve launches when merge discovery fails
+
+### Features
+
+- **ui:** Bound PM reports and version raw updates
+- **notifications:** Route project notices through the server
+
+### Miscellaneous Tasks
+
+- **work:** Preserve the restored pull request link
+- **work:** Issue #3287 の配信済みスライスを記録する
+- **work:** Settle the delivered tray slice successor
+- **ci:** Rust workspace テストを6 shardに分割して実行集合を検証
+- **work:** Record the delivered tray execution
+- **work:** Preserve issue 5016 delivery recovery records
+- **work:** Record SAFE-C performance handoff
+- **work:** Record Profiles delivery relaunch
+- **work:** Record the notification pull request
+
+### Performance
+
+- **ci:** Share Windows test artifacts and parallelize regressions
+- **ci:** Avoid Windows regression runner queues
+- **ui:** Avoid per-packet RAW and snapshot allocations
+- **reports:** Bound live history and expose older pages
+- **state:** Avoid mapped tuples in immutable snapshots
+
+### Refactor
+
+- **ui:** Share Profile state through subscriptions
+
+### Testing
+
+- **ci:** 分割コマンドに既存の対応テストを追従
+- **perf:** 現行の起動導線で計測ペインを開く
+- **perf:** Snapshot回復と区間時計同期を計測する
+- **perf:** Compare captures with measured baseline noise
+- **ui:** Verify Profile state disposal and remount
+- **ui:** Resize live Profile window before environment checks
+- **ui:** Align Profile contract with subscriber identity
+- **notifications:** Align the monitor protocol fixture
+- **notifications:** Preserve the socket readiness contract
+- **monitor:** Account for budget-enriched daemon projections
+
+### Ci
+
+- Separate workflow queue and dependency timing
+
+### Revert
+
+- **perf:** Remove unshipped preview and Reports changes
+- **perf:** Remove unshipped snapshot-copy change
+
+## [9.125.0] - 2026-10-15
+
+### Bug Fixes
+
+- **update:** CLI 更新を稼働中 GUI の終了経路へ引き渡す
+- **update:** Recover terminal Work through fresh launches
+- **settings:** Move autostart queries off the gui event loop
+- **verify:** Resume agents after admission waits
+- **settings:** Explain candidate additions
+- **test:** Preserve browser runner argument forwarding
+- **settings:** Preserve successful saves and compare candidate aliases
+- **gui:** Keep agent titles on one line with explanations
+- **gui:** Enforce single-line agent purpose text
+- **search:** Measure query phases and GUI responsiveness
+- **issue-monitor:** Prepare list snapshots off the gui thread
+- **monitor:** Preserve launch budget and immediate admission
+- **settings:** Publish system panel state to subscribed views
+- **execution:** Recover stopped holder generations
+- **pm:** Close approval and GitHub command gaps
+
+### Features
+
+- **pm:** Add scoped instructions and approved operations
+- **workspace:** Add authenticated work closure
+
+### Miscellaneous Tasks
+
+- **work:** PR の配信記録を保存する
+- **work:** Record Issue 5510 delivery audit
+- **work:** Record PR 5525 delivery receipt
+- **work:** PR #5572 の配信情報を記録する
+
+### Performance
+
+- **search:** Connect directly to the resident search worker
+- **search:** Resolve known checkout roots without git probes
+- **gui:** Profile completed slow dispatches without blocking
+
+### Refactor
+
+- **gui:** 廃止サーフェスを旧 workspace 復元専用にする
+- **gui:** 未使用サーフェスと PR 閲覧経路を撤去する
+- **gui:** 廃止サーフェスの Rust 表示経路を削除する
+
+### Testing
+
+- **update:** 実更新の回帰試験を外部リリースから隔離する
+- **update:** 更新通知のソース監査契約を整合させる
+- **index:** Observe recovered broker admission
+- **update:** Preserve owned process cleanup evidence
+- **settings:** Synchronize live settings read and save responses
+- **gui:** Keep names visible in narrow split columns
+- **gui:** 撤去後の E2E と配信記録を整備する
+- **gui:** 固定モーションで撤去後の画面を検証する
+- **gui:** Allow subpixel title advance bounds
+- **search:** Record verified warm latency and GUI response
+- **issue-monitor:** Remove traced list request timing race
+- **monitor:** Decouple supervision from scan polling defaults
+- **monitor:** Freeze the nominal claim persistence clock
+- **pm:** Align generated approval guidance contract
+- **perf:** Validate GUI identity before recording children
+- **perf:** Preserve canonical headed reporter output
+
+## [9.124.0] - 2026-10-15
+
+### Bug Fixes
+
+- **settings:** Group Issues controls into readable sections
+- **settings:** Preserve nested dropdown values on host sync
+- **gui:** Isolate PM and agent surface ownership
+- **hub:** Discard queued picker requests after connection loss
+- **monitor:** Give wait declarations a durable ipc timeout
+- **issue-monitor:** Recheck close authority and audit spec acceptance
+- **verify:** Refresh holder state after activity sampling
+- **build:** Persist transaction causes and confirm completed work
+- **index:** Exclude explicit PR references from report issues
+- **verify:** Prevent credential wedges and expose safe recovery
+
+### Features
+
+- **tray:** Open project intake directly from the menu
+- **index:** Index and search project PM reports
+
+### Miscellaneous Tasks
+
+- **work:** PM 間メッセージ配信の再開履歴を記録する
+- **work:** PM 配信精算 PR のリンク履歴を記録する
+- **work:** Record PR #5533 delivery metadata
+- **work:** Record Issue #4777 delivery recovery
+- **work:** Preserve Issue #4777 GUI resume record
+- **work:** Settle restored tray implementation work
+- **work:** Record wait declaration delivery recovery
+- **work:** Record acceptance delivery for issue 5126
+- **work:** Link acceptance delivery pr
+- **work:** Issue #5514 の配送再開記録を保存
+- **work:** Record Issue #5514 delivery audit
+- **work:** PR #5551 の配信記録を追加
+- **work:** Record issue 5070 delivery resumption
+
+### Performance
+
+- **capacity:** Share host samples and suppress unchanged status
+
+### Testing
+
+- **settings:** Wait for authoritative update preference
+- **settings:** Align embedded labels contract with groups
+- **gui:** Align wizard visibility source contracts
+- **web:** Register managed hook trust before browser checks
+- **web:** Retain the transient server during fixture gaps
+- **tray:** Align retained menu contract with project intake
+- **tray:** Update Windows native menu command order
+- **board:** Isolate concurrent delivery from real time
+- **pm:** Isolate live report fixtures by suite and theme
+- **e2e:** 一時Shellの非永続化をfixtureで検証
+- **perf:** Record deployed monitor baseline and update boundary
+- **perf:** Verify deployed monitor CPU reduction
+- **perf:** Bind measurements to recorded source commits
+- **build:** Assert the logged unprojected close cause
+- **index:** Use safe Git helpers in reports fixtures
+- **capacity:** Isolate live windows and retain failure traces
+- **capacity:** Preserve isolated storage and avoid redundant writes
+- **capacity:** Focus headed coverage on sampler observations
+- **capacity:** Record integrated sampler cpu
+- **pane:** Prepare board before bridge latency measurements
+
 ## [9.123.2] - 2026-10-15
 
 ### Bug Fixes

@@ -98,6 +98,12 @@ function tomlString(record: string, key: string): string | null {
   return record.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1] ?? null;
 }
 
+async function attachScreenshot(page: Page, testInfo: TestInfo, name: string) {
+  const path = testInfo.outputPath(`${name}.png`);
+  await page.screenshot({ path });
+  await testInfo.attach(name, { path, contentType: "image/png" });
+}
+
 test.describe("Exact relaunch continuity (isolated checkout)", () => {
   // The fixture spawns this checkout's target/debug/gwt, which the embedded
   // CI Playwright job does not build.
@@ -142,6 +148,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     try {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.getByRole("button", { name: "Agents", exact: true }).click();
       await launchCodex(page, fixture.branch);
 
       // Initial launch: a fresh conversation whose native id gwt learns from the provider hook.
@@ -151,7 +158,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const native = first.provider_session_id;
       const firstWindow = await liveCodexWindow(page, first.gwt_session_id!);
       expect(tomlString(await syncedResumeId(first.gwt_session_id!), "agent_session_id")).toBe(native);
-      await testInfo.attach(`launched-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await attachScreenshot(page, testInfo, `launched-${theme}`);
 
       // Window restart: the provider exits, then an explicit runtime restart
       // rebinds the same window. The Agents surface hides legacy canvas chrome.
@@ -167,7 +174,15 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       { after: beforeExit, id: firstWindow.id }, { timeout: 60_000 });
       const tile = page.locator(`.agent-tile[data-agent-id="${firstWindow.id}"]`);
       await expect(tile).toBeVisible();
-      await expect(tile.locator(".agent-tile__header span")).toHaveText("Input unavailable");
+      await expect(tile.locator(".agent-tile__mode")).toHaveText("Input unavailable");
+      const wizardCursor = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: fixture.branch });
+      const { wizard } = await latestWizard(page, wizardCursor, true);
+      await testInfo.attach("quick-start-cache-view", {
+        body: JSON.stringify(wizard.quick_start_entries), contentType: "application/json" });
+      await expect(page.locator("#wizard-modal")).toBeVisible();
+      await attachScreenshot(page, testInfo, `quick-start-${theme}`);
+      await wizardAction(page, { kind: "cancel" });
       await sendLiveGwtEvent(page, { kind: "restart_window", id: firstWindow.id });
       const second = await launchAt(2);
       expect(second.argv.slice(second.argv.indexOf("resume"))).toContain(native);
@@ -175,12 +190,14 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(second.provider_session_id).toBe(native);
       await liveCodexWindow(page, second.gwt_session_id!);
       await expect(tile).toBeVisible();
-      await expect(tile.locator(".agent-tile__header span")).toHaveText("Interactive");
+      await expect(tile.locator(".agent-tile__mode")).toHaveText("Interactive");
       const secondRecord = await syncedResumeId(second.gwt_session_id!);
       expect(tomlString(secondRecord, "agent_session_id")).toBe(native);
+      expect(secondRecord, "the restarted Session stays eligible for the next app restore")
+        .toMatch(/^restore_window_on_startup\s*=\s*true$/m);
       expect(tomlString(secondRecord, "restore_source_session_id")).toBe(first.gwt_session_id);
       expect(tomlString(secondRecord, "launch_origin")).toBe("user_restart");
-      await testInfo.attach(`window-restarted-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await attachScreenshot(page, testInfo, `window-restarted-${theme}`);
       expect(errors, "console/page errors before app restart").toEqual([]);
 
       // App restart: the checkout process stops with the agent window open and
@@ -191,6 +208,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       errors = capture(restored);
       await gotoLiveGwt(restored, fixture.url, { enableTestBridge: true });
       await expect(restored.locator("html")).toHaveAttribute("data-theme", theme);
+      await restored.getByRole("button", { name: "Agents", exact: true }).click();
       const third = await launchAt(3);
       expect(third.argv.slice(third.argv.indexOf("resume"))).toContain(native);
       expect(third.resume_session_id).toBe(native);
@@ -198,10 +216,12 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await liveCodexWindow(restored, third.gwt_session_id!);
       const thirdRecord = await syncedResumeId(third.gwt_session_id!);
       expect(tomlString(thirdRecord, "agent_session_id")).toBe(native);
+      expect(thirdRecord, "automatic restore preserves the live Session restore flag")
+        .toMatch(/^restore_window_on_startup\s*=\s*true$/m);
       expect(tomlString(thirdRecord, "restore_source_session_id")).toBe(second.gwt_session_id);
       expect(tomlString(thirdRecord, "launch_origin")).toBe("automatic_restore");
       expect((await fixture.launches()).map((launch) => launch.provider_session_id)).toEqual([native, native, native]);
-      await testInfo.attach(`app-restarted-${theme}`, { body: await restored.screenshot(), contentType: "image/png" });
+      await attachScreenshot(restored, testInfo, `app-restarted-${theme}`);
       expect(errors, "console/page errors after app restart").toEqual([]);
     } finally {
       try {

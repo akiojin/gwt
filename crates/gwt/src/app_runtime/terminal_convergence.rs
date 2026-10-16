@@ -359,6 +359,9 @@ pub(crate) enum RestoreAdmission {
     /// finished even while a settlement obligation is open. Do not spawn;
     /// keep the placeholder as the diagnostic.
     RefuseCompletedWork,
+    /// Issue #5510 AC-3: keep the placeholder but let the stale Active holder
+    /// reach the reaper and the Monitor's existing fresh-launch recovery.
+    RefuseFreshSession,
     /// Issue #4441 (AC-3): the Issue Monitor is holding this row. Do not
     /// spawn, but keep the placeholder — the hold is reversible.
     RefuseHeld(&'static str),
@@ -963,7 +966,22 @@ impl AppRuntime {
             WindowProcessStatus::Stopped,
             project_root,
         );
-        restore_admission_for_facts(&facts, window_id.is_some())
+        let admission = restore_admission_for_facts(&facts, window_id.is_some());
+        if admission != RestoreAdmission::Admit {
+            return admission;
+        }
+        // Work may already be Done while verification and delivery still keep
+        // its execution Active. Selecting it would protect the old generation
+        // from the reaper, then Resume would refuse and launch without authority.
+        let project_state_root = session
+            .project_state_root
+            .as_deref()
+            .unwrap_or(project_root);
+        match gwt::continuation_requires_new_session(project_state_root, session) {
+            Ok(true) => RestoreAdmission::RefuseFreshSession,
+            Ok(false) => admission,
+            Err(_) => RestoreAdmission::RefuseUnprovable("work_authority_unreadable"),
+        }
     }
 
     /// Persist a terminal/empty restore refusal and remove its placeholder.

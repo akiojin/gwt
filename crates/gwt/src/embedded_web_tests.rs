@@ -151,10 +151,6 @@ fn frontend_bundle_source() -> &'static str {
         // app.js.
         include_str!("../web/launch-wizard-surface.js"),
         "\n",
-        // SPEC-3064 Phase 3 (E6a) — File Tree window surface moved out of
-        // app.js.
-        include_str!("../web/file-tree-surface.js"),
-        "\n",
         // SPEC-3064 Phase 3 (E6b) — Branches window & cleanup surface moved
         // out of app.js.
         include_str!("../web/branches-cleanup-surface.js"),
@@ -567,11 +563,6 @@ fn embedded_web_terminal_context_menu_pastes_text_and_images() {
         "expected app.js to install the terminal context menu controller",
     );
     assert!(
-        html.contains("canvas.addEventListener(\"contextmenu\"")
-            && html.contains("event.preventDefault();"),
-        "expected non-terminal canvas contextmenu to remain suppressed",
-    );
-    assert!(
         html.contains("terminal.paste(text)"),
         "expected context menu text paste to flow through xterm paste",
     );
@@ -702,21 +693,11 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
             ),
             "expected terminal output refresh to avoid geometry refits on every PTY chunk",
         );
-    // SPEC-2008 camera-focus: maximize/minimize were removed. Windows always
-    // render at their own world geometry, so geometry-persist is gated purely
-    // on a real dimension change (Tile/Stack/Align). The old
-    // restore-from-minimized branch (wasMinimized / windowData.minimized) no
-    // longer exists. Issue #3364 folded the intermediate `dimensionsChanged`
-    // into `shouldPersistTerminalGeometry` (conflict suppression moved to the
-    // renderWorkspace pre-pass).
+    // Fixed panes fit the terminal grid without persisting old canvas geometry.
     assert!(
-        html.contains("const previousWidth = parseFloat(element.style.width")
-            && html.contains("const previousHeight = parseFloat(element.style.height")
-            && html.contains("const shouldPersistTerminalGeometry =")
-            && html.contains("previousWidth !== windowData.geometry.width")
-            && html.contains("scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry)"),
-        "expected terminals to persist fitted geometry to backend on window \
-             resize (Tile/Stack/Align)",
+        html.contains("scheduleTerminalFit(windowData.id, true)")
+            && html.contains("send(updateTerminalGridMessage(windowId, cols, rows))"),
+        "expected fitted terminals to update their grid in the fixed surface host",
     );
     assert!(
         !html.contains("element.classList.contains(\"minimized\")")
@@ -932,205 +913,6 @@ fn embedded_web_plain_redraw_does_not_clear_authoritative_pending_refresh() {
         !html[scheduler_start..force_refresh_start].contains("viewportRefreshPending = false"),
         "plain scheduled redraw must not clear authoritative pending refresh state (SPEC-2008 FR-122)",
     );
-}
-
-#[test]
-fn embedded_web_window_pointer_events_finalize_resize_on_mismatch() {
-    // SPEC-2008 Phase 26.C / FR-059 — Windows WebView2 occasionally
-    // emits pointerup / pointercancel with a pointerId that does not
-    // match the one captured at pointerdown. The previous handlers
-    // gated finishWindowResize behind a strict pointerId equality
-    // check, so a mismatched pointerup left resizeState alive until
-    // the 30 second staleness guard finally cleaned it up. This
-    // contract pins the fallback: any window-level pointerup or
-    // pointercancel that fires while a resize is pending must finalize
-    // the original gesture immediately via forceResetResizeState.
-    let html = frontend_bundle_source();
-    let pointerup_fallback = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("pointerup", \(event\) => \{[\s\S]*?if \(resizeState\) \{[\s\S]*?if \(resizeState\.pointerId === event\.pointerId\) \{[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);[\s\S]*?\} else \{[\s\S]*?forceResetResizeState\("window pointerup pointerId mismatch"\);"#,
-        )
-        .expect("valid regex");
-    let pointercancel_fallback = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("pointercancel", \(event\) => \{[\s\S]*?if \(resizeState && resizeState\.pointerId !== event\.pointerId\) \{[\s\S]*?forceResetResizeState\("window pointercancel pointerId mismatch"\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?finishWindowResize\(event\.pointerId,\s*event\);"#,
-        )
-        .expect("valid regex");
-
-    assert!(
-            pointerup_fallback.is_match(html),
-            "expected window pointerup to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
-        );
-    assert!(
-            pointercancel_fallback.is_match(html),
-            "expected window pointercancel to fall back to forceResetResizeState when pointerId mismatches (FR-059)",
-        );
-
-    let force_reset_start = html
-        .find("function forceResetResizeState(reason)")
-        .expect("forceResetResizeState must exist");
-    let next_function_start = html[force_reset_start..]
-        .find("function scheduleTerminalViewportRefresh(")
-        .map(|offset| force_reset_start + offset)
-        .expect("scheduleTerminalViewportRefresh must follow forceResetResizeState");
-    let force_reset_body = &html[force_reset_start..next_function_start];
-    assert!(
-        force_reset_body.contains("finishWindowResize(previous.pointerId);"),
-        "pointerId mismatch must finalize and persist the latest resize geometry",
-    );
-    assert!(
-        !force_reset_body.contains("clearLocalGeometryEdit("),
-        "pointerId mismatch must not discard the local geometry guard before a stale snapshot arrives",
-    );
-}
-
-#[test]
-fn embedded_web_terminal_resize_coalesces_fit_and_restores_focus_on_release() {
-    let html = frontend_bundle_source();
-    let direct_pointermove_fit = regex::Regex::new(
-            r"element\.style\.height = `\$\{clamp\((?s:.*?)\)\}px`;\s*fitTerminal\(resizeState\.id,\s*false\);",
-        )
-        .expect("valid regex");
-    // Issue #3364 — the finalizer commits through the shared
-    // commitWindowGeometryGesture path (guard + optimistic model/minimap
-    // sync + unconditional send) instead of a raw sendGeometry.
-    let resize_finalizer = regex::Regex::new(
-            r"function finishWindowResize\(pointerId,\s*event = null\) \{(?s:.*?)syncResizeStatePointerEvent\(resizeState,\s*event\);(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)commitWindowGeometryGesture\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
-        )
-        .expect("valid regex");
-
-    assert!(
-        html.contains("function scheduleTerminalResizeFit(windowId)")
-            && html.contains("function cancelTerminalResizeFit()"),
-        "expected terminal resize fits to be requestAnimationFrame-coalesced",
-    );
-    assert!(
-        !direct_pointermove_fit.is_match(html),
-        "expected pointermove resize to avoid direct terminal fit/geometry churn",
-    );
-    assert!(
-        resize_finalizer.is_match(html),
-        "expected resize finalizer to cancel pending fit, sync once, and restore terminal focus",
-    );
-}
-
-#[test]
-fn embedded_web_window_resize_cancellation_uses_shared_finalizer() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        html.contains("function finishWindowResize(pointerId, event = null)"),
-        "expected all floating window resize completion paths to share one finalizer",
-    );
-    assert!(
-        html.contains("finishWindowResize(event.pointerId, event);"),
-        "expected pointerup resize path to use the shared finalizer with release coordinates",
-    );
-    assert!(
-        html.contains("window.addEventListener(\"pointercancel\", (event) => {")
-            && html.contains("finishWindowResize(event.pointerId, event);"),
-        "expected pointercancel to finalize resize state with release coordinates",
-    );
-    // SPEC-2008 camera-focus follow-up: the per-window resize handle is back, so
-    // its `lostpointercapture` listener funnels into the shared finalizer too.
-    assert!(
-        html.contains("resizeHandle.addEventListener(\"lostpointercapture\", (event) => {")
-            && html.contains("finishWindowResize(event.pointerId, event);"),
-        "expected lost pointer capture to finalize resize state with release coordinates",
-    );
-    assert!(
-        html.contains("if (!terminalMap.has(windowId)) {\n          return;\n        }"),
-        "expected terminal resize fit scheduling to skip non-terminal panel windows",
-    );
-}
-
-/// SPEC-2014 Phase C4: 高頻度な pointermove を直接 DOM mutation に
-/// 流し込まず、`requestAnimationFrame` で 1 フレーム 1 回に絞り込んで
-/// いることを bundle 上で固定する。Windows WebView2 で layout reflow が
-/// pointermove 速度に追従できず render thread が枯渇する症状を回避するため。
-#[test]
-fn embedded_web_resize_pointermove_is_coalesced_via_request_animation_frame() {
-    let html = frontend_bundle_source();
-    let direct_pointermove_width = regex::Regex::new(
-            r"if\s*\(resizeState && resizeState\.pointerId === event\.pointerId\)\s*\{\s*const element = windowMap\.get\(resizeState\.id\)",
-        )
-        .expect("valid regex");
-    assert!(
-            !direct_pointermove_width.is_match(html),
-            "expected pointermove resize handler to stop directly mutating element.style; the coalesced applyResizePointermove path must replace it"
-        );
-    assert!(
-        html.contains("function scheduleResizePointermoveApply()"),
-        "expected a rAF scheduler that coalesces pointermove-driven DOM writes"
-    );
-    assert!(
-        html.contains("function cancelResizePointermoveApply()"),
-        "expected the coalescing scheduler to be cancellable on resize teardown"
-    );
-    assert!(
-        html.contains("function applyResizePointermove(state)"),
-        "expected a pure helper that translates resizeState into element.style.width/height"
-    );
-    assert!(
-        html.contains("resizeState.latestClientX = event.clientX;"),
-        "expected pointermove to store the latest client coordinates on resizeState"
-    );
-    assert!(
-            html.contains("scheduleResizePointermoveApply();"),
-            "expected pointermove to schedule the coalesced apply rather than write to the DOM directly"
-        );
-    assert!(
-        html.contains("resizeState.applyFrame = requestAnimationFrame(")
-            && html.contains("cancelAnimationFrame(resizeState.applyFrame);")
-            && html.contains("resizeState.applyFrame = null;"),
-        "expected resizeState to carry an applyFrame slot so the rAF handle can be cancelled"
-    );
-}
-
-/// SPEC-2014 Phase C1: Windows WebView2 で pointerup / pointercancel /
-/// lostpointercapture のいずれも届かないケースで Wizard / Terminal が永久に
-/// 固まらないよう、resizeState には auto-clear する staleness guard と
-/// 二重 resize 検知時の forceReset が組み込まれていなければならない。
-///
-/// SPEC-2008 camera-focus follow-up: per-window manual resize (resize handle +
-/// resize-START session 構築) はユーザー要望で復活した。framing は camera で
-/// 行うが、端を掴んでの手動リサイズも残す。したがって staleness guard / force
-/// reset の安全網と resize-START 経路の両方が bundle に存在しなければならない。
-#[test]
-fn embedded_web_resize_state_guards_against_lost_pointer_end_events() {
-    let html = frontend_bundle_source();
-
-    assert!(
-            html.contains("function scheduleResizeStalenessGuard(pointerId)"),
-            "expected a staleness guard scheduler that triggers when pointerup/cancel/lostpointercapture all miss"
-        );
-    assert!(
-        html.contains("function cancelResizeStalenessGuard()"),
-        "expected the staleness guard to be cancellable on the normal resize teardown path"
-    );
-    assert!(
-        html.contains("function forceResetResizeState(reason)"),
-        "expected a force-reset helper that clears stale resizeState when a new resize starts"
-    );
-    assert!(
-            html.contains(
-                "forceResetResizeState(\"new resize started before previous one finished\");",
-            ),
-            "expected new pointerdown to force-reset any leaked previous resizeState before opening a new session"
-        );
-    assert!(
-            html.contains("startedAt: performance.now(),"),
-            "expected resizeState to carry a startedAt timestamp so the staleness guard can log elapsed time"
-        );
-    assert!(
-        html.contains("stalenessTimer: scheduleResizeStalenessGuard(event.pointerId),"),
-        "expected the resize start path to schedule the staleness guard"
-    );
-    assert!(
-            html.contains("try {\n              resizeHandle.setPointerCapture(event.pointerId);")
-                && html.contains(
-                    "console.warn(\n                \"[resize] setPointerCapture failed, falling back to window-bound pointer events\"",
-                ),
-            "expected setPointerCapture to be wrapped in try/catch with a warning fallback for WebView2 edge cases"
-        );
 }
 
 #[test]
@@ -1387,99 +1169,57 @@ fn embedded_web_root_js_modules_use_js_content_type_and_mutable_cache() {
 }
 
 #[test]
-fn embedded_web_canvas_wheel_routing_is_installed_through_named_handler() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        html.contains("function handleCanvasWheelEvent(event)"),
-        "expected canvas wheel routing to live in a named handler",
-    );
-    assert!(
-        html.contains("function installCanvasWheelRouting()"),
-        "expected wheel routing bootstrap to be isolated behind an installer",
-    );
-    assert!(
-            html.contains("document.addEventListener(\"wheel\", handleCanvasWheelEvent, { capture: true, passive: false })"),
-            "expected capture-phase wheel routing to be installed through the named handler",
-        );
-}
-
-#[test]
-fn embedded_web_canvas_wheel_gesture_classifier_is_served_and_imported() {
+fn embedded_web_fixed_surfaces_retire_canvas_assets_and_interactions() {
+    let html = frontend_styles_bundle();
     let js = app_js();
-    let asset = root_js_module_assets()
+    let paths: Vec<_> = root_js_module_assets()
         .iter()
-        .find(|asset| asset.path == "/canvas-wheel-gesture.js")
-        .expect("expected canvas wheel gesture classifier asset");
-
-    assert_eq!(asset.marker, "createCanvasWheelGestureClassifier");
-    assert!(
-        js.contains("from \"/canvas-wheel-gesture.js\""),
-        "expected app.js to import the canvas wheel gesture classifier",
-    );
-    assert!(
-        js.contains("canvasWheelGestureClassifier.classify(event)"),
-        "expected canvas wheel routing to classify the whole wheel gesture before routing",
-    );
-}
-
-#[test]
-fn embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in() {
-    let html = frontend_styles_bundle();
-
-    assert!(
-        html.contains(".canvas-stage"),
-        "expected embedded html to define the canvas stage surface",
-    );
-    assert!(
-        !html.contains("will-change: transform"),
-        "expected canvas stage css to avoid pinning the transform layer hint",
-    );
-}
-
-#[test]
-fn embedded_web_canvas_apply_viewport_debounces_raster_hint_reset() {
-    let js = app_js();
-    let apply_viewport = regex::Regex::new(
-            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*applyWorldGridViewport\(\);\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);[\s\S]*?\}"#,
-        )
-        .expect("valid regex");
-
-    assert!(
-        js.contains("let viewportRasterTimer = null;"),
-        "expected viewport apply flow to keep a dedicated raster debounce timer",
-    );
-    assert!(
-            apply_viewport.is_match(js),
-            "expected viewport application to opt into the transform layer only during motion and reset it after 300ms",
+        .map(|asset| asset.path)
+        .collect();
+    assert!(html.contains("class=\"surface-area\""));
+    assert!(html.contains("id=\"split-surfaces\""));
+    for legacy in [
+        "id=\"canvas\"",
+        "canvas-stage",
+        "canvas-world-grid",
+        "fleet-minimap",
+        "canvas-empty-state",
+        ".resize-handle",
+        ".dock-target",
+    ] {
+        assert!(
+            !html.contains(legacy),
+            "retired canvas surface must be absent: {legacy}"
         );
-}
-
-#[test]
-fn embedded_web_canvas_grid_tracks_viewport_as_world_space_cue() {
-    let html = frontend_styles_bundle();
-    let js = app_js();
-
-    assert!(
-        html.contains("id=\"canvas-world-grid\""),
-        "expected canvas to expose a dedicated world-space grid layer",
-    );
-    assert!(
-        html.contains(".canvas-world-grid"),
-        "expected embedded html to define the world-space grid CSS",
-    );
-    assert!(
-        js.contains("const worldGrid = document.getElementById(\"canvas-world-grid\")"),
-        "expected frontend to bind the world-space grid element",
-    );
-    assert!(
-        js.contains("function applyWorldGridViewport()"),
-        "expected grid viewport sync to live behind a named helper",
-    );
-    assert!(
-        js.contains("applyWorldGridViewport();"),
-        "expected applyViewport to update the grid whenever viewport state changes",
-    );
+    }
+    for asset in [
+        "/canvas-wheel-gesture.js",
+        "/fleet-minimap.js",
+        "/window-docking.js",
+        "/camera-framing.js",
+        "/window-geometry-sync.js",
+        "/viewport-persist-throttle.js",
+        "/viewport-sync.js",
+    ] {
+        assert!(
+            !paths.contains(&asset),
+            "retired canvas asset must be unregistered: {asset}"
+        );
+    }
+    for legacy in [
+        "handleCanvasWheelEvent",
+        "installCanvasWheelRouting",
+        "applyViewport",
+        "applyWorldGridViewport",
+        "finishWindowResize",
+        "resize-handle",
+        "data-action=\"ungroup\"",
+    ] {
+        assert!(
+            !js.contains(legacy),
+            "retired canvas interaction must be absent: {legacy}"
+        );
+    }
 }
 
 #[test]
@@ -1723,18 +1463,8 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
         "expected a shared presetRoleLabel helper",
     );
     for label in [
-        "Shell",
-        "Claude",
-        "Codex",
-        "Agent",
-        "File Tree",
-        "Branches",
-        "Settings",
-        "Profile",
-        "Logs",
-        "Issue",
+        "Shell", "Claude", "Codex", "Agent", "Branches", "Settings", "Profile", "Logs", "Issue",
         "Board",
-        "PR",
     ] {
         assert!(
             js.contains(label),
@@ -1800,9 +1530,8 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
         "window list rows must render worktree form"
     );
     assert!(
-        styles.contains(".window-worktree-badge")
-            && styles.contains(".fleet-minimap__cell[data-worktree-symbol]::before"),
-        "titlebar/list/minimap worktree badge styling must ship in embedded CSS"
+        styles.contains(".window-worktree-badge"),
+        "titlebar/list worktree badge styling must ship in embedded CSS"
     );
     let consumer_wiring = format!("{js}\n{shell_js}");
     for legacy in [
@@ -1857,36 +1586,28 @@ fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
 }
 
 #[test]
-fn embedded_web_window_list_selection_frames_window_via_camera() {
+fn embedded_web_window_list_selection_navigates_to_window() {
     // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved from
     // app.js to the project shell surface; the selection contract is pinned
     // against the extracted module.
     //
-    // SPEC-2008 camera-focus / FR-094: maximize/minimize/restore were removed.
-    // Selecting a window from the switcher flies the local camera to frame the
-    // chosen window (frameWindow), which applies local focus + sends
-    // focus_window for highlight — there is no center/restore handshake.
+    // The selected catalog entry is routed to the fixed surface layout.
     let js = project_shell_surface_js();
 
     assert!(
         js.contains("frameWindow(entry.id);"),
-        "expected window list selection to frame the chosen window via the camera",
+        "expected window list selection to navigate to the chosen window",
     );
     assert!(
         !js.contains("send({ kind: \"restore_window\", id: entry.id });")
             && !js.contains("focusWindowRemotely(entry.id, { center: true });"),
-        "expected window list selection to drop the maximize/restore + center handshake \
-             under camera-focus",
+        "expected window list selection to avoid the maximize/restore + center handshake",
     );
 }
 
 #[test]
 fn embedded_web_programmatic_terminal_focus_reactivates_xterm_after_render() {
     let js = app_js();
-    let render_activation = regex::Regex::new(
-            r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false,?[\s\S]*?\}\);"#,
-        )
-        .expect("valid regex");
     // SPEC-2008 Phase 26.B / FR-056: activation must delegate to
     // runTerminalActivationSequence so the render-before-fit ordering
     // is enforced. The previous Phase 24 ordering (fitTerminal → then
@@ -1913,10 +1634,6 @@ fn embedded_web_programmatic_terminal_focus_reactivates_xterm_after_render() {
             activation_helper.is_match(js),
             "expected programmatic terminal activation to refit, refresh, pass computed shouldFocus, and opt into grid-change geometry sync after render",
         );
-    assert!(
-            render_activation.is_match(js),
-            "expected workspace render to reactivate the topmost terminal without echoing geometry into backend resize broadcasts",
-        );
 }
 
 #[test]
@@ -1927,6 +1644,7 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
         html.contains("function handleSocketOpen()"),
         "expected socket open flow to live in a named handler",
     );
+
     assert!(
         html.contains("function handleSocketMessage(event)"),
         "expected socket message flow to live in a named handler",
@@ -1952,10 +1670,10 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
 #[test]
 fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
     let html = frontend_bundle_source();
-    // Readiness must precede queue replay, and replay must match the immutable
-    // connection scope. Other projects retain their own pending messages.
+    // Readiness and the ephemeral attention report precede queue replay, and
+    // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
     )
     .expect("valid regex");
 
@@ -2001,7 +1719,7 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
     assert!(
         html.contains("kind: \"startup_auto_resume_ready\"")
             && html.contains("bounds: visibleBounds()"),
-        "expected readiness payload to carry the current visible canvas bounds",
+        "expected readiness payload to carry the current fixed surface bounds",
     );
     assert!(
             readiness_flow.is_match(html),
@@ -2231,7 +1949,6 @@ fn embedded_web_root_js_module_registry_covers_app_imports() {
         "/branch-cleanup-modal.js",
         "/close-project-confirm-modal.js",
         "/migration-modal.js",
-        "/window-docking.js",
         "/board-surface.js",
         "/update-cta.js",
         "/theme-manager.js",
@@ -2418,7 +2135,7 @@ fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
     assert!(
         knowledge_status_block.contains("!issueSurface && state.searching")
             && knowledge_status_block.contains("Searching semantic index"),
-        "expected Issue/SPEC semantic progress to stay invisible while preserving PR behavior",
+        "expected semantic progress to stay invisible on the Issue/SPEC surface",
     );
     let direct_send_block = html
         .split("function sendKnowledgeSemanticSearchNow")
@@ -2590,19 +2307,10 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
                 .next()
         })
         .expect("knowledge load request block");
-    let pr_compatibility_block = load_request_block
-        .split("if (normalizeKnowledgeKind(state.kind) === \"pr\") {")
-        .nth(1)
-        .and_then(|tail| tail.split("\n        }").next())
-        .expect("PR compatibility reset block");
     assert!(
         load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")
-            && load_request_block
-                .matches("state.detailRequestId = 0;")
-                .count()
-                == 1
-            && pr_compatibility_block.contains("state.detailRequestId = 0;"),
-        "expected Issue/SPEC refresh to preserve an independently correlated detail request while PR keeps its legacy full-view reset",
+            && !load_request_block.contains("state.detailRequestId = 0;"),
+        "expected refresh to preserve an independently correlated detail request",
     );
     assert!(
         html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
@@ -3014,7 +2722,7 @@ fn embedded_web_profile_surface_uses_config_backed_contract() {
             && html.contains("state.draft && profileDraftIsDirty(state)")
             && html.contains("profileDraftIsDirty(state)")
             && html.contains(
-                "((wasSaveInFlight && profileHasEditableFocus(event.id)) || hasNewerDraft)",
+                "((wasSaveInFlight && profileHasEditableFocus(windowId)) || hasNewerDraft)",
             ),
         "expected delayed Profile save snapshots to preserve newer draft edits before re-rendering",
     );
@@ -3354,7 +3062,7 @@ fn embedded_web_frontend_units_group_stateful_surfaces() {
                 && html.contains("boardSurface,")
                 && html.contains("logsSurface,")
                 && html.contains("knowledgeSettingsSurface,"),
-            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Profile, Board, Logs, and knowledge/settings surfaces",
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, branches, Profile, Board, Logs, and knowledge/settings surfaces",
         );
     assert!(
         !html.contains("window.__POC__"),
@@ -3378,12 +3086,10 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
             r#"case\s*"terminal_output":\s*applyPmWindowReceiveEvent\(event\);\s*break;\s*case\s*"terminal_snapshot":\s*applyPmWindowReceiveEvent\(event\);\s*break;"#,
         )
         .expect("valid regex");
-    // SPEC-3064 Phase 3 (E6e): the profile_snapshot body lives in the
-    // profile window surface applier; the app.js case arm delegates.
-    let profile_event = regex::Regex::new(
-            r#"function applyProfileReceiveEvent\(event\)\s*\{[\s\S]*?case\s*"profile_snapshot":\s*\{\s*const state = ensureProfileState\(event\.id\);[\s\S]*?renderProfile\(event\.id\);\s*break;\s*\}"#,
-        )
-        .expect("valid regex");
+    // Keep the embedded model/subscription wiring smoke here; the frontend
+    // pull-render contract enforces the semantic receiver DOM boundary.
+    let profile_model =
+        regex::Regex::new(r#"const profileModel\s*=\s*createUiStateStore\("#).expect("valid regex");
     let profile_event_delegate = regex::Regex::new(
         r#"case\s*"profile_snapshot":[\s\S]{0,300}?applyProfileReceiveEvent\(event\);\s*break;"#,
     )
@@ -3436,8 +3142,11 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected shared window subscriptions to retain the named terminal host delivery contract",
     );
     assert!(
-        profile_event.is_match(html) && profile_event_delegate.is_match(html),
-        "expected profile snapshot events to flow through the dedicated profile surface unit",
+        profile_model.is_match(html)
+            && html.contains("profileModel.update(")
+            && html.contains("profileModel.subscribe(")
+            && profile_event_delegate.is_match(html),
+        "expected profile snapshot events to flow through shared model subscriptions in the dedicated surface",
     );
     assert!(
         wizard_event.is_match(html) && wizard_event_delegate.is_match(html),
@@ -3471,39 +3180,6 @@ fn embedded_web_inline_module_script_stays_under_phase_1b_budget() {
     );
 }
 
-/// SPEC-2008 FR-032: wheel routing must follow the opt-out model.
-///
-/// Only `.surface-terminal` may consume wheel events for canvas pan or
-/// xterm scrollback. All other surfaces (panels and modals) must let the
-/// browser handle wheel natively. The legacy whitelist helper
-/// `findNativeWheelScrollSurface` must be retired so newly added panel
-/// surfaces never need to remember to register themselves.
-#[test]
-fn embedded_web_wheel_routing_uses_terminal_only_opt_out() {
-    let js = app_js();
-
-    assert!(
-            !js.contains("function findNativeWheelScrollSurface"),
-            "expected the per-class wheel scroll whitelist helper to be removed in favor of an opt-out model",
-        );
-    assert!(
-        !js.contains("findNativeWheelScrollSurface("),
-        "expected no remaining call sites for the retired wheel scroll whitelist helper",
-    );
-    assert!(
-        js.contains("function handleCanvasWheelEvent"),
-        "expected canvas wheel handler to remain as the single routing entrypoint",
-    );
-    assert!(
-            js.contains("targetElement.closest(\".surface-terminal\")"),
-            "expected canvas wheel handler to special-case `.surface-terminal` for the opt-out routing model",
-        );
-    assert!(
-            js.contains("targetElement.closest(\".workspace-window\")"),
-            "expected canvas wheel handler to recognize panel windows so native scroll is preserved inside them",
-        );
-}
-
 /// SPEC-2008 FR-033: every panel surface must share the same window
 /// background, titlebar background, and body background. Three CSS rules
 /// participate in this unification:
@@ -3521,7 +3197,6 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
     let html = frontend_styles_bundle();
 
     let panel_surfaces = [
-        ".surface-file-tree",
         ".surface-branches",
         ".surface-board",
         ".surface-logs",
@@ -3532,11 +3207,11 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
 
     for (anchor, role) in [
         (
-            ".workspace-window.surface-file-tree,",
+            ".workspace-window.surface-branches,",
             "workspace-window background",
         ),
-        (".surface-file-tree .titlebar,", "titlebar background"),
-        (".surface-file-tree .window-body,", "window-body background"),
+        (".surface-branches .titlebar,", "titlebar background"),
+        (".surface-branches .window-body,", "window-body background"),
     ] {
         let rule_start = html
             .find(anchor)
@@ -3701,7 +3376,6 @@ fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
     let scroll_adopters = [
         "knowledge-detail-scroll workspace-scroll",
         "board-timeline-scroll board-scroll-surface workspace-scroll",
-        "file-tree-scroll workspace-scroll",
         "branch-scroll workspace-scroll",
     ];
     for needle in scroll_adopters {
@@ -3798,7 +3472,6 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
 
     let pairs: &[(WindowSurface, &str)] = &[
         (WindowSurface::Terminal, "terminal"),
-        (WindowSurface::FileTree, "file-tree"),
         // Branches and Work redirect to Knowledge in JS. Their enum variants
         // remain for persisted backend compatibility without a separate UI.
         (WindowSurface::Profile, "profile"),
@@ -3807,7 +3480,6 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
         (WindowSurface::Knowledge, "knowledge"),
         (WindowSurface::Index, "index"),
         (WindowSurface::AgentKanban, "agent-kanban"),
-        (WindowSurface::Console, "console"),
         (WindowSurface::Mock, "mock"),
     ];
 
@@ -4041,7 +3713,7 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
     let js = app_js();
     // SPEC-2008 camera-focus: maximize was removed, so the visibility loop no
     // longer ends with a maximized-viewport sync. It now recomputes operator
-    // telemetry (rail window-count badge / empty-canvas state) after mounting
+    // telemetry (rail window-count badge) after mounting
     // every window and applying its visibility transition. Issue #3365: the
     // loop is a per-window `isolate` callback inside workspaceRenderSync so
     // one poisoned window cannot block the others, and the telemetry

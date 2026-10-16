@@ -165,10 +165,49 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
 /// Issue #5086: the explicit short-gate allowlist also owns its execution bound.
 /// Arbitrary interpreters/wrappers and coverage producers remain Heavy.
 pub(crate) fn short_non_cargo_timeout(command: &str) -> Option<Duration> {
+    if is_short_non_cargo_slot_gate(command) {
+        return Some(Duration::from_secs(60));
+    }
     let (assignments, args) = crate::cli::verification_record::split_command_line(command)
         .and_then(crate::cli::verification_record::take_env_assignments)
         .ok()?;
     is_short_non_cargo_gate(&args, &assignments).then_some(Duration::from_secs(60))
+}
+
+/// Issue #5621: this fixture-backed Node test is bounded but still needs one
+/// ordinary host slot. Unknown files/options and preloads stay exclusive.
+pub(crate) fn is_short_non_cargo_slot_gate(command: &str) -> bool {
+    let Ok((assignments, args)) = crate::cli::verification_record::split_command_line(command)
+        .and_then(crate::cli::verification_record::take_env_assignments)
+    else {
+        return false;
+    };
+    let [program, flag, script] = args.as_slice() else {
+        return false;
+    };
+    let script = script.replace('\\', "/");
+    matches!(
+        Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("node" | "node.exe")
+    ) && flag == "--test"
+        && script.strip_prefix("./").unwrap_or(&script) == "scripts/coverage-summary.test.mjs"
+        && !has_node_options(&assignments)
+}
+
+fn has_node_options(assignments: &[(String, String)]) -> bool {
+    // The last explicit assignment overrides inherited Node preloads.
+    assignments
+        .iter()
+        .rev()
+        .find(|(key, _)| {
+            key == "NODE_OPTIONS" || (cfg!(windows) && key.eq_ignore_ascii_case("NODE_OPTIONS"))
+        })
+        .map_or_else(
+            || std::env::var_os("NODE_OPTIONS").is_some_and(|value| !value.is_empty()),
+            |(_, value)| !value.is_empty(),
+        )
 }
 
 fn is_short_non_cargo_gate(args: &[String], assignments: &[(String, String)]) -> bool {
@@ -210,18 +249,7 @@ fn is_short_non_cargo_gate(args: &[String], assignments: &[(String, String)]) ->
         Some("node") => {
             // NODE_OPTIONS can preload arbitrary modules before the reader.
             // An explicit empty assignment disables inherited options.
-            let has_options = assignments
-                .iter()
-                .rev()
-                .find(|(key, _)| {
-                    key == "NODE_OPTIONS"
-                        || (cfg!(windows) && key.eq_ignore_ascii_case("NODE_OPTIONS"))
-                })
-                .map_or_else(
-                    || std::env::var_os("NODE_OPTIONS").is_some_and(|value| !value.is_empty()),
-                    |(_, value)| !value.is_empty(),
-                );
-            !has_options
+            !has_node_options(assignments)
                 && subcommand.is_some_and(|script| {
                     script.replace('\\', "/").trim_start_matches("./")
                         == "scripts/check-coverage-threshold.mjs"
@@ -444,7 +472,7 @@ pub(super) fn run<E: CliEnv>(
         VerificationLeaseCommand::Status => {
             let mut status = status()?;
             let worktree = resolve_current_worktree_root(env.repo_path());
-            observe_holder_activity(&mut status, &worktree);
+            observe_holder_activity(&mut status, &worktree)?;
             render(
                 out,
                 "held",
@@ -702,6 +730,7 @@ fn reclaim_holder(
         owner.pid,
         std::process::id()
     );
+    current.record_ttl_overrun(Some(confirmed.cpu_percent));
     coordinator.record_lease_reclaimed(lease_id, target, owner.clone(), &record);
     out.push_str("verification lease: reclaimed\n");
     out.push_str(&format!("lease_id: {lease_id}\n"));
@@ -935,23 +964,43 @@ struct LeaseStatusSnapshot {
 
 /// Fill in the holder's activity; only the status report pays for the
 /// process-table read.
-fn observe_holder_activity(status: &mut LeaseStatusSnapshot, worktree: &Path) {
-    let Some(pid) = status.owner_pid.filter(|_| status.held) else {
-        return;
-    };
-    // Issue #4561: a `daemon` holder's work is not under `owner_pid`, so the
-    // working set has to reach into the daemons that launched it.
-    let workload = holder_workload(
-        status.holder_spawn_host.as_deref(),
-        status.target.as_deref(),
-        worktree,
-    );
-    if let Some(activity) = holder_activity::observe(pid, &workload, status.acquired_at_ms) {
-        status.holder_held_ms = Some(activity.held_ms);
-        status.holder_cpu_percent = Some(activity.cpu_percent);
-        status.holder_state = Some(activity.state().to_string());
-        status.holder_state_detail = Some(activity.describe());
+fn observe_holder_activity(
+    status: &mut LeaseStatusSnapshot,
+    worktree: &Path,
+) -> Result<(), SpecOpsError> {
+    observe_holder_activity_with(status, |status| {
+        let pid = status.owner_pid.filter(|_| status.held)?;
+        // Daemon-hosted commands run outside the holder's own process tree.
+        let workload = holder_workload(
+            status.holder_spawn_host.as_deref(),
+            status.target.as_deref(),
+            worktree,
+        );
+        holder_activity::observe(pid, &workload, status.acquired_at_ms)
+    })
+}
+
+fn observe_holder_activity_with(
+    status: &mut LeaseStatusSnapshot,
+    observe: impl FnOnce(&LeaseStatusSnapshot) -> Option<holder_activity::HolderActivity>,
+) -> Result<(), SpecOpsError> {
+    let activity = observe(status);
+    // A process sample is historical evidence, not proof it still owns a lease.
+    let mut current = self::status()?;
+    if let Some(activity) = activity.filter(|_| {
+        current.held
+            && current.lease_id == status.lease_id
+            && current.owner_pid == status.owner_pid
+            && current.target == status.target
+            && current.acquired_at_ms == status.acquired_at_ms
+    }) {
+        current.holder_held_ms = Some(activity.held_ms);
+        current.holder_cpu_percent = Some(activity.cpu_percent);
+        current.holder_state = Some(activity.state().to_string());
+        current.holder_state_detail = Some(activity.describe());
     }
+    *status = current;
+    Ok(())
 }
 
 impl From<HeavyLeaseStatus> for LeaseStatusSnapshot {
@@ -1126,7 +1175,18 @@ pub(super) fn effective_cargo_target(
         crate::cli::verification_record::split_command_line(command)?,
     )?;
     if Path::new(&args[0]).file_stem().and_then(|s| s.to_str()) != Some("cargo") {
-        return Ok(None);
+        // Wrappers may build Cargo without invoking it directly. Only an inline
+        // declaration opts in: ambient variables do not establish a wrapper's
+        // artifact contract, and isolated baselines remove this assignment.
+        if isolated_baseline {
+            return Ok(None);
+        }
+        return Ok(assignments
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "CARGO_TARGET_DIR")
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(_, value)| worktree.join(value)));
     }
     let cargo_args: Vec<_> = args[1..]
         .iter()
@@ -1430,7 +1490,7 @@ pub(super) fn lock_build_artifacts(target: &Path) -> std::io::Result<BuildArtifa
     Ok(guard)
 }
 
-fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
+pub(super) fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
     use sha2::{Digest, Sha256};
     let mut existing = if target.is_absolute() {
         target.to_path_buf()
@@ -1536,7 +1596,23 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
             "capacity: {capacity}\nrunning: {}\navailable: {}\n",
             status.running, status.available
         ));
-        out.push_str("exclusive_commands: headed Playwright, coverage, and other commands without a resolved Cargo target; legacy root locks also exclude all slots\n");
+        out.push_str("exclusive_commands: commands without a resolved build directory (Cargo metadata or inline CARGO_TARGET_DIR); legacy root locks also exclude all slots\n");
+        let exclusive_held = status
+            .slots
+            .iter()
+            .any(|slot| slot.slot.is_none() && (slot.status.held || slot.status.holder_stale));
+        let (count, oldest, total) = status
+            .queue
+            .iter()
+            .filter(|entry| exclusive_held && entry.bypass_reason.is_none())
+            .fold((0usize, 0u64, 0u64), |(count, oldest, total), entry| {
+                (
+                    count + 1,
+                    oldest.max(entry.waiting_ms),
+                    total.saturating_add(entry.waiting_ms),
+                )
+            });
+        out.push_str(&format!("exclusive_blocked_count: {count}\nexclusive_blocked_oldest_wait_ms: {oldest}\nexclusive_blocked_total_wait_ms: {total}\n"));
         for slot in &status.slots {
             let label = slot
                 .slot
@@ -1723,7 +1799,11 @@ fn canonical_refusal(lease_id: &str, holder: Option<&str>) -> SpecOpsError {
          Canonical leases are owned by `verify.run` and release when the runner finishes; \
          they cannot be released or extended through the manual API unless the holder is \
          orphaned or an old in-tree driver is stalled with no workload left to run.{holder} \
-         Check `verify.lease.status` for the current holder."
+         Check `verify.lease.status` for the current holder. For a same-project reclaim \
+         candidate, use `verify.lease.release` with `params.lease_id` and `params.reason`. \
+         To stop your own running attempt, get its ID from `verify.status` and call \
+         `verify.cancel` with `params.attempt_id` and `params.reason` from the same \
+         project, worktree, session and execution authority. Other attempts stay protected."
     ))
 }
 
@@ -1744,6 +1824,16 @@ fn unexpected(message: String) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_refusal_names_the_authorized_recovery_operations() {
+        let error = super::canonical_refusal("held", None).to_string();
+        for operation in ["verify.status", "verify.cancel", "verify.lease.release"] {
+            assert!(error.contains(operation), "{error}");
+        }
+        assert!(error.contains("params.attempt_id"), "{error}");
+        assert!(error.contains("params.reason"), "{error}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_disk_budgets_do_not_require_a_listed_mount() {
@@ -1915,6 +2005,38 @@ mod tests {
         assert!(error.contains("Cargo.toml"), "{error}");
     }
 
+    #[test]
+    fn wrappers_declare_build_directories_without_cargo_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        for command in [
+            "CARGO_TARGET_DIR=build make -j1 quality-checks",
+            "CARGO_TARGET_DIR=old CARGO_TARGET_DIR=build python quality.py",
+        ] {
+            assert_eq!(
+                super::effective_cargo_target(dir.path(), command, false).unwrap(),
+                Some(dir.path().join("build")),
+                "{command}"
+            );
+        }
+        for command in [
+            "make -j1 quality-checks",
+            "CARGO_TARGET_DIR= make quality-checks",
+            "CARGO_TARGET_DIR=build cargo llvm-cov",
+        ] {
+            assert_eq!(
+                super::effective_cargo_target(dir.path(), command, false).unwrap(),
+                None,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            super::effective_cargo_target(dir.path(), "CARGO_TARGET_DIR=build make check", true)
+                .unwrap(),
+            None,
+            "isolated baselines remove the declared environment variable"
+        );
+    }
+
     fn command_strings(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
     }
@@ -1971,6 +2093,33 @@ mod tests {
     }
 
     #[test]
+    fn known_node_test_is_slot_admitted_and_bounded() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
+        for command in [
+            "node --test \"scripts/coverage-summary.test.mjs\"",
+            "node.exe --test ./scripts/coverage-summary.test.mjs",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(
+                short_non_cargo_timeout(command),
+                Some(Duration::from_secs(60)),
+                "{command}"
+            );
+        }
+        for command in [
+            "node --test arbitrary.test.mjs",
+            "node --test ../scripts/coverage-summary.test.mjs",
+            "node --test scripts/coverage-summary.test.mjs --import=./wrapper.mjs",
+        ] {
+            assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
+            assert_eq!(short_non_cargo_timeout(command), None, "{command}");
+        }
+    }
+
+    #[test]
     fn node_reader_options_cannot_preload_arbitrary_workloads() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -1979,6 +2128,7 @@ mod tests {
             gwt_core::test_support::ScopedEnvVar::set("NODE_OPTIONS", "--require=./wrapper.cjs");
         for command in [
             "node scripts/check-coverage-threshold.mjs summary.json 90",
+            "node --test scripts/coverage-summary.test.mjs",
             "NODE_OPTIONS= NODE_OPTIONS=--import=./wrapper.mjs node scripts/check-coverage-threshold.mjs summary.json 90",
         ] {
             assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
@@ -2266,6 +2416,57 @@ mod tests {
         assert!(out.contains("executable: unknown"), "{out}");
         assert!(out.contains("worktree: unknown"), "{out}");
         assert!(out.contains("command: unknown"), "{out}");
+    }
+
+    #[test]
+    fn status_counts_waiters_blocked_by_an_exclusive_holder() {
+        let entries = [
+            (true, None, 90_000),
+            (false, None, 80_000),
+            (false, Some("reservation expired"), 120_000),
+        ]
+        .into_iter()
+        .map(|(resident, bypass_reason, waiting_ms)| {
+            serde_json::from_value(serde_json::json!({
+                "priority": "manual-rebuild", "queued_at_ms": 1,
+                "waiting_ms": waiting_ms, "resident": resident,
+                "bypass_reason": bypass_reason
+            }))
+            .unwrap()
+        })
+        .collect();
+        let mut status = LeaseStatusSnapshot {
+            capacity: Some(2),
+            slots: vec![HeavySlotStatus {
+                slot: None,
+                status: HeavyLeaseStatus {
+                    held: true,
+                    ..Default::default()
+                },
+            }],
+            queue: entries,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 2\n"), "{out}");
+        assert!(
+            out.contains("exclusive_blocked_oldest_wait_ms: 90000\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("exclusive_blocked_total_wait_ms: 170000\n"),
+            "{out}"
+        );
+        status.slots[0].status.held = false;
+        status.slots[0].status.holder_stale = true;
+        out.clear();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 2\n"), "{out}");
+        status.slots[0].slot = Some(0);
+        out.clear();
+        push_status_fields(&mut out, &status, "repo");
+        assert!(out.contains("exclusive_blocked_count: 0\n"), "{out}");
     }
 
     #[test]
@@ -2890,8 +3091,34 @@ mod tests {
         }
 
         #[test]
-        fn a_confirmed_empty_stalled_driver_releases_the_lease() {
+        fn a_confirmed_expired_stalled_driver_unblocks_twelve_waiters() {
             let mut held = hold_lease();
+            // Reproduce Issue #4425 without waiting on a wall clock: an
+            // expired holder, no CPU progress, and twelve queued verifiers.
+            held.lease.as_mut().unwrap().extend_until(0).unwrap();
+            let coordinator = open_coordinator().unwrap();
+            let waiting: Vec<_> = (0..12)
+                .map(|index| {
+                    TargetKey::verification("99a8660247f5bc49", format!("waiting-{index:02}"))
+                })
+                .collect();
+            for key in &waiting {
+                coordinator
+                    .reserve_heavy(
+                        key,
+                        JobPriority::ManualRebuild,
+                        Duration::from_secs(600),
+                        Some("waiting for the stalled holder"),
+                    )
+                    .unwrap();
+            }
+            let before = coordinator.heavy_lease_status().unwrap();
+            assert!(before.expired);
+            assert_eq!(before.queue.len(), 12);
+            let next = waiting
+                .iter()
+                .find(|key| Some(key.file_stem()) == before.queue[0].target)
+                .unwrap();
             let lease_id = held.lease_id.clone();
             let mut reclaimer = ScriptedReclaimer {
                 readings: vec![Some(stalled_driver()), Some(stalled_driver())],
@@ -2911,6 +3138,7 @@ mod tests {
 
             assert_eq!(reclaimer.terminated, vec![(std::process::id(), false)]);
             assert!(!still_held(&lease_id));
+            assert_eq!(coordinator.heavy_lease_status().unwrap().queue.len(), 12);
             let events = open_coordinator().unwrap().lease_events().unwrap();
             let event = events.last().unwrap();
             assert_eq!(event.kind, LeaseEventKind::Reclaimed);
@@ -2919,6 +3147,13 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("all commands exited"));
+            let JobAdmission::Owner(next) = coordinator
+                .request_job(next, JobPriority::ManualRebuild, Duration::from_secs(1))
+                .unwrap()
+            else {
+                panic!("the first waiting verifier must be able to progress");
+            };
+            let _lease = next.acquire_heavy(Duration::from_secs(1)).unwrap();
         }
 
         #[test]

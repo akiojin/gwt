@@ -20,10 +20,6 @@ mod daemon_runtime_hook_test;
 mod daemon_socket_path_limit_test;
 #[path = "../daemon_supervisor_test.rs"]
 mod daemon_supervisor_test;
-#[path = "../file_content_test.rs"]
-mod file_content_test;
-#[path = "../file_tree_test.rs"]
-mod file_tree_test;
 #[path = "../gui_single_instance_test.rs"]
 mod gui_single_instance_test;
 #[path = "../index_bootstrap_test.rs"]

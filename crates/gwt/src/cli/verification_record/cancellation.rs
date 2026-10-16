@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 use super::{interruption, VerificationCallerAuthority};
 use crate::cli::trusted_store;
 
+const ADMISSION_INTERRUPTED: &str = "external termination during admission wait: runner pipe closed before admission; rerun required";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum AttemptStatus {
@@ -40,6 +42,8 @@ pub(super) struct AttemptRecord {
     created_at: chrono::DateTime<chrono::Utc>,
     watchdog_token_hash: String,
     runner_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runner_started_at: Option<u64>,
     content_hash: String,
 }
 
@@ -81,6 +85,22 @@ impl Attempt {
             record.status = AttemptStatus::Running;
             record.record_id = Some(record_id.to_string());
             save(&self.worktree, &mut record)
+        })
+    }
+    pub fn set_admission_waiting(&self, waiting: bool) -> io::Result<()> {
+        trusted_store::with_write_lease(&self.worktree, || {
+            self.ensure_active()?;
+            let mut record = required(&self.worktree, &self.id)?;
+            let status = if waiting || record.record_id.is_none() {
+                AttemptStatus::Waiting
+            } else {
+                AttemptStatus::Running
+            };
+            if record.status != status {
+                record.status = status;
+                save(&self.worktree, &mut record)?;
+            }
+            Ok(())
         })
     }
     /// Caller already owns the trusted write lease, shared with the VRR commit.
@@ -195,6 +215,59 @@ fn not_yours() -> io::Error {
     )
 }
 
+pub(super) fn admission_resume_candidate(
+    worktree: &Path,
+    id: &str,
+    token: &str,
+    session: &str,
+) -> io::Result<Option<Vec<String>>> {
+    resume_candidate(worktree, id, token, session, false)
+}
+
+pub(super) fn admitted_resume_candidate(
+    worktree: &Path,
+    id: &str,
+    token: &str,
+    session: &str,
+) -> io::Result<Option<Vec<String>>> {
+    resume_candidate(worktree, id, token, session, true)
+}
+
+fn resume_candidate(
+    worktree: &Path,
+    id: &str,
+    token: &str,
+    session: &str,
+    admitted: bool,
+) -> io::Result<Option<Vec<String>>> {
+    let record = required(worktree, id)?;
+    if record.watchdog_token_hash != digest(token.as_bytes()) || record.session_id != session {
+        return Err(not_yours());
+    }
+    let eligible = if admitted {
+        // The tool may finish before the Agent's busy pane becomes idle.
+        matches!(
+            record.status,
+            AttemptStatus::Waiting | AttemptStatus::Running | AttemptStatus::Completed
+        )
+    } else {
+        record.status == AttemptStatus::Deferred
+            || (record.status == AttemptStatus::Interrupted
+                && record.external_termination
+                && record.reason.as_deref() == Some(ADMISSION_INTERRUPTED))
+    };
+    if read(worktree, &latest_filename(session))?.as_deref() != Some(id) || !eligible {
+        return Ok(None);
+    }
+    // A companion may outlive its producing generation. It must never wake
+    // a successor, a settled execution, or a caller whose authority rotated.
+    let authority = super::snapshot_verification_caller_authority(worktree, session)?;
+    if record.authority_hash != authority_hash(&authority)? {
+        return Ok(None);
+    }
+    Ok(Some(record.commands))
+}
+
 pub(super) fn begin_for_caller(
     worktree: &Path,
     session: &str,
@@ -220,6 +293,7 @@ pub(super) fn begin_for_caller(
             created_at: chrono::Utc::now(),
             watchdog_token_hash: digest(token.as_bytes()),
             runner_pid: std::process::id(),
+            runner_started_at: crate::process::host_process_start_time(std::process::id()),
             content_hash: String::new(),
         };
         save(worktree, &mut record)?;
@@ -277,6 +351,7 @@ fn settle_interrupted_under_lease(
             interruption::RunLifecycle {
                 status: interruption::RunStatus::Running,
                 runner_pid: record.runner_pid,
+                runner_started_at: record.runner_started_at,
                 watchdog_token_hash: record.watchdog_token_hash.clone(),
                 current_command: None,
                 reason: None,
@@ -324,6 +399,12 @@ pub(super) fn cancel_for_caller(
                 coordinator,
             )?;
         } else {
+            if record.reason.as_deref() == Some(ADMISSION_INTERRUPTED) {
+                // Cancel the pending self-notification while preserving the
+                // authenticated external-termination history and retry budget.
+                record.reason = Some(format!("caller cancellation: {}", reason.trim()));
+                save(worktree, &mut record)?;
+            }
             settle_interrupted_under_lease(worktree, &record, coordinator)?;
         }
         Ok(record)
@@ -390,7 +471,8 @@ fn bound_attempt(
     Ok(Some(attempt))
 }
 
-/// Call under the trusted lease before inferring death from the runner PID.
+/// Call under the trusted lease; settle the exact dead attempt and its queue
+/// reservation together with its VRR, including the final-write gap.
 pub(super) fn recover_unfinished_run(
     worktree: &Path,
     record: &super::VerificationRunRecord,
@@ -398,8 +480,15 @@ pub(super) fn recover_unfinished_run(
     let Some(mut attempt) = bound_attempt(worktree, record)? else {
         return Ok(false);
     };
-    if attempt.status == AttemptStatus::Running && record.lifecycle.is_none() {
-        if crate::process::is_host_process_alive(attempt.runner_pid) {
+    if matches!(
+        attempt.status,
+        AttemptStatus::Running | AttemptStatus::Waiting
+    ) {
+        if interruption::runner_is_alive(
+            attempt.runner_pid,
+            attempt.runner_started_at,
+            attempt.created_at,
+        ) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "the previous verification runner is unsettled; wait for its terminal result before retrying (its watchdog may still be recording an external termination)",
@@ -456,11 +545,14 @@ fn settle_watchdog_with_coordinator(
         ) {
             return Ok(());
         }
+        let waiting_for_admission = record.status == AttemptStatus::Waiting;
         interrupt(
             worktree,
             &mut record,
             if normal_return {
                 "verification runner returned without a terminal result; rerun required"
+            } else if waiting_for_admission {
+                ADMISSION_INTERRUPTED
             } else {
                 "external termination: runner pipe closed before a terminal result; signal unknown; rerun required"
             },
@@ -483,6 +575,165 @@ mod tests {
             execution_binding: None,
             session_binding: None,
         }
+    }
+
+    #[test]
+    fn admission_resume_tracks_deferred_and_dead_waiters_but_not_canceled_or_superseded() {
+        let repo = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open(runtime.path()).unwrap();
+        let key = TargetKey::verification("mine", "worktree");
+        let commands = vec!["cargo test --workspace".to_string()];
+        let attempt =
+            begin_for_caller(repo.path(), "mine", &authority(), &key, &commands, "token").unwrap();
+        assert!(
+            admission_resume_candidate(repo.path(), attempt.id(), "token", "mine")
+                .unwrap()
+                .is_none(),
+            "a live admission must not be duplicated"
+        );
+        attempt
+            .returned(Some("verify: deferred"), &coordinator)
+            .unwrap();
+        assert_eq!(
+            admission_resume_candidate(repo.path(), attempt.id(), "token", "mine").unwrap(),
+            Some(commands.clone()),
+            "deferred admission must arrange its own resume"
+        );
+        assert!(admission_resume_candidate(repo.path(), attempt.id(), "wrong", "mine").is_err());
+        assert!(admission_resume_candidate(repo.path(), attempt.id(), "token", "foreign").is_err());
+        cancel_for_caller(
+            repo.path(),
+            "mine",
+            attempt.id(),
+            "stop",
+            &authority(),
+            &coordinator,
+            &key,
+        )
+        .unwrap();
+        assert!(
+            admission_resume_candidate(repo.path(), attempt.id(), "token", "mine")
+                .unwrap()
+                .is_none()
+        );
+
+        let waiter =
+            begin_for_caller(repo.path(), "mine", &authority(), &key, &commands, "next").unwrap();
+        settle_watchdog_with_coordinator(repo.path(), waiter.id(), "next", false, &coordinator)
+            .unwrap();
+        assert_eq!(
+            admission_resume_candidate(repo.path(), waiter.id(), "next", "mine").unwrap(),
+            Some(commands.clone()),
+            "runner death during admission must also resume"
+        );
+        let successor =
+            begin_for_caller(repo.path(), "mine", &authority(), &key, &commands, "new").unwrap();
+        assert!(
+            admission_resume_candidate(repo.path(), waiter.id(), "next", "mine")
+                .unwrap()
+                .is_none(),
+            "an old companion must not wake a newer attempt"
+        );
+        settle_watchdog_with_coordinator(repo.path(), successor.id(), "new", false, &coordinator)
+            .unwrap();
+        cancel_for_caller(
+            repo.path(),
+            "mine",
+            successor.id(),
+            "stop after runner death",
+            &authority(),
+            &coordinator,
+            &key,
+        )
+        .unwrap();
+        assert!(
+            admission_resume_candidate(repo.path(), successor.id(), "new", "mine")
+                .unwrap()
+                .is_none(),
+            "explicit cancellation must suppress resume after admission interruption"
+        );
+    }
+
+    #[test]
+    fn admission_resume_three_agents_finish_after_a_full_pool_without_pm_intervention() {
+        use gwt_core::index_coordinator::{JobAdmission, JobOutcome};
+        let runtime = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(runtime.path(), 3).unwrap();
+        let job = |label: &str| {
+            let key = TargetKey::verification("resume-three", label);
+            match coordinator
+                .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(10))
+                .unwrap()
+            {
+                JobAdmission::Owner(guard) => guard,
+                _ => panic!("expected a new target owner"),
+            }
+        };
+        let holders = (0..3)
+            .map(|index| job(&format!("holder-{index}")))
+            .collect::<Vec<_>>();
+        let leases = holders
+            .iter()
+            .map(|guard| guard.acquire_heavy(Duration::ZERO).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(coordinator.heavy_pool_status().unwrap().available, 0);
+        let waiters = (0..3)
+            .map(|index| {
+                let repo = tempfile::tempdir().unwrap();
+                let key = TargetKey::verification("resume-three", format!("waiter-{index}"));
+                let commands = vec!["cargo test --workspace".to_string()];
+                let attempt =
+                    begin_for_caller(repo.path(), "mine", &authority(), &key, &commands, "token")
+                        .unwrap();
+                attempt
+                    .returned(Some("verify: deferred"), &coordinator)
+                    .unwrap();
+                (repo, attempt, job(&format!("waiter-{index}")))
+            })
+            .collect::<Vec<_>>();
+        for (repo, attempt, _) in &waiters {
+            assert!(super::super::admission_resume::poll(
+                repo.path(),
+                attempt.id(),
+                "token",
+                "mine",
+                &coordinator,
+                |_| panic!("no notification while the pool is full")
+            )
+            .unwrap());
+        }
+        drop(leases);
+        let mut completed = 0;
+        for (repo, attempt, guard) in waiters {
+            assert!(!super::super::admission_resume::poll(
+                repo.path(),
+                attempt.id(),
+                "token",
+                "mine",
+                &coordinator,
+                |commands| {
+                    assert_eq!(commands, ["cargo test --workspace"]);
+                    let _lease = guard.acquire_heavy(Duration::from_secs(10)).unwrap();
+                    trusted_store::with_write_lease(repo.path(), || attempt.complete_under_lease())
+                        .unwrap();
+                    completed += 1;
+                    Ok(true)
+                }
+            )
+            .unwrap());
+            assert!(!super::super::admission_resume::poll(
+                repo.path(),
+                attempt.id(),
+                "token",
+                "mine",
+                &coordinator,
+                |_| panic!("a completed waiter must never be notified again")
+            )
+            .unwrap());
+            guard.complete(JobOutcome::Completed).unwrap();
+        }
+        assert_eq!(completed, 3);
     }
 
     #[test]
@@ -712,6 +963,70 @@ mod tests {
             super::super::load(repo.path()).unwrap().unwrap(),
             interrupted
         );
+    }
+
+    #[test]
+    fn successor_recovers_reused_runner_attempt_and_its_reservation() {
+        let repo = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(runtime.path());
+        let coordinator = crate::cli::verification_lease::open_coordinator().unwrap();
+        let key = TargetKey::verification("mine", "worktree");
+        let reused_start = crate::process::host_process_start_time(std::process::id()).unwrap() + 1;
+        // Recover ordinary execution, the final-write gap, and a bound run
+        // waiting for its next command, without relying on the old watchdog.
+        for (with_lifecycle, waiting) in [(true, false), (false, false), (true, true)] {
+            let attempt =
+                begin_for_caller(repo.path(), "predecessor", &authority(), &key, &[], "token")
+                    .unwrap();
+            let mut record = super::super::tests::passing_record("predecessor", "unused");
+            record.format_version = Some(super::super::VERIFICATION_FORMAT_VERSION);
+            if with_lifecycle {
+                record.lifecycle = Some(interruption::RunLifecycle::running("token"));
+            }
+            let mut document = serde_json::to_value(record).unwrap();
+            document["verification_attempt_id"] = attempt.id().into();
+            if with_lifecycle {
+                document["lifecycle"]["runner_started_at"] = reused_start.into();
+            }
+            let record = serde_json::from_value(document).unwrap();
+            attempt.mark_running("vr-test").unwrap();
+            if waiting {
+                attempt.set_admission_waiting(true).unwrap();
+            }
+            let mut control = load(repo.path(), attempt.id()).unwrap().unwrap();
+            let mut document = serde_json::to_value(&control).unwrap();
+            document["runner_started_at"] = reused_start.into();
+            control = serde_json::from_value(document).unwrap();
+            save(repo.path(), &mut control).unwrap();
+            let check = || attempt.cancelled().map_err(Into::into);
+            coordinator
+                .reserve_heavy_for_attempt(
+                    &key,
+                    JobPriority::ManualRebuild,
+                    Duration::from_secs(600),
+                    None,
+                    &gwt_core::index_coordinator::HeavyAttempt {
+                        id: attempt.id(),
+                        check_cancelled: &check,
+                    },
+                )
+                .unwrap();
+            super::super::save(repo.path(), &record).unwrap();
+
+            let (completed, _) = super::super::run_verification(
+                repo.path(),
+                "successor",
+                &["git --version".to_string()],
+            )
+            .unwrap();
+            assert!(completed.all_passed);
+            assert_eq!(
+                load(repo.path(), attempt.id()).unwrap().unwrap().status,
+                AttemptStatus::Interrupted
+            );
+            assert!(!coordinator.heavy_reservation_path(&key).exists());
+        }
     }
 
     #[test]

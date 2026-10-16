@@ -638,8 +638,7 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
                     (self.coordinator_root / "heavy.progress.json").read_text()
                 )
                 self.assertEqual(progress["model_state"], "warming")
-                runner._MODEL_CACHE = model
-                runner._MODEL_CACHE_REVISION = _revision
+                runner._MODEL_CACHE = {_revision: model}
                 runner._MODEL_LOAD_MS = 16_000
                 return mock.Mock(encode=encode)
 
@@ -651,7 +650,6 @@ class FileIndexV2CooperativeYieldTests(unittest.TestCase):
                 return model.encode(inputs)
 
             with mock.patch.object(runner, "_MODEL_CACHE", None), \
-                    mock.patch.object(runner, "_MODEL_CACHE_REVISION", None), \
                     mock.patch.object(runner, "_MODEL_LOAD_MS", 0), \
                     mock.patch.object(runner, "_get_embedding_model", side_effect=load_model):
                 result = runner.action_index_files_v2(

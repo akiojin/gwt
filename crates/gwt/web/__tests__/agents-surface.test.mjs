@@ -40,6 +40,40 @@ const agents = [
   { id: "pm", preset: "claude", is_pm: true },
 ];
 
+test("Agents titles preserve a fixed name and scrollable purpose in cards, tabs and previews", async () => {
+  const { surface, setWindows, document } = await fixture();
+  const purpose = "Investigate the terminal output and deliver the smallest verified change. ".repeat(3);
+  const data = { ...agents[0], agent_name: "Lumen", dynamic_title: purpose.trim() };
+  setWindows([data]);
+  const host = document.createElement("div");
+  document.querySelector("main").appendChild(host);
+  surface.setPreviewHost(host);
+  const terminal = surface.element.querySelector("textarea");
+  for (const title of [surface.element.querySelector("h3"), document.getElementById("agents-tab-one"), host.querySelector("h3")]) {
+    assert.equal(title.querySelector(".agent-title__name")?.textContent, "Lumen");
+    assert.equal(title.querySelector(".agent-title__purpose")?.textContent, ` — ${purpose.trim()}`);
+    assert.equal(title.dataset.issueExplanation, title.textContent);
+    assert.equal(title.getAttribute("aria-label"), title.textContent);
+  }
+  assert.equal(surface.element.querySelector("h3").getAttribute("tabindex"), "0");
+  setWindows([{ ...data, agent_name: "Vireo", dynamic_title: "Updated purpose" }]);
+  for (const title of [surface.element.querySelector("h3"), document.getElementById("agents-tab-one"), host.querySelector("h3")]) {
+    assert.equal(title.querySelector(".agent-title__name").textContent, "Vireo");
+    assert.equal(title.dataset.issueExplanation, "Vireo — Updated purpose");
+  }
+  assert.equal(surface.element.querySelector("textarea"), terminal);
+  assert.match(surface.element.querySelector(".agent-tile__header").textContent, /Interactive/);
+  surface.dispose();
+});
+
+test("Agents title styles keep one line and constrain only the purpose scroll area", () => {
+  const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
+  assert.match(css, /\.agent-title\s*\{[^}]*white-space:\s*nowrap/);
+  assert.match(css, /\.agent-title__name\s*\{[^}]*flex-shrink:\s*0/);
+  assert.match(css, /\.agent-title__purpose\s*\{[^}]*overflow-x:\s*auto/);
+  assert.match(css, /\.agent-tile__header\s*\{[^}]*flex-shrink:\s*0/);
+});
+
 test("Agents tiles, tabs and readonly preview acquire a late assigned name", async () => {
   const { surface, setWindows, document } = await fixture();
   const data = { ...agents[0], agent_name: null, dynamic_title: "Fix cache" };
@@ -47,7 +81,7 @@ test("Agents tiles, tabs and readonly preview acquire a late assigned name", asy
   const host = document.createElement("div");
   document.querySelector("main").appendChild(host);
   surface.setPreviewHost(host);
-  assert.equal(surface.element.querySelector("h3").textContent, "Naming… — Fix cache");
+  assert.equal(surface.element.querySelector("h3").textContent, "Fix cache");
   const terminal = surface.element.querySelector("textarea");
   setWindows([{ ...data, agent_name: "Lumen" }]);
   assert.equal(surface.element.querySelector("h3").textContent, "Lumen — Fix cache");
@@ -175,12 +209,17 @@ test("tiles keep terminal input as the only input path and report unavailable se
   assert.match(first.textContent, /Interactive/);
 });
 
-test("the dedicated Start Work Shell is interactive without an agent session and retains stopped status gating", async () => {
+test("launched and restored Shells are interactive without agent sessions and retain stopped status gating", async () => {
   const { setWindows, document } = await fixture();
-  const shell = { id: "start-work-shell", preset: "shell", title: "Start Work", surface_owner: "agents", status: "running" };
-  setWindows([shell, { id: "naming", preset: "codex", status: "running" }]);
-  const tile = document.querySelector('[data-agent-id="start-work-shell"]');
-  assert.ok(tile, "Start Work Shell belongs to Agents");
+  const shell = { id: "restored-shell", preset: "shell", title: "Shell", status: "running" };
+  const dedicated = { ...shell, id: "start-work-shell", surface_owner: "agents" };
+  setWindows([shell, dedicated, { id: "naming", preset: "codex", status: "running" },
+    { ...shell, id: "pm", is_pm: true }, { id: "console", preset: "console" },
+    { id: "unknown", preset: "unknown" }]);
+  const tile = document.querySelector('[data-agent-id="restored-shell"]');
+  assert.ok(tile, "restored Shell belongs to Agents");
+  assert.equal(document.querySelectorAll(".agent-tile").length, 3, "PM and non-terminal views stay outside Agents");
+  assert.match(document.querySelector('[data-agent-id="start-work-shell"]').textContent, /Interactive/);
   const input = tile.querySelector("textarea");
   assert.ok(input);
   assert.match(tile.textContent, /Interactive/);

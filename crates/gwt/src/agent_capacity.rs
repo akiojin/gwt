@@ -14,7 +14,8 @@ const TARGET_TTL_SECS: u64 = 600;
 const RAM_FLOOR_BYTES: u64 = 512 * 1024 * 1024;
 const SCAN_ENTRIES_PER_REFRESH: usize = 2_048;
 const SCAN_TIME_PER_REFRESH: Duration = Duration::from_millis(20);
-const MACHINE_REFRESH_SECS: u64 = 5;
+pub const CAPACITY_TICK_INTERVAL: Duration = Duration::from_secs(5);
+const MACHINE_REFRESH_SECS: u64 = 10;
 const MAX_REASON_CHARS: usize = 512;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -60,6 +61,115 @@ impl AgentCapacity {
             (Some(observed), Some(expires)) => fresh(observed, expires, epoch_seconds()),
             _ => false,
         }
+    }
+}
+
+/// Worker-prepared capacity overlay. The GUI applies only these three fields;
+/// prefs, repository identity, snapshot reads and reduction reporting stay here.
+#[derive(Clone, Debug)]
+pub struct CapacityUpdate {
+    pub capacity: AgentCapacity,
+    pub limits: Option<(usize, Option<usize>)>,
+    fresh: bool,
+}
+
+impl CapacityUpdate {
+    pub fn from_status(status: &crate::IssueMonitorStatusView) -> Self {
+        Self {
+            capacity: status.agent_capacity.clone(),
+            limits: Some((status.max_active_agents, status.max_active_agents_override)),
+            fresh: status.agent_capacity.is_fresh(),
+        }
+    }
+
+    pub fn read(project_root: &Path, previous: Option<&Self>) -> Self {
+        Self::read_with(project_root, previous, |root| {
+            project_capacity(root, &BTreeSet::new(), 0)
+        })
+    }
+
+    pub fn read_with(
+        project_root: &Path,
+        previous: Option<&Self>,
+        read_capacity: impl FnOnce(&Path) -> AgentCapacity,
+    ) -> Self {
+        let capacity = read_capacity(project_root);
+        let fresh = capacity.is_fresh();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+        let monitor = match crate::load_issue_monitor_prefs(&prefs_path) {
+            Ok(prefs) => Some(crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                prefs,
+            )),
+            Err(error) => {
+                tracing::warn!(%error, "capacity display could not read Monitor prefs; retaining last valid mode");
+                previous.and_then(|value| value.limits).map(|(_, manual)| {
+                    let mut monitor =
+                        crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+                    monitor.set_max_active_agents_override(manual);
+                    monitor
+                })
+            }
+        };
+        let limits = monitor.map(|mut monitor| {
+            if monitor.max_active_agents_override().is_none() {
+                if let Some((limit, _)) = previous.and_then(|value| value.limits) {
+                    monitor.config.max_active = limit;
+                }
+            }
+            monitor.set_agent_capacity_for_project(project_root, capacity.clone());
+            (
+                monitor.effective_max_active_agents(),
+                monitor.max_active_agents_override(),
+            )
+        });
+        Self {
+            capacity,
+            limits,
+            fresh,
+        }
+    }
+
+    /// Sensor renewal alone is not a display change. Compare freshness as
+    /// observed at sampling time, so a renewed sample never creates a false
+    /// expiry transition when the previous timestamp eventually ages out.
+    pub fn changed_from(&self, previous: Option<&Self>) -> bool {
+        let Some(previous) = previous else {
+            return true;
+        };
+        let mut before = previous.capacity.clone();
+        before.observed_at = self.capacity.observed_at;
+        before.expires_at = self.capacity.expires_at;
+        self.fresh != previous.fresh || self.limits != previous.limits || self.capacity != before
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn capacity_notifications_ignore_renewal_and_publish_expiry_or_mode_changes() {
+        let previous = CapacityUpdate {
+            capacity: AgentCapacity {
+                measurement_complete: true,
+                observed_at: Some(100),
+                expires_at: Some(130),
+                ..Default::default()
+            },
+            limits: Some((3, None)),
+            fresh: true,
+        };
+        let mut renewed = previous.clone();
+        renewed.capacity.observed_at = Some(110);
+        renewed.capacity.expires_at = Some(140);
+        assert!(!renewed.changed_from(Some(&previous)));
+        renewed.fresh = false;
+        assert!(renewed.changed_from(Some(&previous)));
+        renewed.fresh = true;
+        renewed.limits = Some((3, Some(3)));
+        assert!(renewed.changed_from(Some(&previous)));
+        assert!(renewed.changed_from(None));
     }
 }
 
@@ -494,12 +604,20 @@ fn capacity_reason_summary(mut reason: String, diagnostics: &[String]) -> String
 /// GUI-independent refresh. CPU baselines and target walks survive ticks;
 /// only complete positive target measurements enter the shared atomic file.
 pub fn refresh_machine_capacity(project_root: &Path) -> io::Result<()> {
+    refresh_machine_capacity_for_projects(&[project_root.to_path_buf()])
+}
+
+/// One host tick shares its machine sample, target-walk budget and atomic write.
+pub fn refresh_machine_capacity_for_projects(project_roots: &[PathBuf]) -> io::Result<()> {
+    if project_roots.is_empty() {
+        return Ok(());
+    }
     static PROBE: OnceLock<Mutex<RuntimeProbe>> = OnceLock::new();
     let mut probe = PROBE
         .get_or_init(|| Mutex::new(RuntimeProbe::default()))
         .lock()
         .map_err(|_| io::Error::other("capacity probe poisoned"))?;
-    probe.refresh(project_root)
+    probe.refresh_projects(project_roots)
 }
 
 #[derive(Default)]
@@ -514,7 +632,12 @@ struct RuntimeProbe {
 }
 
 impl RuntimeProbe {
+    #[cfg(test)]
     fn refresh(&mut self, project_root: &Path) -> io::Result<()> {
+        self.refresh_projects(&[project_root.to_path_buf()])
+    }
+
+    fn refresh_projects(&mut self, project_roots: &[PathBuf]) -> io::Result<()> {
         use fs2::FileExt;
         let directory = capacity_directory();
         if self.runtime_dir != directory {
@@ -562,7 +685,10 @@ impl RuntimeProbe {
         };
         self.machine_sample = Some(machine.clone());
         let inventory = machine.inventory;
-        let mut roots = BTreeSet::from([normalized(project_root)]);
+        let mut roots = project_roots
+            .iter()
+            .map(|root| normalized(root))
+            .collect::<BTreeSet<_>>();
         roots.extend(
             inventory
                 .sessions
@@ -694,10 +820,9 @@ impl RuntimeProbe {
         });
         snapshot.machine_budget = machine.machine_budget;
         snapshot.constraints = machine.constraints;
-        snapshot
-            .projects
-            .entry(normalized(project_root))
-            .or_default();
+        for root in project_roots {
+            snapshot.projects.entry(normalized(root)).or_default();
+        }
         for row in &snapshot.inventory.sessions {
             let count = snapshot
                 .projects
@@ -726,14 +851,10 @@ impl RuntimeProbe {
         previous: &MachineCapacitySnapshot,
         now: u64,
     ) -> MachineCapacitySnapshot {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
         self.system.refresh_memory();
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_exe(UpdateKind::OnlyIfNotSet),
+        let inventory = crate::session_inventory::observe_machine_sessions_with_system(
+            &gwt_core::paths::gwt_sessions_dir(),
+            &mut self.system,
         );
         let gui = self
             .system
@@ -778,9 +899,6 @@ impl RuntimeProbe {
         };
         self.last_cpu_sample = Some(Instant::now());
         self.gui_identities = current_gui.clone();
-        let inventory = crate::session_inventory::observe_machine_sessions(
-            &gwt_core::paths::gwt_sessions_dir(),
-        );
         let per_agent_ram_bytes = inventory
             .sessions
             .iter()
@@ -1714,7 +1832,11 @@ mod tests {
             reusable_machine_sample(100, Duration::ZERO, 106),
             "a just-completed slow census is reused without resetting its original observed_at"
         );
-        assert!(!reusable_machine_sample(100, Duration::from_secs(5), 105));
+        assert!(
+            reusable_machine_sample(100, Duration::from_secs(5), 105),
+            "the next five-second tick must reuse the machine observation"
+        );
+        assert!(!reusable_machine_sample(100, Duration::from_secs(10), 110));
         assert!(!reusable_machine_sample(105, Duration::from_secs(1), 104));
         assert!(
             !reusable_machine_sample(100, Duration::ZERO, 130),
@@ -1736,9 +1858,10 @@ mod tests {
             std::fs::write(root.join("target/artifact"), [0_u8; 1]).unwrap();
         }
         let mut probe = RuntimeProbe::default();
-        probe.refresh(&first).unwrap();
+        probe
+            .refresh_projects(&[first.clone(), second.clone()])
+            .unwrap();
         let path = snapshot_path();
-        probe.refresh(&second).unwrap();
         assert_eq!(path, snapshot_path());
         let snapshot = read_snapshot(&path).unwrap();
         assert!(snapshot

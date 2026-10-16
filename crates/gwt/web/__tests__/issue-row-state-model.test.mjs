@@ -4,7 +4,7 @@
 // secondary information, and at most two visible action buttons that depend on
 // that state. Anything else moves into the row's overflow menu. The row's agent
 // status row carries no second badge, and once the agent is Windowized the same
-// slot shows a "Shown on canvas" face instead of a second input face.
+// slot shows a "Shown in Agents" face instead of a second input face.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -32,7 +32,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22row-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 test("pending SessionStart diagnosis uses the existing row reason without changing launch state", async () => {
@@ -43,6 +43,40 @@ test("pending SessionStart diagnosis uses the existing row reason without changi
   assert.equal(pending.primary.label, "Launching");
   assert.deepEqual(pending.secondary, [{ kind: "reason", key: "reason", label: entry.readiness_diagnosis }]);
   assert.deepEqual(issueRowStateModel({ entry: { ...entry, readiness_diagnosis: null } }).secondary, []);
+});
+
+test("Issue #4862 a deliberate stop stays Held despite stale window activity", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  const entry = knowledgeEntry(4862, { monitor_state: "needs_human", error_message: "stopped: PM paused for investigation",
+    readiness_diagnosis: "SessionStart readiness pending: stale warning" });
+  assert.equal(issueQueueColumn(entry, workRow()), "backlog");
+  for (const status of ["running", "error"]) {
+    const context = { entry, work: workRow(), inlineWindow: agentWindow("agent-1", 4862, { status }) };
+    const model = issueRowStateModel(context);
+    assert.deepEqual(model.primary, { key: "monitor:held", label: "Held", tone: "idle" });
+    assert.equal(model.secondary[0].label, "PM paused for investigation");
+    const prior = issueRowStateModel({ ...context, entry: { ...entry, error_message: null } });
+    assert.deepEqual(model.actions, prior.actions, "presentation must not change actions");
+    assert.deepEqual(model.overflow, prior.overflow);
+  }
+});
+
+test("Issue #4862 launch diagnoses retain the cause and name the next operation", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  for (const [monitor_state, error_message, recovery] of [
+    ["launch_failed", "cannot launch successor of Work work-42: successor work-42-next has invalid lineage", "Work lineage · Next: workspace.close (superseded), then issue.monitor.requeue"],
+    ["agent_failed", "cannot launch successor of Work work-43: owner or execution container mismatch", "Work owner mismatch · Next: workspace.candidates"],
+    ["needs_human", "autonomous launch attempts exhausted (3/3) with an unchanging failure: Launch timed out: no window was created within 120s; delivery second", "Window timeout · Next: issue.monitor.requeue"],
+    ["needs_human", "autonomous launch attempts exhausted (3/3) with an unchanging failure: successor work-44-next is duplicated; use workspace.close", "Launch failure · Next: issue.monitor.status"],
+    ["launch_failed", "launch provider unavailable", "Launch failure · Next: issue.monitor.status"],
+    ["agent_failed", "agent process exited", "Agent failure · Next: issue.monitor.status"],
+  ]) {
+    const model = issueRowStateModel({ entry: knowledgeEntry(4862, { monitor_state, error_message }) });
+    assert.deepEqual(model.secondary.map(item => [item.key, item.label]), [["reason", error_message], ["recovery", recovery]]);
+    if (monitor_state === "needs_human") {
+      assert.equal(issueQueueColumn(knowledgeEntry(4862, { monitor_state, error_message }), workRow()), "backlog");
+    }
+  }
 });
 
 function knowledgeEntry(number, overrides = {}) {
@@ -229,25 +263,6 @@ test("Issue #5401 mounts all 200 rows but virtualizes larger lists", async t => 
   assert.ok(fixture.body.querySelectorAll(".knowledge-row").length < 200);
   assert.match(fixture.body.querySelector('[data-queue-column="backlog"] h3').textContent, /1545/);
   assert.ok(fixture.body.querySelector(".knowledge-virtual-spacer"));
-});
-
-test("Issue #5401 PR Kanban reuses cards, virtualizes large columns and retains empty guidance", async t => {
-  const fixture = await makeFixture({ kind: "pr" });
-  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
-  const entries = Array.from({ length: 201 }, (_, index) => knowledgeEntry(index + 1));
-  const receive = rows => fixture.surface.applyKnowledgeReceiveEvent({
-    kind: "knowledge_entries", id: "win-1", knowledge_kind: "pr", request_id: fixture.load.request_id,
-    entries: rows, refresh_enabled: true,
-  });
-  receive(entries);
-  const card = fixture.body.querySelector('.kanban-card[data-issue-number="2"]');
-  assert.ok(card);
-  assert.ok(fixture.body.querySelectorAll(".kanban-card").length < 200);
-  receive([{ ...entries[0], title: "Changed card" }, ...entries.slice(1)]);
-  assert.equal(fixture.body.querySelector('.kanban-card[data-issue-number="2"]'), card);
-  const empty = fixture.body.querySelector('[data-phase="done"] .kanban-column-body');
-  empty.dispatchEvent(new fixture.window.Event("scroll"));
-  assert.ok(empty.querySelector(".kanban-column-empty"));
 });
 
 function overflowActions(row) {
@@ -772,7 +787,7 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
 });
 
 // T-005 / FR-012: after Windowize the row keeps the Issue ↔ agent link as a
-// "Shown on canvas" face with no second input face for the PTY.
+// "Shown in Agents" face with no second input face for the PTY.
 test("after Windowize the row shows the agent as on the canvas and offers focus", async (t) => {
   const agent = agentWindow("agent-1", 3671);
   const fixture = await makeFixture({ workspaceWindows: [agent] });
@@ -797,7 +812,7 @@ test("after Windowize the row shows the agent as on the canvas and offers focus"
   assert.equal(face.dataset.windowId, "agent-1");
   assert.equal(face.querySelector(".terminal-root"), null, "no second input face for the PTY");
   assert.equal(fixture.calls.terminalMounts.length, 0, "nothing is mounted");
-  assert.match(face.textContent, /Shown on canvas/);
+  assert.match(face.textContent, /Shown in Agents/);
   assert.equal(face.querySelector('[data-action="windowize-issue-preview"]'), null);
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Running");
   assert.deepEqual(visibleActions(row), ["focus-canvas-window"]);

@@ -35,7 +35,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22resume-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -132,6 +132,52 @@ test("Issue #5396: semantic list completion does not request an implicit preview
     const before = sent.length;
     surface.applyKnowledgeReceiveEvent(searchResultsEvent(requestId));
     assert.equal(sent.slice(before).filter(message => message.kind === "select_knowledge_bridge_entry").length, 0);
+  });
+});
+
+test("Issue #5543: related-work enrichment refreshes only the explicitly selected detail", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async () => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    const listEvent = {
+      kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: sent.at(-1).request_id, entries: [ROW_A, ROW_B],
+      selected_number: null, refresh_enabled: true,
+    };
+    const detailRequests = () => sent.filter(message => message.kind === "select_knowledge_bridge_entry");
+    surface.applyKnowledgeReceiveEvent(listEvent);
+    assert.equal(detailRequests().length, 0, "initial rows must not open a detail");
+
+    surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+      request_id: detailRequests().at(-1).request_id,
+      detail: detailFor(ROW_B, "Beta body"),
+    });
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    const selectionGeneration = state.selectionGeneration;
+    const enriched = {
+      ...listEvent,
+      entries: [ROW_A, { ...ROW_B, related_work_refs: [{ id: "work-beta" }],
+        related_work_count: 1, related_session_count: 1 }],
+    };
+    surface.applyKnowledgeReceiveEvent(enriched);
+    assert.equal(detailRequests().length, 2, "enrichment must requery the selected detail once");
+    assert.equal(detailRequests().at(-1).number, ROW_B.number);
+    assert.equal(state.selectedNumber, ROW_B.number);
+    assert.equal(state.selectionGeneration, selectionGeneration, "refresh is not an explicit selection");
+    surface.applyKnowledgeReceiveEvent(enriched);
+    assert.equal(detailRequests().length, 2, "the same related snapshot must not requery again");
+
+    const relatedWorks = [{ id: "work-beta", title: "Beta work" }];
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+      request_id: detailRequests().at(-1).request_id,
+      detail: { ...detailFor(ROW_B, "Beta body"), related_works: relatedWorks },
+    });
+    assert.deepEqual(state.detail.related_works, relatedWorks);
   });
 });
 
@@ -735,7 +781,13 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       const body = domDocument.createElement("div");
       domDocument.body.appendChild(body);
       const windowMap = new Map([["win-1", body]]);
-      const windowData = { id: "win-1", preset: "issue" };
+      const windowData = { id: "win-1", preset: "issue", minimized: true,
+        tab_group_id: "legacy-group", tab_group_active: false };
+      const cache = domDocument.createElement("section");
+      cache.className = "surface-cache";
+      cache.hidden = true;
+      cache.setAttribute("inert", "");
+      domDocument.body.appendChild(cache);
       let activeTab = true;
       const createNode = (tag, className, textContent = "") => {
         const node = domDocument.createElement(tag);
@@ -791,7 +843,8 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       }
 
       intervals[0].callback();
-      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1);
+      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
+        "visible legacy grouped windows refresh independently of saved canvas state");
       intervals[0].callback();
       intervals[0].callback();
       assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
@@ -804,9 +857,7 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       // Repeated hidden ticks coalesce to one revision check on activation.
       const hiddenCases = [
         [() => { body.hidden = true; }, () => { body.hidden = false; }],
-        [() => { windowData.minimized = true; }, () => { windowData.minimized = false; }],
-        [() => { windowData.tab_group_id = "group"; windowData.tab_group_active = false; },
-          () => { windowData.tab_group_active = true; }],
+        [() => { cache.appendChild(body); }, () => { domDocument.body.appendChild(body); }],
         [() => { activeTab = false; }, () => { activeTab = true; }],
         [() => { domDocument.hidden = true; }, () => { domDocument.hidden = false; }],
       ];
@@ -815,7 +866,7 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
         hide();
         intervals[0].callback();
         intervals[0].callback();
-        assert.equal(sent.length, before, "hidden/minimized/inactive surfaces do no reads");
+        assert.equal(sent.length, before, "hidden/cache/inactive-project surfaces do no reads");
         reveal();
         surface.refreshVisibleKnowledgeWindows();
         surface.refreshVisibleKnowledgeWindows();
@@ -927,12 +978,12 @@ test("changing knowledge kind invalidates an Issue retry owner", async () => {
     );
     const staleTimer = timers.find((timer) => timer.delay === 5000);
 
-    surface.ensureKnowledgeBridgeState("win-1", "pr");
+    surface.ensureKnowledgeBridgeState("win-1", "spec");
     const sentBefore = sent.length;
     forceFire(staleTimer);
 
     assert.equal(sent.length, sentBefore);
-    assert.equal(state.kind, "pr");
+    assert.equal(state.kind, "spec");
   });
 });
 
@@ -1181,174 +1232,23 @@ for (const semanticRetry of [
   });
 }
 
-test("PR selection retains the baseline full-render/full-view contract", async () => {
+test("Issue #4174: retired PR knowledge kind does not mount or request data", async () => {
   const mod = await importSurfaceModule();
   await withPatchedTimersAsync(async () => {
-    const originalDocument = globalThis.document;
     const { document: domDocument } = parseHTML("<html><body></body></html>");
-    globalThis.document = domDocument;
-    try {
-      const sent = [];
-      const body = domDocument.createElement("div");
-      domDocument.body.appendChild(body);
-      const windowMap = new Map([["win-1", body]]);
-      const createNode = (tag, className, textContent = "") => {
-        const node = domDocument.createElement(tag);
-        node.className = className || "";
-        node.textContent = textContent;
-        return node;
-      };
-      const surface = createSurface(mod, sent, "pr", {
-        windowMap,
-        knowledgeKindForPreset: () => "pr",
-        createNode,
-        createKnowledgeMarkdownBody: (value) =>
-          createNode("div", "knowledge-markdown", String(value || "")),
-      });
-      const state = surface.ensureKnowledgeBridgeState("win-1", "pr");
-      state.entries = [ROW_A, ROW_B];
-      state.baseEntries = [ROW_A, ROW_B];
-      state.selectedNumber = ROW_A.number;
-      state.detail = detailFor(ROW_A, "Alpha PR body");
-      state.refreshEnabled = true;
-
-      surface.mountKnowledgeWindow({ id: "win-1", preset: "pr" }, body);
-      sent.length = 0;
-      const originalCards = [...body.querySelectorAll(".kanban-card")];
-      const rowB = body.querySelector(`[data-issue-number="${ROW_B.number}"]`);
-      assert.ok(rowB, "the PR fixture must render row B");
-
-      rowB.click();
-
-      assert.equal(state.selectedNumber, ROW_B.number);
-      assert.equal(state.detailLoading, true);
-      assert.equal(
-        state.selectionGeneration,
-        0,
-        "PR selection must not opt into the Issue/SPEC generation contract",
-      );
-      assert.equal(
-        state.detail?.number,
-        ROW_A.number,
-        "PR must retain its authoritative detail until the baseline full view completes",
-      );
-      assert.equal(sent.length, 1);
-      assert.deepEqual(sent[0], {
-        kind: "select_knowledge_bridge_entry",
-        id: "win-1",
-        knowledge_kind: "pr",
-        request_id: state.detailRequestId,
-        number: ROW_B.number,
-      });
-      assert.strictEqual(
-        body.querySelectorAll(".kanban-card")[0],
-        originalCards[0],
-        "PR selection updates the existing card while retaining the full-view protocol",
-      );
-
-      const refreshedRowB = { ...ROW_B, title: "Beta PR refreshed" };
-      surface.applyKnowledgeReceiveEvent({
-        kind: "knowledge_entries",
-        id: "win-1",
-        knowledge_kind: "pr",
-        request_id: state.detailRequestId,
-        entries: [ROW_A, refreshedRowB],
-        selected_number: ROW_B.number,
-        empty_message: "",
-        refresh_enabled: true,
-      });
-      assert.equal(
-        state.baseEntries[1]?.title,
-        refreshedRowB.title,
-        "the PR select request id must accept its legacy full-list completion",
-      );
-
-      surface.applyKnowledgeReceiveEvent({
-        kind: "knowledge_detail",
-        id: "win-1",
-        knowledge_kind: "pr",
-        request_id: state.detailRequestId,
-        detail: detailFor(refreshedRowB, "Beta PR body"),
-      });
-      assert.equal(state.detail?.number, ROW_B.number);
-      assert.equal(state.detailLoading, false);
-      surface.clearKnowledgeBridgeState("win-1");
-    } finally {
-      globalThis.document = originalDocument;
-    }
-  });
-});
-
-test("a newer PR refresh rejects a late selection full-view completion", async () => {
-  const mod = await importSurfaceModule();
-  await withPatchedTimersAsync(async () => {
+    const body = domDocument.createElement("div");
     const sent = [];
     const surface = createSurface(mod, sent, "pr", {
       knowledgeKindForPreset: () => "pr",
     });
-    const state = surface.ensureKnowledgeBridgeState("win-1", "pr");
-    state.entries = [ROW_A, ROW_B];
-    state.baseEntries = [ROW_A, ROW_B];
-    state.selectedNumber = ROW_A.number;
-    state.detail = detailFor(ROW_A, "Alpha PR body");
-    state.refreshEnabled = true;
-
-    surface.requestKnowledgeDetail("win-1", "pr", ROW_B.number);
-    const selectionRequestId = sent.at(-1).request_id;
-    surface.requestKnowledgeBridge("win-1", "pr", true);
-    const refreshRequestId = sent.at(-1).request_id;
-    assert.notEqual(refreshRequestId, selectionRequestId);
-
-    const refreshedRowB = { ...ROW_B, title: "Beta from newer refresh" };
-    const refreshedDetail = detailFor(refreshedRowB, "Fresh PR body");
-    surface.applyKnowledgeReceiveEvent({
-      kind: "knowledge_entries",
-      id: "win-1",
-      knowledge_kind: "pr",
-      request_id: refreshRequestId,
-      entries: [ROW_A, refreshedRowB],
-      selected_number: ROW_B.number,
-      empty_message: "",
-      refresh_enabled: true,
-    });
-    surface.applyKnowledgeReceiveEvent({
-      kind: "knowledge_detail",
-      id: "win-1",
-      knowledge_kind: "pr",
-      request_id: refreshRequestId,
-      detail: refreshedDetail,
-    });
-
-    const staleRowB = { ...ROW_B, title: "STALE selection snapshot" };
-    surface.applyKnowledgeReceiveEvent({
-      kind: "knowledge_entries",
-      id: "win-1",
-      knowledge_kind: "pr",
-      request_id: selectionRequestId,
-      entries: [staleRowB],
-      selected_number: ROW_B.number,
-      empty_message: "",
-      refresh_enabled: true,
-    });
-    surface.applyKnowledgeReceiveEvent({
-      kind: "knowledge_detail",
-      id: "win-1",
-      knowledge_kind: "pr",
-      request_id: selectionRequestId,
-      detail: detailFor(staleRowB, "STALE PR body"),
-    });
-
-    assert.deepEqual(
-      state.baseEntries.map((entry) => entry.title),
-      [ROW_A.title, refreshedRowB.title],
-      "the superseded PR selection must not overwrite the newer refresh list",
-    );
-    assert.equal(state.detail?.title, refreshedRowB.title);
-    assert.ok(
-      state.detail.sections.some((section) => section.body === "Fresh PR body"),
-      "the superseded PR detail must not overwrite the newer refresh detail",
-    );
-    surface.clearKnowledgeBridgeState("win-1");
+    try {
+      surface.mountKnowledgeWindow({ id: "win-1", preset: "pr" }, body);
+      assert.equal(body.childElementCount, 0, "retired PR GUI must not render a list or detail");
+      assert.deepEqual(sent, [], "retired PR GUI must not load, search or select");
+      assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
+    } finally {
+      surface.clearKnowledgeBridgeState("win-1");
+    }
   });
 });
 

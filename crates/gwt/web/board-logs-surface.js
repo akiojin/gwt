@@ -29,6 +29,7 @@
 import {
   applyBoardMentionNotificationFocus,
   boardEntryAudienceLabels,
+  boardEntryAuthorLabel,
   boardEntryMentionsSelf,
   boardEntryOriginActionLabel,
   boardEntryOriginLabel,
@@ -51,6 +52,7 @@ export function createBoardLogsSurface({
   pushAlertToast,
   sendWindowFocus,
   focusOrSpawnPreset,
+  onOpenOriginAgent,
   activeWorkspace,
   activeProjectTab,
   projectWindowContextById,
@@ -606,6 +608,7 @@ export function createBoardLogsSurface({
           origin_session_id: originSessionId,
           bounds: visibleBounds(),
         });
+        onOpenOriginAgent?.(originSessionId);
       }
 
       function logMatchesQuery(entry, query) {
@@ -1231,7 +1234,7 @@ export function createBoardLogsSurface({
           }
           meta.appendChild(
             document.createTextNode(
-              `${entry.author || "Unknown"} · ${boardTimestampLabel(
+              `${boardEntryAuthorLabel(entry)} · ${boardTimestampLabel(
                 entry.updated_at || entry.created_at,
               )}`,
             ),
@@ -1254,7 +1257,7 @@ export function createBoardLogsSurface({
               "button",
               "board-reply-quote",
               parent
-                ? `Reply to ${parent.author || "Unknown"}: ${boardEntryPreview(parent)}`
+                ? `Reply to ${boardEntryAuthorLabel(parent)}: ${boardEntryPreview(parent)}`
                 : "Reply to earlier Board entry",
             );
             quote.type = "button";
@@ -1450,7 +1453,7 @@ export function createBoardLogsSurface({
               "span",
               "board-reply-banner-text",
               parent
-                ? `Replying to ${parent.author || "Unknown"} - ${boardEntryPreview(parent)}`
+                ? `Replying to ${boardEntryAuthorLabel(parent)} - ${boardEntryPreview(parent)}`
                 : "Replying to earlier Board entry",
             ),
           );
@@ -1750,8 +1753,7 @@ export function createBoardLogsSurface({
 
       // SPEC-3064 Phase 3 (E6c): receive() bodies for board_* / log_*
       // events moved verbatim from app.js; the case arms in app.js delegate
-      // here. (process_line / process_console_snapshot stay in app.js with
-      // the Console window controllers.)
+      // here.
       function applyBoardLogsReceiveEvent(event) {
         switch (event.kind) {
           case "board_entries": {

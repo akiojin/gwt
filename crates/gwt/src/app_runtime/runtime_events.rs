@@ -488,16 +488,6 @@ impl AppRuntime {
             .collect()
     }
 
-    pub(crate) fn process_line_events(
-        &self,
-        line: gwt_core::process_console::ProcessLine,
-    ) -> Vec<OutboundEvent> {
-        self.project_events_for_open_surface(
-            WindowPreset::Console,
-            BackendEvent::ProcessLine { line },
-        )
-    }
-
     pub(crate) fn log_entry_events(
         &self,
         entry: gwt_core::logging::LogEvent,

@@ -24,7 +24,7 @@ test.beforeEach(async ({ page }, info) => {
   await installBackend(page, {
     narrowSettings,
     inboxFirst: info.title.startsWith("Issue #5287"),
-    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:"),
+    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862"),
     observeSkipped: info.title.startsWith("four columns preserve"),
   });
   await page.goto(liveUrl || APP_URL);
@@ -202,12 +202,6 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
   };
   for (const width of [900, 1440]) {
     await page.setViewportSize({ width, height: 1000 });
-    await page.locator(".workspace-window").evaluate((element, width) => {
-      // The fixture's initial wide window auto-fits the canvas. Use physical
-      // CSS pixels for the responsive acceptance instead of camera scaling.
-      document.getElementById("canvas-stage")!.style.transform = "none";
-      Object.assign((element as HTMLElement).style, { left: "8px", top: "8px", width: `${width - 80}px`, height: "860px" });
-    }, width);
     await capture(`${width}-default`);
     if (before) continue;
     await expect(root).toHaveAttribute("data-preview-hidden", "true");
@@ -267,12 +261,36 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
   await expect(statusPill).toHaveText("Waiting · Empty");
   await expect(statusPill).toHaveAttribute("data-tone", "idle");
   await page.setViewportSize({ width: 900, height: 1000 });
-  await page.locator(".workspace-window").evaluate(element => { (element as HTMLElement).style.width = "820px"; });
   await root.getByRole("button", { name: "Split", exact: true }).click();
   await expect(root).toHaveAttribute("data-view-mode", "split");
   const splitList = (await pane.boundingBox())!;
   const splitDetail = (await detail.boundingBox())!;
   expect(splitList.x + splitList.width, "narrow Split keeps its interactive list beside the detail pane").toBeLessThanOrEqual(splitDetail.x + 1);
+});
+
+test("Issue #5603 GitHub API read limit shows its reason and retry time, then clears", async ({ page }) => {
+  const pill = page.locator(".knowledge-monitor-pill");
+  await page.evaluate(() => (window as any).__queueStatus({
+    enabled: true, state: "idle", active_count: 0, last_error: null,
+    github_budget: { core: { throttled: true,
+      reason: "budget_reserve: resource=core remaining=0 reserve=1000",
+      backoff_until: "2026-10-16T01:59:53Z" } },
+  }));
+  await expect(pill).toHaveText("Limited · GitHub");
+  await expect(pill).toHaveAttribute("data-tone", "idle");
+  await expect(pill).toHaveAttribute("title", /GitHub API reads limited.*core.*budget_reserve.*Retry 2026-10-16T01:59:53Z/);
+  await pill.focus();
+  await expect(page.locator('.issue-control-explanation[role="tooltip"]:visible')).toContainText("Retry 2026-10-16T01:59:53Z");
+
+  await page.evaluate(() => (window as any).__queueStatus({ state: "error", last_error: "unrelated scan fault" }));
+  await expect(pill).toHaveText("⚠ Error");
+  await expect(pill).toHaveAttribute("title", /Details in notifications.*GitHub API reads limited.*Retry 2026-10-16T01:59:53Z/);
+
+  await page.evaluate(() => (window as any).__queueStatus({
+    state: "idle", last_error: null, github_budget: { core: { throttled: false } },
+  }));
+  await expect(pill).toHaveText("Running");
+  await expect(pill).toHaveAttribute("title", "");
 });
 
 test("Issue #5396 lazy preview retains DOM across unchanged list and detail replies", async ({ page }, info) => {
@@ -489,7 +507,7 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
   // A headed browser retains its physical pointer across reload. Keep this
   // notification journey clear of an unrelated card-hover explanation.
   await page.mouse.move(1590, 1090);
-  await expect(page.locator('.issue-control-explanation[role="tooltip"]')).not.toBeVisible();
+  await expect(page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]')).not.toBeVisible();
   await loadBadge.click();
   await expect(loadNotice).toBeFocused();
   await expect(loadNotice).toContainText("Issue cache read failed");
@@ -518,7 +536,7 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
   await expect(renderBadge).toBeVisible();
   await expect(page.locator(".knowledge-list")).not.toContainText("Issue card render failed");
   await page.mouse.move(1590, 1090);
-  await expect(page.locator('.issue-control-explanation[role="tooltip"]')).not.toBeVisible();
+  await expect(page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]')).not.toBeVisible();
   await renderBadge.click();
   await expect(renderNotice).toBeFocused();
   await expect(renderNotice).toContainText("Issue card render failed");
@@ -538,6 +556,68 @@ test("Issue #4862 a live delivered slice stays Active while its window binding i
   }]));
   await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
   await expect(column(page, "backlog").locator('[data-issue-number="5"]')).toHaveCount(0);
+  await expect(column(page, "queued").locator('[data-issue-number="5"]')).toHaveCount(0);
+});
+
+test("Issue #4862 failed launches with no window show their reason outside Active", async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([42, 43].map(number => ({ number, title: `Failed issue ${number}`, state: "open",
+      labels: [], related_work_refs: [{ id: `work-${number}` }] })));
+    fixture.__queueEvent({ kind: "active_work_projection", projection: { id: "stale-projection",
+      agents: [], works: [], unassigned_agents: [], journal_entries: [], active_works: [42, 43].map(number => ({
+        id: `work-${number}`, title: `Stale active Work ${number}`, active_agents: 1, agents: [], works: [],
+      })) } });
+  });
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(2);
+  await page.evaluate(() => (window as any).__queueInbox([42, 43].map((number, index) => ({ issue: { number },
+    state: index ? "agent_failed" : "launch_failed", launched_window_id: null,
+    error_message: `Issue ${number}: successor has invalid lineage` }))));
+  for (const [number, badge] of [[42, "Launch failed"], [43, "Agent failed"]] as const) {
+    const failed = column(page, "backlog").locator(`[data-issue-number="${number}"]`);
+    await expect(failed).toBeVisible();
+    await expect(failed.locator(".knowledge-row-badge")).toHaveText(badge);
+    await expect(failed.locator('[data-key="reason"]')).toHaveText(`Issue ${number}: successor has invalid lineage`);
+    await expect(failed.locator('[data-key="recovery"]')).toHaveText("Work lineage · Next: workspace.close (superseded), then issue.monitor.requeue");
+    await expect(failed.locator('[data-action="requeue-issue"]')).toBeVisible();
+    await expect(column(page, "active").locator(`[data-issue-number="${number}"]`)).toHaveCount(0);
+  }
+  await page.evaluate(() => (window as any).__queueInbox([
+    { issue: { number: 42 }, state: "agent_failed", error_message: "cannot launch successor of Work work-42: owner or execution container mismatch" },
+    { issue: { number: 43 }, state: "needs_human", error_message: "autonomous launch attempts exhausted (3/3) with an unchanging failure: Launch timed out: no window was created within 120s" },
+  ]));
+  await expect(row(page, 42).locator('[data-key="recovery"]')).toHaveText("Work owner mismatch · Next: workspace.candidates");
+  await expect(row(page, 43).locator('[data-key="recovery"]')).toHaveText("Window timeout · Next: issue.monitor.requeue");
+  await expect(row(page, 43).locator('[data-key="reason"]')).toContainText("autonomous launch attempts exhausted (3/3)");
+  await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();
+  await expect(column(page, "active").locator('[data-issue-number="43"]')).toHaveCount(0);
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 43 }, state: "needs_human",
+    error_message: "autonomous launch attempts exhausted (3/3) with an unchanging failure: successor work-43-next is duplicated; use workspace.close" }]));
+  await expect(column(page, "backlog").locator('[data-issue-number="43"]')).toBeVisible();
+  await expect(row(page, 43).locator('[data-key="recovery"]')).toHaveText("Launch failure · Next: issue.monitor.status");
+  await expect(page.locator('[data-queue-column]')).toHaveCount(4);
+});
+
+test("Issue #4862 PM stop stays Held outside the queue while a stale pane lingers", async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([{ number: 5, title: "PM stopped issue", state: "open", labels: [],
+      monitor_state: "launched", related_work_refs: [{ id: "work-5" }] }]);
+    fixture.__queueEvent({ kind: "active_work_projection", projection: { id: "stale-projection", agents: [], works: [],
+      unassigned_agents: [], journal_entries: [], active_works: [{ id: "work-5", active_agents: 1, agents: [], works: [] }] } });
+  });
+  await confirm(page, []);
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "launch_failed", error_message: "old failed attempt" }]));
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText("Running");
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "needs_human", error_message: "stopped: PM paused for investigation" }]));
+  const held = column(page, "backlog").locator('[data-issue-number="5"]');
+  await expect(held).toBeVisible();
+  await expect(held.locator(".knowledge-row-badge")).toHaveText("Held");
+  await expect(held.locator(".knowledge-row-badge")).toHaveAttribute("data-tone", "idle");
+  await expect(held.locator('[data-key="reason"]')).toHaveText("PM paused for investigation");
+  await expect(held.locator('[data-key="recovery"]')).toHaveCount(0);
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toHaveCount(0);
   await expect(column(page, "queued").locator('[data-issue-number="5"]')).toHaveCount(0);
 });
 
@@ -574,7 +654,7 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
   expect(hiddenWidth).toBeGreaterThan(visibleWidth+100);
   expect(Math.abs(hiddenWidth-(await page.locator(".issue-list-shell").boundingBox())!.width), "hidden preview gives the board full width").toBeLessThan(2);
   await expect(page.locator(".knowledge-detail-pane")).not.toBeVisible();
-  await page.locator(".workspace-window").evaluate(element => { (element as HTMLElement).style.width="850px"; });
+  await page.setViewportSize({ width: 900, height: 1000 });
   for (const phase of ["backlog","queued","active","done"]) {
     expect((await column(page,phase).boundingBox())!.width).toBeGreaterThanOrEqual(262);
   }
@@ -588,7 +668,7 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
 });
 
 test("T-7a: current labels explain themselves with keyboard focus and hover", async ({ page }) => {
-  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  const popup = page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]');
   const controlMessages = () => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
     message.kind.startsWith("set_issue_monitor_") || message.kind.startsWith("issue_monitor_queue_")
       || message.kind === "update_viewport"));
@@ -738,7 +818,7 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
   await expect(chips).toHaveText(["Min tier 0", "2 agent failures → ≥ tier 1"]);
   await expect(row(page, 4).locator('[data-kind="tier"]')).toHaveCount(0);
   const select = row(page, 3).locator(".knowledge-row-select");
-  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  const popup = page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]');
   await page.mouse.move(1590, 1090);
   await select.focus();
   await expect(popup).toContainText("zero-based");
@@ -771,7 +851,7 @@ test("T-7b.2b.2: Running tier uses exact live window and clears stale explanatio
   await confirm(page, [3, 4], { tier_facts: facts });
   const chip = row(page, 5).locator('[data-key="tier-running"]');
   const select = row(page, 5).locator(".knowledge-row-select");
-  const popup = page.locator('.issue-control-explanation[role="tooltip"]');
+  const popup = page.locator('.issue-control-explanation[id^="issue-control-explanation-"][role="tooltip"]');
   await expect(chip).toHaveText("Running tier 0");
   await expect(select.locator('[tabindex="0"]')).toHaveCount(0);
   // Settle the existing preview's initial agent uptime projection before pressing a row.
@@ -936,8 +1016,11 @@ test("live launched state survives stale cache and retains full queue positions"
 });
 
 test("an unfocused Issue window reflects a launch while animation frames are suspended", async ({ page }, info) => {
-  await page.evaluate(() => (window as any).__queueAddForeground());
-  await expect(page.locator('[data-id="tab-queue::console"]')).toHaveClass(/focused/);
+  await page.getByRole("button", { name: "Split view", exact: true }).click();
+  const right = page.getByRole("region", { name: "Right pane", exact: true });
+  await right.getByRole("combobox").selectOption("settings");
+  await right.locator(".workspace-window .titlebar").click();
+  await expect(right.locator(".workspace-window")).toHaveClass(/focused/);
   await expect(page.locator('[data-id="tab-queue::issue-1"]')).not.toHaveClass(/focused/);
   const elapsed = await page.evaluate(async () => {
     const scheduleFrame = window.requestAnimationFrame;
@@ -1022,11 +1105,6 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
         const agent=windows.find((item:any)=>item.preset==="agent");
         if(extra===null) workspace.tabs[0].workspace.windows=windows.filter((item:any)=>item!==agent);
         else Object.assign(agent,extra);
-        this.emit({kind:"workspace_state",workspace});
-      }; fixture.__queueAddForeground=()=>{
-        const workspace=fixture.__queueWorkspace;
-        workspace.tabs[0].workspace.windows.push({id:"tab-queue::console",title:"Console",preset:"console",
-          geometry:{x:1000,y:80,width:500,height:500},z_index:2,status:"running",persist:true,minimized:false,maximized:false});
         this.emit({kind:"workspace_state",workspace});
       }; fixture.__queueInbox=(items:unknown[])=>this.dispatchEvent(new MessageEvent("message",{
         data:JSON.stringify({kind:"issue_monitor_inbox",items})

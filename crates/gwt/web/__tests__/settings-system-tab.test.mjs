@@ -700,6 +700,74 @@ test("System tab exposes Launch GWT at login autostart control", () => {
   );
 });
 
+test("autostart checking and failures stay local and preserve the last confirmed state", () => {
+  const { document, Event } = parseHTML("<html><body></body></html>");
+  const state = {
+    autostartEnabled: false, autostartPreviousEnabled: false,
+    autostartLoaded: false, autostartPending: false, autostartChecking: true,
+    statusMessage: "Saved system settings.", statusKind: "success",
+  };
+  const messages = [];
+  const createDiv = className => {
+    const element = document.createElement("div");
+    element.className = className;
+    return element;
+  };
+  const renderSource = extractFunctionSource(settingsSource, "renderSystemPanel");
+  const autostartSource = renderSource.slice(
+    renderSource.indexOf('const autostartSection ='),
+    renderSource.indexOf('panel.appendChild(section)'),
+  );
+  const { render, applyAutostartStatus, applyAutostartError } = Function(
+    "document", "systemSettingsState", "createDiv", "send", `
+      const renderSystemPanelInAllSettingsWindows = () => {};
+      ${extractFunctionSource(settingsSource, "applyAutostartStatus")}
+      ${extractFunctionSource(settingsSource, "applyAutostartError")}
+      function render() { ${autostartSource}; return autostartSection; }
+      return { render, applyAutostartStatus, applyAutostartError };
+    `,
+  )(document, state, createDiv, message => messages.push(message));
+  const toggle = section => section.querySelector('input[type="checkbox"]');
+  let section = render();
+  assert.equal(toggle(section).disabled, true, "unknown autostart cannot be changed");
+  assert.match(section.textContent, /Checking login launch status/);
+
+  applyAutostartError({ message: "Status query timed out." });
+  section = render();
+  assert.equal(toggle(section).disabled, true, "failed initial status remains unknown");
+  assert.match(section.textContent, /unavailable.*Status query timed out/i);
+  assert.doesNotMatch(section.textContent, /Checking login launch status/);
+
+  applyAutostartStatus({ enabled: true, mechanism: "fixture", install_path: "/fixture/gwt" });
+  state.autostartPreviousEnabled = false;
+  state.autostartChecking = true;
+  applyAutostartError({ message: "Refresh query unavailable." });
+  assert.equal(state.autostartEnabled, true, "refresh failure preserves the last confirmed value");
+  section = render();
+  assert.equal(toggle(section).disabled, false);
+  assert.equal(toggle(section).checked, true);
+  toggle(section).checked = false;
+  toggle(section).dispatchEvent(new Event("change"));
+  assert.equal(toggle(render()).disabled, true, "saving disables only the autostart control");
+  assert.deepEqual(messages, [{ kind: "update_autostart", enabled: false }]);
+  applyAutostartError({ message: "Update denied." });
+  section = render();
+  assert.equal(toggle(section).checked, true, "failed update restores the known value");
+  assert.equal(toggle(section).disabled, false, "known status allows retry");
+  assert.match(section.textContent, /Update denied/);
+  applyAutostartStatus({ enabled: false }, "Saved login launch setting.");
+  assert.match(render().textContent, /Saved login launch setting/);
+  assert.equal(state.statusMessage, "Saved system settings.");
+  assert.equal(state.statusKind, "success");
+  const openSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
+  assert.match(openSource, /const shouldRequestAutostartStatus = !systemSettingsState\.autostartPending\s*&& !systemSettingsState\.autostartChecking/,
+    "reopening Settings must preserve an in-flight query or update");
+  assert.match(openSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*systemSettingsState\.autostartChecking = true/,
+    "only a new query starts checking");
+  assert.match(openSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*send\(\{ kind: "get_autostart_status" \}\)/,
+    "use the same decision when sending the query");
+});
+
 test("renderSettingsWindow requests current settings via get_system_settings", () => {
   assert.match(
     settingsSource,

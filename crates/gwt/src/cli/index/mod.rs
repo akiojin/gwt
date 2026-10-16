@@ -61,6 +61,7 @@ pub enum IndexScope {
     Discussions,
     Board,
     Works,
+    Reports,
     Files,
     FilesDocs,
 }
@@ -115,6 +116,7 @@ fn parse_rebuild_scope(args: &[String]) -> Result<IndexScope, CliParseError> {
         "discussions" => Ok(IndexScope::Discussions),
         "board" => Ok(IndexScope::Board),
         "works" => Ok(IndexScope::Works),
+        "reports" => Ok(IndexScope::Reports),
         "files" => Ok(IndexScope::Files),
         "files-docs" => Ok(IndexScope::FilesDocs),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -598,6 +600,12 @@ mod tests {
                 "smoke_test": "passed"
             },
             "status": {
+                "reports": {
+                    "healthy": true,
+                    "repair_required": false,
+                    "reason": "ready",
+                    "document_count": 3
+                },
                 "files": {
                     "healthy": false,
                     "repair_required": true,
@@ -616,6 +624,7 @@ mod tests {
         let mut out = String::new();
         render_index_status(&mut out, &report, &payload);
         assert!(out.contains("runtime: ready asset=cccccccccccccccc smoke=passed"));
+        assert!(out.contains("reports: ready reason=ready documents=3 repair_required=false"));
         assert!(out
             .contains("files: unhealthy reason=build_incomplete documents=0 repair_required=true"));
         assert!(out.contains("files: build phase=base done=16 total=64 resumable=true"));

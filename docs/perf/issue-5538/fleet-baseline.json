@@ -1,0 +1,2283 @@
+{
+  "schema_version": 1,
+  "issue": 5538,
+  "evidence_kind": "historical_real_fleet_baseline",
+  "post_change_measurement": false,
+  "ac3_literal_proven": false,
+  "window": {
+    "started_at": "2026-10-15T06:45:46.6757267Z",
+    "ended_at_exclusive": "2026-10-15T07:15:46.6757267Z",
+    "duration_seconds": 1800,
+    "slow_handler_filter": "elapsed_ms > 50",
+    "source_timer_warning_threshold_ms": 30
+  },
+  "source": {
+    "issue": 5385,
+    "context": "../issue-5385/context.json",
+    "samples": "../issue-5385/samples.jsonl",
+    "context_sha256": "f0c5f298161efbd016e5c60f617bc80282599855d62391900c17258ec8d49f0e",
+    "samples_sha256": "622fb2c5f83cfbdc4e7f03aae10c4d1a98c0341dbb3ba3109e80b673f946c130",
+    "log": "USERPROFILE/.gwt/logs/gwt.log.2026-10-15",
+    "log_sha256": "3d79fd919a10c8ad34ba897d8e3cf60ba1ead2d1c1351bc2388f3b64c60e2a4f",
+    "log_size_bytes": 103450125,
+    "raw_record_selector": {
+      "target": "gwt.frontend.timing",
+      "message_contains": "blocked the GUI event loop"
+    },
+    "sanitization": "Only timestamp, event, elapsed_ms are retained from matching warning records; auxiliary frontend latency fields are separate and never added to outer dispatch totals."
+  },
+  "gui": {
+    "gui_pid": 32708,
+    "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+    "gui_version": "9.121.1",
+    "gui_sha256": "3d35cf1b0264d3e6c7176fd5bc4757b11b730fdd47297e79b0d04ffb9aae5243",
+    "release_tag": "v9.121.1",
+    "release_commit": "ed1f5d7feb4c0a7ba80cf0a72e6a990e890fa4db"
+  },
+  "fleet_roster": [
+    {
+      "pane_id": "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+      "status": "running",
+      "provider": "codex",
+      "agent_name": "Virelan",
+      "source_session": null,
+      "created_at": "2026-10-15T06:35:52.353860400+00:00",
+      "role": "implementation_agent"
+    },
+    {
+      "pane_id": "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+      "status": "running",
+      "provider": "codex",
+      "agent_name": "Valen",
+      "source_session": null,
+      "created_at": "2026-10-15T06:40:16.132007600+00:00",
+      "role": "implementation_agent"
+    },
+    {
+      "pane_id": "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+      "status": "running",
+      "provider": "codex",
+      "agent_name": "Cevrin",
+      "source_session": null,
+      "created_at": "2026-10-15T06:40:17.100079100+00:00",
+      "role": "implementation_agent"
+    },
+    {
+      "pane_id": "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+      "status": "running",
+      "provider": "codex",
+      "agent_name": "Velrin",
+      "source_session": null,
+      "created_at": "2026-10-15T06:40:20.165443300+00:00",
+      "role": "implementation_agent"
+    },
+    {
+      "pane_id": "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+      "status": "running",
+      "provider": "codex",
+      "agent_name": null,
+      "source_session": null,
+      "created_at": "2026-10-15T06:40:23.270396700+00:00",
+      "role": "implementation_agent"
+    },
+    {
+      "pane_id": "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+      "status": "running",
+      "provider": "codex",
+      "agent_name": "Veylan",
+      "source_session": null,
+      "created_at": "2026-10-15T06:40:27.369362+00:00",
+      "role": "implementation_agent"
+    },
+    {
+      "pane_id": "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+      "status": "running",
+      "provider": "codex",
+      "agent_name": "Veylin",
+      "source_session": null,
+      "created_at": "2026-10-15T06:40:27.957282100+00:00",
+      "role": "implementation_agent"
+    },
+    {
+      "pane_id": "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416",
+      "status": "running",
+      "provider": "codex",
+      "agent_name": "Ceryn",
+      "source_session": null,
+      "created_at": "2026-10-15T06:41:30.542898900+00:00",
+      "role": "implementation_agent"
+    }
+  ],
+  "fleet_samples": [
+    {
+      "minute": 0,
+      "observed_at": "2026-10-15T06:45:46.6757267Z",
+      "elapsed_seconds": 0.0147667,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 1,
+      "observed_at": "2026-10-15T06:46:46.6776707Z",
+      "elapsed_seconds": 60.0118911,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 2,
+      "observed_at": "2026-10-15T06:47:46.6867928Z",
+      "elapsed_seconds": 120.0210129,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 3,
+      "observed_at": "2026-10-15T06:48:46.8959954Z",
+      "elapsed_seconds": 180.2302102,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 4,
+      "observed_at": "2026-10-15T06:49:46.6677695Z",
+      "elapsed_seconds": 240.001984,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 5,
+      "observed_at": "2026-10-15T06:50:46.6745989Z",
+      "elapsed_seconds": 300.0088152,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 6,
+      "observed_at": "2026-10-15T06:51:46.6596693Z",
+      "elapsed_seconds": 359.9938804,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 7,
+      "observed_at": "2026-10-15T06:52:46.6752082Z",
+      "elapsed_seconds": 420.009418,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 8,
+      "observed_at": "2026-10-15T06:53:46.6703541Z",
+      "elapsed_seconds": 480.0045643,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 9,
+      "observed_at": "2026-10-15T06:54:46.6750783Z",
+      "elapsed_seconds": 540.0092925,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 10,
+      "observed_at": "2026-10-15T06:55:46.6847714Z",
+      "elapsed_seconds": 600.0189858,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 11,
+      "observed_at": "2026-10-15T06:56:46.6675597Z",
+      "elapsed_seconds": 660.0017703,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 12,
+      "observed_at": "2026-10-15T06:57:46.6734036Z",
+      "elapsed_seconds": 720.007614,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 13,
+      "observed_at": "2026-10-15T06:58:46.7589280Z",
+      "elapsed_seconds": 780.0931399,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 14,
+      "observed_at": "2026-10-15T06:59:46.6675420Z",
+      "elapsed_seconds": 840.0017526,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 15,
+      "observed_at": "2026-10-15T07:00:46.6833800Z",
+      "elapsed_seconds": 900.0175966,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 16,
+      "observed_at": "2026-10-15T07:01:46.6836910Z",
+      "elapsed_seconds": 960.0179032,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 17,
+      "observed_at": "2026-10-15T07:02:46.6790473Z",
+      "elapsed_seconds": 1020.0132754,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 18,
+      "observed_at": "2026-10-15T07:03:46.6747397Z",
+      "elapsed_seconds": 1080.0089483,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 19,
+      "observed_at": "2026-10-15T07:04:46.6830822Z",
+      "elapsed_seconds": 1140.017291,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 20,
+      "observed_at": "2026-10-15T07:05:46.6825577Z",
+      "elapsed_seconds": 1200.0167686,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 21,
+      "observed_at": "2026-10-15T07:06:46.6833893Z",
+      "elapsed_seconds": 1260.0175981,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 22,
+      "observed_at": "2026-10-15T07:07:46.6744732Z",
+      "elapsed_seconds": 1320.0086816,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 0
+    },
+    {
+      "minute": 23,
+      "observed_at": "2026-10-15T07:08:46.6866105Z",
+      "elapsed_seconds": 1380.0208201,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 24,
+      "observed_at": "2026-10-15T07:09:46.6739905Z",
+      "elapsed_seconds": 1440.0081996,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 25,
+      "observed_at": "2026-10-15T07:10:46.6675216Z",
+      "elapsed_seconds": 1500.0017309,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 26,
+      "observed_at": "2026-10-15T07:11:46.6838081Z",
+      "elapsed_seconds": 1560.018017,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 27,
+      "observed_at": "2026-10-15T07:12:46.6833295Z",
+      "elapsed_seconds": 1620.0175378,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 28,
+      "observed_at": "2026-10-15T07:13:46.6836116Z",
+      "elapsed_seconds": 1680.0178203,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 29,
+      "observed_at": "2026-10-15T07:14:46.6672289Z",
+      "elapsed_seconds": 1740.0014372,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 30,
+      "observed_at": "2026-10-15T07:15:46.6688486Z",
+      "elapsed_seconds": 1800.0030621,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    },
+    {
+      "minute": 31,
+      "observed_at": "2026-10-15T07:16:46.6688658Z",
+      "elapsed_seconds": 1860.0030738,
+      "gui_pid": 32708,
+      "gui_started_at": "2026-10-15T06:33:37.3790587Z",
+      "running_implementation_pane_ids": [
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1409",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1410",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1411",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1412",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1413",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1414",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1415",
+        "project-694f0f381b744cc59c1956d564ce1d1e::agent-1416"
+      ],
+      "running_pm_count": 1
+    }
+  ],
+  "provider_process_census": {
+    "observed_at": "2026-10-15T06:51:57.7876071Z",
+    "codex_processes": [
+      {
+        "ProcessId": 29976,
+        "ParentProcessId": 31812,
+        "Name": "codex.exe",
+        "created_at": "2026-10-15T06:35:53.6161270Z"
+      },
+      {
+        "ProcessId": 22564,
+        "ParentProcessId": 23492,
+        "Name": "codex.exe",
+        "created_at": "2026-10-15T06:40:17.4504090Z"
+      },
+      {
+        "ProcessId": 30528,
+        "ParentProcessId": 31528,
+        "Name": "codex.exe",
+        "created_at": "2026-10-15T06:40:18.4829930Z"
+      },
+      {
+        "ProcessId": 4940,
+        "ParentProcessId": 36384,
+        "Name": "codex.exe",
+        "created_at": "2026-10-15T06:40:21.6794120Z"
+      },
+      {
+        "ProcessId": 38268,
+        "ParentProcessId": 12220,
+        "Name": "codex.exe",
+        "created_at": "2026-10-15T06:40:24.9255400Z"
+      },
+      {
+        "ProcessId": 3456,
+        "ParentProcessId": 12256,
+        "Name": "codex.exe",
+        "created_at": "2026-10-15T06:40:29.1368820Z"
+      },
+      {
+        "ProcessId": 38440,
+        "ParentProcessId": 2644,
+        "Name": "codex.exe",
+        "created_at": "2026-10-15T06:40:29.7591550Z"
+      },
+      {
+        "ProcessId": 29240,
+        "ParentProcessId": 29528,
+        "Name": "codex.exe",
+        "created_at": "2026-10-15T06:41:36.3954040Z"
+      }
+    ],
+    "other_provider_process_count": 5,
+    "pane_to_process_mapping_recorded": false
+  },
+  "slow_dispatch_records": [
+    {
+      "timestamp": "2026-10-15T15:45:48.850359500+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 76
+    },
+    {
+      "timestamp": "2026-10-15T15:45:48.908261600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T15:45:54.888617700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 62
+    },
+    {
+      "timestamp": "2026-10-15T15:46:00.985255100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 62
+    },
+    {
+      "timestamp": "2026-10-15T15:46:07.077283300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:46:13.156417900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:46:19.122128+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:46:19.523421400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 254
+    },
+    {
+      "timestamp": "2026-10-15T15:46:25.141099800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:46:31.128795100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:46:37.055328500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T15:46:43.003020200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 63
+    },
+    {
+      "timestamp": "2026-10-15T15:46:48.671543+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 72
+    },
+    {
+      "timestamp": "2026-10-15T15:46:48.959133900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T15:46:54.968479700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:47:00.942654300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T15:47:06.906950100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T15:47:12.816440900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:47:18.508269+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 66
+    },
+    {
+      "timestamp": "2026-10-15T15:47:18.736762900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:47:24.741723900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:47:30.711024900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T15:47:36.968896200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:47:42.916677500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T15:47:48.356554700+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 76
+    },
+    {
+      "timestamp": "2026-10-15T15:47:48.811524200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:47:54.680167900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T15:48:00.602244500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T15:48:12.708763900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 58
+    },
+    {
+      "timestamp": "2026-10-15T15:48:17.796442400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 65
+    },
+    {
+      "timestamp": "2026-10-15T15:48:18.664043500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T15:48:24.779149400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 68
+    },
+    {
+      "timestamp": "2026-10-15T15:48:30.819994200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:48:36.940583900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T15:48:42.908417100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:48:48.780766700+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 72
+    },
+    {
+      "timestamp": "2026-10-15T15:48:48.942895300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:48:55.249014+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 77
+    },
+    {
+      "timestamp": "2026-10-15T15:49:01.215892100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T15:49:07.016715400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T15:49:17.876836400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 316
+    },
+    {
+      "timestamp": "2026-10-15T15:49:18.859245100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T15:49:24.861371700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T15:49:30.796204400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:49:42.775159300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 77
+    },
+    {
+      "timestamp": "2026-10-15T15:49:48.152728800+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 79
+    },
+    {
+      "timestamp": "2026-10-15T15:49:48.950876200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 75
+    },
+    {
+      "timestamp": "2026-10-15T15:49:55.371122400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 60
+    },
+    {
+      "timestamp": "2026-10-15T15:49:57.202449700+09:00",
+      "event": "BoardProjectionRefreshed",
+      "elapsed_ms": 92
+    },
+    {
+      "timestamp": "2026-10-15T15:50:01.592550800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:50:07.652024400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:50:13.744362400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 62
+    },
+    {
+      "timestamp": "2026-10-15T15:50:19.690045200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:50:23.445119200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 69
+    },
+    {
+      "timestamp": "2026-10-15T15:50:25.672065200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T15:50:31.796318+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:50:37.957584900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:50:48.188685600+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 235
+    },
+    {
+      "timestamp": "2026-10-15T15:50:55.998864600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:51:02.090002800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T15:51:08.186175300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T15:51:14.265170500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 66
+    },
+    {
+      "timestamp": "2026-10-15T15:51:18.481162+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 71
+    },
+    {
+      "timestamp": "2026-10-15T15:51:20.318223200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:51:26.243610300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:51:32.156881+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:51:38.255619900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:51:44.338282300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:51:48.340278100+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 185
+    },
+    {
+      "timestamp": "2026-10-15T15:51:50.244018400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:51:56.404532500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T15:52:02.419530800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:52:08.422131300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T15:52:14.447755400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:52:18.312123900+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 65
+    },
+    {
+      "timestamp": "2026-10-15T15:52:20.378116700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 69
+    },
+    {
+      "timestamp": "2026-10-15T15:52:26.384044600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T15:52:32.325045200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 70
+    },
+    {
+      "timestamp": "2026-10-15T15:52:38.429924100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T15:52:47.143196800+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 67
+    },
+    {
+      "timestamp": "2026-10-15T15:52:50.032291700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:53:16.580051200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 315
+    },
+    {
+      "timestamp": "2026-10-15T15:53:24.999102500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:53:44.926311200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 64
+    },
+    {
+      "timestamp": "2026-10-15T15:53:48.100129100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:54:05.763986800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:54:11.738364+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:54:16.896567800+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 64
+    },
+    {
+      "timestamp": "2026-10-15T15:54:23.701854+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 791
+    },
+    {
+      "timestamp": "2026-10-15T15:54:28.778311500+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 622
+    },
+    {
+      "timestamp": "2026-10-15T15:54:29.373925100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T15:54:35.302154700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T15:54:41.282156100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 63
+    },
+    {
+      "timestamp": "2026-10-15T15:54:47.131280400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 85
+    },
+    {
+      "timestamp": "2026-10-15T15:54:47.270391800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T15:54:53.176895100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:54:59.035398200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T15:55:04.977352600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 67
+    },
+    {
+      "timestamp": "2026-10-15T15:55:10.960482+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:55:17.023859700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:55:22.958392200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 72
+    },
+    {
+      "timestamp": "2026-10-15T15:55:23.014231100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T15:55:29.083946+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T15:55:35.014890100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:55:47.172371100+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 73
+    },
+    {
+      "timestamp": "2026-10-15T15:56:04.358130800+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 742
+    },
+    {
+      "timestamp": "2026-10-15T15:56:04.562122100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 61
+    },
+    {
+      "timestamp": "2026-10-15T15:56:10.408047+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:56:13.098214100+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 698
+    },
+    {
+      "timestamp": "2026-10-15T15:56:16.257012100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:56:16.470267900+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 65
+    },
+    {
+      "timestamp": "2026-10-15T15:56:22.276390300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T15:56:28.262052100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:56:34.319956700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:56:40.463000700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:56:47.541025100+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 69
+    },
+    {
+      "timestamp": "2026-10-15T15:56:58.455429800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T15:57:10.284355600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T15:57:16.275823700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 58
+    },
+    {
+      "timestamp": "2026-10-15T15:57:16.596649300+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 65
+    },
+    {
+      "timestamp": "2026-10-15T15:57:30.615171700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:57:36.651057300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:57:42.506004400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:57:48.482033+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T15:57:50.358612100+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 70
+    },
+    {
+      "timestamp": "2026-10-15T15:58:00.280338+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T15:58:12.230179800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 75
+    },
+    {
+      "timestamp": "2026-10-15T15:58:16.671876200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 78
+    },
+    {
+      "timestamp": "2026-10-15T15:58:23.974618100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:58:29.916920800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 58
+    },
+    {
+      "timestamp": "2026-10-15T15:58:35.984773600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 68
+    },
+    {
+      "timestamp": "2026-10-15T15:58:42.363298600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 58
+    },
+    {
+      "timestamp": "2026-10-15T15:58:48.722766+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 64
+    },
+    {
+      "timestamp": "2026-10-15T15:58:48.838237900+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 77
+    },
+    {
+      "timestamp": "2026-10-15T15:58:55.005812100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 65
+    },
+    {
+      "timestamp": "2026-10-15T15:59:01.016807100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 61
+    },
+    {
+      "timestamp": "2026-10-15T15:59:06.921980500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T15:59:12.892107700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 60
+    },
+    {
+      "timestamp": "2026-10-15T15:59:18.536788+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 120
+    },
+    {
+      "timestamp": "2026-10-15T15:59:18.856532200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T15:59:24.877006900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 61
+    },
+    {
+      "timestamp": "2026-10-15T15:59:30.792310+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T15:59:42.534063400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 62
+    },
+    {
+      "timestamp": "2026-10-15T15:59:47.035930400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 71
+    },
+    {
+      "timestamp": "2026-10-15T15:59:54.191832300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T16:00:00.068883+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:00:06.107707600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T16:00:12.035695100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 58
+    },
+    {
+      "timestamp": "2026-10-15T16:00:18.092625800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T16:00:23.403738400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 163
+    },
+    {
+      "timestamp": "2026-10-15T16:00:24.096867500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T16:00:35.947857400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:00:41.790771200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:00:47.394298700+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 87
+    },
+    {
+      "timestamp": "2026-10-15T16:00:47.745238700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 80
+    },
+    {
+      "timestamp": "2026-10-15T16:00:59.423975900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T16:01:05.240361900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:01:11.120385600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:01:17.051614100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:01:17.205714+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 74
+    },
+    {
+      "timestamp": "2026-10-15T16:01:22.867947800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:01:34.472300100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:01:40.248749100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:01:46.055087900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T16:01:47.083588900+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 72
+    },
+    {
+      "timestamp": "2026-10-15T16:01:51.842884100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:01:57.678449+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:02:03.558009+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T16:02:09.498927400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 68
+    },
+    {
+      "timestamp": "2026-10-15T16:02:20.467605300+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 86
+    },
+    {
+      "timestamp": "2026-10-15T16:02:20.606235100+09:00",
+      "event": "MainEventsCleared",
+      "elapsed_ms": 73
+    },
+    {
+      "timestamp": "2026-10-15T16:02:21.050424100+09:00",
+      "event": "MainEventsCleared",
+      "elapsed_ms": 76
+    },
+    {
+      "timestamp": "2026-10-15T16:02:31.525913200+09:00",
+      "event": "IssueMonitorDaemonInbox",
+      "elapsed_ms": 143
+    },
+    {
+      "timestamp": "2026-10-15T16:02:31.693091800+09:00",
+      "event": "IssueMonitorDaemonInbox",
+      "elapsed_ms": 112
+    },
+    {
+      "timestamp": "2026-10-15T16:02:31.790275100+09:00",
+      "event": "IssueMonitorDaemonInbox",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:02:31.846022900+09:00",
+      "event": "IssueMonitorDaemonInbox",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:02:33.351750700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:02:35.616515300+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 334
+    },
+    {
+      "timestamp": "2026-10-15T16:02:39.361300500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:02:45.260467500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T16:02:56.984540+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:02:57.728888400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 70
+    },
+    {
+      "timestamp": "2026-10-15T16:03:03.000909+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:03:08.834462300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:03:26.431474700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T16:03:26.796372200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 72
+    },
+    {
+      "timestamp": "2026-10-15T16:03:38.003452200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:03:49.790572900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 61
+    },
+    {
+      "timestamp": "2026-10-15T16:03:55.760337200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T16:03:56.729854200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 296
+    },
+    {
+      "timestamp": "2026-10-15T16:04:07.573697100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:04:13.418710200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:04:19.349241100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T16:04:25.346949700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T16:04:27.704525200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 75
+    },
+    {
+      "timestamp": "2026-10-15T16:04:31.273071800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 63
+    },
+    {
+      "timestamp": "2026-10-15T16:04:37.147634200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T16:04:42.975097500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:04:48.827715300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:04:55.104618700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T16:04:57.687125900+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 78
+    },
+    {
+      "timestamp": "2026-10-15T16:05:12.927565600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:05:18.939979500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 56
+    },
+    {
+      "timestamp": "2026-10-15T16:05:25.013848500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 58
+    },
+    {
+      "timestamp": "2026-10-15T16:05:30.896756700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:05:32.924315700+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 79
+    },
+    {
+      "timestamp": "2026-10-15T16:05:37.155463700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:05:43.191288+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:05:51.503089300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:05:56.876185200+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 506
+    },
+    {
+      "timestamp": "2026-10-15T16:05:58.547358800+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 68
+    },
+    {
+      "timestamp": "2026-10-15T16:06:03.073895900+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 476
+    },
+    {
+      "timestamp": "2026-10-15T16:06:03.228160100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.130509500+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 423
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.546806300+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 415
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.965024100+09:00",
+      "event": "Frontend",
+      "elapsed_ms": 417
+    },
+    {
+      "timestamp": "2026-10-15T16:06:20.994750+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T16:06:26.951480500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 60
+    },
+    {
+      "timestamp": "2026-10-15T16:06:27.427737300+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 70
+    },
+    {
+      "timestamp": "2026-10-15T16:06:32.752826100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:06:56.118281500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:06:57.496583200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 278
+    },
+    {
+      "timestamp": "2026-10-15T16:07:02.114611900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:07:08.359118+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 59
+    },
+    {
+      "timestamp": "2026-10-15T16:07:26.087417700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:07:28.403449+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 320
+    },
+    {
+      "timestamp": "2026-10-15T16:07:31.980060800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 67
+    },
+    {
+      "timestamp": "2026-10-15T16:07:43.606333+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:07:49.566759300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:07:55.471679700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T16:07:56.002511600+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 66
+    },
+    {
+      "timestamp": "2026-10-15T16:08:01.307366300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:08:19.073914200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:08:24.943184500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T16:08:26.911243+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 207
+    },
+    {
+      "timestamp": "2026-10-15T16:08:36.633756600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:08:42.670135700+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:08:48.623153200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 58
+    },
+    {
+      "timestamp": "2026-10-15T16:08:54.506959100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:08:57.329124400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 150
+    },
+    {
+      "timestamp": "2026-10-15T16:09:00.247715200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 61
+    },
+    {
+      "timestamp": "2026-10-15T16:09:26.530334200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 332
+    },
+    {
+      "timestamp": "2026-10-15T16:09:29.544989200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:09:41.246203300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 58
+    },
+    {
+      "timestamp": "2026-10-15T16:09:47.084284+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T16:09:56.585328100+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 72
+    },
+    {
+      "timestamp": "2026-10-15T16:10:10.221375400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:10:15.981776100+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 67
+    },
+    {
+      "timestamp": "2026-10-15T16:10:29.728668200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 150
+    },
+    {
+      "timestamp": "2026-10-15T16:10:44.994633600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 54
+    },
+    {
+      "timestamp": "2026-10-15T16:10:56.362621500+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 69
+    },
+    {
+      "timestamp": "2026-10-15T16:11:08.034662900+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:11:25.451410500+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 315
+    },
+    {
+      "timestamp": "2026-10-15T16:11:42.706742400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:11:48.589999800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 55
+    },
+    {
+      "timestamp": "2026-10-15T16:11:56.941536400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 318
+    },
+    {
+      "timestamp": "2026-10-15T16:12:25.231846200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 174
+    },
+    {
+      "timestamp": "2026-10-15T16:12:54.983988700+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 314
+    },
+    {
+      "timestamp": "2026-10-15T16:13:03.209904600+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:13:25.265325400+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 71
+    },
+    {
+      "timestamp": "2026-10-15T16:13:31.954686300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 52
+    },
+    {
+      "timestamp": "2026-10-15T16:13:49.303665200+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 51
+    },
+    {
+      "timestamp": "2026-10-15T16:13:55.117083500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T16:13:56.235562900+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 315
+    },
+    {
+      "timestamp": "2026-10-15T16:14:00.834269300+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 57
+    },
+    {
+      "timestamp": "2026-10-15T16:14:17.985596400+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:14:25.752347200+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 320
+    },
+    {
+      "timestamp": "2026-10-15T16:14:29.498992500+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 53
+    },
+    {
+      "timestamp": "2026-10-15T16:14:40.874048800+09:00",
+      "event": "IssueMonitorCapacityChanged",
+      "elapsed_ms": 65
+    },
+    {
+      "timestamp": "2026-10-15T16:14:55.136828900+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 64
+    },
+    {
+      "timestamp": "2026-10-15T16:15:29.096583900+09:00",
+      "event": "ProviderUsageSnapshot",
+      "elapsed_ms": 64
+    }
+  ],
+  "frontend_latency_details": [
+    {
+      "timestamp": "2026-10-15T15:54:23.701781700+09:00",
+      "event": "SetIssueMonitorAutonomousMode",
+      "handler_ms": 791,
+      "queue_wait_ms": 0,
+      "receive_to_complete_ms": 791,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T15:54:28.778213400+09:00",
+      "event": "SetIssueMonitorEnabled",
+      "handler_ms": 622,
+      "queue_wait_ms": 0,
+      "receive_to_complete_ms": 622,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T15:56:04.358024900+09:00",
+      "event": "SetIssueMonitorEnabled",
+      "handler_ms": 742,
+      "queue_wait_ms": 0,
+      "receive_to_complete_ms": 742,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T15:56:13.098145900+09:00",
+      "event": "LaunchWizardAction",
+      "handler_ms": 698,
+      "queue_wait_ms": 0,
+      "receive_to_complete_ms": 698,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T15:59:18.537026400+09:00",
+      "event": "UpdateWindowGeometry",
+      "handler_ms": 0,
+      "queue_wait_ms": 113,
+      "receive_to_complete_ms": 113,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:02:20.446478+09:00",
+      "event": "LoadKnowledgeBridge",
+      "handler_ms": 65,
+      "queue_wait_ms": 2,
+      "receive_to_complete_ms": 67,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:05:56.876123+09:00",
+      "event": "SetIssueMonitorEnabled",
+      "handler_ms": 506,
+      "queue_wait_ms": 0,
+      "receive_to_complete_ms": 506,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:06:03.073822200+09:00",
+      "event": "SetIssueMonitorAutoRefill",
+      "handler_ms": 476,
+      "queue_wait_ms": 0,
+      "receive_to_complete_ms": 476,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.130441700+09:00",
+      "event": "SetIssueMonitorAutoRefill",
+      "handler_ms": 423,
+      "queue_wait_ms": 0,
+      "receive_to_complete_ms": 423,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.130766700+09:00",
+      "event": "FocusWindow",
+      "handler_ms": 0,
+      "queue_wait_ms": 302,
+      "receive_to_complete_ms": 302,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.130907400+09:00",
+      "event": "FocusWindow",
+      "handler_ms": 0,
+      "queue_wait_ms": 302,
+      "receive_to_complete_ms": 302,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.546739600+09:00",
+      "event": "SetIssueMonitorAutoRefill",
+      "handler_ms": 415,
+      "queue_wait_ms": 198,
+      "receive_to_complete_ms": 614,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.547045900+09:00",
+      "event": "FocusWindow",
+      "handler_ms": 0,
+      "queue_wait_ms": 148,
+      "receive_to_complete_ms": 148,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.547174900+09:00",
+      "event": "FocusWindow",
+      "handler_ms": 0,
+      "queue_wait_ms": 148,
+      "receive_to_complete_ms": 148,
+      "window_count": 21
+    },
+    {
+      "timestamp": "2026-10-15T16:06:06.964953300+09:00",
+      "event": "SetIssueMonitorAutoRefill",
+      "handler_ms": 417,
+      "queue_wait_ms": 120,
+      "receive_to_complete_ms": 538,
+      "window_count": 21
+    }
+  ],
+  "summary": {
+    "slow_dispatch_count": 271,
+    "observed_kind_count": 6,
+    "total_ms": 24874,
+    "top_limit": 10,
+    "top": [
+      {
+        "event": "IssueMonitorCapacityChanged",
+        "count": 194,
+        "total_ms": 10901,
+        "p95_slow_ms": 68,
+        "max_ms": 80
+      },
+      {
+        "event": "ProviderUsageSnapshot",
+        "count": 60,
+        "total_ms": 8193,
+        "p95_slow_ms": 320,
+        "max_ms": 334
+      },
+      {
+        "event": "Frontend",
+        "count": 10,
+        "total_ms": 5176,
+        "p95_slow_ms": 791,
+        "max_ms": 791
+      },
+      {
+        "event": "IssueMonitorDaemonInbox",
+        "count": 4,
+        "total_ms": 363,
+        "p95_slow_ms": 143,
+        "max_ms": 143
+      },
+      {
+        "event": "MainEventsCleared",
+        "count": 2,
+        "total_ms": 149,
+        "p95_slow_ms": 76,
+        "max_ms": 76
+      },
+      {
+        "event": "BoardProjectionRefreshed",
+        "count": 1,
+        "total_ms": 92,
+        "p95_slow_ms": 92,
+        "max_ms": 92
+      }
+    ]
+  },
+  "limitations": [
+    "Historical v9.121.1 measurement; it does not execute or validate the new Issue #5538 collector.",
+    "pane.list records eight running Codex implementation panes in the observed project and a separate PM. The GUI had five Projects; exactly eight agents across the complete GUI is not established.",
+    "Fleet state was sampled once per minute. These samples bracket the exact 1800-second log interval; they do not exclude an unobserved transient between samples.",
+    "Provider process identities were observed at one point. No pane-to-provider-PID mapping or provider Session IDs were captured; all eight source_session values are none. One pane has no agent_name.",
+    "Legacy warnings have no GUI PID or process start time. Correlation is by shared real HOME, log time, and Issue #5385 observation, not a per-record process identity proof.",
+    "The legacy timer labels Frontend and MainEventsCleared are broad outer dispatches. Frontend latency detail rows overlap them and must not be summed again.",
+    "Legacy records lack pending queue size. Only handlers above 50ms are ranked; p95_slow_ms describes that filtered population, not all dispatches.",
+    "Six slow outer dispatch kinds were observed. Four additional kinds are not invented to fill the requested top-ten limit."
+  ]
+}

@@ -1350,6 +1350,10 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         );
         window.agent_id = Some("codex".to_string());
         window.session_id = Some(session_id.clone());
+        // Preassigned persisted identities keep Work admission independent of
+        // the capacity and language of a fresh-name catalog.
+        let initial = char::from_u32(0x4e00 + index as u32).expect("fixture initial");
+        window.agent_name = Some(format!("{initial}Agent"));
         persisted.windows.push(window);
     }
     persisted.next_z_index = fixtures.len() as u32 + 1;
@@ -1411,6 +1415,24 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         runtime.pending_auto_resume_sources
     );
     let windows = runtime.tabs[0].workspace.persisted().windows.clone();
+    let queued_initials: std::collections::HashSet<_> = windows
+        .iter()
+        .filter(|window| {
+            runtime
+                .pending_auto_resume_sources
+                .contains_key(&combined_window_id("tab-scale", &window.id))
+        })
+        .map(|window| {
+            window
+                .agent_name
+                .as_deref()
+                .unwrap()
+                .chars()
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(queued_initials.len(), OPEN);
     assert_eq!(
         windows
             .iter()

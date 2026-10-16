@@ -34,20 +34,18 @@ macro_rules! pane_name_first_action_guidance {
     () => {
         r#"## Agent name — first action
 
-For every new non-PM Agent, your first action must name your own window
+For every new non-PM Agent, your first action must read your own window's name
 before responding to the user or starting normal work.
-Invent a short one-word ASCII English proper-name candidate using your own AI reasoning.
-Keep it unrelated to the task, Issue, branch, pane id, or provider.
-Do not choose from a static name vocabulary or make a second LLM request.
+gwt assigns a random, project-unique name in the project's output language
+when the window starts. Do not invent or submit an AI-generated candidate.
 
     gwtd <<'JSON'
-    {"schema_version":1,"operation":"pane.name","params":{"candidate":"<your candidate>"}}
+    {"schema_version":1,"operation":"pane.name","params":{}}
     JSON
 
 Use the exact assigned name returned by `pane.name` in reports and handoffs,
 including any collision suffix. If your window is already assigned a name,
-retrying returns that existing name without renaming it. If an invalid candidate
-is rejected, invent another candidate and retry.
+retrying returns that existing name without renaming it.
 
 The PM is exempt: do not call `pane.name` from the PM window.
 "#
@@ -404,6 +402,14 @@ reserving a lease. Use `verify.lease.status` to inspect contention;
 `verify.run` waits up to `params.max_wait_secs` and returns `deferred`
 when admission times out. Inspect the reported holder before retrying;
 there is no manual acquire loop or fixed retry schedule.
+
+`deferred` is a temporary wait, not a verification failure or a terminal outcome.
+While the verification tool process is alive, keep polling that same invocation.
+After `deferred`, retry `verify.run` with the identical full requested matrix,
+or declare an active wait through `issue.monitor.wait` with explicit `params.number`
+for the owner Issue, `params.reason`, and `params.resume_condition`. Keep ownership
+until that condition is met. On a resume notification, retry the same matrix;
+do not leave the owner idle. Never use `execution.blocked` or `build.abort` for ordinary admission contention.
 
 Heavy Cargo commands use a bounded verification slot pool. Independent
 worktrees and effective target directories may run concurrently; the same
@@ -1193,6 +1199,12 @@ mod tests {
             "first remaining command's admission",
             "Overall: PASS",
             "required headed Chromium evidence",
+            "`deferred` is a temporary wait, not a verification failure or a terminal outcome",
+            "keep polling that same invocation",
+            "explicit `params.number`",
+            "On a resume notification, retry",
+            "do not leave the owner idle",
+            "Never use `execution.blocked` or `build.abort` for ordinary admission contention",
         ];
         let tmp = TempDir::new().unwrap();
         crate::distribute::distribute_to_worktree(tmp.path()).unwrap();

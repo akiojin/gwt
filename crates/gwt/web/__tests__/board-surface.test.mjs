@@ -15,6 +15,7 @@ import {
   mentionsForBoardSubmit,
   visibleBoardEntries,
 } from "../board-surface.js";
+import * as boardSurface from "../board-surface.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // SPEC-3064 Phase 3 (E6c): the Board renderers moved from app.js into
@@ -296,4 +297,18 @@ test("Board origin helpers label live focus versus exact resume actions", () => 
   assert.equal(boardEntryOriginActionLabel(entry, liveAgents), "Focus Agent");
   assert.equal(boardEntryOriginActionLabel(entry, []), "Resume Agent");
   assert.equal(boardEntryOriginActionLabel({ author_kind: "user" }, liveAgents), "");
+});
+
+
+test("Board author names survive closed windows and lead provider context", () => {
+  assert.equal(typeof boardSurface.boardEntryAuthorLabel, "function");
+  const { boardEntryAuthorLabel } = boardSurface;
+  const named = { author_kind: "agent", author: "Codex", origin_agent_name: "ミオ",
+    origin_agent_id: "codex", origin_session_id: "closed-session", origin_branch: "work/task" };
+  assert.equal(boardEntryAuthorLabel(named), "ミオ (Codex)");
+  assert.equal(boardEntryOriginLabel(named), "From ミオ (Codex) · work/task · closed-s");
+  assert.equal(boardEntryAuthorLabel({ author_kind: "agent", author: "Codex" }), "Codex");
+  assert.equal(boardEntryAuthorLabel({ author_kind: "user", author: "You" }), "You");
+  assert.match(appSource, /Reply to \$\{boardEntryAuthorLabel\(parent\)\}/);
+  assert.match(appSource, /Replying to \$\{boardEntryAuthorLabel\(parent\)\}/);
 });

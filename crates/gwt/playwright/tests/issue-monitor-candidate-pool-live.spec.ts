@@ -1,4 +1,7 @@
 import { expect, test } from "@playwright/test";
+import { appendFile, readFile, realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   gotoLiveGwt,
   sendLiveGwtEvent,
@@ -6,6 +9,21 @@ import {
 } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
+const CUSTOM_ID = "fixture-candidate";
+
+async function seedCustomCandidate(): Promise<void> {
+  const isolatedHome = process.env.GWT_PLAYWRIGHT_CHECK_HOME;
+  expect(isolatedHome, "requires browser-check's isolated HOME").toBeTruthy();
+  expect(await realpath(isolatedHome!)).not.toBe(await realpath(homedir()));
+  const config = join(isolatedHome!, ".gwt/config.toml");
+  const source = await readFile(config, "utf8").catch(error => {
+    if (error.code !== "ENOENT") throw error;
+    return "";
+  });
+  if (!source.includes(`[tools.customCodingAgents.${CUSTOM_ID}]`)) {
+    await appendFile(config, `\n[tools.customCodingAgents.${CUSTOM_ID}]\nid = "${CUSTOM_ID}"\ndisplayName = "Fixture Candidate"\nagentType = "command"\ncommand = "fixture-candidate-cli"\n`);
+  }
+}
 
 test.describe("Issue Monitor candidate pool", () => {
   test.skip(!BASE, "requires an isolated checkout gwt instance");
@@ -14,6 +32,7 @@ test.describe("Issue Monitor candidate pool", () => {
 
   test("adds, reorders, edits and removes candidates with persistent settings", async ({ page }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
+      await seedCustomCandidate();
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => {
@@ -77,8 +96,18 @@ test.describe("Issue Monitor candidate pool", () => {
       const rows = pool.locator("fieldset[data-agent-id]");
       await expect(rows).toHaveCount(1);
       await expect(pool.getByRole("button", { name: "Remove claude", exact: true })).toBeDisabled();
-      await pool.getByLabel("Add candidate candidate", { exact: true }).fill("codex");
-      // Keyboard focus must survive the input → button transition.
+      const candidate = pool.getByLabel("Add candidate candidate", { exact: true });
+      await expect(candidate).toHaveJSProperty("tagName", "SELECT");
+      await expect(candidate).toBeEnabled({ timeout: 30_000 });
+      await expect(candidate).toHaveValue("");
+      await pool.getByRole("button", { name: "Add candidate", exact: true }).click();
+      await expect(pool.getByRole("alert")).toHaveText("Select an agent to add.");
+      await expect(candidate.locator('option[value="claude"]')).toHaveCount(0);
+      await expect(candidate.locator(`option[value="${CUSTOM_ID}"]`)).toHaveText(`Fixture Candidate (${CUSTOM_ID})`);
+      await candidate.focus();
+      await candidate.selectOption("codex");
+      // Keyboard focus must survive the select → button transition.
+      await candidate.focus();
       await pool.getByLabel("Add candidate candidate", { exact: true }).press("Tab");
       await expect(pool.getByRole("button", { name: "Add candidate", exact: true })).toBeFocused();
       const statusCount = await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
@@ -89,10 +118,20 @@ test.describe("Issue Monitor candidate pool", () => {
       await expect(pool.getByLabel("Add candidate candidate", { exact: true })).toHaveValue("codex");
       await saveProfiles(() => pool.getByRole("button", { name: "Add candidate", exact: true }).press("Enter"), ["claude", "codex"]);
       await expect(rows).toHaveCount(2);
+      await expect(candidate.locator('option[value="codex"]')).toHaveCount(0);
       await saveProfiles(() => pool.getByRole("button", { name: "Move up codex", exact: true }).click(), ["codex", "claude"]);
       await expect(rows.first()).toHaveAttribute("data-agent-id", "codex");
       await saveProfiles(() => pool.getByRole("button", { name: "Move down codex", exact: true }).click(), ["claude", "codex"]);
       await expect(rows.first()).toHaveAttribute("data-agent-id", "claude");
+      // A rejected backend save must explain the failure in this Settings
+      // panel and retain the user's draft for correction and retry.
+      await pool.getByLabel("Model codex", { exact: true }).fill("candidate-draft-model");
+      await pool.getByLabel("Prefer for codex", { exact: true }).fill("invalid-preference");
+      await pool.getByRole("button", { name: "Save profiles", exact: true }).click();
+      await expect(pool.getByRole("alert")).toContainText("prefer_for");
+      await expect(pool).toHaveAttribute("data-saving", "false");
+      await expect(pool.getByLabel("Model codex", { exact: true })).toHaveValue("candidate-draft-model");
+      await expect(pool.getByLabel("Prefer for codex", { exact: true })).toHaveValue("invalid-preference");
       await pool.getByLabel("Usage threshold (%) candidate", { exact: true }).fill("65");
       await pool.getByLabel("Usage threshold (%) candidate", { exact: true }).press("Tab");
       await pool.getByLabel("Prefer for codex", { exact: true }).fill("type:fix, label:bug");
@@ -119,6 +158,18 @@ test.describe("Issue Monitor candidate pool", () => {
       await saveProfiles(() => reloadedPool.getByRole("button", { name: "Remove codex", exact: true }).click(), ["claude"]);
       await expect(reloadedPool.locator("fieldset[data-agent-id]")).toHaveCount(1);
       await expect(reloadedPool.getByRole("button", { name: "Remove claude", exact: true })).toBeDisabled();
+      await expect(candidate).toBeEnabled({ timeout: 30_000 });
+      await candidate.focus();
+      await candidate.selectOption(CUSTOM_ID);
+      await expect(candidate).toHaveValue(CUSTOM_ID);
+      await saveProfiles(() => reloadedPool.getByRole("button", { name: "Add candidate", exact: true }).click(), ["claude", CUSTOM_ID]);
+      await expect(reloadedPool.locator(`fieldset[data-agent-id="${CUSTOM_ID}"]`)).toBeVisible();
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .some(({ payload }: any) => payload.kind === "workspace_state"));
+      await openCandidates();
+      await expect(reloadedPool.locator(`fieldset[data-agent-id="${CUSTOM_ID}"]`)).toBeVisible();
+      await saveProfiles(() => reloadedPool.getByRole("button", { name: `Remove ${CUSTOM_ID}`, exact: true }).click(), ["claude"]);
       await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       expect(errors).toEqual([]);
     });

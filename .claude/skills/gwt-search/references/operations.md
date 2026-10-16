@@ -12,9 +12,10 @@ layout plus SPEC-2805 Memory):
 | Memory | Post-mortem entries in the machine-local work-notes memory log (`~/.gwt/projects/<repo-hash>/work-notes/memory.md`; repo-local `.gwt/work/memory.md` is a read fallback) | Manifest refresh + auto-build on first search |
 | Board | Coordination Board entries | Repo-local event log + auto-build on first search |
 | Discussions | Git-managed discussion notes | Repo-local discussion notes + auto-build on first search |
+| Reports | Durable PM digest and Q&A reports, including their question, answer, and Issue references | Report-ledger mtime+size refresh + auto-build on first search |
 
 All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues,
-SPECs, and Memory are repo-scoped and shared across worktrees; Files
+SPECs, Memory, and Reports are repo-scoped and shared across worktrees; Files
 (code + docs) is worktree-scoped under `worktrees/<worktree-hash>/`. The legacy
 `$WORKTREE/.gwt/index/` location is no longer used and is deleted
 automatically by the gwt GUI on startup.
@@ -80,6 +81,7 @@ JSON
 | `"scopes":["memory"]` | Post-mortem memory only |
 | `"scopes":["board"]` | Coordination Board entries only |
 | `"scopes":["discussions"]` | Git-managed discussion notes only |
+| `"scopes":["reports"]` | Durable PM digest and Q&A reports only |
 
 Scopes merge by listing multiple values, such as
 `"scopes":["issues","specs"]`. `params.n_results` limits the result count,

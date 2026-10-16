@@ -222,6 +222,46 @@ pub(super) fn run<E: CliEnv>(
     Ok(0)
 }
 
+/// Close one Work through the capability-authenticated Host connection.
+pub(super) fn close_work(work_id: &str, close_kind: &str) -> Result<Value, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to create Work close runtime: {err}"))?;
+    runtime.block_on(close_work_async(&ws_url, work_id, close_kind))
+}
+
+async fn close_work_async(ws_url: &str, work_id: &str, close_kind: &str) -> Result<Value, String> {
+    let mut socket = connect_pane_websocket(ws_url).await?;
+    send_frontend_event(
+        &mut socket,
+        json!({"kind":"close_work","work_id":work_id,"close_kind":close_kind}),
+    )
+    .await?;
+    tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
+        loop {
+            let result = next_backend_json_unbounded(&mut socket).await?;
+            if result["kind"] != "work_close_result"
+                || result["work_id"] != work_id
+                || result["close_kind"] != close_kind
+            {
+                continue;
+            }
+            if result["ok"].as_bool().is_none()
+                || (result["ok"] == true && result["changed"].as_bool().is_none())
+            {
+                return Err(
+                    "invalid Host Work close result; inspect Work state before retrying".into(),
+                );
+            }
+            return Ok(result);
+        }
+    })
+    .await
+    .map_err(|_| "Work close outcome unavailable; inspect Work state before retrying".to_string())?
+}
+
 pub(super) fn live_windows(
     default_project_root: &Path,
 ) -> Result<Vec<PersistedWindowState>, String> {
@@ -232,6 +272,32 @@ pub(super) fn live_windows(
         .build()
         .map_err(|err| format!("failed to create pane runtime: {err}"))?;
     runtime.block_on(request_window_list(&ws_url, &project_root))
+}
+
+/// Admission companions use the existing self-only authenticated route. A
+/// busy pane is left alone; an ambiguous send is never retried automatically.
+pub(super) fn notify_verification_resume(
+    worktree: &Path,
+    session: &str,
+    text: &str,
+    still_current: impl Fn() -> bool,
+) -> Result<bool, String> {
+    if std::env::var(GWT_SESSION_ID_ENV).ok().as_deref() != Some(session) {
+        return Err("verification resume Session changed".to_string());
+    }
+    let ws_url = pane_websocket_url_from_env()?;
+    let project_root = project_root_for_pane(worktree);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        send_pane_input_guarded(&ws_url, &project_root, None, text, &|window| {
+            window.status == WindowState::Idle && still_current()
+        })
+        .await
+        .map(|sent| sent.is_some())
+    })
 }
 
 async fn run_async(
@@ -427,6 +493,18 @@ async fn send_pane_input(
     requested_id: Option<&str>,
     text: &str,
 ) -> Result<String, String> {
+    send_pane_input_guarded(ws_url, project_root, requested_id, text, &|_| true)
+        .await?
+        .ok_or_else(|| "pane send was withheld".to_string())
+}
+
+async fn send_pane_input_guarded(
+    ws_url: &str,
+    project_root: &str,
+    requested_id: Option<&str>,
+    text: &str,
+    can_send: &dyn Fn(&PersistedWindowState) -> bool,
+) -> Result<Option<String>, String> {
     let session_id = std::env::var(GWT_SESSION_ID_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -447,6 +525,12 @@ async fn send_pane_input(
     if scoped_window_id != window_id {
         return Err("pane send target changed while establishing the authenticated scope".into());
     }
+    if !scoped_windows
+        .iter()
+        .any(|window| window.id == scoped_window_id && can_send(window))
+    {
+        return Ok(None);
+    }
     send_frontend_event(
         &mut socket,
         json!({ "kind": "pane_send_input", "session_id": session_id, "text": line }),
@@ -459,10 +543,10 @@ async fn send_pane_input(
             continue;
         };
         return if reply.ok {
-            Ok(format!(
+            Ok(Some(format!(
                 "sent input to {}\n",
                 reply.window_id.unwrap_or(window_id)
-            ))
+            )))
         } else {
             Err(format!(
                 "pane send rejected: {}",
@@ -3750,6 +3834,42 @@ mod tests {
 
     /// Issue #3629 AC-12: a backend that answers with `pane_close_result`
     /// settles the close without any workspace readback round.
+    #[test]
+    fn workspace_close_waits_for_the_exact_host_result_and_propagates_refusal() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token =
+            ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-close-capability");
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "pm-session");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for (ok, changed) in [(false, json!(false)), (true, json!("unknown")), (true, json!(false))] {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let request = next_frontend_json(&mut socket).await;
+                    assert_eq!(request, json!({"kind":"close_work","work_id":"work-1","close_kind":"discarded"}));
+                    socket.send(Message::Text(json!({"kind":"work_close_result","work_id":"other","close_kind":"discarded","ok":true}).to_string().into())).await.unwrap();
+                    socket.send(Message::Text(json!({"kind":"work_close_result","work_id":"work-1","close_kind":"discarded","ok":ok,"changed":changed,"retryable":!ok,"error":if ok {None} else {Some("refresh and retry")} }).to_string().into())).await.unwrap();
+                }
+            });
+            let url = format!("ws://{address}/internal/pane-ws");
+            let refusal = close_work_async(&url, "work-1", "discarded").await.unwrap();
+            assert_eq!(refusal["ok"], false);
+            assert_eq!(refusal["retryable"], true);
+            assert_eq!(refusal["error"], "refresh and retry");
+            assert!(close_work_async(&url, "work-1", "discarded").await.unwrap_err().contains("invalid Host"));
+            assert_eq!(close_work_async(&url, "work-1", "discarded").await.unwrap()["changed"], false);
+            server.await.unwrap();
+        });
+    }
+
     #[test]
     fn non_self_pane_close_consumes_backend_close_result() {
         let _env_lock = crate::env_test_lock()

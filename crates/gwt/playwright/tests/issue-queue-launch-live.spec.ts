@@ -22,15 +22,8 @@ test.describe("Issue queue real backend launch", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await sendLiveGwtEvent(page, { kind: "create_window", preset: "settings",
         bounds: { x: 20, y: 60, width: 1480, height: 920 } });
-      // create_window bounds position a preset-sized window; set the intended
-      // fixture geometry so the drag source and target are both in view.
       const issueWindow = page.locator('.workspace-window[data-preset="settings"]');
       await expect(issueWindow).toBeVisible();
-      await sendLiveGwtEvent(page, { kind: "update_window_geometry",
-        id: await issueWindow.getAttribute("data-id"),
-        geometry: { x: 20, y: 60, width: 1480, height: 920 }, cols: 0, rows: 0 });
-      await expect(issueWindow).toHaveCSS("width", "1480px");
-      await expect(issueWindow).toHaveCSS("height", "920px");
       await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", {
         detail: { section: "issues" },
       })));
@@ -244,26 +237,36 @@ test.describe("Issue queue real backend launch", () => {
       const execution = fixture.executionStatus(seed.worktree);
       expect(execution.holder_session_id).toBe(fresh.gwt_session_id);
       expect(execution.generation_id).not.toBe(blocked.generation_id);
-      await expect.poll(async () => (await fixture.workItems()).work_items.find((work: any) =>
-        work.id === seed.successorId)?.events.some((event: any) => event.kind === "start"
-          && event.agent_session_id === fresh.gwt_session_id && event.related_work_item_id === seed.predecessorId),
-      { timeout: 60_000, message: "fresh launch commits the missing Start lineage" }).toBe(true);
-      const successor = (await fixture.workItems()).work_items.find((work: any) => work.id === seed.successorId);
+      // Current recovery audit-closes malformed occupancy and starts its
+      // successor, preserving the orphan's historical Start unchanged.
+      const freshWork = async () => (await fixture.workItems()).work_items.find((work: any) =>
+        work.events.some((event: any) => event.kind === "start"
+          && event.agent_session_id === fresh.gwt_session_id && event.related_work_item_id === seed.successorId));
+      await expect.poll(async () => Boolean(await freshWork()),
+        { timeout: 60_000, message: "fresh launch commits an audited successor lineage" }).toBe(true);
+      const successor = await freshWork();
+      const retired = (await fixture.workItems()).work_items.find((work: any) => work.id === seed.successorId);
+      expect(retired.discarded).toBe(true);
+      expect(retired.events.some((event: any) => event.id === `superseded-${seed.successorId}`
+        && event.kind === "discard" && event.related_work_item_id === seed.predecessorId)).toBe(true);
+      expect(retired.events).toContainEqual(seed.orphan);
+      expect(successor.id).not.toBe(seed.successorId);
       const start = successor.events.find((event: any) => event.kind === "start" && event.agent_session_id === fresh.gwt_session_id);
       expect(JSON.parse(await readFile(fixture.eventShardPath(seed.worktree, start.id), "utf8"))).toEqual(start);
       expect(start.owner).toBe(seed.orphan.owner);
       expect(start.execution_container.branch).toBe(seed.branch);
       expect(await realpath(start.execution_container.worktree_path)).toBe(seed.worktree);
       expect(successor.owner).toBe(`Issue #${fixture.issueNumber}`);
-      expect(successor.related_work_item_ids).toContain(seed.predecessorId);
+      expect(successor.related_work_item_ids).toContain(seed.successorId);
       expect(fixture.stagedDiff(seed.worktree), "fresh launch preserves the complete staged diff").toEqual(seed.stagedDiff);
       await expect.poll(async () => ["running", "idle"].includes((await agentWindow(restored, fresh.gwt_session_id!))?.status),
         { timeout: 60_000 }).toBe(true);
       const freshWindow = await agentWindow(restored, fresh.gwt_session_id!);
       await restored.locator('.op-rail__surface[data-surface="agents"]').click();
+      await restored.getByRole("tab", { name: "All agents", exact: true }).click();
       const tile = restored.locator(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="${freshWindow.id}"]`);
       await expect(tile).toBeVisible();
-      await expect(tile.locator(".agent-tile__header span")).toHaveText("Interactive");
+      await expect(tile.locator(".agent-tile__mode")).toHaveText("Interactive");
       expect(errors, "console/page errors including cold restart and fresh launch").toEqual([]);
       await info.attach(`active-orphan-recovered-${theme}`, { body: await restored.screenshot(), contentType: "image/png" });
       await info.attach("active-orphan-recovery", { body: JSON.stringify({ execution, start,
