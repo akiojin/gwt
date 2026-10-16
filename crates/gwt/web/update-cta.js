@@ -325,7 +325,9 @@ export function createUpdateCtaController({
     // manifest is gone. The CTA was already morphed to `ready` by then, so
     // surface the failure modal even in the `ready` state — silently dropping
     // the error would leave the user believing Restart is safe when it isn't.
-    if (status === "applying" || status === "ready") {
+    // A successful project snapshot can precede another project's wait failure.
+    if (status === "applying" || status === "ready"
+      || (status === "draining" && payload.stage === "Apply after agents finish")) {
       showError(updateFailureDetail(payload));
       renderModalFailed(payload);
     }

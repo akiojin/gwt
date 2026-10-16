@@ -93,6 +93,53 @@ fn issue_5646_explicit_wait_uses_the_existing_manual_drain_without_restarting() 
 }
 
 #[test]
+fn issue_5646_failed_wait_keeps_apply_deferred_and_reports_the_failure() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let payload = temp.path().join("payload");
+    fs::write(&payload, "prepared").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "99.0.0".into(),
+        asset_url: "https://example.invalid/update".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab",
+        "agent",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    // Reading absent prefs is valid, but their writer lock cannot be opened.
+    fs::create_dir_all(prefs_path.with_extension("lock")).unwrap();
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path).is_ok());
+    let events = runtime.apply_update_when_idle_events("client");
+    assert!(
+        gwt_core::update::load_pending_update_manifest()
+            .unwrap()
+            .auto_apply_deferred
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event, BackendEvent::UpdateApplyError { stage: Some(stage), .. }
+            if stage == "Apply after agents finish"
+    ) && event.target
+        == gwt::project_transport::DispatchTarget::Client("client".into())));
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "failed waiting never restarts"
+    );
+}
+
+#[test]
 fn app_runtime_update_settings_protocol_belongs_to_update_domain() {
     assert!(serde_json::from_value::<FrontendEvent>(serde_json::json!({
         "kind": "set_issue_monitor_auto_apply_updates", "enabled": true

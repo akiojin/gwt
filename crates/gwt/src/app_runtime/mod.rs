@@ -10744,6 +10744,7 @@ impl AppRuntime {
             return vec![update_notice("warn", refusal.notice(version))];
         }
         self.begin_update_drain_for_project(context, version, prefs, automatic)
+            .0
     }
 
     fn begin_update_drain_for_project(
@@ -10752,7 +10753,7 @@ impl AppRuntime {
         version: &str,
         prefs: gwt::IssueMonitorPrefs,
         automatic: bool,
-    ) -> Vec<OutboundEvent> {
+    ) -> (Vec<OutboundEvent>, bool) {
         let project_root = context.project_root.clone();
         let observe = |stage: &str, reason: &str| {
             record_pending_update_observation(
@@ -10774,7 +10775,7 @@ impl AppRuntime {
                 "pending_failed",
                 "project state unavailable while starting drain",
             );
-            return Vec::new();
+            return (Vec::new(), false);
         };
         state.update_auto_apply.reset();
         let version = version.to_string();
@@ -10806,12 +10807,15 @@ impl AppRuntime {
                             "pending_failed",
                             &format!("cannot commit update drain: {local_error}"),
                         );
-                        return self.issue_monitor_control_error_events(
-                            Some(&context.project_root),
-                            None,
-                            local_error,
-                            "update-drain",
-                            None,
+                        return (
+                            self.issue_monitor_control_error_events(
+                                Some(&context.project_root),
+                                None,
+                                local_error,
+                                "update-drain",
+                                None,
+                            ),
+                            false,
                         );
                     }
                 }
@@ -10821,12 +10825,15 @@ impl AppRuntime {
                     "pending_failed",
                     &format!("cannot publish update drain: {error}"),
                 );
-                return self.issue_monitor_control_error_events(
-                    Some(&context.project_root),
-                    None,
-                    error,
-                    "update-drain",
-                    None,
+                return (
+                    self.issue_monitor_control_error_events(
+                        Some(&context.project_root),
+                        None,
+                        error,
+                        "update-drain",
+                        None,
+                    ),
+                    false,
                 );
             }
         };
@@ -10861,7 +10868,7 @@ impl AppRuntime {
                 "Update v{version} staged — draining agents before applying automatically; new launches are held."
             ),
         ));
-        events
+        (events, true)
     }
 
     /// Issue #3906 AC-2 / AC-7 / AC-8 / AC-9 (#4076 AC-2 / AC-5): one drain

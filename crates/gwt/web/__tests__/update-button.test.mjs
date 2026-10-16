@@ -625,6 +625,12 @@ test("issue #5646: waiting for all agents uses the idle apply route", () => {
   fixture.document.querySelector("[data-update-modal-wait-for-idle]").click();
   assert.equal(fixture.sent.at(-1).kind, "apply_update_when_idle");
   assert.equal(fixture.document.getElementById("update-modal"), null);
+  controller.handleIssueMonitorStatus({
+    update_drain: { reason: "auto", version: "9.26.0", blocking: [], since: "2026-10-16T00:00:00Z" },
+  });
+  controller.handleUpdateApplyError({ stage: "Apply after agents finish", reason: "Could not save every project drain" });
+  assert.equal(fixture.document.getElementById("update-modal")?.dataset.state, "failed");
+  assert.match(fixture.document.getElementById("update-modal").textContent, /Could not save every project drain/);
 });
 
 test("issue #5646: zero impact still confirms and missing, cancelled or obsolete previews never restart", () => {
@@ -671,7 +677,8 @@ test("issue #5646: a failed impact request removes restart confirmation and igno
 });
 
 test("issue #5646: app routes restart impact to the controller", () => {
-  assert.match(appSource, /case "update_restart_impact":[\s\S]{0,100}updateCtaController\.handleUpdateRestartImpact\(event\)/);
+  assert.match(appSource, /case "update_restart_impact":[\s\S]{0,100}updateRestartImpactModel\.update\(\(\) => event\)/);
+  assert.match(appSource, /updateRestartImpactModel\.subscribe\(impact => impact, impact => \{\s*if \(impact\) updateCtaController\.handleUpdateRestartImpact\(impact\)/);
 });
 
 test("phase19: [Later] closes modal, sends apply_update_later, and morphs CTA to ready state", () => {

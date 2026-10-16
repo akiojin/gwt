@@ -1095,14 +1095,17 @@ impl AppRuntime {
     }
 
     pub(super) fn apply_update_when_idle_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
-        let result = (|| -> Result<Vec<OutboundEvent>, String> {
+        let mut events = Vec::new();
+        let result = (|| -> Result<(), String> {
             let manifest = gwt_core::update::load_pending_update_manifest()
                 .ok_or_else(|| "No prepared update is available to schedule.".to_string())?;
+            // A failed wait request must also keep startup apply deferred.
+            gwt_core::update::defer_pending_update(&manifest.version)?;
             let contexts = self.project_contexts();
             if contexts.is_empty() {
                 return Err("Open a project before scheduling the update.".into());
             }
-            // Validate all project preferences before changing the operator defer.
+            // Validate every project before starting any drain.
             let projects = contexts
                 .into_iter()
                 .map(|context| {
@@ -1113,24 +1116,27 @@ impl AppRuntime {
                     Ok((context, prefs))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            gwt_core::update::resume_pending_update(&manifest.version)?;
-            let mut events = Vec::new();
             for (context, prefs) in projects {
-                events.extend(self.begin_update_drain_for_project(
-                    &context,
-                    &manifest.version,
-                    prefs,
-                    false,
-                ));
+                let (project_events, saved) =
+                    self.begin_update_drain_for_project(&context, &manifest.version, prefs, false);
+                events.extend(project_events);
+                if !saved {
+                    return Err(format!(
+                        "Could not start the update drain for {}; automatic apply remains deferred.",
+                        context.project_root.display()
+                    ));
+                }
             }
-            Ok(Self::deduplicate_update_host_events(events))
+            gwt_core::update::resume_pending_update(&manifest.version)?;
+            Ok(())
         })();
-        result.unwrap_or_else(|reason| {
-            vec![OutboundEvent::reply(
+        if let Err(reason) = result {
+            events.push(OutboundEvent::reply(
                 client_id,
                 update_apply_error_failed("Apply after agents finish", &reason),
-            )]
-        })
+            ));
+        }
+        Self::deduplicate_update_host_events(events)
     }
 
     /// SPEC-2785 US-1 / FR-C / FR-E: user clicked the server URL cell in the
