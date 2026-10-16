@@ -210,10 +210,49 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             case,
             MonitorProviderConversationFixture::Present,
             MonitorNativeHolderFixture::None,
-            true,
+            case != "completed-done",
             LinkedIssueKind::Spec,
             settlement,
         );
+        if case == "completed-done" {
+            // Issue #4783 AC-R4: derive this delivery from a reopened owner,
+            // rather than only seeding a fresh delivery over terminal history.
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+            let mut monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            );
+            let number = fixture.execution_owner.number;
+            monitor.record_closed(number, Some("2026-08-13T00:00:00Z".into()));
+            assert!(monitor.record_reopened(number, Some("2026-08-13T00:01:00Z".into())));
+            monitor.terminal_queue_push(&[number], "operator", "2026-08-13T00:01:00Z");
+            gwt::scan_issue_monitor_candidates_with_provenance(
+                &mut monitor,
+                &[gwt::IssueMonitorIssue {
+                    number,
+                    title: "SPEC: reopened Monitor owner".into(),
+                    labels: vec!["gwt-spec".into()],
+                    state: gwt::IssueMonitorIssueState::Open,
+                    body: Some("## Acceptance Criteria\n- [ ] AC-1: remaining work\n".into()),
+                    url: None,
+                    readiness: gwt::IssueMonitorReadiness::ReadyWithOpenTasks,
+                    updated_at: Some("2026-08-13T00:01:00Z".into()),
+                }],
+                gwt::IssueMonitorCandidateSource::Live,
+                &fixture.project_root,
+                "2026-08-13T00:01:01Z",
+            );
+            assert_eq!(monitor.queued_issue_numbers(), vec![number]);
+            assert!(monitor.apply_confirmed_claim(
+                number,
+                "claim-reopened",
+                "host/session",
+                "effect-reopened",
+                &Utc::now().to_rfc3339(),
+            ));
+            fixture.delivery_id = monitor.pending_launch_delivery_id(number);
+            gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        }
         let unique_head = if case.contains("ownerless") {
             fs::write(fixture.worktree.join("retained-source.txt"), case).unwrap();
             run_git(&fixture.worktree, &["add", "retained-source.txt"]);
@@ -222,6 +261,11 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
         } else {
             None
         };
+        let staged_diff = (case == "3824-active-parentless-successor").then(|| {
+            fs::write(fixture.worktree.join("retained-staged-source.txt"), case).unwrap();
+            run_git(&fixture.worktree, &["add", "retained-staged-source.txt"]);
+            git_stdout(&fixture.worktree, &["diff", "--cached", "--binary"])
+        });
         let source_path = fixture
             .sessions_dir
             .join(format!("{}.toml", fixture.source_session_id));
@@ -534,6 +578,27 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             .runtime
             .pending_fresh_execution_launches
             .contains_key(&window_id));
+        if case == "completed-done" {
+            let observations =
+                super::super::terminal_convergence::observe_terminal_windows_in_background(
+                    &fixture.sessions_dir,
+                    fixture.runtime.terminal_window_snapshots(),
+                    Duration::from_secs(60),
+                );
+            let now = Instant::now();
+            fixture.runtime.terminal_convergence_observed_events_at(
+                Duration::from_secs(60),
+                observations,
+                now,
+            );
+            fixture
+                .runtime
+                .close_expired_terminal_window_candidates_at(now + Duration::from_secs(61));
+            assert!(
+                fixture.runtime.window_lookup.contains_key(&window_id),
+                "the reopened owner's launch survives terminal grace before Ready"
+            );
+        }
         let (spawner, _) = BlockingTaskSpawner::queued();
         fixture.runtime.blocking_tasks = spawner;
         let mut ready = runtime_hook_state_for_event("Working", "SessionStart", &session_id);
@@ -626,6 +691,59 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
                 }
             }
         }
+        if staged_diff.is_some() {
+            let start = successor
+                .events
+                .iter()
+                .find(|event| {
+                    event.kind == gwt_core::workspace_projection::WorkEventKind::Start
+                        && event.agent_session_id.as_deref() == Some(session_id.as_str())
+                })
+                .expect("committed successor Start");
+            assert_eq!(
+                start.related_work_item_id.as_deref(),
+                Some(
+                    superseded_occupancy
+                        .as_ref()
+                        .unwrap_or(&predecessor_id)
+                        .as_str()
+                ),
+                "{case}"
+            );
+            assert!(
+                gwt_core::workspace_projection::workspace_work_event_shard_matches(
+                    &fixture.worktree,
+                    start,
+                )
+                .unwrap(),
+                "{case}: stored shard retains the returned Start lineage"
+            );
+            // A cold intake must derive the same linked lifetime from the
+            // immutable sources, including the original malformed Start.
+            let cold_intake_path = temp.path().join(format!("{case}-cold-intake.json"));
+            let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+                &fixture.project_root,
+                &works_path,
+                &cold_intake_path,
+            );
+            assert!(intake.load_error.is_none(), "{case}: {intake:?}");
+            assert!(intake.projection_rebuilt, "{case}: {intake:?}");
+            let reloaded =
+                gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                gwt_core::workspace_projection::current_work_id(
+                    &reloaded,
+                    &fixture.project_root,
+                    Some("work/issue-3165"),
+                    Some(&fixture.worktree),
+                )
+                .as_deref(),
+                Some(successor_id.as_str()),
+                "{case}: cold intake keeps successor authority"
+            );
+        }
         let projection =
             gwt_core::workspace_projection::load_workspace_projection(&fixture.project_root)
                 .unwrap()
@@ -689,6 +807,13 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
                 git_stdout(&fixture.worktree, &["rev-parse", "HEAD"]),
                 unique_head,
                 "{case}: retain unique commit"
+            );
+        }
+        if let Some(staged_diff) = staged_diff {
+            assert_eq!(
+                git_stdout(&fixture.worktree, &["diff", "--cached", "--binary"]),
+                staged_diff,
+                "{case}: retain staged source bytes"
             );
         }
         let updated =
@@ -1045,13 +1170,13 @@ fn successor_placeholder_cannot_take_over_related_foreign_or_live_work() {
                 .unwrap()
                 .branch = Some("work/issue-43".to_string());
         }
-        if invalid == "active" || invalid == "terminal" {
+        if matches!(invalid, "active" | "live" | "terminal") {
             works
                 .work_items
                 .iter_mut()
                 .find(|work| work.id == successor_id)
                 .unwrap()
-                .status_category = if invalid == "active" {
+                .status_category = if invalid != "terminal" {
                 gwt_core::workspace_projection::WorkspaceStatusCategory::Active
             } else {
                 gwt_core::workspace_projection::WorkspaceStatusCategory::Done

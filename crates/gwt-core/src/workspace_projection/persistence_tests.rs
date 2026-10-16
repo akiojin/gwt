@@ -7936,6 +7936,234 @@ fn session_bound_update_ignores_execution_container_recorded_on_another_host() {
 }
 
 #[test]
+fn issue_4783_session_bound_done_survives_full_rebuild_and_transaction_recovery() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut fixture = t812_seed_session_bound_fixture(temp.path());
+    let base_id = canonical_work_id(
+        &fixture.target.project_state_root,
+        Some(T812_TARGET_BRANCH),
+        Some(&fixture.target.worktree_identity),
+    )
+    .unwrap();
+    fixture.target.work_id = base_id.clone();
+    let mut current = load_workspace_projection_from_path(&fixture.current_path)
+        .unwrap()
+        .unwrap();
+    current.agents[0].workspace_id = Some(base_id.clone());
+    save_workspace_projection_to_path_unlocked(&fixture.current_path, &current).unwrap();
+    let mut works = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .unwrap()
+        .unwrap();
+    works.work_items[0].id = base_id.clone();
+    works.work_items[0].events[0].work_item_id = base_id.clone();
+    let start = works.work_items[0].events[0].clone();
+    let start_content = serde_json::to_string(&start).unwrap();
+    fs::write(&fixture.events_path, format!("{start_content}\n")).unwrap();
+    save_workspace_work_items_projection_to_path(&fixture.work_items_path, &works).unwrap();
+
+    let done_event = std::cell::RefCell::new(None);
+    update_workspace_projection_with_journal_for_resolved_work_target(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.into()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+        TrackedWorkEventPolicy::Persist,
+        |_, _| Ok(()),
+        |event, _| {
+            event.id = "issue-4783-authenticated-done".into();
+            done_event.replace(Some(event.clone()));
+            Ok(())
+        },
+    )
+    .expect("authenticated Done commits");
+    let done = done_event.into_inner().unwrap();
+    let done_works = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .unwrap()
+        .unwrap();
+    let done_shard =
+        gwt_repo_local_work_event_shard_path(&fixture.target.work_event_root, &done.id);
+    let done_content = fs::read_to_string(&done_shard).unwrap();
+    assert_eq!(
+        serde_json::from_str::<WorkEvent>(done_content.trim()).unwrap(),
+        done
+    );
+
+    let successor_id = successor_work_id(&base_id);
+    let mut successor = WorkEvent::new(
+        WorkEventKind::Start,
+        &successor_id,
+        done.updated_at + chrono::Duration::seconds(1),
+    );
+    successor.owner = start.owner.clone();
+    successor.agent_session_id = Some("issue-4783-current-successor".into());
+    successor.agent_id = start.agent_id.clone();
+    successor.execution_container = start.execution_container.clone();
+    successor.related_work_item_id = Some(base_id.clone());
+    transact_workspace_state_for_work_event_root(
+        &fixture.target.project_state_root,
+        &fixture.target.work_event_root,
+        |projection, existing, _| {
+            assert!(existing
+                .work_items
+                .iter()
+                .find(|work| work.id == base_id)
+                .unwrap()
+                .is_terminal());
+            let mut agent = projection.agents[0].clone();
+            agent.session_id = successor.agent_session_id.clone().unwrap();
+            agent.workspace_id = Some(successor_id.clone());
+            agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+            projection.agents.push(agent);
+            Ok(((), vec![successor.clone()]))
+        },
+    )
+    .expect("valid successor and assignment commit");
+    let current_before = fs::read(&fixture.current_path).unwrap();
+    let successor_content = fs::read_to_string(gwt_repo_local_work_event_shard_path(
+        &fixture.target.work_event_root,
+        &successor.id,
+    ))
+    .unwrap();
+    let close_path = fixture
+        .work_items_path
+        .with_file_name("work-events-closed.jsonl");
+    let report = crate::work_events_intake::rebuild_work_events_paths(
+        &fixture.work_items_path,
+        [
+            start_content.as_str(),
+            done_content.as_str(),
+            successor_content.as_str(),
+        ],
+        Some(&close_path),
+    )
+    .expect("full shared-source rebuild");
+    assert_eq!(
+        report.skipped_close_kind, 1,
+        "shared Done remains non-authoritative"
+    );
+    let rebuilt = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .unwrap()
+        .unwrap();
+    assert!(
+        rebuilt
+            .work_items
+            .iter()
+            .find(|work| work.id == base_id)
+            .unwrap()
+            .is_terminal(),
+        "authenticated Done must remain terminal after a complete rebuild"
+    );
+    assert_eq!(
+        current_work_id(
+            &rebuilt,
+            &fixture.target.project_state_root,
+            Some(T812_TARGET_BRANCH),
+            Some(&fixture.target.worktree_identity)
+        ),
+        Some(successor_id)
+    );
+    assert_eq!(
+        fs::read(&fixture.current_path).unwrap(),
+        current_before,
+        "current successor assignment is untouched"
+    );
+    let close_before = fs::read(&close_path).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<WorkEvent>(&close_before).unwrap(),
+        done,
+        "local close retains the audit identity"
+    );
+
+    // Replay a durable marker whose snapshots are older than the successor.
+    // Recovery must repair the interrupted close append without rewinding either
+    // the current assignment or the newer Work projection.
+    let works_before = fs::read(&fixture.work_items_path).unwrap();
+    fs::write(&close_path, b"{interrupted-close").unwrap();
+    let (mut transaction, _) = marker_path_contract_transaction(
+        temp.path(),
+        4,
+        gwt_repo_local_work_events_dir(&fixture.target.work_event_root),
+    );
+    transaction.current_path = fixture.current_path.clone();
+    transaction.work_items_path = fixture.work_items_path.clone();
+    transaction.events = vec![done];
+    transaction.work_items = Some(done_works);
+    write_pending_transaction_markers(&transaction);
+    with_workspace_current_and_work_items_lock(
+        &fixture.current_path,
+        &fixture.work_items_path,
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(fs::read(&close_path).unwrap(), close_before);
+    assert_eq!(fs::read(&fixture.current_path).unwrap(), current_before);
+    assert_eq!(fs::read(&fixture.work_items_path).unwrap(), works_before);
+    assert_eq!(fs::read_to_string(done_shard).unwrap(), done_content);
+}
+
+#[cfg(unix)]
+#[test]
+fn issue_4783_done_rejects_a_symlinked_local_close_before_reserving_an_obligation() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let close_path = fixture
+        .work_items_path
+        .with_file_name("work-events-closed.jsonl");
+    let external = temp.path().join("external-close");
+    fs::write(&external, b"untouched").unwrap();
+    std::os::unix::fs::symlink(&external, &close_path).unwrap();
+    let before = fixture.state_bytes();
+    let reserved = std::cell::Cell::new(false);
+    let result = update_workspace_projection_with_journal_for_resolved_work_target(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: None,
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.into()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+        TrackedWorkEventPolicy::Persist,
+        |_, _| Ok(()),
+        |_, _| {
+            reserved.set(true);
+            Ok(())
+        },
+    );
+    assert!(result.is_err(), "an indirect close stream must be refused");
+    assert!(
+        !reserved.get(),
+        "path refusal precedes the external obligation"
+    );
+    assert_eq!(fixture.state_bytes(), before);
+    assert_eq!(fs::read(&external).unwrap(), b"untouched");
+    assert!(!pending_workspace_state_transaction_path(&fixture.current_path).exists());
+    assert!(
+        !pending_workspace_state_transaction_path_for_work_items(&fixture.work_items_path).exists()
+    );
+}
+
+#[test]
 fn session_bound_update_runs_pre_persist_hook_before_any_surface_mutation() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");

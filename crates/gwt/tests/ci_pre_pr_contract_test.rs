@@ -122,6 +122,20 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
     let steps = coverage["jobs"]["rust-coverage"]["steps"]
         .as_sequence()
         .unwrap();
+    let toolchain = steps
+        .iter()
+        .find(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("dtolnay/rust-toolchain@"))
+        })
+        .unwrap();
+    // Verification admission tests execute the Light `cargo fmt --version` command.
+    assert!(toolchain["with"]["components"]
+        .as_str()
+        .unwrap()
+        .split(',')
+        .any(|component| component.trim() == "rustfmt"));
     let cache = steps
         .iter()
         .find(|s| {

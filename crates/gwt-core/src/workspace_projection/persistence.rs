@@ -2934,6 +2934,15 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
         // before that reservation or any recovery marker can be published.
         validate_workspace_work_event_store_path(events_dir)?;
     }
+    if tracked_event_policy == TrackedWorkEventPolicy::Persist
+        && update.status_category == Some(WorkspaceStatusCategory::Done)
+    {
+        // The external obligation must not be reserved for an unsafe home
+        // close stream that this transaction will also have to publish.
+        validate_workspace_local_close_path(
+            &work_items_path.with_file_name("work-events-closed.jsonl"),
+        )?;
+    }
 
     // This strict entry point never synthesizes or migrates authority state.
     // Target resolution already proved each surface; disappearance between
@@ -5085,6 +5094,9 @@ fn write_workspace_state_transaction_markers(
     if let Some(path) = transaction.journal_path.as_deref() {
         ensure_supported_workspace_layout(path)?;
     }
+    if let Some(path) = workspace_transaction_local_close_path(transaction) {
+        validate_workspace_local_close_path(&path)?;
+    }
 
     validate_pending_workspace_state_transaction(
         transaction,
@@ -5554,6 +5566,10 @@ fn apply_workspace_state_transaction_locked(
     if let Some(path) = transaction.journal_path.as_deref() {
         ensure_supported_workspace_layout(path)?;
     }
+    let local_close_path = workspace_transaction_local_close_path(transaction);
+    if let Some(path) = local_close_path.as_deref() {
+        validate_workspace_local_close_path(path)?;
+    }
 
     if transaction
         .external_commit
@@ -5616,6 +5632,30 @@ fn apply_workspace_state_transaction_locked(
             append_workspace_work_events_to_path(events_path, &transaction.events)?;
         }
     }
+    if let Some(path) = local_close_path.as_deref() {
+        // A tracked close is audit evidence; complete shared-source rebuilds
+        // deliberately ignore it. Publish the same accepted event in the home
+        // close stream before clearing this marker, including during recovery.
+        let existing = read_machine_local_workspace_work_events_from_path(path)?;
+        let mut missing = Vec::new();
+        for event in transaction
+            .events
+            .iter()
+            .filter(|event| event.kind == WorkEventKind::Done)
+        {
+            match existing.iter().find(|stored| stored.id == event.id) {
+                Some(stored) if stored != event => {
+                    return Err(GwtError::Other(format!(
+                        "machine-local close event identity conflicts with transaction: {}",
+                        event.id
+                    )));
+                }
+                Some(_) => {}
+                None => missing.push(event.clone()),
+            }
+        }
+        append_workspace_work_events_to_path(path, &missing)?;
+    }
     let may_write_current = !recovering
         || workspace_state_snapshot_matches_precondition(
             current_path,
@@ -5648,6 +5688,70 @@ fn apply_workspace_state_transaction_locked(
 
 fn is_workspace_work_event_store_dir(path: &Path) -> bool {
     path.ends_with(Path::new(".gwt").join("work").join("events"))
+}
+
+fn workspace_transaction_local_close_path(
+    transaction: &PendingWorkspaceStateTransaction,
+) -> Option<PathBuf> {
+    transaction
+        .events_path
+        .as_deref()
+        .filter(|path| is_workspace_work_event_store_dir(path))?;
+    transaction
+        .events
+        .iter()
+        .any(|event| event.kind == WorkEventKind::Done)
+        .then(|| {
+            transaction
+                .work_items_path
+                .with_file_name("work-events-closed.jsonl")
+        })
+}
+
+fn validate_workspace_local_close_path(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        // HOME itself may be reached through a symlink. Check only the managed
+        // project-state / project-hash / projects tail, or the injected parent
+        // used by compatibility callers.
+        let depth = if parent
+            .file_name()
+            .is_some_and(|name| name == "project-state")
+        {
+            3
+        } else {
+            1
+        };
+        for directory in parent.ancestors().take(depth) {
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "workspace local close parent is not a real directory: {}",
+                            directory.display()
+                        ),
+                    )
+                    .into())
+                }
+            }
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "workspace local close stream is not a regular file: {}",
+                path.display()
+            ),
+        )
+        .into()),
+    }
 }
 
 fn workspace_state_transaction_version_for_events_path(events_path: Option<&Path>) -> u32 {
