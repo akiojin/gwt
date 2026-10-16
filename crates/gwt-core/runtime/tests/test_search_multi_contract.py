@@ -1271,6 +1271,19 @@ class SearchWorkerTests(unittest.TestCase):
         self.assertTrue(payload["retryable"])
 
     def test_cli_searches_reuse_worker_and_reopen_published_store(self):
+        evidence = self._exercise_cli_worker_reuse()
+        if os.environ.get("GWT_INDEX_REAL_SEARCH_BENCHMARK") == "1":
+            self.assertLessEqual(max(evidence["warm_seconds"]), 2.0)
+
+    @unittest.skipUnless(
+        os.environ.get("GWT_INDEX_REAL_SEARCH_BENCHMARK") == "1",
+        "requires the opt-in real embedding model",
+    )
+    def test_real_model_worker_exposes_readiness(self):
+        evidence = self._exercise_cli_worker_reuse()
+        self.assertIn("warming", evidence["observed_model_states"])
+
+    def _exercise_cli_worker_reuse(self):
         real_model = os.environ.get("GWT_INDEX_REAL_SEARCH_BENCHMARK") == "1"
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1377,8 +1390,6 @@ class SearchWorkerTests(unittest.TestCase):
                                       "warm_timings_ms": warm_timings_ms,
                                       "warm_model_load_ms": second["model_load_ms"]}), flush=True)
                     self.assertGreater(first["model_load_ms"], 0)
-                    self.assertIn("warming", observed_states)
-                    self.assertLessEqual(max(warm_seconds), 2.0)
                 db_path = runner.resolve_db_path(
                     REPO_HASH, None, "memory", db_root=base / ".gwt" / "index"
                 )
@@ -1393,6 +1404,8 @@ class SearchWorkerTests(unittest.TestCase):
                                    "--query", "beta update")
                 self.assertEqual(corrupted["worker_pid"], worker_pid)
                 self.assertEqual(corrupted["scopes"]["memory"]["state"], "corrupt")
+                return {"observed_model_states": observed_states,
+                        "warm_seconds": warm_seconds}
             finally:
                 # This PID came from the worker launched by this isolated fixture.
                 import signal
