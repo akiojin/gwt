@@ -55,11 +55,11 @@ function hasRawMagic(file) {
   return RAW_MAGICS.some((magic) => magic.equals(header));
 }
 
-// cargo-llvm-cov names profiles `<name>-%p-%Nm.profraw`; the `%m` token is
-// the instrumented module's signature, shared by every process of one binary.
+// `%Nm` expands to `<module signature>_<pool slot>`. Ignore the slot for
+// both pooled names and cargo-llvm-cov's default `<name>-%p-%Nm.profraw`.
 function moduleOf(name) {
   const stem = name.replace(/\.profraw$/, "");
-  return stem.slice(stem.lastIndexOf("-") + 1);
+  return stem.slice(stem.lastIndexOf("-") + 1).replace(/_\d+$/, "");
 }
 
 function readsCleanly(profdata, file) {
