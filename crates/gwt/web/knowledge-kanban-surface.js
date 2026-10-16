@@ -5225,7 +5225,9 @@ export function createKnowledgeKanbanSurface({
             // A cache-first list can precede the related-work snapshot used by
             // an explicit selection. Refresh its detail without selecting anew.
             if (refreshSelectedDetail) {
-              dispatchKnowledgeDetailRequest(event.id, event.knowledge_kind, previousNumber, { explicit: false });
+              knowledgeCompletionViewModel.update(() => ({
+                windowId: event.id, detailRefreshNumber: previousNumber,
+              }));
             }
             const renderCompletion = () => {
               knowledgeCompletionViewModel.update(() => ({
@@ -5528,9 +5530,13 @@ export function createKnowledgeKanbanSurface({
       });
       // List completion publishes data in receive; the synchronous view owns
       // both the full rebuild and revision-preserving selection updates.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber }) => {
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber }) => {
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
+        if (detailRefreshNumber) {
+          dispatchKnowledgeDetailRequest(windowId, state.kind, detailRefreshNumber, { explicit: false });
+          return;
+        }
         if (!unchangedEntries) {
           renderKnowledgeBridge(windowId);
           return;
