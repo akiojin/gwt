@@ -363,7 +363,8 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
                 gwt_core::workspace_projection::successor_work_id(&predecessor_id),
                 Utc::now(),
             );
-            placeholder.owner = Some("SPEC-3165".to_string());
+            placeholder.owner =
+                (case != "4777-discarded-successor-placeholder").then(|| "SPEC-3165".to_string());
             placeholder.execution_container = Some(
                 gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                     branch: Some("work/issue-3165".to_string()),
@@ -468,6 +469,32 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             &history,
         )
         .expect("seed observed historical Work shape");
+        let persisted_successor_detachment = matches!(
+            case,
+            "4783-active-empty-container-successor" | "4777-discarded-successor-placeholder"
+        );
+        if persisted_successor_detachment {
+            let invalid_id = superseded_occupancy.as_ref().unwrap();
+            let mut container = history
+                .work_items
+                .iter()
+                .find(|work| &work.id == invalid_id)
+                .unwrap()
+                .events
+                .iter()
+                .find_map(|event| event.execution_container.clone())
+                .unwrap();
+            container.worktree_path = Some(dunce::canonicalize(&fixture.worktree).unwrap());
+            // Issues #4783/#4777: the durable repair receipt also removes the
+            // container reintroduced by the reserved supersession audit.
+            let detachments =
+                std::collections::BTreeMap::from([(invalid_id.clone(), vec![container])]);
+            fs::write(
+                works_path.with_extension("detachments.json"),
+                serde_json::to_vec(&detachments).unwrap(),
+            )
+            .expect("seed persistent successor container detachment");
+        }
         let predecessor =
             gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
                 .unwrap()
@@ -589,6 +616,15 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
                     .any(|event| event.is_successor_supersession()),
                 "{case}"
             );
+            if persisted_successor_detachment {
+                assert!(
+                    invalid.execution_containers.is_empty(),
+                    "{case}: the durable detachment still applies after the supersession audit"
+                );
+                if case == "4777-discarded-successor-placeholder" {
+                    assert_eq!(invalid.owner, None, "{case}: preserve ownerless history");
+                }
+            }
         }
         let projection =
             gwt_core::workspace_projection::load_workspace_projection(&fixture.project_root)
