@@ -138,6 +138,23 @@ test("Reports and raw terminal receivers resolve only shared model updates", () 
   assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
 });
 
+test("Release notes receivers resolve only shared model updates", () => {
+  const appFile = 'crates/gwt/web/app.js';
+  const surfaceFile = 'crates/gwt/web/release-notes-window.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../release-notes-window.js', import.meta.url), 'utf8');
+  const receivers = source => scanModule(source, appFile, { modules: new Map([[surfaceFile, surface]]) })
+    .filter(finding => finding.root === 'receive' && /^\/release_notes_(payload|error)$/.test(finding.context));
+  assert.deepEqual(receivers(app), []);
+  for (const name of ['handlePayload', 'handleError']) {
+    assert.deepEqual(scanModule(surface, surfaceFile, { rootName: name }), []);
+    const bypass = surface.replace(name === 'handlePayload' ? 'function handlePayload(payload) {' : 'function handleError(message) {',
+        `function ${name}(${name === 'handlePayload' ? 'payload' : 'message'}) { renderSidebar(model.read());`);
+    assert.notEqual(bypass, surface);
+    assert.ok(scanModule(bypass, surfaceFile, { rootName: name }).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
 test("Workspace state notice receiver resolves only shared model updates", () => {
   const appFile = 'crates/gwt/web/app.js';
   const noticeFile = 'crates/gwt/web/workspace-state-notice.js';
