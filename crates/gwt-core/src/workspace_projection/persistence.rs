@@ -6099,6 +6099,28 @@ fn current_canonical_work_item<'a>(
             break;
         };
         validate_launch_owner(successor)?;
+        let container_matches = |container: &WorkspaceExecutionContainerRef| {
+            canonical_work_id(
+                project_root,
+                container.branch.as_deref(),
+                container.worktree_path.as_deref(),
+            )
+            .as_deref()
+                == Some(canonical_id)
+        };
+        // A durable detachment receipt may remove even the container added by
+        // supersession. The exact authenticated audit still proves terminal
+        // lineage; reading it must not restore the detached mutable refs.
+        let detached_supersession_container = successor.events.iter().find_map(|event| {
+            (successor.is_terminal()
+                && successor.execution_containers.is_empty()
+                && event.is_successor_supersession()
+                && event.work_item_id == successor.id
+                && event.related_work_item_id.as_deref() == Some(current.id.as_str()))
+            .then_some(event.execution_container.as_ref())
+            .flatten()
+            .filter(|container| container_matches(container))
+        });
         // Historical terminal rows may lack owner metadata. Keep the last
         // known owner across that gap, and only publish a later Work once its
         // owner agrees. An ownerless tail must not gain adoption authority.
@@ -6110,13 +6132,17 @@ fn current_canonical_work_item<'a>(
             }
             (Some(_), None) => successor.is_terminal() || launch_owner.is_some(),
             (None, None) => true,
-            (None, Some(owner)) => successor.execution_containers.iter().any(|container| {
-                container
-                    .branch
-                    .as_deref()
-                    .and_then(work_owner_for_branch)
-                    .is_some_and(|branch_owner| owners_match(&branch_owner, owner))
-            }),
+            (None, Some(owner)) => successor
+                .execution_containers
+                .iter()
+                .chain(detached_supersession_container)
+                .any(|container| {
+                    container
+                        .branch
+                        .as_deref()
+                        .and_then(work_owner_for_branch)
+                        .is_some_and(|branch_owner| owners_match(&branch_owner, owner))
+                }),
         };
         if candidates.next().is_some()
             || !successor.related_work_item_ids.contains(&current.id)
@@ -6126,19 +6152,9 @@ fn current_canonical_work_item<'a>(
                     && event.related_work_item_id.as_deref() == Some(current.id.as_str())
             })
             || !owner_matches
-            || successor.execution_containers.is_empty()
-            || !successor.execution_containers.iter().all(|container| {
-                // Branch-backed Work identity spans hosts. Old paths may be
-                // foreign or absent; the Start link and canonical identity
-                // establish lineage, not a historical host's checkout path.
-                canonical_work_id(
-                    project_root,
-                    container.branch.as_deref(),
-                    container.worktree_path.as_deref(),
-                )
-                .as_deref()
-                    == Some(canonical_id)
-            })
+            || (successor.execution_containers.is_empty()
+                && detached_supersession_container.is_none())
+            || !successor.execution_containers.iter().all(container_matches)
         {
             break;
         }

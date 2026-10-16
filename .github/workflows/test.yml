@@ -700,6 +700,9 @@ jobs:
           if ($failures -ne 0) { exit 1 }
         timeout-minutes: 15
 
+  # Issue #5565: keep each default test harness on one host while compiling
+  # library harnesses beside runtime/integration harnesses. Both keep the
+  # original four Cargo roots and feed the same protected Windows check.
   test-windows-rust:
     name: Test (Windows regressions)
     concurrency:
@@ -722,114 +725,78 @@ jobs:
       - name: Check Windows test runner
         run: node --test scripts/ci-windows-tests.test.mjs
       - name: Build Windows regression targets once
-        run: node scripts/ci-windows-tests.mjs build default
+        # Test inherits dev; keep assertions/features while omitting CI line tables.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: node scripts/ci-windows-tests.mjs build default-runtime
         timeout-minutes: 30
-      - name: Run targeted issue cache refresh regression
-        run: node scripts/ci-windows-tests.mjs run gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact
-        timeout-minutes: 15
       - name: Run managed hook self-heal regressions
         shell: bash
         run: |
-          node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1
         timeout-minutes: 15
       - name: Run GUI dispatch stall diagnostic regressions
         run: |
-          node scripts/ci-windows-tests.mjs run gwt bin gwt dispatch_watchdog::tests:: -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt dispatch_watchdog::tests:: -- --test-threads=1
         timeout-minutes: 15
       - name: Run priority roundtrip from Normal and BelowNormal launchers
-        run: node scripts/ci-windows-tests.mjs run gwt-core test process_priority_roundtrip -- --nocapture
+        run: node scripts/ci-windows-tests.mjs run-runtime gwt-core test process_priority_roundtrip -- --nocapture
         timeout-minutes: 15
       - name: Run shared Windows process resolver tests
         shell: bash
         run: |
-          node scripts/ci-windows-tests.mjs run gwt-core test windows_process_resolver
-          node scripts/ci-windows-tests.mjs run gwt-core test process_adapter_parity
+          node scripts/ci-windows-tests.mjs run-runtime gwt-core test windows_process_resolver
+          node scripts/ci-windows-tests.mjs run-runtime gwt-core test process_adapter_parity
         timeout-minutes: 15
       - name: Run real Claude probe caller regressions
         shell: bash
         run: |
-          node scripts/ci-windows-tests.mjs run gwt-core test windows_claude_user_agent
-          node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent real_bun_global_placeholder_fixture
-          node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent direct_runner_resolution_failure_still_emits_an_end_summary
-          node scripts/ci-windows-tests.mjs run gwt bin gwt real_bun_global_placeholder_fixture
-          node scripts/ci-windows-tests.mjs run gwt bin gwt command_prompt_agent_wrapper
+          node scripts/ci-windows-tests.mjs run-runtime gwt-core test windows_claude_user_agent
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt real_bun_global_placeholder_fixture
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt command_prompt_agent_wrapper
         timeout-minutes: 15
-      - name: Run Windows PTY resolver adapter tests
-        run: node scripts/ci-windows-tests.mjs run gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1
-        timeout-minutes: 15
-      - name: Run inherited Claude session environment regressions
-        run: node scripts/ci-windows-tests.mjs run gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1
-        timeout-minutes: 15
-      # Issue #3631: a GUI-subsystem PTY start gate is never attached to the
-      # pane's pseudoconsole, so the released agent renders in an external
-      # Windows Terminal window. Both guards are Windows-only and would be
-      # skipped by the Linux workspace run.
+      # Issue #3631: the GUI-subsystem start gate must attach to ConPTY.
+      # Both guards are Windows-only and are skipped by the Linux suite.
       - name: Run Windows PTY start-gate console contracts
         shell: bash
         run: |
-          node scripts/ci-windows-tests.mjs run gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt-terminal test pty_start_gate_test -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt test runtime_tests pty_start_gate_console_test:: -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt-terminal test pty_start_gate_test -- --test-threads=1
         timeout-minutes: 15
       - name: Run Issue Monitor scheduled driver contracts
         shell: bash
         run: |
-          node scripts/ci-windows-tests.mjs run gwt bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt bin gwt scheduled_tick_drives_disabled_claim_cleanup_without_scanning -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt bin gwt scheduled_tick_advances_autonomous_launch_without_an_external_daemon -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime_local_driver_ -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt local_fallback_lease -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt scheduled_tick_drives_disabled_claim_cleanup_without_scanning -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt scheduled_tick_advances_autonomous_launch_without_an_external_daemon -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime_local_driver_ -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1
         timeout-minutes: 15
       - name: Run Issue Monitor launch_now control-path contracts
         shell: bash
         run: |
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt bin gwt authenticated_scan_now_ -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt test coordination_tests issue_monitor_protocol_test::agent_issue_monitor_scan_ -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt authenticated_scan_now_ -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt test coordination_tests issue_monitor_protocol_test::frontend_issue_monitor_events_use_snake_case_wire_shape -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-runtime gwt test coordination_tests issue_monitor_protocol_test::agent_issue_monitor_scan_ -- --test-threads=1
         timeout-minutes: 15
       - name: Run agent process resolver caller contracts
-        run: 'node scripts/ci-windows-tests.mjs run gwt test runtime_tests agent_process_resolution_contract_test::'
-        timeout-minutes: 15
-      - name: Run Windows runtime daemon named-pipe transport contracts
-        shell: bash
-        run: |
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::daemon::transport -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::daemon::client -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::daemon::tests -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt daemon_subscriber -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt daemon_supervisor -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt process::tests -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt-core lib gwt_core daemon_pipe_name -- --test-threads=1
-        timeout-minutes: 20
-      # Issue #4746: Windows uses the in-process verification runner, and
-      # reclaiming an exited workload's stalled driver needs native taskkill.
-      - name: Run Windows verification completion and reclaim regressions
-        shell: bash
-        run: |
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_record::tests::verification_records_exit_while_grandchild_holds_output -- --exact --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_lease:: -- --test-threads=1
+        run: 'node scripts/ci-windows-tests.mjs run-runtime gwt test runtime_tests agent_process_resolution_contract_test::'
         timeout-minutes: 15
       - name: Run Windows verification driver relink regression
         # Issue #5466 AC-4: all ten passes retain their real-artifact assertions.
         # Each process has private fixture HOME/project/target directories.
         run: |
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::verification_record::driver:: -- --test-threads=1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $jobs = 1..5 | ForEach-Object {
             Start-Job -ArgumentList (Get-Location).Path,$_ -ScriptBlock {
               param($repo, $worker)
               Set-Location $repo
               for ($attempt = 1; $attempt -le 2; $attempt++) {
                 Write-Host "Windows verification driver worker $worker attempt $attempt of 2"
-                node scripts/ci-windows-tests.mjs run gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1
+                node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1
                 if ($LASTEXITCODE -ne 0) { throw "driver worker $worker failed ($LASTEXITCODE)" }
               }
             }
@@ -842,30 +809,105 @@ jobs:
             $jobs | Remove-Job -Force
           }
         timeout-minutes: 20
-      # Issue #4078 AC-4: the wait declaration is the only way a Windows agent
-      # can tell the Issue Monitor its silence is a wait rather than a stall.
-      # Both the acceptance of a declaration and its durable prefs fallback are
-      # host-state contracts, so they are pinned on the Windows job rather than
-      # inferred from the Linux run.
-      - name: Run Issue Monitor wait declaration contracts
-        shell: bash
-        run: |
-          node scripts/ci-windows-tests.mjs run gwt lib gwt cli::issue::tests::monitor_wait_ -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt issue_monitor::tests::wait_declaration_ -- --test-threads=1
-          node scripts/ci-windows-tests.mjs run gwt lib gwt issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1
-        timeout-minutes: 15
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15
       # Issue #4821: keep the readiness contract within 60 seconds.
       # Native timing measurements run on the nightly path.
       - name: Check Windows startup tray readiness contract
-        run: node scripts/ci-windows-tests.mjs run gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture
+        run: node scripts/ci-windows-tests.mjs run-runtime gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture
         timeout-minutes: 1
       # Issue #4803 AC-4: Linux runs this in the workspace suite; pin it here
       # too so exceeding the deterministic 1500-session Git budget fails CI.
       - name: Check startup update Git-spawn budget
-        run: node scripts/ci-windows-tests.mjs run gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1
+        run: node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1
+        timeout-minutes: 15
+
+  test-windows-rust-lib:
+    name: Test (Windows library regressions)
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-rust-lib
+      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+    needs: source-sync
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          shared-key: windows-workspace
+        continue-on-error: true
+      - name: Check Windows test runner
+        run: node --test scripts/ci-windows-tests.test.mjs
+      - name: Build Windows library regression targets once
+        # Test inherits dev; keep assertions/features while omitting CI line tables.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: node scripts/ci-windows-tests.mjs build default-lib
+        timeout-minutes: 30
+      - name: Run targeted issue cache refresh regression
+        run: node scripts/ci-windows-tests.mjs run-lib gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact
+        timeout-minutes: 15
+      - name: Run real Claude probe caller regressions
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt-agent lib gwt_agent real_bun_global_placeholder_fixture
+          node scripts/ci-windows-tests.mjs run-lib gwt-agent lib gwt_agent direct_runner_resolution_failure_still_emits_an_end_summary
+        timeout-minutes: 15
+      - name: Run Windows PTY resolver adapter tests
+        run: node scripts/ci-windows-tests.mjs run-lib gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run inherited Claude session environment regressions
+        run: node scripts/ci-windows-tests.mjs run-lib gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run Issue Monitor scheduled driver contracts
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt local_fallback_lease -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run Issue Monitor launch_now control-path contracts
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run Windows runtime daemon named-pipe transport contracts
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::daemon::transport -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::daemon::client -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::daemon::tests -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt daemon_subscriber -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt daemon_supervisor -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt process::tests -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt-core lib gwt_core daemon_pipe_name -- --test-threads=1
+        timeout-minutes: 20
+      # Issue #4746: Windows uses the in-process verification runner, and
+      # reclaiming an exited workload's stalled driver needs native taskkill.
+      - name: Run Windows verification completion and reclaim regressions
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::verification_record::tests::verification_records_exit_while_grandchild_holds_output -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::verification_lease:: -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run Windows verification driver pinning contracts
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::verification_record::driver:: -- --test-threads=1
+        timeout-minutes: 15
+      # Issue #4078: pin both the wait declaration and its durable prefs fallback.
+      - name: Run Issue Monitor wait declaration contracts
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::issue::tests::monitor_wait_ -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt issue_monitor::tests::wait_declaration_ -- --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1
         timeout-minutes: 15
 
   test-windows-warm:
@@ -898,14 +940,14 @@ jobs:
         run: node scripts/ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget -- --exact --test-threads=1
         timeout-minutes: 15
 
-  # Issue #4821: both workloads start together; the protected check still
-  # requires every core matrix run and all selective regressions to succeed.
+  # Issue #4821: core stability and both default slices start together; the
+  # protected check requires every slice and warm latency to succeed.
   test-windows-required:
     name: Test (Rust, Windows)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-required
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: [test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-warm, source-sync]
+    needs: [test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, source-sync]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -915,10 +957,11 @@ jobs:
           CORE_STABILITY_RESULT: ${{ needs.test-windows-core-stability.result }}
           INDEX_STABILITY_RESULT: ${{ needs.test-windows-index-stability.result }}
           WINDOWS_RESULT: ${{ needs.test-windows-rust.result }}
+          WINDOWS_LIB_RESULT: ${{ needs.test-windows-rust-lib.result }}
           WARM_RESULT: ${{ needs.test-windows-warm.result }}
         run: |
-          echo "Windows core stability: $CORE_STABILITY_RESULT; regressions: $WINDOWS_RESULT"
-          test "$CORE_STABILITY_RESULT" = success && test "$INDEX_STABILITY_RESULT" = success && test "$WINDOWS_RESULT" = success && test "$WARM_RESULT" = success
+          echo "Windows core stability: $CORE_STABILITY_RESULT; regressions: $WINDOWS_RESULT; library regressions: $WINDOWS_LIB_RESULT"
+          test "$CORE_STABILITY_RESULT" = success && test "$INDEX_STABILITY_RESULT" = success && test "$WINDOWS_RESULT" = success && test "$WINDOWS_LIB_RESULT" = success && test "$WARM_RESULT" = success
 
   # The default-parallel determinism proof lives in nightly.yml (Issue #4134
   # AC-1). It re-ran on Windows a suite Linux had already run, cost 2806s, and
@@ -946,29 +989,46 @@ jobs:
       # Build once, then exercise both installed provider commands through
       # the same direct probe, Session persistence, and ConPTY launch routes.
       - name: Build the deterministic Windows agent launch E2E
+        # Test inherits dev; keep assertions/features while omitting CI line tables.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo test -p gwt --test windows_agent_launch_e2e --no-run
         timeout-minutes: 30
       # Issue #4644 AC-5: the non-ignored contract tests in this cfg(windows)
       # target (e.g. the Hub bootstrap reply classifier) are compiled nowhere
       # else, so run them once before the provider combinations.
       - name: Run Windows agent launch E2E contract tests
+        # Test inherits dev; keep assertions/features while omitting CI line tables.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo test -p gwt --test windows_agent_launch_e2e
       # Run both providers even when one fails, retaining native diagnostics.
       - name: Run credential-free deterministic Windows agent launch E2E
         shell: bash
         env:
           GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE: "1"
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           status=0
+          providers=(codex claude)
+          pids=()
+          # Fixtures isolate HOME, npm state, registry/server ports, and sessions.
           for provider in codex claude; do
+            GWT_WINDOWS_AGENT_PROVIDER="$provider" \
+              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture > "$RUNNER_TEMP/windows-agent-${provider}.log" 2>&1 &
+            pids+=("$!")
+          done
+          # Keep both outcomes and the existing provider-specific diagnostics.
+          for index in "${!pids[@]}"; do
+            provider="${providers[$index]}"
             echo "::group::windows installed agent launch E2E ${provider}"
-            if GWT_WINDOWS_AGENT_PROVIDER="$provider" \
-              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture; then
+            if wait "${pids[$index]}"; then
               echo "ok ${provider}/installed"
             else
               echo "::error::windows agent launch E2E failed for ${provider}/installed"
               status=1
             fi
+            cat "$RUNNER_TEMP/windows-agent-${provider}.log"
             echo "::endgroup::"
           done
           exit "$status"
@@ -1031,7 +1091,7 @@ jobs:
         timeout-minutes: 15
 
   report-post-merge-failure:
-    needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-verify-timings, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
+    needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-verify-timings, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
     if: ${{ github.event_name == 'push' && failure() }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-report-post-merge-failure

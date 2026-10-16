@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.126.1] - 2026-10-16
+
+### Bug Fixes
+
+- **execution:** Resolve superseded work after container detachment
+
+### Miscellaneous Tasks
+
+- **work:** Record PM settings delivery gate handoff
+- **work:** Record Windows CI delivery continuation
+- **work:** Record Windows CI delivery recovery
+- **work:** Record PR 5622 delivery metadata
+
+### Performance
+
+- **ci:** Trim Windows test symbols and parallelize providers
+- **ci:** Compile Windows regression harness groups in parallel
+
+### Refactor
+
+- **ui:** Render PM settings from shared state
+- **ui:** Render workspace state notices from shared state
+
+### Testing
+
+- **workspace:** Isolate rebuild detachment fixture home
+- **ci:** Align native caller contracts with Windows slices
+- **execution:** Fix detached successor fixture path lookup
+
 ## [9.126.0] - 2026-10-16
 
 ### Bug Fixes
