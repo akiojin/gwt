@@ -549,6 +549,7 @@ fn derive_pre_pr_for_host_excluding(
         .filter(|command| command.starts_with("node --test "))
         .collect();
     if workspace || !packages.is_empty() {
+        plan.commands.push("rustc --version".to_string());
         plan.commands.push(CI_FMT_GATE.to_string());
         let scope = if workspace {
             "--workspace".into()
@@ -863,6 +864,7 @@ fn derive_for_host_excluding(
 
     let code_changed = !rust_crates.is_empty() || workspace_rust || skills || frontend || other;
     if code_changed {
+        push_unique(&mut commands, "rustc --version".to_string());
         push_unique(&mut commands, CI_FMT_GATE.to_string());
         push_unique(&mut commands, CI_CLIPPY_GATE.to_string());
         push_unique(&mut commands, CI_RUSTDOC_GATE.to_string());
@@ -1060,6 +1062,11 @@ mod tests {
             std::slice::from_ref(&local),
         )
         .unwrap();
+        assert_eq!(
+            plan.commands.first().map(String::as_str),
+            Some("rustc --version"),
+            "pre-pr evidence must capture the selected Rust toolchain before checking code"
+        );
         assert!(plan.commands.contains(&CI_FMT_GATE.to_string()));
         assert!(plan.commands.contains(
             &"cargo clippy -p gwt --all-targets --all-features -- -D warnings".to_string()
@@ -1377,6 +1384,7 @@ mod tests {
         assert_eq!(
             plan.commands,
             vec![
+                "rustc --version".to_string(),
                 CI_FMT_GATE.to_string(),
                 CI_CLIPPY_GATE.to_string(),
                 CI_RUSTDOC_GATE.to_string(),
@@ -2146,6 +2154,7 @@ mod tests {
         assert_eq!(
             plan.commands,
             vec![
+                "rustc --version".to_string(),
                 CI_FMT_GATE.to_string(),
                 CI_CLIPPY_GATE.to_string(),
                 CI_RUSTDOC_GATE.to_string(),
