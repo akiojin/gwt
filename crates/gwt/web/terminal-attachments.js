@@ -120,8 +120,9 @@ export function createTerminalAttachments({
       const attachmentProgressControllers = new Map();
 
       function ensureAttachmentProgressSurface(windowId) {
-        const host = terminalMap.get(windowId)?.terminalContainer?.closest?.(".agent-tile")
-          || workspaceWindowElement(windowId) || document.body;
+        const terminalHost = terminalMap.get(windowId)?.terminalContainer?.parentElement;
+        const host = terminalHost?.dataset.agentId === windowId
+          ? terminalHost : workspaceWindowElement(windowId) || document.body;
         let surface = host.querySelector(".attachment-progress");
         if (surface) {
           return surface;

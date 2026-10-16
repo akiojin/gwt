@@ -56,6 +56,17 @@ test.describe("Surface rail", () => {
       await page.reload();
       await expect(main).toHaveAttribute("data-surface", visibleSurface);
       await expectSurfaceOnly(page);
+      // A project change closes the previous layout before restoring the
+      // next catalog. Returning must restore the saved surface as well.
+      await page.evaluate(() => (window as any).__switchSurfaceProject("tab-2"));
+      await expect(main).toHaveAttribute("data-surface", "board");
+      await expect(main.locator('[data-id="second-board"]')).toBeVisible();
+      await expectSurfaceOnly(page);
+      await page.evaluate(() => (window as any).__switchSurfaceProject("tab-1"));
+      await expect(main).toHaveAttribute("data-surface", visibleSurface);
+      await expect(main.locator(`.workspace-window[data-id='${focusedId}']`)).toBeVisible();
+      await expect(page.locator("#split-surfaces")).toHaveAttribute("data-split", "false");
+      await expectSurfaceOnly(page);
       await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
       await page.screenshot({ path: testInfo.outputPath(`restored-${surface}.png`) });
       expect(errors).toEqual([]);
@@ -929,6 +940,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
     }
     let zCounter = 100;
     let socket: FixtureWebSocket | null = null;
+    let activeTabId = "tab-1";
 
     const workspaceState = () => ({
       kind: "workspace_state",
@@ -945,8 +957,20 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
               windows: windows.map((windowData) => ({ ...windowData })),
             },
           },
+          {
+            id: "tab-2",
+            title: "Second project",
+            project_root: "/second-fixture",
+            kind: "git",
+            workspace: {
+              viewport: { x: -5000, y: 3000, zoom: 0.4 },
+              windows: [canvasWindow("second-board", {
+                preset: "board", geometry: { x: -5000, y: 3000, width: 520, height: 420 },
+              })],
+            },
+          },
         ],
-        active_tab_id: "tab-1",
+        active_tab_id: activeTabId,
         recent_projects: [],
       },
     });
@@ -1029,6 +1053,10 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
       value: FixtureWebSocket,
     });
     (window as any).__surfaceRailSocket = () => socket;
+    (window as any).__switchSurfaceProject = (id: string) => {
+      activeTabId = id;
+      socket?.emit(workspaceState());
+    };
     (window as any).__removeSurfaceAgent = (id: string, update?: Record<string, unknown>) => {
       const index = windows.findIndex(data => data.id === id);
       if (index >= 0) windows.splice(index, 1);
