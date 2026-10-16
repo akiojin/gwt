@@ -1075,11 +1075,13 @@ pub fn classify_exact_session_runtime(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
 ) -> io::Result<ExactSessionRuntimeDisposition> {
+    gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
     let runtime_root = sessions_dir.join("runtime");
     let entries = match fs::read_dir(&runtime_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(ExactSessionRuntimeDisposition::Absent)
+            gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
+            return Ok(ExactSessionRuntimeDisposition::Absent);
         }
         Err(error) => return Err(error),
     };
@@ -1095,6 +1097,7 @@ pub fn classify_exact_session_runtime(
     let mut conflicting_proof = false;
     let mut saw_reachable_proof = false;
     for namespace in entries {
+        gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
         let namespace = namespace?;
         let Some(host_pid) = namespace
             .file_name()
@@ -1151,7 +1154,10 @@ pub fn classify_exact_session_runtime(
             }
             continue;
         };
-        if crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at) {
+        let child_alive =
+            crate::process::exact_pty_process_tree_is_alive(child_pid, child_started_at);
+        gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
+        if child_alive {
             return Ok(ExactSessionRuntimeDisposition::Live);
         }
         // Issue #5535: the child identity proves runtime absence even when
@@ -1219,6 +1225,8 @@ pub fn classify_exact_session_runtime(
             conflicting_proof = true;
         }
     }
+    // A partial census must never authorize reaping a holder or releasing its slot.
+    gwt_core::operation_deadline::ensure_remaining("exact session runtime census")?;
     if saw_unknown {
         return Ok(ExactSessionRuntimeDisposition::Unknown);
     }
@@ -17749,6 +17757,41 @@ fn run_adopt_locked(
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    #[test]
+    fn issue_5644_expired_runtime_scan_cannot_prove_absence() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            gwt_agent::Session::new(temp.path(), "work/issue-5644", gwt_agent::AgentId::Codex);
+        session.repo_hash = Some("repo".to_string());
+        session.linked_issue_number = Some(5644);
+        session.execution_binding = Some(gwt_agent::SessionExecutionBinding {
+            schema_version: 1,
+            session_id: session.id.clone(),
+            repo_hash: "repo".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 5644,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation".to_string(),
+                binding_id: "binding".to_string(),
+                ledger_head_hash: "head".to_string(),
+            },
+            capability_generation: 1,
+        });
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(temp.path(), &identity).unwrap(),
+            ExactSessionRuntimeDisposition::Absent
+        );
+        let deadline = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(deadline);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        let error = classify_exact_session_runtime(temp.path(), &identity)
+            .expect_err("expired observation cannot establish runtime absence");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     /// Issue #4074 AC-3 (regression contract for #4029): `execution.status`
     /// must not name a recovery the caller's session and authority would

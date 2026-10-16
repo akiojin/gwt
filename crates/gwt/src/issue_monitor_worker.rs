@@ -407,23 +407,36 @@ pub(crate) struct IssueMonitorScanTiming {
 impl IssueMonitorScanTiming {
     pub(crate) fn start(phase: &'static str) -> Self {
         let started = std::time::Instant::now();
-        Self {
+        let timing = Self {
             started,
             phase_started: started,
             phase,
-        }
+        };
+        timing.record_started();
+        timing
     }
 
     pub(crate) fn next(&mut self, phase: &'static str) {
         self.record(self.phase, self.phase_started.elapsed());
         self.phase = phase;
         self.phase_started = std::time::Instant::now();
+        self.record_started();
+    }
+
+    fn record_started(&self) {
+        tracing::info!(
+            target: "gwt.issue_monitor.scan",
+            stage = self.phase,
+            state = "started",
+            "Issue Monitor scan stage"
+        );
     }
 
     fn record(&self, stage: &str, elapsed: std::time::Duration) {
         tracing::info!(
             target: "gwt.issue_monitor.scan",
             stage,
+            state = "finished",
             duration_ms = elapsed.as_secs_f64() * 1_000.0,
             remaining_budget_ms = ?gwt_core::operation_deadline::current().map(|deadline|
                 deadline.saturating_duration_since(gwt_core::operation_deadline::now()).as_millis()),
@@ -453,9 +466,34 @@ pub fn read_execution_observations(
     project_root: &Path,
     issue_numbers: &[u64],
 ) -> BTreeMap<u64, crate::issue_monitor::IssueMonitorExecutionObservation> {
-    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    let inventory = crate::session_inventory::observe_sessions(project_root, &sessions_dir);
-    read_execution_observations_from_inventory(project_root, issue_numbers, &inventory)
+    let _timing = IssueMonitorScanTiming::start("execution-observation");
+    let deadline = gwt_core::operation_deadline::current();
+    let span = tracing::Span::current();
+    #[cfg(test)]
+    let home = gwt_core::test_support::gwt_home_override();
+    let observe = || {
+        #[cfg(test)]
+        let _home = home
+            .as_ref()
+            .map(gwt_core::test_support::ScopedGwtHome::set);
+        let _span = span.enter();
+        let _deadline = deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let inventory = crate::session_inventory::observe_sessions(project_root, &sessions_dir);
+        read_execution_observations_from_inventory(project_root, issue_numbers, &inventory)
+    };
+    if tokio::runtime::Handle::try_current().is_ok() {
+        // Deadline-aware Git uses a synchronous runtime. Keep that work off
+        // the async driver's thread while retaining its absolute deadline.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(observe)
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+    } else {
+        observe()
+    }
 }
 
 pub(crate) fn read_execution_observations_from_inventory(
@@ -474,6 +512,17 @@ pub(crate) fn read_execution_observations_from_inventory(
     issue_numbers
         .iter()
         .map(|issue_number| {
+            if gwt_core::operation_deadline::ensure_remaining("execution observations").is_err() {
+                return (
+                    *issue_number,
+                    crate::issue_monitor::IssueMonitorExecutionObservation {
+                        settlement: IssueMonitorExecutionSettlement::Unknown,
+                        process_held: true,
+                        holder_host_dead: false,
+                        held_holder_session_id: None,
+                    },
+                );
+            }
             let diagnosis = diagnose_owner(
                 project_root,
                 ExecutionOwnerKey {
