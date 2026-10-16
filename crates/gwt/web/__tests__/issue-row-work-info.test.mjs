@@ -327,3 +327,19 @@ test("app.js feeds the Issue surface from the shared Work projection and helpers
     "the Issue surface reads the already-broadcast active Work projection",
   );
 });
+
+
+test("Issue detail uses the related agent name with provider context", async (t) => {
+  const fixture = await makeFixture();
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)]);
+  fixture.surface.requestKnowledgeDetail("win-1", "issue", 3671);
+  const requestId = fixture.sent.at(-1).request_id;
+  fixture.surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1",
+    knowledge_kind: "issue", request_id: requestId,
+    detail: { number: 3671, title: "Issue #3671", state: "open", sections: [],
+      related_works: [{ title: "Implementation", agents: [{ session_id: "session-1",
+        agent_name: "ミオ", display_name: "Codex", agent_id: "codex", sessions: [] }] }] } });
+  fixture.body.querySelector("[data-issue-detail-view='issue']").click();
+  assert.equal(fixture.body.querySelector(".knowledge-related-agent-name").textContent, "ミオ (Codex)");
+});

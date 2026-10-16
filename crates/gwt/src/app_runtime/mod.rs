@@ -4230,6 +4230,173 @@ fn issue_monitor_issue_from_snapshot(
 }
 
 impl AppRuntime {
+    fn agent_name_reservations(
+        &self,
+        restoring_session: Option<&str>,
+    ) -> (HashSet<String>, HashSet<String>) {
+        let mut known = HashSet::new();
+        let mut active = HashSet::new();
+        for tab in &self.tabs {
+            let pm = self.pm_session_for_root(&tab.project_root);
+            for window in &tab.workspace.persisted().windows {
+                if !window.preset.is_agent_terminal()
+                    || window.is_pm
+                    || pm.is_some_and(|id| window.session_id.as_ref() == Some(id))
+                {
+                    continue;
+                }
+                if let Some(name) = &window.agent_name {
+                    known.insert(name.clone());
+                    // Retained stopped/error windows may restart with the same
+                    // identity, so their initials stay reserved until close.
+                    if !restoring_session.is_some_and(|id| {
+                        window.session_id.as_deref() == Some(id)
+                            && matches!(
+                                window.status,
+                                WindowProcessStatus::Stopped | WindowProcessStatus::Error
+                            )
+                    }) {
+                        active.insert(name.clone());
+                    }
+                }
+            }
+        }
+        (known, active)
+    }
+
+    fn allocate_agent_name(
+        &self,
+        root: &Path,
+        inherited: Option<String>,
+    ) -> Result<String, String> {
+        let history =
+            gwt_core::paths::gwt_project_dir_for_repo_path(root).join("agent-names.jsonl");
+        let (mut known, active) = self.agent_name_reservations(None);
+        if let Some(name) = inherited {
+            gwt::agent_names::ensure_available_initial(&name, &active)?;
+            known.insert(name.clone());
+            gwt::agent_names::remember(&history, &known)?;
+            return Ok(name);
+        }
+        let language = gwt_config::Settings::load()
+            .map(|settings| settings.ai.effective_language())
+            .unwrap_or("en");
+        gwt::agent_names::allocate(&history, language, &active, &known)
+    }
+
+    fn ensure_window_agent_name(
+        &mut self,
+        tab_id: &str,
+        raw_id: &str,
+    ) -> Result<Option<String>, String> {
+        let tab = self.tab(tab_id).ok_or("Project is closed")?;
+        let window = tab
+            .workspace
+            .window(raw_id)
+            .ok_or("Agent window is missing")?;
+        if !window.preset.is_agent_terminal()
+            || window.is_pm
+            || self
+                .pm_session_for_root(&tab.project_root)
+                .is_some_and(|id| window.session_id.as_ref() == Some(id))
+        {
+            return Ok(None);
+        }
+        let existing_name = window.agent_name.clone();
+        let root = tab.project_root.clone();
+        let session_path = window
+            .session_id
+            .as_ref()
+            .map(|id| self.sessions_dir.join(format!("{id}.toml")));
+        let mut session = session_path
+            .as_ref()
+            .and_then(|path| gwt_agent::Session::load(path).ok());
+        let name = match existing_name {
+            Some(name) => name,
+            None => self.allocate_agent_name(
+                &root,
+                session
+                    .as_ref()
+                    .and_then(|session| session.agent_name.clone()),
+            )?,
+        };
+        if let Some(session) = &mut session {
+            if session.agent_name.is_none() {
+                let previous = session.clone();
+                session.agent_name = Some(name.clone());
+                if !session
+                    .save_if_unchanged(&self.sessions_dir, &previous)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(
+                        "Session changed during Agent naming; retry on the next tick".into(),
+                    );
+                }
+            }
+        }
+        self.tab_mut(tab_id)
+            .ok_or("Project is closed")?
+            .workspace
+            .set_agent_name(raw_id, Some(name.clone()));
+        Ok(Some(name))
+    }
+
+    /// Backfill restored/legacy windows even when their provider never calls pane.name.
+    pub(super) fn assign_missing_agent_names(&mut self) -> Vec<OutboundEvent> {
+        let (known, _) = self.agent_name_reservations(None);
+        for tab in &self.tabs {
+            let history = gwt_core::paths::gwt_project_dir_for_repo_path(&tab.project_root)
+                .join("agent-names.jsonl");
+            if let Err(error) = gwt::agent_names::remember(&history, &known) {
+                tracing::warn!(%error, "could not reserve existing Agent names");
+            }
+        }
+        let targets: Vec<_> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| window.preset.is_agent_terminal() && !window.is_pm)
+                    .map(|window| {
+                        (
+                            tab.id.clone(),
+                            window.id.clone(),
+                            window.agent_name.is_none(),
+                        )
+                    })
+            })
+            .collect();
+        let mut changed = HashSet::new();
+        for (tab_id, raw_id, was_unnamed) in targets {
+            match self.ensure_window_agent_name(&tab_id, &raw_id) {
+                Ok(Some(_)) if was_unnamed => {
+                    changed.insert(tab_id);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, %raw_id, "Agent naming will retry on the next runtime tick")
+                }
+            }
+        }
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        if let Err(error) = self.persist() {
+            tracing::warn!(%error, "failed to persist Agent names");
+        }
+        changed
+            .into_iter()
+            .filter_map(|tab_id| {
+                let context = self.project_context(&tab_id)?;
+                self.refresh_agent_name_projection(&tab_id);
+                Some(self.workspace_state_broadcast(&context))
+            })
+            .collect()
+    }
+
     pub(crate) fn accept_project_completion(&self, mut event: UserEvent) -> Option<UserEvent> {
         while let UserEvent::ProjectCompletion {
             context,
@@ -13068,7 +13235,7 @@ impl AppRuntime {
                 )
             }
             AgentFrontendRequest::Name {
-                candidate,
+                candidate: _,
                 request_id,
             } => {
                 let assignment = (|| {
@@ -13093,30 +13260,9 @@ impl AppRuntime {
                         return Err("PM windows keep their fixed identity".to_string());
                     }
                     let already_named = window.agent_name.is_some();
-                    let reserved = self
-                        .tabs
-                        .iter()
-                        .flat_map(|tab| {
-                            let pm = self.pm_session_for_root(&tab.project_root);
-                            tab.workspace
-                                .persisted()
-                                .windows
-                                .iter()
-                                .filter(move |window| {
-                                    crate::runtime_support::window_is_agent_pane(window)
-                                        && !window.is_pm
-                                        && !pm.is_some_and(|pm| {
-                                            window.session_id.as_ref() == Some(pm)
-                                        })
-                                })
-                                .filter_map(|window| window.agent_name.clone())
-                        })
-                        .collect::<HashSet<_>>();
                     let assigned = self
-                        .tab_mut(&address.tab_id)
-                        .ok_or_else(|| "Project is closed".to_string())?
-                        .workspace
-                        .assign_agent_name(&address.raw_id, &candidate, &reserved)?;
+                        .ensure_window_agent_name(&address.tab_id, &address.raw_id)?
+                        .ok_or_else(|| "PM windows keep their fixed identity".to_string())?;
                     Ok((assigned, address.tab_id, already_named))
                 })();
                 match assignment {

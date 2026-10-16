@@ -839,7 +839,8 @@ export function createIssueOtherSurface({
         createNode(
           "div",
           "workspace-overview-agent-name",
-          agent.agent_name || "Naming…",
+          agent.agent_name || agent.title_summary || agent.current_focus || agent.branch
+            || agent.display_name || agent.agent_id || "Agent",
         ),
       );
       const meta = createNode("div", "workspace-overview-agent-meta");
@@ -1228,6 +1229,10 @@ export function createIssueOtherSurface({
 
       let renderedSessionCount = 0;
       for (const agent of displayedAgents) {
+        if (agent.agent_name) {
+          group.appendChild(createNode("div", "workspace-detail-work-heading",
+            `${agent.agent_name} (${agent.display_name || agent.agent_id || "Agent"})`));
+        }
         const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
         if (sessions.length === 0) continue;
         // Multiple Session rows per agent read as noise — render only that
@@ -1278,6 +1283,7 @@ export function createIssueOtherSurface({
   }
 
   function displayedWorkAgentIdentity(agent, index) {
+    if (agent?.agent_name) return `name:${agent.agent_name}`;
     const raw = String(agent?.agent_id || agent?.display_name || "").trim();
     if (!raw) return `session:${agent?.session_id || index}`;
 

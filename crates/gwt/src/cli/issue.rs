@@ -741,6 +741,55 @@ fn degraded_projection_error(error: String) -> String {
     )
 }
 
+fn attach_named_monitor_launches(project_root: &Path, output: &mut serde_json::Value) {
+    let active = output["active_launches"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let Some(rows) = output["inbox"].as_array_mut() else {
+        return;
+    };
+    let mut details = Vec::new();
+    for row in rows {
+        let Some(number) = row["issue_number"]
+            .as_u64()
+            .filter(|number| active.contains(&serde_json::json!(number)))
+        else {
+            continue;
+        };
+        let window_id = row["launched_window_id"].as_str();
+        let Some(session_id) = monitor_target_session(project_root, number, window_id)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let Ok(session) = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        ) else {
+            continue;
+        };
+        let Some(name) = session
+            .agent_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+        else {
+            continue;
+        };
+        if session.linked_issue_number != Some(number) || session.review_dispatch {
+            continue;
+        }
+        details.push(serde_json::json!({
+            "issue_number": number, "kind": "issue", "window_id": window_id,
+            "session_id": session_id, "agent_name": name, "provider": session.display_name,
+        }));
+        row["agent_name"] = serde_json::json!(name);
+    }
+    if !details.is_empty() {
+        output["active_launch_details"] = serde_json::json!(details);
+    }
+}
+
 fn run_monitor_status<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -842,6 +891,7 @@ fn run_monitor_status<E: CliEnv>(
             }
         }
     }
+    attach_named_monitor_launches(&project_root, &mut output);
     out.push_str(
         &serde_json::to_string(&output)
             .map_err(|error| io_as_api_error(io::Error::other(error)))?,
@@ -10125,6 +10175,42 @@ mod tests {
         let status: serde_json::Value =
             serde_json::from_str(out.trim()).expect("status json: {out}");
         assert_eq!(status["needs_human"], serde_json::json!([]), "{out}");
+    }
+
+    #[test]
+    fn monitor_status_names_the_exact_active_window_without_a_pane_read() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+        session.linked_issue_number = Some(42);
+        session.agent_name = Some("ミオ".into());
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut workspace = crate::persistence::empty_workspace_state();
+        let mut window = crate::persistence::default_workspace_state()
+            .windows
+            .remove(0);
+        window.id = "current".into();
+        window.preset = crate::WindowPreset::Agent;
+        window.session_id = Some(session.id.clone());
+        window.linked_issue_number = Some(42);
+        workspace.windows.push(window);
+        crate::persistence::save_workspace_state(
+            &crate::persistence::workspace_state_path(&repo),
+            &workspace,
+        )
+        .unwrap();
+        let mut output = serde_json::json!({"active_launches":[42],"inbox":[
+            {"issue_number":42,"state":"launched","launched_window_id":"tab::current"},
+            {"issue_number":43,"state":"launched","launched_window_id":"tab::absent"}
+        ]});
+        attach_named_monitor_launches(&repo, &mut output);
+        assert_eq!(output["inbox"][0]["agent_name"], "ミオ");
+        assert!(output["inbox"][1]["agent_name"].is_null());
+        assert_eq!(output["active_launch_details"][0]["agent_name"], "ミオ");
+        assert_eq!(output["active_launches"], serde_json::json!([42]));
     }
 
     #[test]

@@ -581,6 +581,15 @@ fn create<E: crate::cli::CliEnv>(
     let snapshot = env.fetch_ci_delivery_snapshot(&request.base, &request.head)?;
     snapshot.validate(request)?;
     unchanged_gates(&worktree, &authority, request, &snapshot)?;
+    let (_, producing_session_id, _) = target_context(&worktree, &authority, request)?;
+    let producing_session = producing_session_id
+        .as_ref()
+        .map(|id| {
+            gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{id}.toml")),
+            )
+        })
+        .transpose()?;
     // Never acquire the worktree-global write lease beneath owner/Session
     // leases: activation acquires global -> owner. Audit outside that boundary.
     let audit_id = uuid::Uuid::new_v4().to_string();
@@ -595,6 +604,7 @@ fn create<E: crate::cli::CliEnv>(
         &serde_json::to_vec_pretty(&audit)?,
     )?;
     let body = format!("{}\n\n<!-- gwt-ci-delivery:{audit_id} head:{} -->\nCI delivery evidence: mandatory GitHub checks passed for `{}` at `{}`. This admits Ready creation only; it does not claim local verification PASS or reopen the execution.\n", request.body, request.head_sha, request.head, request.head_sha);
+    let body = crate::session_launch::with_named_pr_author(&body, producing_session.as_ref());
     let mut dispatch = || -> io::Result<gwt_git::PrStatus> {
         actor(&worktree, &session_id, request)?;
         let fresh = env.fetch_ci_delivery_snapshot(&request.base, &request.head)?;
@@ -643,6 +653,19 @@ fn create<E: crate::cli::CliEnv>(
     let pr = result?;
     if observed_head?.as_deref() != Some(&request.head_sha) || pr.head_ref_name != request.head {
         return Err(refused(format!("PR {} was created but its exact head could not be confirmed; inspect it before delivery", pr.url)));
+    }
+    if let Some(session) = producing_session.as_ref() {
+        crate::session_launch::record_named_issue_activity(
+            env.client(),
+            session,
+            crate::session_launch::NamedIssueActivity::PrCreated { number: pr.number },
+        )
+        .map_err(|error| {
+            io::Error::other(format!(
+                "PR #{} was created, but its named Issue history could not be recorded: {error}",
+                pr.number
+            ))
+        })?;
     }
     if matches!(authority, Actor::Owner(_)) {
         crate::cli::action_obligation::settle_kinds_best_effort(

@@ -472,6 +472,9 @@ pub struct BoardEntry {
     pub origin_session_id: Option<String>,
     #[serde(default)]
     pub origin_agent_id: Option<String>,
+    /// Window-owned name captured when this immutable entry was authored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_worktree_form: Option<BoardWorktreeForm>,
     #[serde(
@@ -499,6 +502,25 @@ pub struct BoardEntry {
 }
 
 impl BoardEntry {
+    pub fn author_display_name(&self) -> String {
+        let name = self
+            .origin_agent_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        match name {
+            Some(name) if self.author_kind == AuthorKind::Agent => {
+                format!("{name} ({})", self.author)
+            }
+            _ => self.author.clone(),
+        }
+    }
+
+    pub fn with_origin_agent_name(mut self, value: impl Into<String>) -> Self {
+        self.origin_agent_name = trimmed_or_none(Some(value.into()));
+        self
+    }
+
     pub fn with_origin_branch(mut self, value: impl Into<String>) -> Self {
         self.origin_branch = Some(value.into());
         self
@@ -609,6 +631,7 @@ impl BoardEntry {
             origin_branch: None,
             origin_session_id: None,
             origin_agent_id: None,
+            origin_agent_name: None,
             origin_worktree_form: None,
             origin_recovery_id: None,
             target_owners: Vec::new(),
@@ -647,6 +670,9 @@ pub fn board_entry_payload_digest(entry: &BoardEntry) -> Result<String> {
         origin_branch: &'a Option<String>,
         origin_session_id: &'a Option<String>,
         origin_agent_id: &'a Option<String>,
+        // Keep existing v1 digests unchanged for unnamed/legacy entries.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        origin_agent_name: &'a Option<String>,
         origin_worktree_form: &'a Option<BoardWorktreeForm>,
         origin_recovery_id: Option<&'a str>,
         target_owners: &'a [String],
@@ -675,6 +701,7 @@ pub fn board_entry_payload_digest(entry: &BoardEntry) -> Result<String> {
         origin_branch: &entry.origin_branch,
         origin_session_id: &entry.origin_session_id,
         origin_agent_id: &entry.origin_agent_id,
+        origin_agent_name: &entry.origin_agent_name,
         origin_worktree_form: &entry.origin_worktree_form,
         origin_recovery_id,
         target_owners: &entry.target_owners,
@@ -712,6 +739,7 @@ pub struct BoardOrigin {
     pub branch: String,
     pub session_id: String,
     pub agent_id: String,
+    pub agent_name: Option<String>,
     pub worktree_form: Option<BoardWorktreeForm>,
     pub recovery_id: String,
 }
@@ -726,9 +754,15 @@ impl BoardOrigin {
             branch: branch.into(),
             session_id: session_id.into(),
             agent_id: agent_id.into(),
+            agent_name: None,
             worktree_form: None,
             recovery_id: String::new(),
         }
+    }
+
+    pub fn with_agent_name(mut self, value: Option<String>) -> Self {
+        self.agent_name = trimmed_or_none(value);
+        self
     }
 
     pub fn with_worktree_form(mut self, value: BoardWorktreeForm) -> Self {
@@ -838,6 +872,7 @@ impl BoardEntryDraft {
         entry.origin_branch = blank_to_none(&self.origin.branch);
         entry.origin_session_id = blank_to_none(&self.origin.session_id);
         entry.origin_agent_id = blank_to_none(&self.origin.agent_id);
+        entry.origin_agent_name = trimmed_or_none(self.origin.agent_name);
         entry.origin_worktree_form = self.origin.worktree_form;
         entry.origin_recovery_id = blank_to_none(&self.origin.recovery_id);
         Ok(entry)
@@ -969,13 +1004,40 @@ mod board_entry_draft_tests {
     }
 
     #[test]
+    fn board_agent_name_snapshot_roundtrips_and_is_part_of_payload_identity() {
+        let legacy = draft("body").finalize().unwrap();
+        assert_eq!(
+            board_entry_payload_digest(&legacy).unwrap(),
+            "v1:sha256:f9e861f58e3dd36a96c05608e1aa697325c335f01c7ed0b56a30ff02984e5189"
+        );
+        let mut json = serde_json::to_value(&legacy).unwrap();
+        json["origin_agent_name"] = serde_json::json!("ミオ");
+        let named: BoardEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            serde_json::to_value(&named).unwrap()["origin_agent_name"],
+            "ミオ"
+        );
+        assert_ne!(
+            board_entry_payload_digest(&legacy).unwrap(),
+            board_entry_payload_digest(&named).unwrap()
+        );
+        assert!(!same_board_payload(&legacy, &named));
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("origin_agent_name")
+            .is_none());
+    }
+
+    #[test]
     fn finalize_drops_blank_origin_fields_and_keeps_nonblank() {
         let mut d = draft("body");
-        d.origin = BoardOrigin::new("  ", "session-1", " agent-a ");
+        d.origin =
+            BoardOrigin::new("  ", "session-1", " agent-a ").with_agent_name(Some(" ミオ ".into()));
         let entry = d.finalize().expect("finalize");
         assert_eq!(entry.origin_branch, None);
         assert_eq!(entry.origin_session_id.as_deref(), Some("session-1"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("agent-a"));
+        assert_eq!(entry.origin_agent_name.as_deref(), Some("ミオ"));
     }
 
     #[test]
@@ -1746,6 +1808,7 @@ fn same_board_payload(left: &BoardEntry, right: &BoardEntry) -> bool {
         origin_branch,
         origin_session_id,
         origin_agent_id,
+        origin_agent_name,
         origin_worktree_form,
         origin_recovery_id,
         target_owners,
@@ -1767,6 +1830,7 @@ fn same_board_payload(left: &BoardEntry, right: &BoardEntry) -> bool {
         && origin_branch == &right.origin_branch
         && origin_session_id == &right.origin_session_id
         && origin_agent_id == &right.origin_agent_id
+        && origin_agent_name == &right.origin_agent_name
         && origin_worktree_form == &right.origin_worktree_form
         && origin_recovery_id == &right.origin_recovery_id
         && target_owners == &right.target_owners

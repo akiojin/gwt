@@ -42,7 +42,7 @@ test.describe("Agent title role and worktree badges", () => {
 
     const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
     await expect(agentWindow).toBeVisible({ timeout: 10_000 });
-    await expect(agentWindow.locator(".title-text")).toHaveText("Naming…");
+    await expect(agentWindow.locator(".title-text")).toHaveText("Grok Build");
 
     const badge = agentWindow.locator(".window-role-badge").first();
     await expect(badge).toBeVisible();
@@ -61,10 +61,27 @@ test.describe("Agent title role and worktree badges", () => {
     await page.goto(appUrl);
     const owner = page.locator(".workspace-window[data-id='agent-1']");
     const review = page.locator(".workspace-window[data-id='agent-2']");
-    await expect(owner.locator(".title-text")).toHaveText("Naming… — Deliver Issue #42");
-    await expect(review.locator(".title-text")).toHaveText("Naming… — Review · Issue #42");
+    await expect(owner.locator(".title-text")).toHaveText("Deliver Issue #42");
+    await expect(review.locator(".title-text")).toHaveText("Review · Issue #42");
     await expect(review.locator(".window-worktree-badge")).toHaveAttribute("data-worktree-form", "ephemeral");
     await page.screenshot({ path: info.outputPath("independent-review.png") });
+  });
+
+  test("Board authors and replies retain assigned names in both themes", async ({ page }, info) => {
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installAgentTitleBadgeBackend(page, undefined, true);
+    await page.goto(appUrl);
+    const board = page.locator(".workspace-window[data-id='board-1']");
+    await expect(board).toBeVisible();
+    const authored = board.locator("[data-board-entry-id='named-post']");
+    await expect(authored.locator(".board-message-meta")).toContainText("ミオ (Codex)");
+    await expect(board.locator(".board-reply-quote")).toContainText("Reply to ミオ (Codex)");
+    await authored.locator(".board-reply-button").click();
+    await expect(board.locator(".board-reply-banner-text")).toContainText("Replying to ミオ (Codex)");
+    await authored.locator(".board-message-meta").scrollIntoViewIfNeeded();
+    const screenshot = info.outputPath("board-agent-names.png");
+    await board.screenshot({ path: screenshot });
+    await info.attach("Board agent names", { path: screenshot, contentType: "image/png" });
   });
 
   test("late names reach badge, title, Fleet and Kanban in both themes", async ({ page }, info) => {
@@ -72,7 +89,7 @@ test.describe("Agent title role and worktree badges", () => {
     await installAgentTitleBadgeBackend(page, undefined, true);
     await page.goto(appUrl);
     const agent = page.locator(".workspace-window[data-id='agent-1']");
-    await expect(agent.locator(".window-worktree-badge")).toHaveText("Naming…");
+    await expect(agent.locator(".window-worktree-badge")).toHaveText("Fix cache");
     await page.evaluate(() => (window as any).__assignAgentName("Lumen"));
     await expect(agent.locator(".window-worktree-badge")).toHaveText("Lumen");
     await expect(agent.locator(".window-worktree-badge")).toHaveAccessibleName("Lumen — Branch-backed worktree");
@@ -89,7 +106,7 @@ test.describe("Agent title role and worktree badges", () => {
     await page.locator("#window-list-button").click();
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
     await expect(page.locator(".agent-tile[data-agent-id='agent-1'] h3")).toHaveText("Lumen — Fix cache");
-    await expect(page.locator(".agent-tile[data-agent-id='agent-2'] h3")).toHaveText("Naming…");
+    await expect(page.locator(".agent-tile[data-agent-id='agent-2'] h3")).toHaveText("Intake Agent");
     await page.screenshot({ path: info.outputPath("agent-names.png") });
   });
 
@@ -114,7 +131,7 @@ test.describe("Agent title role and worktree badges", () => {
       ".window-worktree-badge",
     );
     await expect(branchBackedBadge).toBeVisible();
-    await expect(branchBackedBadge).toHaveText("Naming…");
+    await expect(branchBackedBadge).toHaveText("Codex");
     await expect(branchBackedBadge).toHaveAttribute(
       "data-worktree-form",
       "branch-backed",
@@ -126,20 +143,20 @@ test.describe("Agent title role and worktree badges", () => {
     await expect(branchBackedBadge).toHaveAttribute("data-worktree-symbol", "B");
     await expect(branchBackedBadge).toHaveAttribute(
       "aria-label",
-      "Naming… — Branch-backed worktree",
+      "Codex — Branch-backed worktree",
     );
     await expect(branchBackedBadge).toHaveAttribute("role", "img");
     await expect(branchBackedBadge).toHaveAccessibleName(
-      "Naming… — Branch-backed worktree",
+      "Codex — Branch-backed worktree",
     );
     await expect(branchBackedBadge).toHaveAttribute(
       "title",
-      "Naming… — Branch-backed worktree",
+      "Codex — Branch-backed worktree",
     );
 
     const ephemeralBadge = ephemeralWindow.locator(".window-worktree-badge");
     await expect(ephemeralBadge).toBeVisible();
-    await expect(ephemeralBadge).toHaveText("Naming…");
+    await expect(ephemeralBadge).toHaveText("Intake Agent");
     await expect(ephemeralBadge).toHaveAttribute(
       "data-worktree-form",
       "ephemeral",
@@ -151,16 +168,16 @@ test.describe("Agent title role and worktree badges", () => {
     await expect(ephemeralBadge).toHaveAttribute("data-worktree-symbol", "Ø");
     await expect(ephemeralBadge).toHaveAttribute(
       "aria-label",
-      "Naming… — Ephemeral branchless worktree",
+      "Intake Agent — Ephemeral branchless worktree",
     );
     await expect(ephemeralBadge).toHaveAttribute("role", "img");
     await expect(ephemeralBadge).toHaveAccessibleName(
-      "Naming… — Ephemeral branchless worktree",
+      "Intake Agent — Ephemeral branchless worktree",
     );
 
     const unknownBadge = unknownWindow.locator(".window-worktree-badge");
     await expect(unknownBadge).toBeVisible();
-    await expect(unknownBadge).toHaveText("Naming…");
+    await expect(unknownBadge).toHaveText("Restored Agent");
     await expect(unknownBadge).toHaveAttribute("data-worktree-form", "unknown");
     await expect(unknownBadge).toHaveAttribute(
       "data-worktree-label",
@@ -169,10 +186,10 @@ test.describe("Agent title role and worktree badges", () => {
     await expect(unknownBadge).toHaveAttribute("data-worktree-symbol", "?");
     await expect(unknownBadge).toHaveAttribute(
       "aria-label",
-      "Naming… — Unknown worktree form",
+      "Restored Agent — Unknown worktree form",
     );
     await expect(unknownBadge).toHaveAttribute("role", "img");
-    await expect(unknownBadge).toHaveAccessibleName("Naming… — Unknown worktree form");
+    await expect(unknownBadge).toHaveAccessibleName("Restored Agent — Unknown worktree form");
 
     const minimap = page.locator("#fleet-minimap");
     await expect(minimap).toBeVisible();
@@ -237,32 +254,32 @@ test.describe("Agent title role and worktree badges", () => {
       .locator(".window-list-row").nth(2)
       .first()
       .locator(".window-list-worktree");
-    await expect(branchBackedListBadge).toHaveText("Naming…");
+    await expect(branchBackedListBadge).toHaveText("Codex");
     await expect(branchBackedListBadge).toHaveAttribute(
       "data-worktree-form",
       "branch-backed",
     );
     await expect(branchBackedListBadge).toHaveAttribute("role", "img");
     await expect(branchBackedListBadge).toHaveAccessibleName(
-      "Naming… — Branch-backed worktree",
+      "Codex — Branch-backed worktree",
     );
-    await expect(ephemeralListBadge).toHaveText("Naming…");
+    await expect(ephemeralListBadge).toHaveText("Intake Agent");
     await expect(ephemeralListBadge).toHaveAttribute(
       "data-worktree-form",
       "ephemeral",
     );
     await expect(ephemeralListBadge).toHaveAttribute("role", "img");
     await expect(ephemeralListBadge).toHaveAccessibleName(
-      "Naming… — Ephemeral branchless worktree",
+      "Intake Agent — Ephemeral branchless worktree",
     );
-    await expect(unknownListBadge).toHaveText("Naming…");
+    await expect(unknownListBadge).toHaveText("Restored Agent");
     await expect(unknownListBadge).toHaveAttribute(
       "data-worktree-label",
       "Unknown worktree form",
     );
     await expect(unknownListBadge).toHaveAttribute("role", "img");
     await expect(unknownListBadge).toHaveAccessibleName(
-      "Naming… — Unknown worktree form",
+      "Restored Agent — Unknown worktree form",
     );
 
     await expectWorktreeChromeNotToOverflow(page, false);
@@ -526,6 +543,9 @@ async function installAgentTitleBadgeBackend(
         placement: { kind: "agent_kanban", board_id: "kanban-1", lane_id: "active", order: 0, collapsed: true } });
       windows.push({ ...windows[0], id: "kanban-1", preset: "agent_kanban", title: "Agent Kanban",
         agent_id: null, dynamic_title: null, geometry: { x: 600, y: 640, width: 720, height: 420 } });
+      windows.push({ ...windows[0], id: "board-1", preset: "board", title: "Board",
+        agent_id: null, agent_name: null, dynamic_title: null,
+        geometry: { x: 780, y: 20, width: 620, height: 540 } });
     }
     const workspaceState = {
       kind: "workspace_state",
@@ -580,6 +600,17 @@ async function installAgentTitleBadgeBackend(
         }
         if (msg.kind === "list_windows") {
           this.emit(windowListState);
+        }
+        if (msg.kind === "load_board") {
+          const post = { id: "named-post", author_kind: "agent", author: "Codex",
+            origin_agent_name: "ミオ", origin_agent_id: "codex", origin_session_id: "closed-session",
+            origin_branch: "work/issue-3824", kind: "status", body: "対応中です。",
+            created_at: "2026-10-15T00:00:00Z", updated_at: "2026-10-15T00:00:00Z",
+            mentions: [], audience: [] };
+          this.emit({ kind: "board_entries", id: msg.id, has_more_before: false,
+            entries: [post, { ...post, id: "reply-post", author_kind: "user", author: "You",
+              origin_agent_name: null, origin_session_id: null, parent_id: post.id,
+              body: "了解です。", created_at: "2026-10-15T00:01:00Z", updated_at: "2026-10-15T00:01:00Z" }] });
         }
       }
 

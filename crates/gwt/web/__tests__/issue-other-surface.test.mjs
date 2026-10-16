@@ -373,7 +373,7 @@ test("Active Work agents show assigned names with provider as secondary context"
   assert.match(fixture.body.querySelector(".workspace-overview-agent-meta").textContent, /Codex/);
   projection.unassigned_agents[0].agent_name = null;
   surface.renderInto(fixture.body, fixture.windowData.id);
-  assert.equal(fixture.body.querySelector(".workspace-overview-agent-name").textContent, "Naming…");
+  assert.equal(fixture.body.querySelector(".workspace-overview-agent-name").textContent, "work/20260511-0100");
 });
 
 test("Workspace Overview renders Active Works from active_works and keeps Unassigned Agents separate", () => {
@@ -3549,4 +3549,19 @@ test("Other remote rows deduplicate Issue-linked branches and use the Issue lane
   surface.renderInto(fixture.body, fixture.windowData.id, { laneFilter: "remote" });
   assert.deepEqual(rowIdsInList(fixture), ["remote-start:feature/remote"]);
   assert.equal(fixture.body.querySelector(".issue-other-summary").textContent, "Other (1)");
+});
+
+
+test("Work detail keeps named windows distinct even when their provider matches", () => {
+  const projection = sampleProjection();
+  const work = projection.works[0];
+  work.agents = ["ミオ", "ハヤテ"].map((name, index) => ({
+    session_id: `window-${index}`, agent_id: "codex", display_name: "Codex", agent_name: name,
+    sessions: [{ agent_session_id: `conversation-${index}`, is_active: true }],
+  }));
+  const fixture = createFixture();
+  createSurface(fixture, projection).renderInto(fixture.body, fixture.windowData.id);
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  assert.match(fixture.body.textContent, /ミオ \(Codex\)/);
+  assert.match(fixture.body.textContent, /ハヤテ \(Codex\)/);
 });

@@ -292,7 +292,7 @@ fn verification_adjudication_note(
 /// Snapshot the body submitted by a mutation, or the existing body for Ready.
 /// File-backed mutations dispatch this same value after checking it.
 fn pr_mutation_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<Option<String>> {
-    match cmd {
+    let body = match cmd {
         PrCommand::CreateBody { body, .. } => Ok(Some(body.clone())),
         PrCommand::Create { file, .. } => env.read_file(file).map(Some),
         PrCommand::EditBody { body, .. } => Ok(body.clone()),
@@ -303,7 +303,17 @@ fn pr_mutation_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<
         other => Err(std::io::Error::other(format!(
             "not a PR mutation: {other:?} carries no PR body"
         ))),
+    }?;
+    if let Some(body) = body.as_deref() {
+        if let PrCommand::Edit { number, .. } | PrCommand::EditBody { number, .. } = cmd {
+            let previous = env.fetch_pr_quarantine_context(*number)?;
+            return Ok(Some(crate::session_launch::preserve_named_pr_author(
+                body,
+                &previous.body,
+            )));
+        }
     }
+    Ok(body)
 }
 
 /// #4326: use the launch route and measured verification for Ready handoffs.
@@ -756,7 +766,10 @@ pub(super) fn run<E: CliEnv>(
                     )
                 }),
                 || {
-                    let mut checked_body = body.to_string();
+                    let author_session = mutation_binding.as_ref().and_then(|binding| {
+                        gwt_agent::Session::load(&gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", binding.session_id))).ok()
+                    });
+                    let mut checked_body = crate::session_launch::with_named_pr_author(body, author_session.as_ref());
                     let mut checked_head = head.clone();
                     if !draft {
                         let worktree = mutation_worktree.as_deref().expect("mutation worktree");
@@ -802,6 +815,12 @@ pub(super) fn run<E: CliEnv>(
                         head.as_deref(),
                         false,
                     )?;
+                    if let Some(session) = author_session.as_ref() {
+                        crate::session_launch::record_named_issue_activity(
+                            env.client(), session,
+                            crate::session_launch::NamedIssueActivity::PrCreated { number: pr.number },
+                        ).map_err(|error| std::io::Error::other(format!("PR #{} was created, but its named Issue history could not be recorded: {error}", pr.number)))?;
+                    }
                     Ok(Some(pr))
                 },
             )
@@ -2546,6 +2565,11 @@ mod tests {
         let identity = initialize_pr_generation_authority(&fixture.repo, producer);
         persist_pr_generation_session(&fixture.repo, producer, identity);
         enable_autonomous_pr_session(&fixture.repo, producer);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut named =
+            gwt_agent::Session::load(&sessions.join(format!("{producer}.toml"))).unwrap();
+        named.agent_name = Some("ミオ".into());
+        named.save(&sessions).unwrap();
         crate::cli::execution_state::settle(
             &fixture.repo,
             producer,
@@ -2601,6 +2625,15 @@ mod tests {
             .unwrap();
         let mut env = crate::cli::TestEnv::new(pm_path.clone());
         seed_ci_delivery(&mut env, &request);
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(42),
+            title: "delivery".into(),
+            body: String::new(),
+            labels: vec![],
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-10-16T00:00:00Z"),
+            comments: vec![],
+        });
         let mut out = String::new();
         assert_eq!(
             run(&mut env, PrCommand::CreateFromCi(request.clone()), &mut out).unwrap(),
@@ -2612,6 +2645,14 @@ mod tests {
             Some("work/issue-42")
         );
         assert!(!env.pr_create_call_log[0].draft);
+        assert!(env.pr_create_call_log[0]
+            .body
+            .contains("Agent: ミオ (Codex)"));
+        assert!(env
+            .client
+            .comments(gwt_github::IssueNumber(42))
+            .iter()
+            .any(|comment| comment.body.contains("ミオ が対応し、PR #7 を作成")));
         assert_eq!(
             protected
                 .iter()
@@ -3440,6 +3481,11 @@ mod tests {
         let identity = initialize_pr_generation_authority(&fixture.repo, session_id);
         persist_pr_generation_session(&fixture.repo, session_id, identity);
         enable_autonomous_pr_session(&fixture.repo, session_id);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut named =
+            gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+        named.agent_name = Some("ミオ".into());
+        named.save(&sessions).unwrap();
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
         let git = |args: &[&str]| {
             let output = gwt_core::process::hidden_command("git")
@@ -3492,6 +3538,15 @@ mod tests {
         )
         .unwrap();
         let mut env = crate::cli::TestEnv::new(fixture.repo.clone());
+        env.client.seed(gwt_github::IssueSnapshot {
+            number: gwt_github::IssueNumber(42),
+            title: "delivery".into(),
+            body: String::new(),
+            labels: vec![],
+            state: gwt_github::IssueState::Open,
+            updated_at: gwt_github::UpdatedAt::new("2026-10-15T00:00:00Z"),
+            comments: vec![],
+        });
         let mut out = String::new();
         for command in [
             crate::cli::verification_record::VerifyCommand::Plan {
@@ -3537,6 +3592,17 @@ mod tests {
             &fixture.repo,
             verified.verified_head.as_deref().unwrap(),
         );
+        assert!(env
+            .pr_create_call_log
+            .last()
+            .unwrap()
+            .body
+            .contains("Agent: ミオ (Codex)"));
+        assert!(env
+            .client
+            .comments(gwt_github::IssueNumber(42))
+            .iter()
+            .any(|comment| comment.body.contains("ミオ が対応し、PR #7 を作成")));
         let items = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
             .unwrap()
             .unwrap();
@@ -3663,6 +3729,11 @@ mod tests {
         let completed = crate::cli::execution_state::load(&fixture.repo)
             .unwrap()
             .unwrap();
+        assert!(env
+            .client
+            .comments(gwt_github::IssueNumber(42))
+            .iter()
+            .any(|comment| comment.body.contains("ミオ が対応を完了")));
         let bookkeeping =
             crate::cli::verification_record::load_work_event_settlement_record(&fixture.repo)
                 .unwrap()
@@ -4910,6 +4981,33 @@ mod tests {
                 ..gwt_git::PrInventoryOptions::default()
             })
         );
+    }
+
+    #[test]
+    fn pr_edit_body_retains_the_original_named_producer() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut producer =
+            gwt_agent::Session::new(repo.path(), "work/issue-42", gwt_agent::AgentId::Codex);
+        producer.agent_name = Some("Maya".into());
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        seed_readable_pr_body(&mut env);
+        env.pr_quarantine_contexts.get_mut(&7).unwrap().body =
+            crate::session_launch::with_named_pr_author("Original description", Some(&producer));
+        let body = pr_mutation_body(
+            &mut env,
+            &PrCommand::EditBody {
+                number: 7,
+                base: None,
+                title: None,
+                body: Some("Rewritten description".into()),
+                add_labels: vec![],
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(body.starts_with("Rewritten description"));
+        assert!(body.contains("Agent: Maya (Codex)"), "{body}");
+        assert!(body.contains("\"phase\":\"pr_author\""), "{body}");
     }
 
     #[test]

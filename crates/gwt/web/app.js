@@ -1801,6 +1801,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           windowData?.dynamic_title,
           windowData?.purpose_title,
           windowData?.title,
+          windowData?.branch,
           windowData?.agent_id,
         ];
         if (windowData?.is_pm) {
@@ -1814,9 +1815,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             : PM_WINDOW_TITLE;
         }
         if (isAgentWindowPreset(windowData?.preset)) {
-          const name = String(windowData?.agent_name || "").trim() || "Naming…";
+          const name = String(windowData?.agent_name || "").trim();
           const purpose = String(windowData?.dynamic_title || windowData?.purpose_title || "").trim();
-          return purpose ? `${name} — ${purpose}` : name;
+          if (name) return purpose ? `${name} — ${purpose}` : name;
         }
         for (const value of candidates) {
           const title = String(value || "").trim();

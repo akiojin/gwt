@@ -41,6 +41,18 @@ test.describe("Issue preview placement", () => {
     viewport: { width: 1600, height: 1000 },
   });
 
+  test("Issue detail names its assigned related agent in both themes", async ({ page }, info) => {
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installIssuePreviewBackend(page);
+    await page.goto(liveUrl || APP_URL);
+    await page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-select").click();
+    await page.locator("[data-issue-detail-view='issue']").click();
+    await expect(page.locator(".knowledge-related-agent-name")).toHaveText("Aster (Codex)");
+    const screenshot = info.outputPath("issue-assigned-agent.png");
+    await page.screenshot({ path: screenshot });
+    await info.attach("Issue assigned agent", { path: screenshot, contentType: "image/png" });
+  });
+
   test("Active cards show all three live tails without selecting their terminals", async ({ page }, info) => {
     // Match the Issue controls fixture's viewport and fixed window height.
     await page.setViewportSize({ width: 1600, height: 1100 });
@@ -49,6 +61,9 @@ test.describe("Issue preview placement", () => {
     await page.goto(liveUrl || APP_URL);
     const outputs = page.locator('[data-queue-column="active"] .issue-card-output');
     await expect(outputs).toHaveCount(3);
+    await expect(outputs.locator(".issue-agent-status-title")).toHaveText([
+      "Aster — Issue #3671 agent", "Birch — Issue #3672 agent", "Cedar — Issue #3673 agent",
+    ]);
     await expect(outputs.locator("pre")).toHaveText(Array(3).fill("Waiting for output"));
     await page.evaluate(() => {
       for (const [index, id] of ["tab-issue::agent-preview", "tab-issue::agent-preview-2", "tab-issue::agent-preview-3"].entries()) {
@@ -1043,6 +1058,9 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
                 subtitle: "Cached Issue detail",
                 labels: ["bug"],
                 launch_issue_number: message.number,
+                related_works: [{ id: "related-agent-work", title: "Related implementation",
+                  agents: [{ session_id: "related-session", agent_id: "codex", display_name: "Codex",
+                    agent_name: "Aster", sessions: [] }] }],
                 sections: [
                   {
                     title: "Description",

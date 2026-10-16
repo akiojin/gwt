@@ -1566,7 +1566,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.name" => {
             reject_unknown_params(params, &["candidate"], "pane.name")?;
             CliCommand::Pane(PaneCommand::Name {
-                candidate: required_string(params, "candidate")?,
+                candidate: optional_string(params, "candidate")?.unwrap_or_default(),
             })
         }
         "pane.read" => CliCommand::Pane(PaneCommand::Read {
@@ -8085,14 +8085,13 @@ mod tests {
     }
 
     #[test]
-    fn pane_name_parses_only_an_ai_candidate() {
+    fn pane_name_gets_assigned_identity_with_optional_legacy_candidate() {
         let command = ok("pane.name", json!({"candidate": "Aster"}));
         assert!(matches!(command,
             CliCommand::Pane(PaneCommand::Name { candidate }) if candidate == "Aster"
         ));
-        assert!(matches!(
-            err("pane.name", json!({})),
-            CliParseError::MissingFlag("candidate")
+        assert!(matches!(ok("pane.name", json!({})),
+            CliCommand::Pane(PaneCommand::Name { candidate }) if candidate.is_empty()
         ));
         for forbidden in ["id", "window_id", "session_id", "project_root", "name"] {
             let mut params = json!({"candidate": "Aster"});

@@ -70,10 +70,19 @@ export function boardEntryOriginSessionId(entry) {
   return authorKind === "agent" ? sessionId : "";
 }
 
+export function boardEntryAuthorLabel(entry) {
+  const author = String(entry?.author || "Unknown").trim();
+  const name = String(entry?.origin_agent_name || "").trim();
+  return String(entry?.author_kind || "").toLowerCase() === "agent" && name
+    ? `${name} (${author})` : author;
+}
+
 export function boardEntryOriginLabel(entry) {
   const sessionId = boardEntryOriginSessionId(entry);
   if (!sessionId) return "";
-  const agent = String(entry?.origin_agent_id || entry?.author || "").trim();
+  const agent = entry?.origin_agent_name
+    ? boardEntryAuthorLabel(entry)
+    : String(entry?.origin_agent_id || entry?.author || "").trim();
   const branch = String(entry?.origin_branch || "").trim();
   const shortSession = sessionId.slice(0, 8);
   const parts = [agent, branch, shortSession].filter(Boolean);

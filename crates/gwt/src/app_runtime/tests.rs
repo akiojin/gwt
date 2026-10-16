@@ -6023,6 +6023,7 @@ fn bound_runtime_launch_completion(
         false,
         AgentLaunchRuntimeContext {
             agent_project_root: repo.display().to_string(),
+            predecessor_session_id: None,
             expected_execution_identity: Some(expected_identity),
             active_launch_handshake: None,
         },

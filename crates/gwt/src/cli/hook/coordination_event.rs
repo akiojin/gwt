@@ -189,6 +189,9 @@ fn board_entry_for_event_with_paths(
     if !session.display_name.trim().is_empty() {
         entry = entry.with_origin_agent_id(session.display_name.clone());
     }
+    if let Some(name) = session.agent_name.as_ref() {
+        entry = entry.with_origin_agent_name(name.clone());
+    }
     Ok(Some(entry))
 }
 
@@ -316,6 +319,7 @@ mod tests {
 
         let mut session = Session::new(dir.path(), "feature/spec-1974", AgentId::Codex);
         session.linked_issue_number = Some(1974);
+        session.agent_name = Some("ミオ".into());
 
         sync_coordination_for_session_with_paths(&session, "SessionStart", &cache_root, None)
             .unwrap();
@@ -332,6 +336,7 @@ mod tests {
         assert_eq!(entry.related_owners, vec!["1974".to_string()]);
         assert_eq!(entry.origin_branch.as_deref(), Some("feature/spec-1974"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
+        assert_eq!(entry.origin_agent_name.as_deref(), Some("ミオ"));
         assert!(entry.origin_session_id.is_some());
     }
 

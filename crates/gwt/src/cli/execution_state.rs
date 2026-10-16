@@ -16602,6 +16602,22 @@ fn run_impl<E: CliEnv>(
             }
         }
     };
+    if let SettleResult::Settled(record) | SettleResult::AlreadySettled(record) = &result {
+        if record.status == ExecutionControlStatus::Completed
+            && crate::cli::delivered_owner::trusted_no_action_for_session(&worktree, &session_id)
+                .is_none()
+        {
+            if let Ok(session) = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            ) {
+                crate::session_launch::record_named_issue_activity(
+                    env.client(),
+                    &session,
+                    crate::session_launch::NamedIssueActivity::Completed,
+                )?;
+            }
+        }
+    }
     match result {
         SettleResult::Settled(record) => {
             if record.status == ExecutionControlStatus::Blocked {
