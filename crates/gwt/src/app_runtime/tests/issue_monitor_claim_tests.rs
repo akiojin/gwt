@@ -3340,6 +3340,8 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
 #[cfg(unix)]
 #[test]
 fn app_runtime_issue_monitor_reconciliation_error_survives_rebase_scan() {
+    // Verify error persistence independently of the prefs commit wall-clock budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
