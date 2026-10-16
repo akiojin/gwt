@@ -1385,8 +1385,9 @@ WORKTREE_SCOPED = {"files", "files-docs"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
 V2_FILES_DOCS_COLLECTION = "files_docs"
-V2_SPECS_COLLECTION = "specs"
+V2_SPECS_COLLECTION = "issues"
 V2_ISSUES_COLLECTION = "issues"
+ISSUE_RECORD_LAYOUT = "issue-spec-chunks-v1"
 V2_MEMORY_COLLECTION = "memory"
 V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
@@ -1450,7 +1451,7 @@ def resolve_db_path(
     repo_dir = root / repo_hash
 
     if scope in {"issues", "specs", "memory", "discussions", "board", "works", "reports"}:
-        return repo_dir / scope
+        return repo_dir / ("issues" if scope == "specs" else scope)
 
     return repo_dir / "worktrees" / worktree_hash / scope
 
@@ -2169,6 +2170,8 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
     (`.../worktrees/<wt>/files/`); both are normalized to the worktree
     level so writers and readers always agree on the location.
     """
+    if scope == "specs":
+        scope = "issues"
     if worktree_dir.name in (
         "specs",
         "files",
@@ -5544,14 +5547,13 @@ def action_index_specs_v2(
     db_root: Optional[Path] = None,
     qos: str = "interactive",
 ) -> dict:
-    """Index cached gwt-spec Issues into the repo-scoped specs store."""
+    """Compatibility entrypoint for the shared Issue/SPEC corpus."""
     del worktree_hash
-    documents, entries = _load_cached_spec_documents(repo_hash)
-    entries.sort(key=lambda entry: entry["path"])
-    return _index_repo_records_v2(
-        repo_hash, "specs", _build_spec_records(documents),
-        entries, mode, db_root, project_root, qos,
+    result = action_index_issues_v2(
+        repo_hash, project_root, db_root=db_root, mode=mode, qos=qos,
+        allow_empty=True,
     )
+    return {**result, "scope": "specs"}
 
 
 # ---------------------------------------------------------------------
@@ -5622,6 +5624,10 @@ def _normalize_labels(labels: Any) -> List[str]:
     return []
 
 
+def _is_spec_issue(labels: Any) -> bool:
+    return any(label.casefold() == "gwt-spec" for label in _normalize_labels(labels))
+
+
 def _phase_label(labels: Sequence[str]) -> str:
     for label in labels:
         if label.startswith("phase/"):
@@ -5649,6 +5655,10 @@ def _build_cache_manifest_entry(name: str, paths: Sequence[Path]) -> Optional[Di
 
 
 def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
+    return _cached_issue_source(repo_hash, "documents", lambda: _read_cached_issue_documents(repo_hash))
+
+
+def _read_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     root = _issue_cache_root(repo_hash)
     if not root.is_dir():
         return []
@@ -5755,8 +5765,8 @@ def _cached_issue_source(repo_hash: str, kind: str, load: Callable[[], Any]) -> 
 
 def _issue_cache_source_snapshot(repo_hash: str) -> Dict[str, Any]:
     def load() -> Dict[str, Any]:
-        issues = _load_cached_issue_documents(repo_hash)
-        return {"fingerprint": _issue_source_fingerprint(issues), "document_count": len(issues)}
+        records = _load_issue_records(repo_hash)
+        return {"fingerprint": _record_source_fingerprint(records), "document_count": len(records)}
 
     source = _cached_issue_source(repo_hash, "issues", load)
     refresh_meta = _issue_cache_refresh_meta(repo_hash)
@@ -5764,6 +5774,34 @@ def _issue_cache_source_snapshot(repo_hash: str) -> Dict[str, Any]:
         **source,
         "cache_refresh_at": refresh_meta.get("last_full_refresh"),
     }
+
+
+def _record_source_fingerprint(records: Sequence[Dict[str, Any]]) -> str:
+    raw = json.dumps(records, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _load_issue_records(repo_hash: str) -> List[Dict[str, Any]]:
+    """Store ordinary Issues once and SPECs only as full section chunks."""
+    def load() -> List[Dict[str, Any]]:
+        records = []
+        for issue in _load_cached_issue_documents(repo_hash):
+            if _is_spec_issue(issue["labels"]):
+                continue
+            records.append({
+                "id": str(issue["number"]),
+                "document": f"{issue['title']}\n{issue['body']}",
+                "metadata": {
+                    "record_kind": "issue", "number": issue["number"],
+                    "title": issue["title"], "url": "", "state": issue["state"],
+                    "labels": ",".join(issue["labels"]),
+                },
+            })
+        specs, _ = _load_cached_spec_documents(repo_hash)
+        records.extend(_build_spec_records(specs))
+        return sorted(records, key=lambda record: record["id"])
+
+    return _cached_issue_source(repo_hash, "records", load)
 
 
 def _load_cached_spec_documents(
@@ -5797,7 +5835,7 @@ def _read_cached_spec_documents(
             continue
 
         labels = _normalize_labels(meta.get("labels", []))
-        if "gwt-spec" not in labels:
+        if not _is_spec_issue(labels):
             continue
 
         spec_path = entry / "sections" / "spec.md"
@@ -7246,6 +7284,7 @@ def _build_spec_records(specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]
                     "id": f"spec-{spec.get('spec_id', '')}:chunk-{idx}",
                     "document": document,
                     "metadata": {
+                        "record_kind": "spec",
                         "spec_id": spec.get("spec_id", ""),
                         "title": spec.get("title", ""),
                         "status": spec.get("status", ""),
@@ -7433,6 +7472,13 @@ def _scope_status_v2(
     scope: str,
     db_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
+    if scope == "specs":
+        health = _issue_status_v2(repo_hash, db_root=db_root)
+        if health.get("reason") == "empty_corpus":
+            # An explicitly built empty SPEC corpus remains searchable; the
+            # agent auto-build path reports unsynced caches separately.
+            health.update(healthy=True, repair_required=False, reason="ready")
+        return health
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     manifest_path = _manifest_path(db_path, scope)
     manifest_entries = read_manifest(db_path, scope=scope)
@@ -7613,6 +7659,10 @@ def _issue_status_v2(
         reason = "metadata_missing"
         healthy = False
         repair_required = True
+    elif meta.get("record_layout") != ISSUE_RECORD_LAYOUT:
+        reason = "record_layout_changed"
+        healthy = False
+        repair_required = True
     else:
         indexed_document_count = meta.get("document_count")
         current_source_document_count = source.get("document_count")
@@ -7701,6 +7751,7 @@ def action_index_issues_v2(
     qos: str = "interactive",
     mode: str = "full",
     repair: bool = False,
+    allow_empty: bool = False,
 ) -> dict:
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
     # Separate from the publication lock so readers keep using the active
@@ -7709,7 +7760,7 @@ def action_index_issues_v2(
         if _read_issue_repair(db_path).get("last_error") == "BUILD_INCOMPLETE":
             (db_path / "repair.json").unlink(missing_ok=True)
         return _index_issues_v2_locked(repo_hash, project_root, db_root, respect_ttl,
-                                       ttl_minutes, qos, mode, repair)
+                                       ttl_minutes, qos, mode, repair, allow_empty)
 
 
 def _index_issues_v2_locked(
@@ -7721,6 +7772,7 @@ def _index_issues_v2_locked(
     qos: str = "interactive",
     mode: str = "full",
     repair: bool = False,
+    allow_empty: bool = False,
 ) -> dict:
     """Index GitHub Issues using the v2 layout. Respects TTL on demand.
 
@@ -7738,9 +7790,13 @@ def _index_issues_v2_locked(
     if (db_path / "cancel-requested").exists():
         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
 
-    issues = _load_cached_issue_documents(repo_hash)
-    source = {"fingerprint": _issue_source_fingerprint(issues),
-              "document_count": len(issues),
+    source_revision = _issue_source_revision(repo_hash)
+    records = _load_issue_records(repo_hash)
+    issue_cache_fingerprint = _issue_source_fingerprint(_load_cached_issue_documents(repo_hash))
+    if source_revision != _issue_source_revision(repo_hash):
+        source_revision = None
+    source = {"fingerprint": _record_source_fingerprint(records),
+              "document_count": len(records),
               "cache_refresh_at": _issue_cache_refresh_meta(repo_hash).get("last_full_refresh")}
     fingerprint = source["fingerprint"]
     previous_failure = _read_issue_repair(db_path)
@@ -7759,7 +7815,7 @@ def _index_issues_v2_locked(
                 return {"ok": True, "skipped": True, "scope": "issues",
                         "mode": meta.get("mode", "full"),
                         "ttl_remaining_seconds": int(ttl_minutes * 60 - age)}
-    if not issues:
+    if not records and not allow_empty:
         return _issue_build_failure(db_path, fingerprint, mode, "EMPTY_CORPUS", 0, 0)
     old_entries = read_manifest(db_path, scope="issues")
     # Reuse only a self-consistent previous generation; source drift is expected.
@@ -7771,12 +7827,12 @@ def _index_issues_v2_locked(
     )
     if repair or not manifest_valid or not (health.get("healthy") or health.get("source_drift")):
         mode = "full"
-    new_entries = [{"path": str(issue["number"]),
-                    "content_hash": _issue_source_fingerprint([issue])} for issue in issues]
+    new_entries = [{"path": record["id"],
+                    "content_hash": _record_source_fingerprint([record])} for record in records]
 
     # Persist before staging. The held build lock distinguishes a live build
     # from an orphan left by process death. Normal yield/success clear it.
-    _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(issues))
+    _issue_build_failure(db_path, fingerprint, mode, "BUILD_INCOMPLETE", 0, len(records))
 
     emit_progress(
         {
@@ -7790,7 +7846,7 @@ def _index_issues_v2_locked(
 
     staging = _staging_dir_for(db_path)
     continuation_path = staging / CONTINUATION_FILENAME
-    total = len(issues)
+    total = len(records)
     heavy_target = _heavy_target_stem(repo_hash, "issues")
 
     continuation = _read_continuation(continuation_path)
@@ -7823,7 +7879,7 @@ def _index_issues_v2_locked(
                     except Exception:  # pragma: no cover - defensive chroma fallback
                         staged_ids = set()
                 pending: List[Dict[str, Any]] = [
-                    issue for issue in issues if str(issue.get("number", 0)) not in staged_ids
+                    record for record in records if record["id"] not in staged_ids
                 ]
                 checkpoint_batch = 1 if qos == "background" else EMBED_CHECKPOINT_BATCH
                 _write_heavy_progress(
@@ -7832,28 +7888,11 @@ def _index_issues_v2_locked(
                 for start in range(0, len(pending), checkpoint_batch):
                     if (db_path / "cancel-requested").exists():
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-                    batch_issues = pending[start : start + checkpoint_batch]
+                    batch_records = pending[start : start + checkpoint_batch]
                     batch_started = time.monotonic()
-                    ids: List[str] = []
-                    documents: List[str] = []
-                    metadatas: List[Dict[str, Any]] = []
-                    for issue in batch_issues:
-                        number = issue.get("number", 0)
-                        title = issue.get("title", "")
-                        body = issue.get("body", "")
-                        state = issue.get("state", "")
-                        labels = issue.get("labels", [])
-                        ids.append(str(number))
-                        documents.append(f"{title}\n{body}")
-                        metadatas.append(
-                            {
-                                "number": number,
-                                "title": title,
-                                "url": "",
-                                "state": state,
-                                "labels": ",".join(labels),
-                            }
-                        )
+                    ids = [record["id"] for record in batch_records]
+                    documents = [record["document"] for record in batch_records]
+                    metadatas = [record["metadata"] for record in batch_records]
                     collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
                     newly_embedded += len(ids)
                     done = len(staged_ids) + newly_embedded
@@ -7868,7 +7907,7 @@ def _index_issues_v2_locked(
                         heavy_target,
                         done,
                         total,
-                        len(batch_issues),
+                        len(batch_records),
                         int((time.monotonic() - batch_started) * 1000),
                     )
                     emit_progress(
@@ -7881,7 +7920,7 @@ def _index_issues_v2_locked(
                     )
                     if (db_path / "cancel-requested").exists():
                         return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-                    remaining = len(pending) - (start + len(batch_issues))
+                    remaining = len(pending) - (start + len(batch_records))
                     if remaining > 0 and qos == "background" and _pending_higher_priority("background"):
                         yielded = True
                         break
@@ -7937,11 +7976,14 @@ def _index_issues_v2_locked(
                 db_path,
                 {
                     "schema_version": INDEX_SCHEMA_VERSION,
+                    "record_layout": ISSUE_RECORD_LAYOUT,
                     "mode": mode,
                     "last_full_refresh": _now_utc().isoformat(),
                     "ttl_minutes": ttl_minutes,
-                    "document_count": len(issues),
+                    "document_count": len(records),
                     "source_cache_fingerprint": source["fingerprint"],
+                    "issue_cache_fingerprint": issue_cache_fingerprint,
+                    **({"source_cache_revision": source_revision} if source_revision is not None else {}),
                     "source_document_count": source["document_count"],
                     "source_cache_refresh_at": source.get("cache_refresh_at"),
                 },
@@ -7958,7 +8000,7 @@ def _index_issues_v2_locked(
             db_path,
             staging,
             scope="issues",
-            document_count=len(issues),
+            document_count=len(records),
             after_publish=_commit_issue_meta,
         )
         if publication_error is not None:
@@ -7971,7 +8013,9 @@ def _index_issues_v2_locked(
         published_health = _issue_status_v2(repo_hash, db_root=db_root, source=source, check_repair=False)
         if published_health.get("reason") == "cancelled":
             return {"ok": False, "scope": "issues", "error_code": "CANCELLED"}
-        if not published_health.get("healthy"):
+        if not published_health.get("healthy") and not (
+            allow_empty and published_health.get("reason") == "empty_corpus"
+        ):
             actual = published_health.get("document_count", 0)
             error_code = "COUNT_MISMATCH" if actual != total else "INDEX_UNHEALTHY"
             return _issue_build_failure(db_path, fingerprint, mode, error_code, actual, total)
@@ -7985,14 +8029,14 @@ def _index_issues_v2_locked(
             "phase": "complete",
             "scope": "issues",
             "mode": mode,
-            "indexed": len(issues),
-            "total": len(issues),
+            "indexed": len(records),
+            "total": len(records),
         }
     )
     return {
         "ok": True,
         "scope": "issues",
-        "indexed": len(issues),
+        "indexed": len(records),
         "newly_embedded": newly_embedded,
         "mode": mode,
     }
@@ -8090,6 +8134,7 @@ def _search_collection_v2(
     query: str,
     n_results: int,
     query_embedding: Optional[List[float]] = None,
+    where: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     try:
         count = collection.count()
@@ -8098,6 +8143,7 @@ def _search_collection_v2(
     if count == 0:
         return []
     actual_n = min(n_results, count)
+    filters = {"where": where} if where is not None else {}
     if query_embedding is not None:
         # Phase 70 AS-2: reuse one query embedding across every scope in a
         # batch request instead of re-encoding per scope.
@@ -8105,12 +8151,14 @@ def _search_collection_v2(
             query_embeddings=[query_embedding],
             n_results=actual_n,
             include=["metadatas", "documents", "distances"],
+            **filters,
         )
     else:
         results = collection.query(
             query_texts=[query],
             n_results=actual_n,
             include=["metadatas", "documents", "distances"],
+            **filters,
         )
     items: List[Dict[str, Any]] = []
     if results and results.get("ids") and results["ids"][0]:
@@ -8126,6 +8174,10 @@ def _search_collection_v2(
                 }
             )
     return items
+
+
+def _scope_record_filter(scope: str) -> Dict[str, Any]:
+    return {"where": {"record_kind": "spec" if scope == "specs" else "issue"}} if scope in {"issues", "specs"} else {}
 
 
 def _wire_distance(value: Any) -> Optional[float]:
@@ -8412,13 +8464,11 @@ def action_search_v2(
         health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
     needs_build = not health["exists"] or health.get("repair_required", False)
-    if scope == "issues" and health.get("building") and (
+    if scope in {"issues", "specs"} and health.get("building") and (
         health.get("healthy") or health.get("source_drift")
     ):
         needs_build = False
-    needs_spec_refresh = scope == "specs" and health.get("healthy", False) and not no_auto_build
-
-    if needs_build or needs_spec_refresh:
+    if needs_build:
         if no_auto_build and needs_build:
             error_code = "INDEX_UNHEALTHY" if health["exists"] else "INDEX_MISSING"
             return {
@@ -8510,7 +8560,7 @@ def action_search_v2(
         try:
             collection_count = _safe_collection_count(collection)
             fetch_n = _search_fetch_count(scope, n_results, match_mode)
-            items = _search_collection_v2(collection, query, fetch_n)
+            items = _search_collection_v2(collection, query, fetch_n, **_scope_record_filter(scope))
         finally:
             _close_chroma_client(client)
 
@@ -8556,8 +8606,8 @@ def _classify_scope_for_search(
       or Issue-cache drift) — serve it and queue a refresh.
     - ``fresh``: healthy and current.
     """
-    if scope == "issues":
-        health = _issue_status_v2(repo_hash, db_root=db_root)
+    if scope in {"issues", "specs"}:
+        health = _issue_status_v2(repo_hash, db_root=db_root) if scope == "issues" else _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
         if not health.get("exists"):
             return "missing", health
         if health.get("building") and (health.get("healthy") or health.get("source_drift")):
@@ -9215,7 +9265,8 @@ def _search_scope_collection(
         try:
             fetch_n = _search_fetch_count(scope, n_results, match_mode)
             items = _search_collection_v2(
-                collection, query, fetch_n, query_embedding=query_embedding
+                collection, query, fetch_n, query_embedding=query_embedding,
+                **_scope_record_filter(scope),
             )
         finally:
             _close_chroma_client(client)

@@ -422,7 +422,7 @@ class AutoBuildFallbackTests(unittest.TestCase):
                 result["specResults"][0]["title"],
                 "gwt-spec: Semantic search platform",
             )
-            db = db_root / "abc1234567890def" / "specs"
+            db = db_root / "abc1234567890def" / "issues"
             self.assertTrue(db.exists(), f"index dir was not created: {db}")
 
     def test_search_memory_auto_builds_when_index_missing(self):

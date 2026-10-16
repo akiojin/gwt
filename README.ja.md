@@ -792,6 +792,13 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent pane の確認と操作
 
+SPEC と通常 Issue は同じ検索索引を使い、SPEC は見出しチャンクとして一度だけ格納します。
+`gwtd` JSON `search` の `scopes:["specs"]` は SPEC、`scopes:["issues"]` は
+通常 Issue、`scopes:["specs","issues"]` は両方を検索します。既定では両種と他の検索
+スコープを含みます。`gwt-spec-search` / `gwt-issue-search` も同じフィルターを使います。
+どちらかのスコープを再構築すると、ローカル Issue キャッシュから旧索引を移行します。
+旧 SPEC 専用ストアは参照されなくなるため、手動で削除する必要はありません。
+
 Managed hooks は user hook を保持しながら、Agent state、workflow guardrails、
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。

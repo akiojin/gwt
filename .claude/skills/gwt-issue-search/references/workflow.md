@@ -1,6 +1,14 @@
 # Issue Search
 
-gwt maintains a vector search index of GitHub Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/issues/` and is Worktree-independent. The gwt GUI app (WebView built with `wry + tao + axum WebSocket` and `xterm.js`) refreshes it asynchronously at startup with a 15-minute TTL; non-GUI invocations get an auto-build on the first search.
+gwt indexes plain Issues and SPEC heading chunks in one repo-scoped `issues`
+generation store, using ChromaDB and `intfloat/multilingual-e5-base`. The
+`issues` scope filters to plain Issues, excluding `gwt-spec` labeled Issues;
+use `scopes:["issues","specs"]` for both kinds, or omit scopes to search all
+content. Existing commands and Issue result fields remain compatible. The
+first rebuild of either scope upgrades the old layout from the Issue cache;
+old separate SPEC stores are no longer read. The GUI refreshes the shared
+index asynchronously with a 15-minute TTL; non-GUI invocations auto-build it
+on the first search.
 
 ## gwtd resolution
 
