@@ -1246,6 +1246,7 @@ fn save_sample_agent_session_toml(runtime: &AppRuntime, worktree: &Path) {
 /// Reap through the OS exit notification instead of a polling deadline.
 /// The separate durable-stop polling fixture below retains its own bounds.
 const TEST_PTY_STOP_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(20);
+// test-hygiene: allow-short-duration Poll an external durable stop proof; assertions inspect identity/status, not ordering inside this interval.
 const TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
