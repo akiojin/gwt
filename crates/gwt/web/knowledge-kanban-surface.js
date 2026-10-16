@@ -2046,6 +2046,29 @@ export function createKnowledgeKanbanSurface({
         scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
+      function resyncKnowledge(windowIds) {
+        for (const windowId of windowIds) {
+          const state = knowledgeBridgeStateMap.get(windowId);
+          if (!state) continue;
+          clearKnowledgeLoadRecoveryTimer(state);
+          invalidateKnowledgeSearchOwner(state, state.kind, state.query);
+          state.inFlightSearchIntent = null;
+          state.searchInFlight = false;
+          state.inFlightSearchRequestId = 0;
+          state.searching = false;
+          state.detailRequestId = 0;
+          state.revisionPending = false;
+          state.ownedLoadRequestIds.clear();
+          state.loading = false;
+          // A dropped phase reply cannot settle a pending marker. Reload the
+          // authoritative phase without retrying the write or rolling it back.
+          state.pendingPhaseUpdates.clear();
+          state.dndSnapshot = null;
+          // The full read includes selected detail; keep query and selection.
+          requestKnowledgeBridge(windowId, state.kind, false);
+        }
+      }
+
       function scheduleKnowledgeRelatedWorkRefresh(forceReload = false) {
         knowledgeEventRefreshModel.update(model => ({ kind: "projection", forceReload, revision: model.revision + 1 }));
       }
@@ -5702,6 +5725,7 @@ export function createKnowledgeKanbanSurface({
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
+        resyncKnowledge,
         scheduleKnowledgeRelatedWorkRefresh,
         resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,

@@ -551,8 +551,34 @@ function mountCleanupSurface(surfaceModule, windowId) {
     getActiveWorkProjection: () => null,
     renderWorkspaceWindows: () => {},
   });
-  return { surface, sent, dialogEl };
+  return { surface, sent, dialogEl, windowEl };
 }
+
+test("Issue #5531: branch resync reissues a lost read and preserves its cleanup operation", async () => {
+  const surfaceModule = await loadBranchesCleanupSurfaceForTest();
+  const { surface, sent, windowEl } = mountCleanupSurface(surfaceModule, "branches");
+  windowEl.innerHTML = '<div class="branch-list-root"></div>';
+  const state = surface.ensureBranchListState("branches");
+  state.cleanupSelected.add("work/keep");
+  state.cleanupOptions.deleteRemote = true;
+  for (const [id, operation_id] of [["branches", "cleanup-keep"], ["other-project", "cleanup-other"]]) {
+    surface.applyBranchCleanupReceiveEvent({ kind: "branch_cleanup_progress", id, operation_id, branch: "work/keep" });
+    surface.requestBranches(id);
+  }
+  assert.equal(state.loading, true, "start a real pending read before recovery");
+  sent.length = 0;
+
+  surface.resyncBranches(["branches"]);
+
+  assert.deepEqual(sent, [
+    { kind: "load_branches", id: "branches" },
+    { kind: "sync_branch_cleanup", id: "branches", operation_id: "cleanup-keep" },
+  ]);
+  assert.equal(surface.readBranchCleanupState("branches").stage, "running");
+  assert.ok(state.cleanupSelected.has("work/keep"));
+  assert.equal(state.cleanupOptions.deleteRemote, true);
+  assert.equal(surface.ensureBranchListState("other-project").loading, true, "another scope's pending read stays intact");
+});
 
 test("Issue #4433: a cleanup run is tagged with an operation id", async () => {
   const surfaceModule = await loadBranchesCleanupSurfaceForTest();

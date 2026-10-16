@@ -91,7 +91,7 @@ test("Index health commits an immutable project snapshot and ignores unrelated p
   assert.strictEqual(document.querySelector('.index-search-health-summary').firstChild, summary);
 });
 
-test("Index search renders committed responses and clears closed-window subscriptions", async t => {
+test("Index search renders committed responses, recovers lost reads and clears closed-window subscriptions", async t => {
   const { controller, document, sent } = await indexHealthFixture(t);
   const submit = query => {
     const input = document.querySelector('.index-search-input');
@@ -112,6 +112,20 @@ test("Index search renders committed responses and clears closed-window subscrip
   assert.equal(document.querySelector('.index-detail-preview').textContent, 'Original preview');
   assert.match(document.querySelector('.index-search-status').textContent, /1 results/);
   const pending = submit('second');
+  // Issue #5531: recover a real pending read through the canonical response model.
+  controller.resyncProjectIndexSearch(['index-1', 'other']);
+  const replacement = sent.at(-1);
+  assert.equal(replacement.query, 'second');
+  assert.deepEqual(replacement.scopes, pending.scopes);
+  assert.equal(replacement.match_mode, pending.match_mode);
+  assert.ok(replacement.request_id > pending.request_id);
+  controller.handleProjectIndexSearchResults({ id: 'index-1', request_id: pending.request_id, results: [] });
+  assert.match(document.querySelector('.index-search-status').textContent, /Updating results/);
+  assert.match(document.querySelector('.index-result-list').textContent, /Committed/);
+  controller.handleProjectIndexSearchResults({ id: 'index-1', request_id: replacement.request_id,
+    results: [{ title: 'Fresh snapshot' }], suggestions: [] });
+  assert.match(document.querySelector('.index-search-status').textContent, /1 results/);
+  assert.match(document.querySelector('.index-result-list').textContent, /Fresh snapshot/);
   submit('');
   controller.handleProjectIndexSearchError({ id: 'index-1', request_id: pending.request_id, message: 'stale' });
   assert.match(document.querySelector('.index-search-status').textContent, /^Ready/);

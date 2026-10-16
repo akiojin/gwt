@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
+import { createInteractionGuard } from "../interaction-guard.js";
+import { setControlExplanation } from "../control-explanations.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -53,6 +55,143 @@ function loadFunctionWithDeps(name, deps) {
     `"use strict"; ${dependencySources}; return (${extractFunctionSource(settingsSource, name)});`,
   )();
 }
+
+function createSettingsHarness() {
+  const { document, window } = parseHTML("<html><body><main></main></body></html>");
+  const sent = [];
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
+      .replace(/^import .*;\r?\n/gm, "")
+      .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {},
+  );
+  const surface = factory({
+    send: message => sent.push(message),
+    createNode(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text) node.textContent = text;
+      return node;
+    },
+    focusWindowLocally() {},
+    activeProjectTab: () => ({ project_root: "/projects/A", title: "Project A" }),
+    focusOrSpawnPreset() {}, renderUsagePanel() {},
+    indexStatusByProjectRoot: new Map(), pmSettingsPanel: { mount() {} },
+    mountIssues(_windowData, host) {
+      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><button data-action="monitor-settings"></button></div>';
+    },
+  });
+  const body = document.querySelector("main");
+  return { surface, body, document, window, sent };
+}
+
+test("Issue #5531: mounted Settings recovers all lost reads without replaying writes or replacing input", () => {
+  const { surface, body, document, sent } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  assert.equal(sent.filter(message => message.kind === "get_autostart_status").length, 1);
+  assert.equal(surface.systemSettingsState.autostartChecking, true);
+  assert.equal(body.querySelector('[data-role="autostart-settings-status"]').textContent,
+    "Checking login launch status…");
+  const secondBody = document.createElement("main");
+  document.body.appendChild(secondBody);
+  surface.renderSettingsWindow(secondBody, { id: "settings-second", title: "Settings" });
+  assert.equal(sent.filter(message => message.kind === "get_autostart_status").length, 1,
+    "another mount does not duplicate a pending status read");
+  secondBody.remove();
+  const draft = body.querySelector('[aria-label="Allowed labels"]');
+  draft.value = "keep-my-draft";
+  assert.equal(surface.customAgentsState.loading, true);
+  sent.length = 0;
+  surface.resyncSettings();
+  assert.deepEqual(sent, [
+    { kind: "list_issue_monitor" }, { kind: "get_issue_monitor_profiles" },
+    { kind: "list_supported_agents" }, { kind: "get_system_settings" },
+    { kind: "get_update_settings" }, { kind: "get_board_auth_status" },
+    { kind: "get_autostart_status" }, { kind: "list_custom_agents" },
+    { kind: "list_agent_backends", agent: "claudeCode" },
+    { kind: "list_agent_backends", agent: "codex" },
+  ]);
+  assert.equal(body.querySelector('[aria-label="Allowed labels"]'), draft);
+  assert.equal(draft.value, "keep-my-draft");
+  sent.length = 0;
+  body.remove();
+  surface.resyncSettings();
+  assert.deepEqual(sent, [], "detached Settings must not trigger read probes");
+});
+
+test("Issue #5531: recovered System snapshots preserve unsaved provider and OAuth inputs", () => {
+  const { surface, body, window } = createSettingsHarness();
+  surface.systemSettingsState.boardProvider = "slack";
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const secret = body.querySelector('input[type="password"]');
+  const port = body.querySelector(".board-oauth-port-form input");
+  secret.value = "unsaved-secret";
+  secret.dispatchEvent(new window.Event("input", { bubbles: true }));
+  port.value = "9876";
+  port.dispatchEvent(new window.Event("input", { bubbles: true }));
+  surface.resyncSettings();
+  surface.systemSettingsState.boardConfig.oauthRedirectPort = 8765;
+  surface.renderSystemPanelInAllSettingsWindows();
+  assert.equal(body.querySelector('input[type="password"]'), secret);
+  assert.equal(secret.value, "unsaved-secret");
+  assert.equal(body.querySelector(".board-oauth-port-form input"), port);
+  assert.equal(port.value, "9876");
+  body.querySelector(".board-config-form button").click();
+  body.querySelector(".board-oauth-port-form button").click();
+  surface.renderSystemPanelInAllSettingsWindows();
+  assert.notEqual(body.querySelector('input[type="password"]'), secret,
+    "explicit saves allow the next authoritative snapshot to render");
+  assert.equal(body.querySelector('input[type="password"]').value, "");
+});
+
+test("Issue #5531: dirty provider drafts keep autostart pending and error state synchronized", () => {
+  const { surface, body, window, sent } = createSettingsHarness();
+  surface.systemSettingsState.boardProvider = "slack";
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  surface.applyAutostartStatus({ enabled: false });
+  surface.systemSettingsState.statusMessage = "Saved system settings.";
+  surface.systemSettingsState.statusKind = "success";
+  surface.renderSystemPanelInAllSettingsWindows();
+  const secret = body.querySelector('input[type="password"]');
+  secret.value = "unsaved-secret";
+  secret.dispatchEvent(new window.Event("input", { bubbles: true }));
+  const port = body.querySelector(".board-oauth-port-form input");
+  port.value = "9876";
+  port.dispatchEvent(new window.Event("input", { bubbles: true }));
+  const autostart = body.querySelector('input[id$="-settings-system-autostart"]');
+  autostart.checked = true;
+  autostart.dispatchEvent(new window.Event("change"));
+  const pendingDisabled = autostart.disabled;
+  const status = body.querySelector('[data-role="autostart-settings-status"]');
+  assert.equal(status.textContent, "Saving…");
+  sent.length = 0;
+  surface.resyncSettings();
+  assert.equal(sent.filter(message => message.kind === "get_autostart_status").length, 1);
+  assert.equal(sent.some(message => message.kind === "update_autostart"), false,
+    "recovery probes status without retrying the pending mutation");
+  assert.equal(surface.systemSettingsState.autostartPending, true);
+  surface.applyAutostartError({ message: "Login launch could not be saved." });
+  surface.renderSystemPanelInAllSettingsWindows();
+  assert.equal(autostart.checked, false, "a failed write restores the authoritative checkbox value");
+  assert.equal(autostart.disabled, false, "the error releases the pending checkbox");
+  assert.equal(pendingDisabled, true, "the checkbox is disabled while its write is pending");
+  assert.equal(status.textContent, "Login launch could not be saved.");
+  assert.equal(status.dataset.kind, "error");
+  assert.equal(body.querySelector('[data-role="system-settings-status"]').textContent,
+    "Saved system settings.");
+  surface.resyncSettings();
+  assert.equal(autostart.disabled, true, "a recovery query disables the known checkbox until its reply");
+  assert.equal(status.textContent, "Checking login launch status…");
+  surface.applyAutostartStatus({ enabled: true });
+  surface.renderSystemPanelInAllSettingsWindows();
+  assert.equal(autostart.checked, true);
+  assert.equal(autostart.disabled, false);
+  assert.equal(status.textContent, "");
+  assert.equal(status.dataset.kind, undefined);
+  assert.equal(body.querySelector('input[type="password"]'), secret);
+  assert.equal(secret.value, "unsaved-secret");
+  assert.equal(port.value, "9876");
+});
 
 test("Supported Agents renders the catalog, identifiers, versions, and install actions", () => {
   const { document } = parseHTML("<html><body><section></section></body></html>");
@@ -723,6 +862,8 @@ test("autostart checking and failures stay local and preserve the last confirmed
       const renderSystemPanelInAllSettingsWindows = () => {};
       ${extractFunctionSource(settingsSource, "applyAutostartStatus")}
       ${extractFunctionSource(settingsSource, "applyAutostartError")}
+      ${extractFunctionSource(settingsSource, "syncAutostartCheckbox")}
+      ${extractFunctionSource(settingsSource, "renderAutostartStatus")}
       function render() { ${autostartSource}; return autostartSection; }
       return { render, applyAutostartStatus, applyAutostartError };
     `,
@@ -759,12 +900,12 @@ test("autostart checking and failures stay local and preserve the last confirmed
   assert.match(render().textContent, /Saved login launch setting/);
   assert.equal(state.statusMessage, "Saved system settings.");
   assert.equal(state.statusKind, "success");
-  const openSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
-  assert.match(openSource, /const shouldRequestAutostartStatus = !systemSettingsState\.autostartPending\s*&& !systemSettingsState\.autostartChecking/,
+  const requestSource = extractFunctionSource(settingsSource, "requestSettingsSnapshots");
+  assert.match(requestSource, /const shouldRequestAutostartStatus = recovering \|\| \(!systemSettingsState\.autostartPending\s*&& !systemSettingsState\.autostartChecking\)/,
     "reopening Settings must preserve an in-flight query or update");
-  assert.match(openSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*systemSettingsState\.autostartChecking = true/,
+  assert.match(requestSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*systemSettingsState\.autostartChecking = true/,
     "only a new query starts checking");
-  assert.match(openSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*send\(\{ kind: "get_autostart_status" \}\)/,
+  assert.match(requestSource, /if \(shouldRequestAutostartStatus\)\s*\{[^}]*send\(\{ kind: "get_autostart_status" \}\)/,
     "use the same decision when sending the query");
 });
 
