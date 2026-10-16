@@ -566,6 +566,7 @@ fn issue_5335_rebuild_refuses_local_ledger_only_change_and_retries() {
 #[test]
 fn issue_5335_rebuild_refuses_detachments_only_change_and_retries() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(&temp.path().join("home"));
     let works = temp.path().join("works.json");
     let receipt = container_detachments_path(&works);
     let at = Utc.with_ymd_and_hms(2026, 10, 12, 0, 0, 0).unwrap();
