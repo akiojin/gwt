@@ -9374,9 +9374,7 @@ fn terminal_workspace_commit_recovery(
                     "continue-work:resume" | "continue-work:handoff"
                 )
             {
-                return Err(generation_conflict(
-                    "operation is not a Work launch transaction",
-                ));
+                return Ok(None);
             }
             let committed = attempt.status == ContinuationAttemptStatus::Activated;
             if committed
@@ -9412,9 +9410,7 @@ fn terminal_workspace_commit_recovery(
                 attempt.request.source.as_deref(),
                 Some("continue-work:resume" | "continue-work:handoff")
             ) {
-                return Err(generation_conflict(
-                    "operation is not a Work takeover transaction",
-                ));
+                return Ok(None);
             }
             let committed = attempt.status == GenerationTakeoverAttemptStatus::Activated;
             if committed
@@ -19347,6 +19343,61 @@ mod tests {
                 Utc::now(),
             )
             .expect("terminal receipt makes repeated recovery safe");
+
+            let mut ledger = load_owner_generation_ledger(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            ledger
+                .continuation_attempts
+                .last_mut()
+                .unwrap()
+                .request
+                .source = "execution-continue".into();
+            assert!(
+                terminal_workspace_commit_recovery(&ledger, &request.operation_id)
+                    .unwrap()
+                    .is_none()
+            );
+            if activated {
+                ledger
+                    .continuation_attempts
+                    .last_mut()
+                    .unwrap()
+                    .request
+                    .source = request.source.clone();
+                ledger.current_generation_id.clear();
+                assert_eq!(
+                    terminal_workspace_commit_recovery(&ledger, &request.operation_id)
+                        .unwrap_err()
+                        .kind(),
+                    ErrorKind::AlreadyExists,
+                    "a matching Work transaction must still reject changed authority"
+                );
+            }
+
+            let mut takeover = takeover_request("external-recovery-non-work-takeover");
+            takeover.source = None;
+            takeover.work_id = None;
+            takeover.from_session_id = if activated {
+                request.initial_session_id.clone()
+            } else {
+                active.primary_session_id.clone()
+            };
+            prepare_generation_takeover(&worktree, owner, &takeover).unwrap();
+            let mut ledger = load_owner_generation_ledger(&worktree, owner)
+                .unwrap()
+                .unwrap();
+            for status in [
+                GenerationTakeoverAttemptStatus::Aborted,
+                GenerationTakeoverAttemptStatus::Activated,
+            ] {
+                ledger.takeover_attempts.last_mut().unwrap().status = status;
+                assert!(
+                    terminal_workspace_commit_recovery(&ledger, &takeover.operation_id)
+                        .unwrap()
+                        .is_none()
+                );
+            }
         }
     }
 
