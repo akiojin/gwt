@@ -2,6 +2,166 @@
 
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy)]
+pub enum NamedIssueActivity {
+    PrCreated { number: u64 },
+    Completed,
+}
+
+const NAMED_ACTIVITY_PREFIX: &str = "<!-- gwt-agent-work ";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NamedIssueRecord {
+    name: String,
+    provider: String,
+    session_id: String,
+    phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pr_number: Option<u64>,
+}
+
+fn named_record(
+    session: &gwt_agent::Session,
+    phase: &str,
+    pr_number: Option<u64>,
+) -> Option<NamedIssueRecord> {
+    if session.review_dispatch {
+        return None;
+    }
+    Some(NamedIssueRecord {
+        name: session.agent_name.as_deref()?.trim().to_string(),
+        provider: session.display_name.clone(),
+        session_id: session.id.clone(),
+        phase: phase.to_string(),
+        pr_number,
+    })
+    .filter(|record| !record.name.is_empty())
+}
+
+fn named_record_from_body(body: &str) -> Option<NamedIssueRecord> {
+    body.lines().rev().find_map(|line| {
+        let json = line
+            .strip_prefix(NAMED_ACTIVITY_PREFIX)?
+            .strip_suffix(" -->")?;
+        serde_json::from_str(json).ok()
+    })
+}
+
+fn record_named_comment<C: gwt_github::IssueClient + ?Sized>(
+    client: &C,
+    session: &gwt_agent::Session,
+    record: NamedIssueRecord,
+    narrative: &str,
+) -> Result<bool, gwt_github::ApiError> {
+    use gwt_github::{FetchResult, IssueNumber};
+    let Some(number) = session.linked_issue_number else {
+        return Ok(false);
+    };
+    let snapshot = match client.fetch(IssueNumber(number), None)? {
+        FetchResult::Updated(snapshot) => snapshot,
+        FetchResult::NotModified => {
+            return Err(gwt_github::ApiError::Unexpected(
+                "unconditional named Issue history fetch reported not modified".into(),
+            ))
+        }
+    };
+    if snapshot
+        .comments
+        .iter()
+        .filter_map(|comment| named_record_from_body(&comment.body))
+        .any(|existing| {
+            existing.name == record.name
+                && existing.phase == record.phase
+                && existing.pr_number == record.pr_number
+        })
+    {
+        return Ok(false);
+    }
+    let metadata = serde_json::to_string(&record).expect("named Issue metadata serializes");
+    client.create_comment(
+        IssueNumber(number),
+        &format!("{NAMED_ACTIVITY_PREFIX}{metadata} -->\n\n{narrative}\n"),
+    )?;
+    Ok(true)
+}
+
+/// Append a durable assignment after the named Session has successfully launched.
+/// Call from the launch worker, never from the GUI event loop.
+pub fn record_named_issue_assignment<C: gwt_github::IssueClient + ?Sized>(
+    client: &C,
+    session: &gwt_agent::Session,
+    previous_name: Option<&str>,
+) -> Result<bool, gwt_github::ApiError> {
+    let Some(record) = named_record(session, "assignment", None) else {
+        return Ok(false);
+    };
+    let previous_name = previous_name.map(str::trim).filter(|name| !name.is_empty());
+    if previous_name == Some(record.name.as_str()) {
+        return Ok(false);
+    }
+    let narrative = match previous_name {
+        Some(previous) => format!(
+            "{previous} から {} に引き継ぎ（{}）。",
+            record.name, record.provider
+        ),
+        None => format!("{}（{}）が担当を開始。", record.name, record.provider),
+    };
+    record_named_comment(client, session, record, &narrative)
+}
+
+/// Name the producing agent in the owner's append-only GitHub history.
+pub fn record_named_issue_activity<C: gwt_github::IssueClient + ?Sized>(
+    client: &C,
+    session: &gwt_agent::Session,
+    activity: NamedIssueActivity,
+) -> Result<bool, gwt_github::ApiError> {
+    let (phase, pr_number) = match activity {
+        NamedIssueActivity::PrCreated { number } => ("pr_created", Some(number)),
+        NamedIssueActivity::Completed => ("completed", None),
+    };
+    let Some(record) = named_record(session, phase, pr_number) else {
+        return Ok(false);
+    };
+    let narrative = match activity {
+        NamedIssueActivity::PrCreated { number } => format!(
+            "{} が対応し、PR #{number} を作成（{}）。",
+            record.name, record.provider
+        ),
+        NamedIssueActivity::Completed => {
+            format!("{} が対応を完了（{}）。", record.name, record.provider)
+        }
+    };
+    record_named_comment(client, session, record, &narrative)
+}
+
+/// Keep an immutable name/provider snapshot with the PR, independent of a live pane.
+pub fn with_named_pr_author(body: &str, session: Option<&gwt_agent::Session>) -> String {
+    let Some(record) = session.and_then(|session| named_record(session, "pr_author", None)) else {
+        return body.to_string();
+    };
+    append_named_pr_author(body, &record)
+}
+
+pub fn preserve_named_pr_author(body: &str, previous: &str) -> String {
+    let Some(record) =
+        named_record_from_body(previous).filter(|record| record.phase == "pr_author")
+    else {
+        return body.to_string();
+    };
+    append_named_pr_author(body, &record)
+}
+
+fn append_named_pr_author(body: &str, record: &NamedIssueRecord) -> String {
+    if named_record_from_body(body).is_some_and(|existing| existing.name == record.name) {
+        return body.to_string();
+    }
+    let metadata = serde_json::to_string(record).expect("named PR metadata serializes");
+    format!(
+        "{body}\n\n{NAMED_ACTIVITY_PREFIX}{metadata} -->\nAgent: {} ({})\n",
+        record.name, record.provider
+    )
+}
+
 pub fn initialize_launch_session(
     worktree: &Path,
     project_root: &Path,
@@ -42,6 +202,13 @@ pub fn apply_resume_identity_to_session(
     session: &mut gwt_agent::Session,
     config: &gwt_agent::LaunchConfig,
 ) {
+    if session.agent_name.is_none() {
+        session.agent_name = config
+            .env_vars
+            .get("GWT_AGENT_NAME")
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+    }
     if config.session_mode == gwt_agent::SessionMode::Resume {
         session.agent_session_id = config.resume_session_id.clone();
     }
@@ -183,6 +350,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn named_issue_history_records_start_handover_pr_and_completion_once() {
+        use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+        let client = FakeIssueClient::new();
+        client.seed(IssueSnapshot {
+            number: IssueNumber(42),
+            title: "work".into(),
+            body: String::new(),
+            labels: vec![],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-10-15T00:00:00Z"),
+            comments: vec![],
+        });
+        let mut session =
+            gwt_agent::Session::new("/tmp/work", "work/issue-42", gwt_agent::AgentId::Codex);
+        session.linked_issue_number = Some(42);
+        session.agent_name = Some("ハヤテ".into());
+        assert!(record_named_issue_assignment(&client, &session, None).unwrap());
+        assert!(!record_named_issue_assignment(&client, &session, None).unwrap());
+        let mut successor = session.clone();
+        successor.id = "successor".into();
+        successor.agent_name = Some("ミオ".into());
+        assert!(record_named_issue_assignment(&client, &successor, Some("ハヤテ")).unwrap());
+        assert!(!record_named_issue_assignment(&client, &successor, Some("ミオ")).unwrap());
+        assert!(record_named_issue_activity(
+            &client,
+            &successor,
+            NamedIssueActivity::PrCreated { number: 43 }
+        )
+        .unwrap());
+        assert!(
+            record_named_issue_activity(&client, &successor, NamedIssueActivity::Completed)
+                .unwrap()
+        );
+        assert!(
+            !record_named_issue_activity(&client, &successor, NamedIssueActivity::Completed)
+                .unwrap()
+        );
+        let comments = client.comments(IssueNumber(42));
+        assert_eq!(comments.len(), 4);
+        assert!(comments[0].body.contains("ハヤテ（Codex）が担当を開始"));
+        assert!(comments[1].body.contains("ハヤテ から ミオ に引き継ぎ"));
+        assert!(comments[2].body.contains("ミオ が対応し、PR #43 を作成"));
+        assert!(comments[3].body.contains("ミオ が対応を完了"));
+    }
+
+    #[test]
+    fn named_pr_body_keeps_the_assigned_name_and_provider_snapshot() {
+        let mut session =
+            gwt_agent::Session::new("/tmp/work", "work/issue-42", gwt_agent::AgentId::Codex);
+        session.agent_name = Some("Maya".into());
+        let body = with_named_pr_author("Existing body", Some(&session));
+        assert!(body.starts_with("Existing body"));
+        assert!(body.contains("Agent: Maya (Codex)"));
+        assert_eq!(with_named_pr_author(&body, Some(&session)), body);
+        assert_eq!(with_named_pr_author("legacy", None), "legacy");
+    }
+
+    #[test]
     fn launch_session_initializes_and_persists_without_gui() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
@@ -194,10 +419,14 @@ mod tests {
         config
             .env_vars
             .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
+        config
+            .env_vars
+            .insert("GWT_AGENT_NAME".into(), "ミオ".into());
         let project = tmp.path().join("project");
         let worktree = tmp.path().join("worktree");
         let mut session = initialize_launch_session(&worktree, &project, &config);
         assert_eq!(session.project_state_root.as_ref(), Some(&project));
+        assert_eq!(session.agent_name.as_deref(), Some("ミオ"));
         assert_eq!(session.exact_resume_session_id(), Some("conversation"));
         assert_eq!(session.launch_command, "claude");
         let sessions = tmp.path().join("sessions");
@@ -207,6 +436,7 @@ mod tests {
         let saved = gwt_agent::Session::load(&sessions.join(format!("{}.toml", session.id)))
             .expect("load session");
         assert_eq!(saved.status, gwt_agent::AgentStatus::Running);
+        assert_eq!(saved.agent_name.as_deref(), Some("ミオ"));
         assert_eq!(saved.exact_resume_session_id(), Some("conversation"));
         assert_eq!(saved.tool_version.as_deref(), Some("2.1.156"));
         assert_eq!(

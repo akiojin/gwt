@@ -16602,6 +16602,22 @@ fn run_impl<E: CliEnv>(
             }
         }
     };
+    if let SettleResult::Settled(record) | SettleResult::AlreadySettled(record) = &result {
+        if record.status == ExecutionControlStatus::Completed
+            && crate::cli::delivered_owner::trusted_no_action_for_session(&worktree, &session_id)
+                .is_none()
+        {
+            if let Ok(session) = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            ) {
+                crate::session_launch::record_named_issue_activity(
+                    env.client(),
+                    &session,
+                    crate::session_launch::NamedIssueActivity::Completed,
+                )?;
+            }
+        }
+    }
     match result {
         SettleResult::Settled(record) => {
             if record.status == ExecutionControlStatus::Blocked {
@@ -33792,6 +33808,14 @@ exit 1
                     mergeable: "MERGEABLE".to_string(),
                     merge_state_status: "CLEAN".to_string(),
                     review_status: "REVIEW_REQUIRED".to_string(),
+                },
+            );
+            env.pr_quarantine_contexts.insert(
+                4122,
+                crate::cli::pr::PrQuarantineContext {
+                    number: 4122,
+                    body: "Inherited PR description".to_string(),
+                    comments: Vec::new(),
                 },
             );
             let (pr_code, pr_out) = run_collect(

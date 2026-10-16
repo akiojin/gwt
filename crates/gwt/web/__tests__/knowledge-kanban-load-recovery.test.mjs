@@ -135,6 +135,52 @@ test("Issue #5396: semantic list completion does not request an implicit preview
   });
 });
 
+test("Issue #5543: related-work enrichment refreshes only the explicitly selected detail", async () => {
+  const mod = await importSurfaceModule();
+  await withPatchedTimersAsync(async () => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    surface.requestKnowledgeBridge("win-1", "issue", false);
+    const listEvent = {
+      kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
+      request_id: sent.at(-1).request_id, entries: [ROW_A, ROW_B],
+      selected_number: null, refresh_enabled: true,
+    };
+    const detailRequests = () => sent.filter(message => message.kind === "select_knowledge_bridge_entry");
+    surface.applyKnowledgeReceiveEvent(listEvent);
+    assert.equal(detailRequests().length, 0, "initial rows must not open a detail");
+
+    surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+      request_id: detailRequests().at(-1).request_id,
+      detail: detailFor(ROW_B, "Beta body"),
+    });
+    const state = surface.knowledgeBridgeStateMap.get("win-1");
+    const selectionGeneration = state.selectionGeneration;
+    const enriched = {
+      ...listEvent,
+      entries: [ROW_A, { ...ROW_B, related_work_refs: [{ id: "work-beta" }],
+        related_work_count: 1, related_session_count: 1 }],
+    };
+    surface.applyKnowledgeReceiveEvent(enriched);
+    assert.equal(detailRequests().length, 2, "enrichment must requery the selected detail once");
+    assert.equal(detailRequests().at(-1).number, ROW_B.number);
+    assert.equal(state.selectedNumber, ROW_B.number);
+    assert.equal(state.selectionGeneration, selectionGeneration, "refresh is not an explicit selection");
+    surface.applyKnowledgeReceiveEvent(enriched);
+    assert.equal(detailRequests().length, 2, "the same related snapshot must not requery again");
+
+    const relatedWorks = [{ id: "work-beta", title: "Beta work" }];
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+      request_id: detailRequests().at(-1).request_id,
+      detail: { ...detailFor(ROW_B, "Beta body"), related_works: relatedWorks },
+    });
+    assert.deepEqual(state.detail.related_works, relatedWorks);
+  });
+});
+
 for (const kind of ["issue", "spec"]) {
   test(`selecting row B renders the local preview synchronously (${kind} preset, AS-17.4)`, async () => {
     const mod = await importSurfaceModule();
@@ -735,7 +781,13 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       const body = domDocument.createElement("div");
       domDocument.body.appendChild(body);
       const windowMap = new Map([["win-1", body]]);
-      const windowData = { id: "win-1", preset: "issue" };
+      const windowData = { id: "win-1", preset: "issue", minimized: true,
+        tab_group_id: "legacy-group", tab_group_active: false };
+      const cache = domDocument.createElement("section");
+      cache.className = "surface-cache";
+      cache.hidden = true;
+      cache.setAttribute("inert", "");
+      domDocument.body.appendChild(cache);
       let activeTab = true;
       const createNode = (tag, className, textContent = "") => {
         const node = domDocument.createElement(tag);
@@ -791,7 +843,8 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       }
 
       intervals[0].callback();
-      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1);
+      assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
+        "visible legacy grouped windows refresh independently of saved canvas state");
       intervals[0].callback();
       intervals[0].callback();
       assert.equal(sent.filter(message => message.kind === "check_knowledge_revision").length, 1,
@@ -804,9 +857,7 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
       // Repeated hidden ticks coalesce to one revision check on activation.
       const hiddenCases = [
         [() => { body.hidden = true; }, () => { body.hidden = false; }],
-        [() => { windowData.minimized = true; }, () => { windowData.minimized = false; }],
-        [() => { windowData.tab_group_id = "group"; windowData.tab_group_active = false; },
-          () => { windowData.tab_group_active = true; }],
+        [() => { cache.appendChild(body); }, () => { domDocument.body.appendChild(body); }],
         [() => { activeTab = false; }, () => { activeTab = true; }],
         [() => { domDocument.hidden = true; }, () => { domDocument.hidden = false; }],
       ];
@@ -815,7 +866,7 @@ test("auto refresh gates revision checks on visibility and semantic owners (#539
         hide();
         intervals[0].callback();
         intervals[0].callback();
-        assert.equal(sent.length, before, "hidden/minimized/inactive surfaces do no reads");
+        assert.equal(sent.length, before, "hidden/cache/inactive-project surfaces do no reads");
         reveal();
         surface.refreshVisibleKnowledgeWindows();
         surface.refreshVisibleKnowledgeWindows();

@@ -231,6 +231,8 @@ struct PersistedBoardPayloadV1 {
     origin_branch: Option<String>,
     origin_session_id: Option<String>,
     origin_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin_agent_name: Option<String>,
     origin_worktree_form: Option<BoardWorktreeForm>,
     origin_recovery_id: Option<String>,
     target_owners: Vec<String>,
@@ -259,6 +261,7 @@ impl From<&BoardEntry> for PersistedBoardPayloadV1 {
             origin_branch: entry.origin_branch.clone(),
             origin_session_id: entry.origin_session_id.clone(),
             origin_agent_id: entry.origin_agent_id.clone(),
+            origin_agent_name: entry.origin_agent_name.clone(),
             origin_worktree_form: entry.origin_worktree_form,
             origin_recovery_id: entry.origin_recovery_id.clone(),
             target_owners: entry.target_owners.clone(),
@@ -288,6 +291,7 @@ impl PersistedBoardPayloadV1 {
             origin_branch: self.origin_branch,
             origin_session_id: self.origin_session_id,
             origin_agent_id: self.origin_agent_id,
+            origin_agent_name: self.origin_agent_name,
             origin_worktree_form: self.origin_worktree_form,
             origin_recovery_id: self.origin_recovery_id,
             target_owners: self.target_owners,
@@ -923,6 +927,7 @@ fn validate_sanitized_entry(
         || !optional_string_is_canonical(&entry.origin_branch)
         || !optional_string_is_canonical(&entry.origin_session_id)
         || !optional_string_is_canonical(&entry.origin_agent_id)
+        || !optional_string_is_canonical(&entry.origin_agent_name)
         || !optional_string_is_canonical(&entry.origin_recovery_id)
         || entry.resolves_entry_ids != sanitize_board_terms(&entry.resolves_entry_ids)
         || entry.related_topics != sanitize_board_terms(&entry.related_topics)
@@ -954,6 +959,7 @@ fn board_entry_is_public_safe(entry: &BoardEntry) -> bool {
         && optional_text_is_safe(&entry.origin_branch)
         && optional_text_is_safe(&entry.origin_session_id)
         && optional_text_is_safe(&entry.origin_agent_id)
+        && optional_text_is_safe(&entry.origin_agent_name)
         && optional_text_is_safe(&entry.origin_recovery_id)
         && entry.mentions.iter().all(|mention| {
             recovery_text_is_public_safe(&mention.target) && optional_text_is_safe(&mention.label)
@@ -1724,6 +1730,34 @@ fn sync_directory(_path: &Path) -> RecoveryResult<()> {
 #[cfg(test)]
 mod retention_tests {
     use super::*;
+
+    #[test]
+    fn persisted_board_payload_preserves_the_agent_name_snapshot() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "body",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let legacy = serde_json::to_value(PersistedBoardPayloadV1::from(&entry)).unwrap();
+        assert!(legacy.get("origin_agent_name").is_none());
+        let mut named = legacy.clone();
+        named["origin_agent_name"] = serde_json::json!("ミオ");
+        let payload: PersistedBoardPayloadV1 = serde_json::from_value(named).unwrap();
+        assert_eq!(
+            serde_json::to_value(payload.into_board_entry()).unwrap()["origin_agent_name"],
+            "ミオ"
+        );
+        let payload: PersistedBoardPayloadV1 = serde_json::from_value(legacy).unwrap();
+        assert!(serde_json::to_value(payload.into_board_entry())
+            .unwrap()
+            .get("origin_agent_name")
+            .is_none());
+    }
 
     #[test]
     fn opening_an_absent_recovery_authority_does_not_materialize_storage() {

@@ -192,10 +192,8 @@ test.describe("PM startup responsiveness (isolated checkout)", () => {
       expect(total).toMatchObject({ status: "ok" });
       expect(total.duration_ms).toBeLessThan(200);
       expect(git(worktree, "rev-parse", "HEAD")).toBe(head);
-      const stage = page.locator("#canvas-stage");
-      const previousTransform = await stage.evaluate(node => (node as HTMLElement).style.transform);
-      await page.locator("#zoom-in-button").click();
-      await expect.poll(() => stage.evaluate(node => (node as HTMLElement).style.transform)).not.toBe(previousTransform);
+      await expect(page.locator("#canvas, #canvas-stage, #zoom-in-button")).toHaveCount(0);
+      await expect(page.locator("#split-surfaces")).toBeVisible();
       expect(errors).toEqual([]);
     } finally {
       const ownedPid = fixture.ownedPid;

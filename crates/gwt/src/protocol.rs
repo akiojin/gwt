@@ -546,8 +546,9 @@ pub enum FrontendEvent {
         rows: u16,
     },
     ListWindows,
-    /// Authenticated Agent-only self-naming; the principal supplies all scope.
+    /// Fetch the gwt-assigned identity; the principal supplies all scope.
     PaneName {
+        #[serde(default)]
         candidate: String,
         request_id: String,
     },

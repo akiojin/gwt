@@ -599,8 +599,8 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "any failed worker must fail the required job"
     );
 
-    // Issue #5565: split the hosts without dropping or broadening any of the
-    // original 49 default filters; warm retains its separate 50th filter above.
+    // Issue #5565 split the original 49 default filters across both hosts.
+    // Issue #5560 adds the FIFO regression; warm keeps its separate filter above.
     let mut expected_filters = vec![
         "gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact",
         "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1",
@@ -646,13 +646,14 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt lib gwt cli::verification_lease:: -- --test-threads=1",
         "gwt lib gwt cli::verification_record::driver:: -- --test-threads=1",
         "gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1",
+        "gwt test cli_contracts verification_lease_cli_test::deferred_fifo_survives_status_read_contention_and_new_processes -- --exact --nocapture",
         "gwt lib gwt cli::issue::tests::monitor_wait_ -- --test-threads=1",
         "gwt lib gwt issue_monitor::tests::wait_declaration_ -- --test-threads=1",
         "gwt lib gwt issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1",
         "gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture",
         "gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1",
     ];
-    assert_eq!(expected_filters.len(), 49);
+    assert_eq!(expected_filters.len(), 50);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

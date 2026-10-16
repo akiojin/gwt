@@ -120,7 +120,9 @@ export function createTerminalAttachments({
       const attachmentProgressControllers = new Map();
 
       function ensureAttachmentProgressSurface(windowId) {
-        const host = workspaceWindowElement(windowId) || document.body;
+        const terminalHost = terminalMap.get(windowId)?.terminalContainer?.parentElement;
+        const host = terminalHost?.dataset.agentId === windowId
+          ? terminalHost : workspaceWindowElement(windowId) || document.body;
         let surface = host.querySelector(".attachment-progress");
         if (surface) {
           return surface;
@@ -708,14 +710,21 @@ export function createTerminalAttachments({
         };
       }
 
+      function attachmentWindowIdFromElement(element) {
+        const tile = element?.closest?.(".agent-tile[data-agent-id]");
+        if (tile) {
+          return tile.closest(".agents-surface--preview") ? null : tile.dataset.agentId;
+        }
+        return element?.closest?.(".workspace-window")?.dataset?.id || null;
+      }
+
       function terminalWindowIdFromPoint(x, y) {
         if (!Number.isFinite(x) || !Number.isFinite(y)) {
           return null;
         }
         const target = document.elementFromPoint(x, y);
         const terminalRoot = target?.closest?.(".terminal-root");
-        const windowElement = terminalRoot?.closest?.(".workspace-window");
-        const windowId = windowElement?.dataset?.id || null;
+        const windowId = attachmentWindowIdFromElement(terminalRoot);
         if (!windowId || !terminalMap.has(windowId)) {
           return null;
         }
@@ -723,8 +732,7 @@ export function createTerminalAttachments({
       }
 
       function workspaceWindowIdFromDropEvent(event) {
-        const targetWindow = event.target?.closest?.(".workspace-window");
-        const targetWindowId = targetWindow?.dataset?.id || null;
+        const targetWindowId = attachmentWindowIdFromElement(event.target);
         if (targetWindowId) {
           return targetWindowId;
         }
@@ -734,8 +742,7 @@ export function createTerminalAttachments({
           return null;
         }
         const pointTarget = document.elementFromPoint(x, y);
-        const pointWindow = pointTarget?.closest?.(".workspace-window");
-        return pointWindow?.dataset?.id || null;
+        return attachmentWindowIdFromElement(pointTarget);
       }
 
       function eventTargetsPmReports(event) {

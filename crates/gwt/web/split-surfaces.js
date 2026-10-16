@@ -4,11 +4,11 @@ const SURFACES = { issues: "Issues", agents: "Agents", board: "Board", settings:
 const PRESETS = { issues: "settings", board: "board", settings: "settings" };
 
 // A client-local layout: move live views, never clone terminals or persist
-// dimensions as canvas geometry. One or two panes share this same host;
-// close returns live views to the legacy canvas during the migration.
+// geometry. One or two panes share the same host; inactive live views stay
+// connected in an inert cache so view lifecycle checks keep their state alive.
 export function createSplitSurfaces({
-  document, stage, windowCatalogModel, getWindows, getElement, openSurface, onChange, onLayout,
-  restoreVisibility = () => {}, onAgentsHost = () => {},
+  document, windowCatalogModel, getWindows, getElement, openSurface, onChange, onLayout,
+  onAgentsHost = () => {},
 }) {
   const host = document.getElementById("split-surfaces");
   const button = document.getElementById("split-view-button");
@@ -17,13 +17,21 @@ export function createSplitSurfaces({
   let split = false;
   let active = 0;
   let selections = ["issues", "board"];
-  let fixedWindowId = null;
+  let selectedWindowIds = [null, null];
+  const parking = document.createElement("section");
+  parking.className = "surface-cache";
+  parking.hidden = true;
+  parking.setAttribute("inert", "");
+  parking.setAttribute("aria-hidden", "true");
+  host.appendChild(parking);
   const requested = new Map();
   const mounted = new Map();
   const panes = ["Left", "Right"].map((label, index) => {
     const pane = document.createElement("section");
     pane.className = "split-pane";
-    pane.setAttribute("aria-label", `${label} pane`);
+    pane.hidden = index !== active;
+    pane.dataset.active = String(index === active);
+    pane.setAttribute("aria-label", index === active ? "Main pane" : `${label} pane`);
     pane.innerHTML = `
       <div class="split-pane__header">
         <label>${label}<select aria-label="${label} pane surface"></select></label>
@@ -44,6 +52,13 @@ export function createSplitSurfaces({
     host.appendChild(pane);
     return pane;
   });
+  host.hidden = false;
+  host.dataset.split = "false";
+  area.classList.add("has-surface-layout");
+
+  function park(element) {
+    parking.appendChild(element);
+  }
 
   function focusPane(index) {
     if (!split && index !== active) return;
@@ -64,9 +79,16 @@ export function createSplitSurfaces({
       }
     }
     if (!opened) return;
+    for (const [index, id] of selectedWindowIds.entries()) {
+      if (!id) continue;
+      const data = windows.find(data => data.id === id);
+      if (!data) selectedWindowIds[index] = null;
+      else if (surfaceForWindow(data)) selections[index] = surfaceForWindow(data);
+    }
     const pm = selections[active] === "pm";
-    if (pm && !windows.some(data => data.id === fixedWindowId && surfaceForWindow(data) === "pm")) {
-      fixedWindowId = windows.find(data => data.is_pm)?.id || null;
+    if (pm) split = false;
+    if (pm && !selectedWindowIds[active]) {
+      selectedWindowIds[active] = windows.find(data => data.is_pm)?.id || null;
     }
     const visiblePanes = panes.map((pane, index) => ({ pane, index }))
       .filter(({ index }) => split || index === active);
@@ -86,7 +108,7 @@ export function createSplitSurfaces({
     const assigned = new Map();
     // Reserve each existing pane's live view before allocating a second view.
     for (const { index, pane } of visiblePanes) {
-      const data = windows.find(data => matchesSurface(data, selections[index]) &&
+      const data = windows.find(data => matchesSurface(data, selections[index], index) &&
         getElement(data.id)?.parentElement === pane.querySelector(".split-pane__body"));
       if (data) { assigned.set(index, data); desired.set(data.id, { element: getElement(data.id), index }); }
     }
@@ -103,7 +125,7 @@ export function createSplitSurfaces({
         pane.querySelector(".split-pane__empty").hidden = true;
         continue;
       }
-      const data = assigned.get(index) || windows.find(data => matchesSurface(data, surface) && !desired.has(data.id));
+      const data = assigned.get(index) || windows.find(data => matchesSurface(data, surface, index) && !desired.has(data.id));
       const empty = pane.querySelector(".split-pane__empty");
       empty.hidden = Boolean(data);
       empty.textContent = surface === "pm" ? "PM is not running. Open PM from the rail." : `Opening ${SURFACES[surface]}…`;
@@ -114,10 +136,15 @@ export function createSplitSurfaces({
       if (data) {
         const element = getElement(data.id);
         if (element) {
-          if (surface === "issues" && (changedSurface || element.parentElement !== pane.querySelector(".split-pane__body"))) {
+          if (surface === "issues" && data.settingsSection !== "issues" &&
+            (changedSurface || element.parentElement !== pane.querySelector(".split-pane__body"))) {
             element.querySelector('[data-settings-tab="issues"]')?.click();
+          } else if (surface === "settings" && data.settingsSection === "issues" &&
+            (changedSurface || element.parentElement !== pane.querySelector(".split-pane__body"))) {
+            element.querySelector('[data-settings-tab="system"]')?.click();
           }
           desired.set(data.id, { element, index });
+          selectedWindowIds[index] = data.id;
         }
       }
     }
@@ -130,10 +157,7 @@ export function createSplitSurfaces({
     for (const [id, element] of mounted) {
       if (desired.has(id)) continue;
       // A backend removal may already have detached this view.
-      if (element.parentElement) {
-        stage.appendChild(element);
-        restoreVisibility(id, element);
-      }
+      if (element.parentElement) park(element);
       mounted.delete(id);
       changed.push(id);
     }
@@ -143,8 +167,6 @@ export function createSplitSurfaces({
         body.appendChild(element);
         changed.push(id);
       }
-      // Split selection is independent of the canvas tab group's one-active
-      // rule. Restore that rule when returning this live view to the canvas.
       element.hidden = false;
       mounted.set(id, element);
     }
@@ -152,20 +174,19 @@ export function createSplitSurfaces({
     if (changed.length) onLayout(changed);
   }
 
-  function matchesSurface(data, surface) {
-    if (surface === "pm") return data.id === fixedWindowId && surfaceForWindow(data) === "pm";
+  function matchesSurface(data, surface, index) {
+    const selectedId = selectedWindowIds[index];
+    if (selectedId) return data.id === selectedId && surfaceForWindow(data) === surface;
+    if (surface === "pm") return false;
     return data.preset === PRESETS[surface] && surfaceForWindow(data) !== "pm";
   }
 
   function choose(surface, index = active) {
     if (!opened || !SURFACES[surface] || (!split && index !== active)) return false;
-    fixedWindowId = null;
+    selectedWindowIds[index] = null;
     selections[index] = surface;
     active = index;
     sync();
-    if (surface === "issues") {
-      panes[index].querySelector('[data-settings-tab="issues"]')?.click();
-    }
     return true;
   }
 
@@ -175,6 +196,8 @@ export function createSplitSurfaces({
     if (!opened) {
       selections = [SURFACES[surface] ? surface : "issues", surface === "board" ? "issues" : "board"];
       active = 0;
+    } else if (!panes[1 - active].dataset.surface) {
+      selections[1 - active] = selections[active] === "board" ? "issues" : "board";
     }
     opened = true;
     split = true;
@@ -194,11 +217,15 @@ export function createSplitSurfaces({
 
   function showWindow(id) {
     const windows = getWindows(windowCatalogModel.read().catalog);
-    if (!windows.some(data => data.id === id && surfaceForWindow(data) === "pm")) return false;
-    fixedWindowId = id;
-    selections[active] = "pm";
+    const data = windows.find(data => data.id === id);
+    const surface = surfaceForWindow(data);
+    if (!surface) return false;
+    const existingPane = mounted.get(id)?.closest(".split-pane");
+    if (existingPane) active = panes.indexOf(existingPane);
+    selectedWindowIds[active] = surface === "agents" ? null : id;
+    selections[active] = surface;
     opened = true;
-    split = false;
+    if (surface === "pm") split = false;
     sync();
     return true;
   }
@@ -211,21 +238,28 @@ export function createSplitSurfaces({
   }
 
   function close() {
-    if (!opened) return;
     const ids = [...mounted.keys()];
     for (const [id, element] of mounted) {
-      if (element.parentElement) {
-        stage.appendChild(element);
-        restoreVisibility(id, element);
-      }
+      if (element.parentElement) park(element);
     }
     mounted.clear();
     opened = false;
     split = false;
-    fixedWindowId = null;
+    selectedWindowIds = [null, null];
+    selections = ["issues", "board"];
+    active = 0;
+    requested.clear();
     onAgentsHost(null, null);
-    host.hidden = true;
-    area.classList.remove("is-split", "has-surface-layout");
+    host.hidden = false;
+    host.dataset.split = "false";
+    area.classList.remove("is-split");
+    for (const [index, pane] of panes.entries()) {
+      pane.hidden = index !== active;
+      pane.dataset.active = String(index === active);
+      delete pane.dataset.surface;
+      pane.setAttribute("aria-label", index === active ? "Main pane" : "Right pane");
+      pane.querySelector(".split-pane__empty").hidden = true;
+    }
     button.setAttribute("aria-pressed", "false");
     button.disabled = false;
     button.textContent = "Split view";
@@ -237,9 +271,9 @@ export function createSplitSurfaces({
   const unsubscribe = windowCatalogModel.subscribe(state => state.catalog, () => sync());
   return {
     dispose: unsubscribe,
-    open, show, showWindow, close, collapse, sync, select: choose,
+    open, show, showWindow, close, collapse, sync, park, select: choose,
     isOpen: () => opened && split,
-    get hasLayout() { return opened; },
+    get hasLayout() { return true; },
     activeSurface: () => opened ? selections[active] : null,
     containsWindow: (id) => mounted.has(id),
     focusSurface(surface) {

@@ -12494,6 +12494,7 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -12530,6 +12531,44 @@ mod tests {
             evaluate_evidence(dir.path(), "session-predecessor", Some(2359)),
             EvidenceStatus::WrongGeneration,
             "same owner/session/fingerprint predecessor evidence must not satisfy the successor"
+        );
+
+        // Simulate a GUI restart that lost both runner and watchdog, followed
+        // by another host process reusing the old runner's PID.
+        let mut unfinished = run;
+        unfinished.lifecycle = Some(interruption::RunLifecycle::running("old-runner"));
+        let mut document = serde_json::to_value(unfinished).unwrap();
+        document["lifecycle"]["runner_started_at"] =
+            (crate::process::host_process_start_time(std::process::id()).unwrap() + 1).into();
+        save(dir.path(), &serde_json::from_value(document).unwrap()).unwrap();
+        persist_generation_scoped_session(dir.path(), "session-successor", successor.clone(), 1);
+        run_verify_cli_as(
+            dir.path(),
+            "session-successor",
+            VerifyCommand::Plan {
+                commands: commands.clone(),
+                derive: false,
+            },
+        )
+        .unwrap();
+        let (code, output) = run_verify_cli_as(
+            dir.path(),
+            "session-successor",
+            VerifyCommand::Run {
+                commands,
+                max_wait_secs: Some(0),
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        let completed = load(dir.path()).unwrap().unwrap();
+        assert_eq!(completed.execution_binding.as_ref(), Some(&successor));
+        assert!(completed.all_passed);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "session-successor", Some(2359)),
+            EvidenceStatus::Fresh
         );
     }
 
