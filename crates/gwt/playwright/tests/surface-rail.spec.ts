@@ -80,6 +80,7 @@ test.describe("Surface rail", () => {
     await installSurfaceRailBackend(page, true);
     await page.goto(surfaceAppUrl);
     const main = page.getByRole("region", { name: "Main pane", exact: true });
+    await expect(main).toHaveAttribute("data-surface", "board");
     await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "system" } })));
     await expect(main).toHaveAttribute("data-surface", "settings");
     await expect(main.getByRole("tab", { name: "System", exact: true })).toHaveAttribute("aria-selected", "true");
