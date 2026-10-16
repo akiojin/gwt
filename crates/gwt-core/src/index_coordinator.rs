@@ -4409,6 +4409,51 @@ mod tests {
     }
 
     #[test]
+    fn successive_exclusive_batches_yield_to_an_earlier_legacy_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 3).unwrap();
+        let holder_key = TargetKey::verification("project-a", "holder");
+        let holder = own(&coordinator, &holder_key, JobPriority::ManualRebuild);
+        let first = holder
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .unwrap();
+        let first_id = first.id().to_string();
+        let earlier_key = TargetKey::verification("project-b", "earlier");
+        let earlier = own(&coordinator, &earlier_key, JobPriority::ManualRebuild);
+        // The helper decodes a legacy registration with no command mode.
+        let (pending, path) =
+            resident_verification_claim(&coordinator, &earlier_key, Duration::ZERO);
+        let arrival = coordinator.heavy_pool_status().unwrap().queue[0].queued_at_ms;
+
+        first.release().unwrap();
+        assert!(matches!(
+            holder.acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[]),
+            Err(CoordinatorError::Timeout { .. })
+        ));
+        let queue = coordinator.heavy_pool_status().unwrap().queue;
+        assert_eq!(
+            queue[0].target.as_deref(),
+            Some(earlier_key.file_stem().as_str())
+        );
+        assert_eq!(queue[0].queued_at_ms, arrival);
+        assert_eq!(queue[0].mode, HeavyQueueMode::Exclusive);
+        let predecessor = earlier
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .expect("the earlier legacy claim must run before the holder's next batch");
+        drop(pending);
+        fs::remove_file(path).unwrap();
+        predecessor.release().unwrap();
+        earlier.complete(JobOutcome::Completed).unwrap();
+
+        let next = holder
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .expect("the next exclusive batch runs after its predecessor releases");
+        assert_ne!(next.id(), first_id);
+        next.release().unwrap();
+        holder.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
     fn verification_pool_backfills_behind_a_resident_exclusive_claim() {
         let tmp = tempfile::tempdir().unwrap();
         let coordinator = IndexCoordinator::open_verification(tmp.path(), 3).unwrap();
