@@ -1,6 +1,30 @@
 # Issue #5598 search measurements
 
-The final native warm-worker workload **passes: 12/12 distinct searches, p95 2,748.71 ms**, against the fixed 1,622-Issue corpus and real model. The comparable baseline delivered 2/12 at p95 13,552.08 ms. Cold-worker stress still fails and earlier failed attempts are retained. A separate manual headed browser run passes both themes. Fresh canonical verification and delivery status belong to the PR's Verification Run Record.
+The corrected native warm-worker workload **passes: 12/12 distinct searches, p95 1,993.92 ms**, against the fixed 1,622-Issue corpus and real model. The comparable baseline delivered 2/12 at p95 13,552.08 ms. Earlier corrected-source attempts missed the target and are retained, together with cold-worker failures. Fresh canonical verification and delivery status belong to the PR's Verification Run Record.
+
+## Delivery review: retain only immutable Issue readers
+
+Delivery review found that generation directory names alone do not prove immutability. The generic repo-scope incremental indexer updates its active generation in place. With Chroma 1.5.5, a retained reader observed the updated document text while its vector ranking remained stale; closing and reopening the client restored the correct ranking. The dedicated Issue indexer always stages and publishes a replacement generation, including incremental builds.
+
+Reader retention is therefore limited to Issue collections. Memory, SPEC, Board, discussion, Work, report, legacy, and file-index readers retain request-scoped ownership. A focused regression first failed because the mutable-generation client was not closed, then passed with the narrower retention condition. Existing tests continue to cover Issue-reader reuse, replacement cleanup, and its finite limit. This preserves source freshness without adding a new invalidation protocol or changing publication.
+
+The original 2,748.71 ms measurement below retains its executable and source provenance. It is not relabeled as a measurement of the later reader-scope correction.
+
+The first corrected-source rerun is retained in [recovery-saturated/after-search-burst.json](recovery-saturated/after-search-burst.json): all 12 warm requests succeeded, but outer client p95 was **5,722.28 ms (fail)**. CPU was 100% before and after; free RAM fell from about 49.23 to 12.55 GiB. The native `gwtd:search` maximum was 3,214.82 ms and is also above the target. Its warm-stage maxima include admission 2,312.11 ms and runner transport 368.33 ms; the retained Issue-reader index-read mean was 3.90 ms. These nested durations are not additive. Saturation was observed, not established as the sole cause; the outer wall boundary and the 3,000 ms threshold remain unchanged.
+
+## Corrected-source standard workload
+
+The final unchanged-source standard rerun uses the original driver, all 12 distinct queries, the copied real source/index tuple, native Rust JSON clients, and inherited launch priority. Its frozen executable SHA-256 is `5ed8e1a1c145bc28810075004612ae41225663d14c614e9d3a0d4a6d618905a0`; [build provenance](recovery/build-provenance.json), [comparison](recovery/comparison.json), and [raw outcomes](recovery/after-search-burst.json) identify the measured source and boundary.
+
+| Phase | Baseline successful / sent | Baseline p95 ms | Corrected successful / sent | Corrected p95 ms | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Cold worker burst | 0 / 12 | 29,503.85 | 1 / 12 | 17,574.85 | Fail |
+| Warm resident worker | 2 / 12 | 13,552.08 | 12 / 12 | 1,993.92 | Pass |
+| Forced cold-worker recovery | 1 / 12 | 27,271.15 | 1 / 12 | 16,862.08 | Fail |
+
+Explicit prewarm took 535.44 ms because the preceding cold burst had already loaded the model for its one successful request; the following Rust warmup took 267.60 ms. Cold failures were not folded into the warm result. CPU was observed at 51% before and 54% after, with about 13.28 / 19.03 GiB free RAM. This is an observed comparison, not a controlled-load causal speedup or a guarantee under arbitrary saturation. The two corrected-source failures remain visible.
+
+The [post-measurement audit](recovery/fixture-after.json) confirms 1,622 documents, unchanged native TTL/metadata/manifest/pointer, unchanged corpus/vector tables, and no repair/failure guards. Administrative `acquire_write` rows may grow. The source tree remains the fixed 9,119 files with SHA-256 `05f16c59e2a15083e7278f843f1f6b1d827d1bc4f4e3d438e9e214041b7a2220`. Successful responses are still stale with refresh queued; no metadata was edited to report freshness. The [warm-stage summary](recovery/stage-summary.json) retains the actual 12 samples separately from startup.
 
 ## Workload and measurement boundary
 
@@ -172,3 +196,7 @@ Use `--source-components` with the baseline executable while its embedded runtim
 User Verification Result: n/a (autonomous)
 
 Agent Visual Check: pass (manual headed Chromium dark/light, 2 tests; fresh canonical evidence is in the PR Verification Run Record)
+
+The second unchanged-source attempt is retained in [recovery-second-attempt/after-search-burst.json](recovery-second-attempt/after-search-burst.json): 12/12 warm responses, outer p95 **3,715.63 ms (fail)**, native maximum 3,130.15 ms. CPU was 50% before and 74% after. The mean runner transport of 208.40 ms across 12 serialized requests already accounts for about 2.50 seconds, before outer process startup and handoff costs.
+
+A separate [launch-priority diagnostic](priority-diagnostic.json) alternated the owned driver's BelowNormal / Normal / Normal / BelowNormal class, preserving the binary, corpus, distinct queries, and native search route. All four bursts returned 12/12. Their p95 values were 2,248.98 / 2,159.41 / 1,869.99 / 1,698.38 ms. Because order and host load were not fixed, this does not establish a causal priority improvement, and no additional CLI priority change was made. Both ordinary-priority controls passed. This diagnostic is kept separate from the standard before/after protocol.

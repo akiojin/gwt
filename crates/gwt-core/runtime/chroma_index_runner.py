@@ -2066,7 +2066,7 @@ _SEARCH_WORKER_READ_CLIENTS: Optional[Dict[tuple[Path, str], tuple[Path, Any, An
 
 @contextlib.contextmanager
 def _search_worker_read_clients() -> Iterator[None]:
-    """Retain bounded immutable repo-store readers for one worker lifetime."""
+    """Retain bounded immutable Issue-store readers for one worker lifetime."""
     global _SEARCH_WORKER_READ_CLIENTS
     previous = _SEARCH_WORKER_READ_CLIENTS
     retained: Dict[tuple[Path, str], tuple[Path, Any, Any]] = {}
@@ -2086,18 +2086,14 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
     db_path = Path(db_path)
     retained = _SEARCH_WORKER_READ_CLIENTS
     cache_key = None
-    # Closing the last Chroma client stops its System. Only immutable repo
-    # generations can stay warm beyond a request; legacy and pinned file-v2
-    # stores retain their existing request-scoped ownership.
+    # Closing the last Chroma client stops its System. Issue indexing always
+    # publishes a new generation. Other repo scopes update the active store
+    # in place, so retaining their readers would keep stale query vectors.
     if (
         retained is not None
         and db_path.parent.name.endswith(GENERATIONS_DIR_SUFFIX)
         and db_path.name.startswith("gen-")
-        and collection_name in {
-            V2_SPECS_COLLECTION, V2_ISSUES_COLLECTION, V2_MEMORY_COLLECTION,
-            V2_DISCUSSIONS_COLLECTION, V2_BOARD_COLLECTION,
-            V2_WORKS_COLLECTION, V2_REPORTS_COLLECTION,
-        }
+        and collection_name == V2_ISSUES_COLLECTION
     ):
         db_path = db_path.resolve()
         cache_key = (db_path.parent, collection_name)

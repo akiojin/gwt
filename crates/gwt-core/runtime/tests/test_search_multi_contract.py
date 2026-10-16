@@ -1184,20 +1184,20 @@ class SearchWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.dict(sys.modules, {"chromadb": fake_chroma}):
             root = Path(tmp)
-            first = root / "memory.gen" / "gen-first"
-            second = root / "memory.gen" / "gen-second"
+            first = root / "issues.gen" / "gen-first"
+            second = root / "issues.gen" / "gen-second"
             first.mkdir(parents=True)
             second.mkdir()
             with runner._search_worker_read_clients():
-                pair = runner._open_chroma_collection(first, runner.V2_MEMORY_COLLECTION)
+                pair = runner._open_chroma_collection(first, runner.V2_ISSUES_COLLECTION)
                 runner._close_chroma_client(pair[0])
                 self.assertEqual(
-                    runner._open_chroma_collection(first, runner.V2_MEMORY_COLLECTION), pair
+                    runner._open_chroma_collection(first, runner.V2_ISSUES_COLLECTION), pair
                 )
                 self.assertEqual(fake_chroma.PersistentClient.call_count, 1)
                 clients[0].close.assert_not_called()
                 replacement = runner._open_chroma_collection(
-                    second, runner.V2_MEMORY_COLLECTION
+                    second, runner.V2_ISSUES_COLLECTION
                 )
                 clients[0].close.assert_called_once()
                 runner._close_chroma_client(replacement[0])
@@ -1211,7 +1211,7 @@ class SearchWorkerTests(unittest.TestCase):
                     runner._close_chroma_client(client)
                     client.close.assert_called_once()
             clients[1].close.assert_called_once()
-            direct, _ = runner._open_chroma_collection(second, runner.V2_MEMORY_COLLECTION)
+            direct, _ = runner._open_chroma_collection(second, runner.V2_ISSUES_COLLECTION)
             runner._close_chroma_client(direct)
             direct.close.assert_called_once()
 
@@ -1224,16 +1224,27 @@ class SearchWorkerTests(unittest.TestCase):
              mock.patch.object(runner, "SEARCH_WORKER_READ_CLIENT_LIMIT", 2):
             with runner._search_worker_read_clients():
                 for index in range(3):
-                    store = Path(tmp) / str(index) / "memory.gen" / "gen-active"
+                    store = Path(tmp) / str(index) / "issues.gen" / "gen-active"
                     store.mkdir(parents=True)
                     client, _ = runner._open_chroma_collection(
-                        store, runner.V2_MEMORY_COLLECTION
+                        store, runner.V2_ISSUES_COLLECTION
                     )
                     runner._close_chroma_client(client)
                 clients[0].close.assert_called_once()
                 clients[1].close.assert_not_called()
                 clients[2].close.assert_not_called()
             for client in clients:
+                client.close.assert_called_once()
+
+    def test_worker_closes_mutable_repo_generation_readers_after_each_request(self):
+        fake_chroma = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(sys.modules, {"chromadb": fake_chroma}):
+            store = Path(tmp) / "memory.gen" / "gen-active"
+            store.mkdir(parents=True)
+            with runner._search_worker_read_clients():
+                client, _ = runner._open_chroma_collection(store, runner.V2_MEMORY_COLLECTION)
+                runner._close_chroma_client(client)
                 client.close.assert_called_once()
 
     def test_worker_transport_failure_remains_retryable(self):
