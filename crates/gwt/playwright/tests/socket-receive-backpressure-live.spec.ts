@@ -84,7 +84,12 @@ test.describe("background receive backpressure (Issue #5531)", () => {
       await page.waitForFunction(() => document.visibilityState === "visible", undefined,
         { polling: 100, timeout: 10_000 });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await expect(page.locator('.workspace-window[data-preset="agent"]')).toHaveCount(8);
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await page.getByRole("tab", { name: "All agents", exact: true }).click();
+      await page.getByRole("spinbutton", { name: "Agent columns" }).fill("4");
+      const agentTiles = page.locator('.agents-surface:not(.agents-surface--preview) .agent-tile');
+      await expect(agentTiles).toHaveCount(8);
+      for (const tile of await agentTiles.all()) await expect(tile.locator(".xterm-helper-textarea")).toBeVisible();
       await expect.poll(() => terminalTexts(page)).toEqual(paneIds.map(id => snapshotText(0, id)));
       console.log(`${label}/${theme}: eight terminal snapshots rendered`);
       expect(await page.evaluate(() => PerformanceObserver.supportedEntryTypes.includes("longtask"))).toBe(true);
@@ -176,7 +181,7 @@ test.describe("background receive backpressure (Issue #5531)", () => {
         // Echo after snapshots so replacement cannot erase a successful echo.
         recoveryStage = "input_focus";
         await measuredEvaluate(cdp, id => {
-          const textarea = document.querySelector<HTMLTextAreaElement>(`.workspace-window[data-id="${id}"] .xterm-helper-textarea`);
+          const textarea = document.querySelector<HTMLTextAreaElement>(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="${id}"] .xterm-helper-textarea`);
           if (!textarea) throw new Error("terminal input is missing");
           textarea.focus();
           if (document.activeElement !== textarea) throw new Error("terminal input did not focus");

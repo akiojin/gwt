@@ -27,6 +27,12 @@ preserves explicit-save inputs while synchronizing autostart state.
 Close-preview authority is invalidated when the transport is replaced.
 Console and File Tree were retired upstream by Issue #4174 and stay retired.
 
+Integration with develop retains its shared UI-state models and connection
+attention report. Profile recovery clears the canonical model's pending read
+through its existing update function. Its regression starts a real profile
+request before recovery, and verifies that drafts and in-flight save control
+remain intact.
+
 ## Measurement method
 
 - Run `scripts/diagnostics/issue-5531-browser-check.ps1` with `-Label before`
@@ -79,20 +85,27 @@ The final harness also uses CDP for the initial hidden observation and adds
 independent sender samples. The eight-pane workload, native visibility,
 two-second recovery deadline and 200ms settled limit are unchanged.
 
+After integrating develop's canvas retirement, the after harness opens the
+Agents rail, selects All agents, and shows its eight interactive terminals in
+four columns before timing starts. Input targets the visible agent tile rather
+than the retired workspace-window host. The baseline remains the immutable
+archived canvas run; the new after launch binds the integrated frontend and
+updated harness to their exact digests.
+
 ## Evidence and verification
 
 | Run | Peak queue | Completed task max (ms) | Tasks 0–2s / 2–4s (ms) | Snapshot / input (ms) |
 | --- | ---: | ---: | --- | --- |
 | Before, dark | 373,280 | 41,412 | unobserved / unobserved | timeout at 15,018 / unobserved |
 | Before, light | 647,408 | 98,951 | unobserved / unobserved | timeout at 15,008 / unobserved |
-| After, dark | 2,048 | 6,285 | 0 / 0 | 442 / 726 |
-| After, light | 2,048 | 2,989 | 108 / 0 | 596 / 731 |
+| After, dark | 2,048 | 14,460 | 0 / 0 | 256 / 411 |
+| After, light | 2,048 | 2,695 | 0 / 0 | 458 / 621 |
 
-Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,015ms (after-dark), 1,800,013ms (after-light).
-They sent 673,702, 686,642, 675,408, 698,408 frames respectively, including the final foreground-triggering burst.
+Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,013ms (after-dark), 1,800,007ms (after-light).
+They sent 673,702, 686,642, 677,068, 699,203 frames respectively, including the final foreground-triggering burst.
 
 The archived before observer gaps reached 55,033/100,924ms.
-Final after sender observation gaps stayed within 30,182/30,023ms.
+Final after sender observation gaps stayed within 30,691/30,032ms.
 Both final after runs passed, with zero console/page/fixture errors and no
 reported task of at least 50ms in either settled window.
 
