@@ -7508,6 +7508,7 @@ pub(crate) mod tests {
                 ".github/workflows/test.yml",
                 ".github/workflows/lint.yml",
                 ".github/workflows/coverage.yml",
+                ".github/workflows/coverage-ci.yml",
             ] {
                 let destination = worktree.join(path);
                 fs::create_dir_all(destination.parent().unwrap()).unwrap();

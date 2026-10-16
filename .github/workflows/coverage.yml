@@ -59,7 +59,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: llvm-tools-preview, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -120,7 +120,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 20
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
