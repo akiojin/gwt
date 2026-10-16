@@ -188,6 +188,11 @@ pub enum AppEventProxy {
     },
     #[cfg(test)]
     Stub(Arc<Mutex<Vec<UserEvent>>>),
+    #[cfg(test)]
+    Notifying {
+        inner: Box<AppEventProxy>,
+        sent: std::sync::mpsc::Sender<()>,
+    },
 }
 
 impl AppEventProxy {
@@ -199,6 +204,8 @@ impl AppEventProxy {
             Self::Project { inner, .. } => inner.pending_count(),
             #[cfg(test)]
             Self::Stub(events) => events.try_lock().ok().map(|events| events.len()),
+            #[cfg(test)]
+            Self::Notifying { inner, .. } => inner.pending_count(),
         }
     }
 
@@ -264,6 +271,12 @@ impl AppEventProxy {
                 }
                 Ok(())
             }
+            #[cfg(test)]
+            Self::Notifying { inner, sent } => {
+                let result = inner.send_event(event);
+                let _ = sent.send(());
+                result
+            }
         }
     }
 
@@ -276,6 +289,8 @@ impl AppEventProxy {
                 drop(discarded);
             }
             Self::Project { inner, .. } => inner.close(),
+            #[cfg(test)]
+            Self::Notifying { inner, .. } => inner.close(),
             #[cfg(test)]
             Self::Stub(events) => {
                 let discarded = std::mem::take(&mut *events.lock().expect("stub app events"));
@@ -326,6 +341,11 @@ impl AppEventProxy {
                     .expect("stub app events")
                     .splice(0..0, events);
             }
+            #[cfg(test)]
+            Self::Notifying { inner, sent } => {
+                inner.prepend_events(events);
+                let _ = sent.send(());
+            }
         }
     }
 
@@ -350,6 +370,8 @@ impl AppEventProxy {
                 next
             }
             Self::Project { inner, .. } => inner.take_next(),
+            #[cfg(test)]
+            Self::Notifying { inner, .. } => inner.take_next(),
             #[cfg(test)]
             Self::Stub(events) => {
                 let mut events = events.lock().expect("stub app events");

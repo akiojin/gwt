@@ -1018,7 +1018,9 @@ fn wait_for_active_work_projection(runtime: &mut AppRuntime) -> gwt::ActiveWorkP
         .expect("active tab for projection completion");
     let recorded_events = match &runtime.proxy {
         AppEventProxy::Stub(events) => events.clone(),
-        AppEventProxy::Real(_) | AppEventProxy::Project { .. } => {
+        AppEventProxy::Real(_)
+        | AppEventProxy::Project { .. }
+        | AppEventProxy::Notifying { .. } => {
             panic!("test runtime must use a stub event proxy")
         }
     };
@@ -1135,12 +1137,10 @@ fn long_running_test_pane(id: &str) -> Pane {
             ],
         )
     } else {
-        (
-            "/bin/sh".to_string(),
-            // Keep this basic fixture in one process: killing a shell can leave
-            // its sleep child orphaned after the direct child has been reaped.
-            vec!["-lc".to_string(), "exec sleep 30".to_string()],
-        )
+        // One direct child, blocked on stdin until the fixture kills it.
+        // A login shell can fork profile children before exec; reaping only
+        // its leader then races the successor's process-group death proof.
+        ("/bin/cat".to_string(), Vec::new())
     };
     Pane::new(
         id.to_string(),
@@ -1243,39 +1243,45 @@ fn save_sample_agent_session_toml(runtime: &AppRuntime, worktree: &Path) {
 /// Coverage for the still-running path belongs to Issue #3744, which restores
 /// a bounded guarantee instead of dropping the proof.
 ///
-/// Twenty seconds preserves the established fixture budget while allowing
-/// shared CI runners to reap a PTY process tree under saturation. Both waits
-/// poll positive settlement signals, so this is an upper bound rather than a
-/// fixed delay (Issue #3751).
+/// Reap through the OS exit notification instead of a polling deadline.
+/// The separate durable-stop polling fixture below retains its own bounds.
 const TEST_PTY_STOP_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(20);
 const TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn settle_test_pane_child(runtime: &AppRuntime, window_id: &str) {
-    let pane = runtime
+    let pty = runtime
         .runtimes
         .get(window_id)
         .expect("window runtime for settle")
-        .pane
+        .pty
         .clone();
-    pane.lock()
-        .expect("test pane")
-        .kill()
-        .expect("kill test child");
-    let deadline = Instant::now() + TEST_PTY_STOP_SETTLEMENT_TIMEOUT;
+    pty.kill().expect("kill test child");
+    pty.wait()
+        .expect("reap test child after its exit notification");
+}
+
+/// Wake only when the stub publishes an event. The shared fixture hang guard
+/// detects a stuck producer; scheduler speed does not decide the assertion.
+fn notify_on_test_events(runtime: &mut AppRuntime) -> mpsc::Receiver<()> {
+    let (sent, received) = mpsc::channel();
+    runtime.proxy = AppEventProxy::Notifying {
+        inner: Box::new(runtime.proxy.clone()),
+        sent,
+    };
+    received
+}
+
+fn wait_for_notified_event(
+    label: &str,
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+    notifications: &mpsc::Receiver<()>,
+    predicate: impl Fn(&[UserEvent]) -> bool,
+) {
     loop {
-        if pane
-            .lock()
-            .expect("test pane")
-            .process_has_exited()
-            .expect("test child exit probe")
-        {
+        if predicate(&events.lock().expect("event log")) {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "test child for {window_id} did not exit before the deadline"
-        );
-        std::thread::sleep(TEST_PTY_STOP_SETTLEMENT_POLL_INTERVAL);
+        gwt_core::test_support::recv_event(notifications, label);
     }
 }
 
@@ -5631,7 +5637,9 @@ impl AppRuntime {
         fn recording(proxy: &AppEventProxy) -> Arc<Mutex<Vec<UserEvent>>> {
             match proxy {
                 AppEventProxy::Stub(events) => events.clone(),
-                AppEventProxy::Project { inner, .. } => recording(inner),
+                AppEventProxy::Project { inner, .. } | AppEventProxy::Notifying { inner, .. } => {
+                    recording(inner)
+                }
                 AppEventProxy::Real(_) => panic!("test drain must use a recording proxy"),
             }
         }
@@ -5669,7 +5677,9 @@ impl AppRuntime {
         fn recording(proxy: &AppEventProxy) -> Arc<Mutex<Vec<UserEvent>>> {
             match proxy {
                 AppEventProxy::Stub(events) => events.clone(),
-                AppEventProxy::Project { inner, .. } => recording(inner),
+                AppEventProxy::Project { inner, .. } | AppEventProxy::Notifying { inner, .. } => {
+                    recording(inner)
+                }
                 AppEventProxy::Real(_) => panic!("test launch must use a recording proxy"),
             }
         }
