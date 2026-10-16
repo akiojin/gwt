@@ -50,6 +50,7 @@ pub mod migration;
 pub mod monitor_duplicate_runtime;
 pub mod native_app;
 pub mod native_notification_permission;
+pub mod native_notifications;
 #[doc(hidden)]
 pub mod perf;
 pub mod persistence;
@@ -60,6 +61,7 @@ pub mod pm_registry;
 pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
+pub mod project_notifications;
 pub mod project_open_control;
 pub mod project_runtime;
 pub mod project_transport;

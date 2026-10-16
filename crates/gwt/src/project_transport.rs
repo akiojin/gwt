@@ -145,6 +145,7 @@ impl OutboundEvent {
             target: DispatchTarget::All,
             event: BackendEvent::IssueMonitorToast {
                 notification_transition: None,
+                notification_transition_id: None,
                 level: level.into(),
                 message: message.into(),
                 issue_number: None,
@@ -1002,6 +1003,31 @@ impl ClientHub {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(client_id)
             .map(|registration| registration.scope.clone())
+    }
+
+    /// Only browser views bound to this Project participate in notification delivery.
+    pub fn project_browser_client_ids(&self, key: &gwt_core::repo_hash::ProjectKey) -> Vec<String> {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, client)| {
+                client.receives_broadcasts
+                    && matches!(&client.scope, ClientScope::Project(project) if project == key)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    pub fn has_project_browser_clients(&self, key: &gwt_core::repo_hash::ProjectKey) -> bool {
+        self.clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|client| {
+                client.receives_broadcasts
+                    && matches!(&client.scope, ClientScope::Project(project) if project == key)
+            })
     }
 
     fn register_pane(&self, client_id: String) -> Arc<ClientQueue> {
@@ -2920,6 +2946,23 @@ mod tests {
         assert_eq!(clients.browser_session_state(), (2, false));
         assert!(clients.has_clients());
     }
+
+    #[test]
+    fn project_browser_membership_excludes_hub_panes_and_disconnected_clients() {
+        let clients = ClientHub::default();
+        let key = project_a();
+        clients.register_pane("agent".into());
+        clients.register_scoped("hub".into(), ClientScope::Hub);
+        clients.register_scoped("a".into(), ClientScope::Project(key.clone()));
+        clients.register_scoped(
+            "b".into(),
+            ClientScope::Project(ProjectKey::parse("fedcba9876543210").unwrap()),
+        );
+        assert_eq!(clients.project_browser_client_ids(&key), ["a"]);
+        assert!(clients.has_project_browser_clients(&key));
+        clients.unregister("a");
+        assert!(!clients.has_project_browser_clients(&key));
+    }
     fn project_a() -> ProjectKey {
         ProjectKey::parse("0123456789abcdef").unwrap()
     }
@@ -4079,6 +4122,7 @@ mod tests {
         let _home = ScopedGwtHome::set(home.path());
         let event = BackendEvent::IssueMonitorToast {
             notification_transition: None,
+            notification_transition_id: None,
             level: "error".into(),
             message: "project launch error".into(),
             issue_number: Some(4735),

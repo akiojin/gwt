@@ -27,10 +27,10 @@ function fixture({ routeProjectKey = null } = {}) {
     URL, WebSocket: Socket, socket: null, socketProjectKey: null, hubSocket: null, hubReconnectTimer: null, pendingHubMessages: [],
     pendingMessages: [], reconnectTimer: null, socketReceiveDispatcherGeneration: 0,
     socketReceiveDispatcher: null, recoveryCenterController: null,
-    closeResetCount: 0, notificationResetCount: 0,
-    agentCompletionNotifier: { reset() { context.notificationResetCount += 1; } },
+    closeResetCount: 0, attentionReportCount: 0,
+    agentCompletionNotifier: { reset() {} },
     closeProjectController: { connectionLost() { context.closeResetCount += 1; } },
-    projectPageMetadata: { resetConnection() {} },
+    projectPageMetadata: { resetConnection() {}, reportAttention() { context.attentionReportCount += 1; } },
     requestVisiblePmReports() {}, requestSupportedAgentRefresh() {}, pmChatViews: new Map(),
     applyPmWindowReceiveEvent: createPmWindowModel().applyPmWindowReceiveEvent,
     appState: { tabs: [], active_tab_id: null }, hubCatalog: null,
@@ -165,10 +165,11 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   sockets[1].close();
   assert.equal(context.closeResetCount, 1, "disconnected Project discards its close preview authority");
   context.connectSocket();
-  assert.equal(context.notificationResetCount, 2, "reconnect discards observed Running duration");
+  assert.equal(context.attentionReportCount, 1, "fresh attention is reported for each opened Project connection");
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }], "reconnect re-requests only this client's full sync");
+  assert.equal(context.attentionReportCount, 2);
 });
 
 
@@ -211,6 +212,9 @@ test("aggregate control events bypass held rendering frames and stale sockets st
   old.handlers.message({ data: JSON.stringify(aggregate) });
   assert.equal(context.received.at(-1)?.kind, "project_agent_aggregate");
   assert.equal(held.length, 0, "aggregate must never wait for animation frames");
+  old.handlers.message({ data: JSON.stringify({ kind: "project_notification", notification: { transition_id: "one" } }) });
+  assert.equal(context.received.at(-1)?.kind, "project_notification");
+  assert.equal(held.length, 0, "desktop intent must not wait for animation frames in a hidden tab");
   old.handlers.message({ data: JSON.stringify({ kind: "workspace_state" }) });
   assert.equal(held.length, 1, "normal render scheduling must remain unchanged");
   old.close();
@@ -228,6 +232,8 @@ test("offline acknowledgement is ephemeral and never replays against a fresh con
   sockets[1].open();
   sockets[1].close();
   assert.equal(context.send({ kind: "project_aggregate_ack", revision: 99, visible: true, focused: true }), "unavailable");
+  assert.equal(context.send({ kind: "project_client_attention", visible: true, focused: true, notification_permission: "granted" }), "unavailable");
+  assert.equal(context.pendingMessages.length, 0, "stale attention must never replay after reconnect");
   context.connectSocket();
   sockets.at(-1).open();
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);

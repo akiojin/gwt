@@ -492,10 +492,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "workspace.close" => {
             reject_unknown_params(params, &["work_id", "close_kind"], "workspace.close")?;
             let close_kind = required_string(params, "close_kind")?;
-            if !matches!(close_kind.as_str(), "done" | "discarded") {
+            if !matches!(close_kind.as_str(), "done" | "discarded" | "superseded") {
                 return Err(CliParseError::InvalidValue {
                     flag: "close_kind",
-                    reason: "expected done or discarded",
+                    reason: "expected done, discarded, or superseded",
                 });
             }
             CliCommand::Workspace(WorkspaceCommand::Close {
@@ -2771,7 +2771,10 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
-        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "pm-delegated-test",
+        );
         let repo = home.path().join("repo");
         std::fs::create_dir_all(repo.join("target")).unwrap();
         std::fs::write(repo.join("target/keep"), "build cache").unwrap();
@@ -2782,6 +2785,15 @@ mod tests {
             .unwrap()
             .status
             .success());
+        let prefs = serde_json::from_value(json!({"registration":{
+            "session_id":"pm-delegated-test", "agent_id":"codex", "worktree_path":repo,
+        }}))
+        .unwrap();
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &prefs,
+        )
+        .unwrap();
         let intent = OperationIntent {
             operation: "worktree.gc_build_artifacts".into(),
             params: json!({"dry_run":true,"include_unmerged":true}),
@@ -2829,10 +2841,22 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
-        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _session = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "pm-delegated-test",
+        );
         let _pane = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        let prefs = serde_json::from_value(json!({"registration":{
+            "session_id":"pm-delegated-test", "agent_id":"codex", "worktree_path":repo,
+        }}))
+        .unwrap();
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            &prefs,
+        )
+        .unwrap();
         let intent = OperationIntent {
             operation: "pm.message.send".into(),
             params: json!({"id":"fixture-agent","text":"Approved exact action"}),
@@ -4509,6 +4533,11 @@ mod tests {
             ok("workspace.close", json!({"work_id":"work-1","close_kind":"done"})),
             CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
                 if work_id == "work-1" && close_kind == "done"
+        ));
+        assert!(matches!(
+            ok("workspace.close", json!({"work_id":"work-1","close_kind":"superseded"})),
+            CliCommand::Workspace(WorkspaceCommand::Close { work_id, close_kind })
+                if work_id == "work-1" && close_kind == "superseded"
         ));
         for params in [
             json!({"close_kind":"done"}),
