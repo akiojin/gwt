@@ -77,6 +77,7 @@ function fixture({ routeProjectKey = null } = {}) {
   if (source.includes("function requestSocketSnapshots(")) vm.runInContext(functionSource("requestSocketSnapshots"), context);
   if (source.includes("function resyncSocketSurfaces(")) vm.runInContext(functionSource("resyncSocketSurfaces"), context);
   if (source.includes("function closeSocketInputHandoff(")) vm.runInContext(functionSource("closeSocketInputHandoff"), context);
+  if (source.includes("function sendOnSocket(")) vm.runInContext(functionSource("sendOnSocket"), context);
   const select = (key) => { context.appState = { active_tab_id: key, tabs: [{ id: key, project_key: key }] }; context.connectSocket(); };
   return { context, sockets, select, opened };
 }
@@ -323,6 +324,9 @@ test("Reports history survives disconnect while the Project reconnects", () => {
 test("project not found stops every reconnect for the route", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
   context.connectSocket();
+  sockets[1].open();
+  context.dispatcherOptions.at(-1).onResync("visible");
+  assert.equal(sockets[1].readyState, 1, "exercise not-found cleanup during the live input handoff");
   context.showProjectRouteNotFound();
   assert.equal(context.notFoundRendered, true);
   assert.ok(sockets.every((socket) => socket.readyState === 3));

@@ -108,14 +108,14 @@ updated harness to their exact digests.
 | --- | ---: | ---: | --- | --- |
 | Before, dark | 373,280 | 41,412 | unobserved / unobserved | timeout at 15,018 / unobserved |
 | Before, light | 647,408 | 98,951 | unobserved / unobserved | timeout at 15,008 / unobserved |
-| After, dark | 2,048 | 14,503 | 0 / 0 | 455 / 605 |
-| After, light | 2,048 | 22,563 | 52 / 0 | 622 / 780 |
+| After, dark | 2,048 | 1,267 | 0 / 0 | 417 / 563 |
+| After, light | 2,048 | 1,008 | 0 / 0 | 410 / 552 |
 
-Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,018ms (after-dark), 1,800,018ms (after-light).
-They sent 673,702, 686,642, 671,400, 666,624 frames respectively, including the final foreground-triggering burst.
+Real background durations were 1,800,006ms (before-dark), 1,800,010ms (before-light), 1,800,020ms (after-dark), 1,800,012ms (after-light).
+They sent 673,702, 686,642, 690,575, 690,302 frames respectively, including the final foreground-triggering burst.
 
 The archived before observer gaps reached 55,033/100,924ms.
-Final after sender observation gaps stayed within 30,882/30,507ms.
+Final after sender observation gaps stayed within 30,135/30,237ms.
 Both final after runs passed, with zero console/page/fixture errors and no
 reported task of at least 50ms in either settled window.
 
@@ -150,8 +150,11 @@ One post-review dark trial ended during background observation when CDP reported
 `Target page, context or browser has been closed`. It never reached foreground
 measurement. Its original stack, two hidden samples, and error counters are
 retained as `excluded-dark-target-closed*`; the closure cause is unknown. It is
-excluded from acceptance. The same inputs passed an independent two-minute
-diagnostic and the accepted full dark repeat. The accepted light and dark runs
+excluded from acceptance. That earlier source and its successful diagnostic
+and repeat are preserved in commit `8c646a9929c45b7a9b748fc01ca26a4ef7a946a6`.
+The final accepted runs were collected again after consolidating transport calls
+through the existing send and close paths; the receiver baseline is unchanged.
+The accepted light and dark runs
 partly overlapped on the shared host, with independent browsers and fixtures.
 Each launch's exact input digests, continuing sender counters and physical
 foreground deadline are verified separately.

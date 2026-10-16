@@ -943,6 +943,15 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function send(message) {
+        const liveInputHandoff = (message.kind === "terminal_input" || message.kind === "pane_send_input")
+          && socket?.readyState !== WebSocket.OPEN
+          && socketInputHandoff?.projectKey === activeProjectKey()
+          && socketProjectKey === activeProjectKey()
+          && socketInputHandoff.socket.readyState === WebSocket.OPEN;
+        return sendOnSocket(message, liveInputHandoff ? socketInputHandoff.socket : socket);
+      }
+
+      function sendOnSocket(message, socket) {
         if (isHubNavigationMessage(message.kind)) {
           if (hubSocket?.readyState === WebSocket.OPEN) {
             hubSocket.send(JSON.stringify(message));
@@ -959,15 +968,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (socket && socket.readyState === WebSocket.OPEN
           && socketProjectKey === activeProjectKey()) {
           socket.send(JSON.stringify(message));
-          return "sent";
-        }
-        // Recovery fences the old receive path immediately, but input can
-        // still use that same live Project connection until replacement OPEN.
-        if ((message.kind === "terminal_input" || message.kind === "pane_send_input")
-          && socketInputHandoff?.projectKey === activeProjectKey()
-          && socketProjectKey === activeProjectKey()
-          && socketInputHandoff.socket.readyState === WebSocket.OPEN) {
-          socketInputHandoff.socket.send(JSON.stringify(message));
           return "sent";
         }
         // Keystrokes depend on the program's current prompt. Never replay
@@ -1269,10 +1269,10 @@ import { createUiStateStore } from "/ui-state-store.js";
       // Project. Show the path-free not-found view and stop reconnecting.
       function showProjectRouteNotFound() {
         routeProjectMissing = true;
-        closeSocketInputHandoff();
-        for (const connection of [socket, hubSocket]) {
+        for (const connection of [socket, hubSocket, socketInputHandoff?.socket]) {
           try { connection?.close(); } catch { /* already closed */ }
         }
+        socketInputHandoff = null;
         renderRouteNotFound(document);
       }
 
