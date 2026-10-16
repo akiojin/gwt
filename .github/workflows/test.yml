@@ -444,6 +444,10 @@ jobs:
       # is the number the contract test reads.
       - name: Re-run the changed test targets until the outcome wobbles
         env:
+          # Omit workspace line tables only for repetition artifacts. Keep
+          # these after cache restore: dependencies already use debug=false.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
           GWT_FLAKE_TARGETS: ${{ needs.changes.outputs.flake_targets }}
           GWT_FLAKE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           GWT_FLAKE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}

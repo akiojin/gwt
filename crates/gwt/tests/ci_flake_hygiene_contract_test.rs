@@ -276,6 +276,10 @@ fn the_flake_detector_repeats_the_agreed_number_of_times() {
         .find(|step| step["run"].as_str() == Some(FLAKE_SCRIPT))
         .unwrap();
     assert_eq!(detector["env"]["GWT_FLAKE_BUDGET_SECS"], "220");
+    for key in ["CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"] {
+        assert_eq!(detector["env"][key], "0");
+        assert!(flake["env"][key].is_null(), "keep the shared cache key");
+    }
 }
 
 /// A gate that cannot be reproduced outside CI gets disabled instead of fixed.
