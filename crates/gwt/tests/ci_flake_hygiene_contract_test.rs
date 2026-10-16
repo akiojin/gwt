@@ -175,6 +175,11 @@ fn a_flake_detection_job_reruns_the_changed_crates() {
         "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}",
         "develop pushes must use changed-file selection too"
     );
+    assert_eq!(
+        detector["env"]["GWT_FLAKE_HEAD_SHA"],
+        "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}",
+        "a merge checkout must select the owner's changes rather than newer base changes"
+    );
 
     let condition = flake
         .get("if")

@@ -116,7 +116,7 @@ class FlakeDetectionTests(unittest.TestCase):
 
 
 class ChangedTestSelectionTests(unittest.TestCase):
-    def select_suite(self, changed):
+    def select_suite(self, changed, merged_checkout=False):
         code = SCRIPT.read_text().split("# changed-test-selection-begin\n", 1)[1].split(
             "# changed-test-selection-end\n", 1
         )[0]
@@ -138,6 +138,12 @@ class ChangedTestSelectionTests(unittest.TestCase):
             for args in (["init", "--quiet"], ["add", "."], ["commit", "--quiet", "-m", "base"]):
                 subprocess.run(git + args, cwd=root, check=True, capture_output=True)
             base = subprocess.check_output(git + ["rev-parse", "HEAD"], cwd=root, text=True).strip()
+            if merged_checkout:
+                (crate / "tests/unrelated.rs").write_text("fn first() { assert!(true); }\n")
+                for args in (["add", "."], ["commit", "--quiet", "-m", "upstream"]):
+                    subprocess.run(git + args, cwd=root, check=True, capture_output=True)
+                upstream = subprocess.check_output(git + ["rev-parse", "HEAD"], cwd=root, text=True).strip()
+                subprocess.run(git + ["reset", "--hard", base], cwd=root, check=True, capture_output=True)
             for name in changed:
                 path = crate / "tests" / name
                 if changed[name] is None:
@@ -146,17 +152,27 @@ class ChangedTestSelectionTests(unittest.TestCase):
                     path.write_text(changed[name])
             subprocess.run(git + ["add", "."], cwd=root, check=True, capture_output=True)
             subprocess.run(git + ["commit", "--quiet", "-m", "change"], cwd=root, check=True, capture_output=True)
+            head = subprocess.check_output(git + ["rev-parse", "HEAD"], cwd=root, text=True).strip()
+            if merged_checkout:
+                subprocess.run(git + ["merge", "--quiet", "--no-edit", upstream],
+                               cwd=root, check=True, capture_output=True)
             listing = root / "tests.txt"
             listing.write_text("\n".join(f"{test}: test" for test in tests))
             result = subprocess.run(
                 [sys.executable, "-c", code, "gwt|test|ci_contracts", str(listing), base],
-                cwd=root, env=dict(os.environ, PYTHONPATH=str(SCRIPT.parent.resolve())),
+                cwd=root, env=dict(os.environ, PYTHONPATH=str(SCRIPT.parent.resolve()),
+                                  GWT_FLAKE_HEAD_SHA=head),
                 capture_output=True, text=True, check=True,
             )
             return result.stdout.splitlines()
 
     def test_consolidated_suite_repeats_only_the_changed_file(self):
         self.assertEqual(self.select_suite({"changed.rs": "fn first() { assert!(true); }\n"}),
+                         ["changed::first", "changed::first_extra"])
+
+    def test_merge_checkout_excludes_upstream_only_changes(self):
+        self.assertEqual(self.select_suite({"changed.rs": "fn first() { assert!(true); }\n"},
+                                           merged_checkout=True),
                          ["changed::first", "changed::first_extra"])
 
     def test_suite_harness_or_unknown_or_deleted_source_retains_the_full_target(self):

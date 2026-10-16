@@ -16,8 +16,9 @@
 #
 #   GWT_FLAKE_TARGETS      space-separated `<crate>|test|<name>` / `<crate>|lib|`
 #                          tokens naming the cargo test targets to exercise
-#   GWT_FLAKE_BASE_SHA     PR / merge-group base for changed-file test selection
+#   GWT_FLAKE_BASE_SHA     PR / merge-group / push base for changed-file selection
 #                          (unset keeps full targets for standalone use)
+#   GWT_FLAKE_HEAD_SHA     Owner source head (defaults to HEAD for local callers)
 #   GWT_FLAKE_RUNS         integration run ceiling (default 20); libraries use 2
 #   GWT_FLAKE_BUDGET_SECS  test execution budget, excluding compile (default 600)
 #   GWT_FLAKE_MIN_FREE_MB  stop repeating below this much free disk (default 2048)
@@ -84,6 +85,7 @@ selector_for() {
 select_changed_tests() {
   python3 - "$1" "$2" "$GWT_FLAKE_BASE_SHA" <<'PY'
 # changed-test-selection-begin
+import os
 import pathlib
 import re
 import subprocess
@@ -94,8 +96,11 @@ entry, listing, base = sys.argv[1:]
 if not base:
     raise SystemExit("Changed-test selection requires a base commit")
 crate, kind, target = entry.split("|")
+# CI may test a synthetic merge containing newer base commits. Select only
+# the owner's changes, while retaining the merged checkout for test execution.
+head = os.environ.get("GWT_FLAKE_HEAD_SHA") or "HEAD"
 changed = subprocess.check_output(
-    ["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+    ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"],
     text=True,
 ).split("\0")
 tests = sorted({line.removesuffix(": test") for line in
