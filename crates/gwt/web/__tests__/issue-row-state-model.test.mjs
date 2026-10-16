@@ -79,6 +79,20 @@ test("Issue #4862 launch diagnoses retain the cause and name the next operation"
   }
 });
 
+test("Issue #5491 judgment holds outrank stale Work activity but preserve live agents", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  const reason = "Choose the publication scope before work can continue";
+  for (const monitor_state of ["needs_human", "blocked_by_claim"]) {
+    const entry = knowledgeEntry(5491, { monitor_state, queue_position: 2, error_message: reason });
+    assert.equal(issueQueueColumn(entry, workRow()), "backlog");
+    assert.equal(issueQueueColumn(entry, workRow(), agentWindow("live", 5491)), "active");
+  }
+  assert.equal(issueQueueColumn(knowledgeEntry(5491), workRow({ status_category: "blocked" })), "backlog");
+  const model = issueRowStateModel({ entry: knowledgeEntry(5491, { monitor_state: "needs_human", error_message: reason }) });
+  assert.equal(model.primary.label, "Needs human");
+  assert.equal(model.secondary[0].label, reason);
+});
+
 function knowledgeEntry(number, overrides = {}) {
   return {
     number,
