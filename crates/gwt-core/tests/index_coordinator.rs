@@ -804,13 +804,18 @@ fn verification_owner(
 }
 
 #[test]
-fn verification_pool_admits_two_processes_and_bounds_all_later_claimants() {
+fn verification_pool_admits_three_cross_project_processes_and_bounds_later_claimants() {
     let arena = TestArena::new();
-    let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 2).unwrap();
+    let coordinator = IndexCoordinator::open_verification(&arena.coord_root, 3).unwrap();
     let ledger = arena.path("pool-ledger");
     let release = arena.path("release-pool");
     let mut helpers = Vec::new();
     for index in 0..6 {
+        let project = if index == 0 {
+            "foreign-repo"
+        } else {
+            "pool-repo"
+        };
         let ready = arena.path(&format!("pool-ready-{index}"));
         helpers.push(spawn_helper(
             &format!("pool-{index}"),
@@ -820,32 +825,60 @@ fn verification_pool_admits_two_processes_and_bounds_all_later_claimants() {
                     "pool-verification-until-signal".to_string(),
                 ),
                 arena.coord_env(),
-                ("GWT_COORD_CAPACITY", "2".to_string()),
-                ("GWT_COORD_VERIFY_TARGET", format!("pool-repo|wt-{index}")),
+                ("GWT_COORD_CAPACITY", "3".to_string()),
+                ("GWT_COORD_VERIFY_TARGET", format!("{project}|wt-{index}")),
                 ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
                 ("GWT_COORD_SIGNAL", release.to_string_lossy().into_owned()),
                 ("GWT_COORD_LEDGER", ledger.to_string_lossy().into_owned()),
             ],
         ));
-        if index < 2 {
+        if index < 3 {
             wait_for_file(&ready, Duration::from_secs(20));
         }
     }
     poll_until(Duration::from_secs(20), || {
-        coordinator.heavy_pool_status().unwrap().queue.len() == 4
+        coordinator.heavy_pool_status().unwrap().queue.len() == 3
     });
     let status = coordinator.heavy_pool_status().unwrap();
-    assert_eq!((status.capacity, status.used, status.available), (2, 2, 0));
+    assert_eq!((status.capacity, status.used, status.available), (3, 3, 0));
     assert_eq!(
         status.slots.iter().filter(|slot| slot.status.held).count(),
-        2
+        3
     );
-    assert_eq!(read_counter(&ledger), (2, 2));
+    let holders: Vec<_> = status
+        .slots
+        .iter()
+        .filter(|slot| slot.status.held)
+        .collect();
+    let mut targets: Vec<_> = holders
+        .iter()
+        .map(|slot| slot.status.target.as_deref().unwrap())
+        .collect();
+    targets.sort();
+    assert_eq!(
+        targets,
+        [
+            "foreign-repo--verification--wt-0",
+            "pool-repo--verification--wt-1",
+            "pool-repo--verification--wt-2"
+        ]
+    );
+    let pids: std::collections::HashSet<_> = holders
+        .iter()
+        .map(|slot| slot.status.owner.as_ref().unwrap().pid)
+        .collect();
+    assert_eq!(
+        pids.len(),
+        3,
+        "all three OS processes must be admitted before any is released"
+    );
+    println!("Issue #5662 AC-2: capacity=3 running=3 available=0; foreign-project=1 same-project=2; holder_pids={pids:?}");
+    assert_eq!(read_counter(&ledger), (3, 3));
     publish_marker(&release, b"release").unwrap();
     for helper in helpers {
         wait_success(helper, Duration::from_secs(20));
     }
-    assert_eq!(read_counter(&ledger), (0, 2));
+    assert_eq!(read_counter(&ledger), (0, 3));
 }
 
 #[test]
