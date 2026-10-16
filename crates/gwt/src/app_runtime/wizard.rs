@@ -576,6 +576,12 @@ pub(crate) struct IssueMonitorLaunchPrepared {
 
 pub(crate) type IssueMonitorLaunchPreparationKey = (String, u64, u64, Option<String>, bool);
 
+pub(crate) struct PendingIssueMonitorLaunch {
+    context: super::ProjectContext,
+    request: super::DeferredIssueMonitorLaunch,
+    reusable: Option<IssueMonitorLaunchPreparation>,
+}
+
 fn issue_monitor_launch_preparation_key(
     context: &super::ProjectContext,
     request: &super::DeferredIssueMonitorLaunch,
@@ -3183,6 +3189,41 @@ impl AppRuntime {
         )
     }
 
+    fn issue_monitor_launch_lane_busy(&self, context: &super::ProjectContext) -> bool {
+        self.issue_monitor_launch_preparations.iter().any(|key| {
+            self.project_context(&key.0).is_some_and(|current| {
+                current.generation == key.1 && current.project_key == context.project_key
+            })
+        }) || self.inflight_launches.values().any(|(window_id, _)| {
+            self.window_lookup
+                .get(window_id)
+                .and_then(|address| self.project_context(&address.tab_id))
+                .is_some_and(|current| current.project_key == context.project_key)
+        })
+    }
+
+    /// Capture each sibling's inputs only after the preceding launch worker
+    /// finishes. Its claim/config writes would otherwise invalidate all siblings.
+    pub(super) fn advance_issue_monitor_launch_queue_events(&mut self) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        for pending in std::mem::take(&mut self.issue_monitor_launch_queue) {
+            if self.project_context_is_current(&pending.context) {
+                let request = pending.request;
+                events.extend(
+                    self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
+                        &request.project_root,
+                        request.issue_number,
+                        request.linked_issue_kind,
+                        request.delivery_id,
+                        request.launch_session_strategy,
+                        pending.reusable,
+                    ),
+                );
+            }
+        }
+        events
+    }
+
     fn auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
         &mut self,
         project_root: &Path,
@@ -3254,9 +3295,23 @@ impl AppRuntime {
             }
         }
         let key = issue_monitor_launch_preparation_key(&context, &request);
-        if !self.issue_monitor_launch_preparations.insert(key.clone()) {
+        if self.issue_monitor_launch_preparations.contains(&key) {
             return Vec::new();
         }
+        if self.issue_monitor_launch_lane_busy(&context) {
+            if !self.issue_monitor_launch_queue.iter().any(|pending| {
+                issue_monitor_launch_preparation_key(&pending.context, &pending.request) == key
+            }) {
+                self.issue_monitor_launch_queue
+                    .push(PendingIssueMonitorLaunch {
+                        context,
+                        request,
+                        reusable,
+                    });
+            }
+            return Vec::new();
+        }
+        self.issue_monitor_launch_preparations.insert(key.clone());
         let cache = self.launch_wizard_cache.clone();
         let sessions_dir = self.sessions_dir.clone();
         let profile_config_path = self.profile_config_path();
@@ -3468,8 +3523,15 @@ impl AppRuntime {
             };
             resume.handoff_delivery = Some((target_window_id, prepared));
             record_issue_monitor_worker_phase("monitor_answer_write_ahead", &mut phase_started);
-            let admission = Some(admission_input.prepare());
             let prefs_stamp = super::issue_monitor_prefs_stamp(&prefs_path);
+            let admission = Some(
+                gwt::load_issue_monitor_prefs(&prefs_path)
+                    .map_err(|error| format!("Cannot read answered launch mode: {error}"))
+                    .and_then(|prefs| {
+                        resume.autonomous_mode = prefs.autonomous_mode;
+                        admission_input.prepare()
+                    }),
+            );
             proxy.send(UserEvent::IssueMonitorLaunchPrepared(Box::new(
                 IssueMonitorLaunchPrepared {
                     context,
@@ -3721,6 +3783,15 @@ impl AppRuntime {
     }
 
     pub(crate) fn handle_issue_monitor_launch_prepared(
+        &mut self,
+        prepared: IssueMonitorLaunchPrepared,
+    ) -> Vec<OutboundEvent> {
+        let mut events = self.apply_issue_monitor_launch_prepared(prepared);
+        events.extend(self.advance_issue_monitor_launch_queue_events());
+        events
+    }
+
+    fn apply_issue_monitor_launch_prepared(
         &mut self,
         prepared: IssueMonitorLaunchPrepared,
     ) -> Vec<OutboundEvent> {

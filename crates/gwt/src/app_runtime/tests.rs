@@ -1428,6 +1428,7 @@ fn sample_runtime_with_events(
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
+        issue_monitor_launch_queue: Vec::new(),
         issue_monitor_materializer_id: "app-runtime-test-materializer".to_string(),
         // Issue #3878: own the fallback commit budget instead of inheriting
         // the GUI-thread one; tests that assert that budget set it explicitly.

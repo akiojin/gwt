@@ -5235,6 +5235,16 @@ impl AppRuntime {
         window_id: String,
         result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
+        let mut events = self.apply_launch_complete(window_id, result);
+        events.extend(self.advance_issue_monitor_launch_queue_events());
+        events
+    }
+
+    fn apply_launch_complete(
+        &mut self,
+        window_id: String,
+        result: AgentLaunchResult,
+    ) -> Vec<OutboundEvent> {
         // Issue #3851: an Err result is produced before this handler spawns a
         // PTY. If this window already owns a live agent runtime, the result is
         // necessarily from an older preparation attempt and must not consume
@@ -5404,6 +5414,12 @@ impl AppRuntime {
         &mut self,
         prepared: PreparedAgentLaunch,
     ) -> Vec<OutboundEvent> {
+        let mut events = self.apply_agent_launch_prepared(prepared);
+        events.extend(self.advance_issue_monitor_launch_queue_events());
+        events
+    }
+
+    fn apply_agent_launch_prepared(&mut self, prepared: PreparedAgentLaunch) -> Vec<OutboundEvent> {
         let Some(prepared) = prepared
             .0
             .state
@@ -5483,12 +5499,20 @@ impl AppRuntime {
                     })
         });
         if matches_generation && !failure_authority_matches {
-            self.pending_launch_completions.remove(&window_id);
+            if let Some(pending) = self.pending_launch_completions.remove(&window_id) {
+                self.inflight_launches.retain(|_, (id, started)| {
+                    id != &window_id || Some(*started) != pending.started_at
+                });
+            }
             return Vec::new();
         }
         if !matches_generation || !(current || missing_at_enqueue && prepared.result.is_err()) {
             if matches_generation {
-                self.pending_launch_completions.remove(&window_id);
+                if let Some(pending) = self.pending_launch_completions.remove(&window_id) {
+                    self.inflight_launches.retain(|_, (id, started)| {
+                        id != &window_id || Some(*started) != pending.started_at
+                    });
+                }
             }
             if let Ok(success) = prepared.result {
                 self.queue_stale_prepared_agent_launch_cleanup(success);

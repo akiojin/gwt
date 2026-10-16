@@ -433,25 +433,25 @@ fn issue4803_monitor_launch_request_does_not_wait_for_provider_preparation() {
     );
     assert_eq!(
         queued.lock().expect("queued preparations").len(),
-        2,
+        1,
         "replayed delivery must not start another preparation"
     );
+    assert_eq!(runtime.issue_monitor_launch_queue.len(), 1);
     drain_queued_blocking_tasks(&queued);
-    assert_eq!(PROBE_CALLS.load(Ordering::SeqCst), 2);
+    assert_eq!(PROBE_CALLS.load(Ordering::SeqCst), 1);
     runtime
         .project_tab_incarnations
         .get_mut("tab-1")
         .expect("project")
         .generation += 1;
-    for _ in 0..2 {
-        let prepared = take_issue4803_monitor_preparation(&recorded_events);
-        assert!(
-            runtime
-                .handle_issue_monitor_launch_prepared(prepared)
-                .is_empty(),
-            "a reopened project's old preparation must not be applied"
-        );
-    }
+    let prepared = take_issue4803_monitor_preparation(&recorded_events);
+    assert!(
+        runtime
+            .handle_issue_monitor_launch_prepared(prepared)
+            .is_empty(),
+        "a reopened project's old preparation must not be applied"
+    );
+    assert!(runtime.issue_monitor_launch_queue.is_empty());
     assert!(runtime.issue_monitor_launch_preparations.is_empty());
 }
 
@@ -515,6 +515,89 @@ fn issue4803_monitor_preparation_rechecks_deleted_resume_session() {
         "stale resume must be prepared again"
     );
     assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+}
+
+#[test]
+fn issue5596_same_project_launch_preparation_waits_for_the_previous_materialization() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "serial-preparation",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    for issue_number in [3165, 3166] {
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &fixture.project_root,
+                issue_number,
+                LinkedIssueKind::Issue,
+                None,
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            );
+    }
+    assert_eq!(
+        queued.lock().expect("preparation workers").len(),
+        1,
+        "sibling launches must not invalidate each other's preparation or race Git config writes"
+    );
+    drain_queued_blocking_tasks(&queued);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    fixture.runtime.advance_issue_monitor_launch_queue_events();
+    assert!(
+        queued.lock().expect("materialization wait").is_empty(),
+        "creating the first pane must not release its Git materialization lane"
+    );
+    let (window_id, result) =
+        take_monitor_launch_complete_event("serial-preparation", &fixture.recorded_events);
+    assert!(result.is_ok(), "first launch: {result:?}");
+    fixture
+        .runtime
+        .handle_launch_complete(window_id.clone(), result);
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_prepared_agent_launch(&fixture.recorded_events);
+    // A newer Session supersedes this completion without closing the pane.
+    let address = fixture.runtime.window_lookup[&window_id].clone();
+    fixture
+        .runtime
+        .tab_mut(&address.tab_id)
+        .unwrap()
+        .workspace
+        .set_session_id(&address.raw_id, Some("superseding-session".to_string()));
+    fixture.runtime.handle_agent_launch_prepared(prepared);
+    drain_queued_blocking_tasks(&queued);
+    assert!(
+        fixture
+            .runtime
+            .inflight_launches
+            .values()
+            .all(|(id, _)| id != &window_id),
+        "a stale completed worker must release its own materialization lane"
+    );
+    assert!(
+        fixture
+            .runtime
+            .issue_monitor_launch_preparations
+            .iter()
+            .any(|key| key.2 == 3166),
+        "the second launch must progress on completion without waiting for the scheduled tick"
+    );
 }
 
 #[test]
@@ -992,4 +1075,73 @@ fn termination_class_requires_exact_exit_and_readable_bridge_evidence() {
         );
         assert_eq!(after.issue_tiers[&4774].unknown_failures, 0);
     }
+}
+
+#[test]
+fn issue5596_answer_worker_uses_current_autonomous_mode() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _autonomous_execution =
+        ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+    let _autonomous_issue = ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "answer-current-autonomous-mode",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    seed_resumed_autonomous_handoff(&fixture, "Continue the exact Session");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.autonomous_mode = false;
+        Ok(())
+    })
+    .expect("begin preparation without autonomous mode");
+    let previous_spawner = fixture.runtime.blocking_tasks.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+    drain_queued_blocking_tasks(&queued);
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ))
+        .is_empty());
+    assert_eq!(
+        queued.lock().expect("queued answer worker").len(),
+        1,
+        "the exact answer must await its write-ahead worker"
+    );
+    // The second worker accepts a new prefs stamp, so its launch facts must
+    // reflect a mode edit made after the first preparation callback.
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.autonomous_mode = true;
+        Ok(())
+    })
+    .expect("enable autonomous mode before answer preparation");
+    drain_queued_blocking_tasks(&queued);
+    fixture.runtime.blocking_tasks = previous_spawner;
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    let result =
+        take_monitor_launch_complete("answer-current-autonomous-mode", &fixture.recorded_events);
+    assert_monitor_exact_resume(result, &fixture);
 }
