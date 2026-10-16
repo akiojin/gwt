@@ -261,7 +261,7 @@ fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
 /// (returns `true`) on any non-absent read/parse ambiguity so nothing is
 /// destroyed; only a genuinely absent file returns `false` (nothing to lose).
 pub fn managed_hook_config_has_user_content(path: &Path) -> bool {
-    let content = match fs::read_to_string(path) {
+    let content = match crate::asset_io::read_to_string(path) {
         Ok(content) => content,
         // Absent: nothing to preserve here.
         Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
@@ -353,8 +353,8 @@ fn atomic_staging_path(path: &Path, fallback_name: &str) -> io::Result<PathBuf> 
 
 /// Publish a fully written staging file as `destination` in one step.
 ///
-/// The asset publisher uses POSIX replacement semantics, including on Windows,
-/// so existing handles remain valid and new readers always open a complete file.
+/// Atomic rename preserves complete old/new contents. The shared asset reader
+/// and publisher retry transient Windows sharing failures within a bounded budget.
 /// A former remove-then-rename left a missing-file window (PR #3520 review);
 /// Windows' legacy replacement also raced path opens (Issue #5609).
 fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()> {
@@ -1181,7 +1181,7 @@ mod tests {
             let all_done = children
                 .iter_mut()
                 .all(|child| child.try_wait().expect("poll child").is_some());
-            match fs::read_to_string(&hooks_path) {
+            match crate::asset_io::read_to_string(&hooks_path) {
                 Ok(rendered) => {
                     serde_json::from_str::<Value>(&rendered)
                         .expect("destination must always hold a complete hooks.json");
