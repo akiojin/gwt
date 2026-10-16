@@ -1153,6 +1153,10 @@ import { createUiStateStore } from "/ui-state-store.js";
           window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`),
         openReleaseNotes: (version) => releaseNotesWindow.open(version || null),
       });
+      const updateRestartImpactModel = createUiStateStore(null);
+      updateRestartImpactModel.subscribe(impact => impact, impact => {
+        if (impact) updateCtaController.handleUpdateRestartImpact(impact);
+      });
 
       // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
       // WebSocket bridge is down — a tiny status-strip label alone reads as
@@ -5537,6 +5541,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             updateCtaController.handleUpdateApplyPendingPersisted({
               version: event.version,
             });
+            break;
+          case "update_restart_impact":
+            updateRestartImpactModel.update(() => event);
             break;
           case "update_auto_apply":
             // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
