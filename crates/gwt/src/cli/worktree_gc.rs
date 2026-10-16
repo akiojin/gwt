@@ -368,7 +368,6 @@ pub(crate) fn run_gc_with_pressure(
                     reason: format!("build artifact coordination unavailable: {error}"),
                     bytes: candidate.bytes,
                 });
-                candidates.push(candidate);
                 continue;
             }
         };
@@ -1350,6 +1349,18 @@ mod tests {
         );
         assert!(report["disk_space"]["volumes"].is_array(), "{out}");
         assert!(sibling_target.join("blob.bin").is_file());
+
+        // A coordination I/O error makes the cache unavailable on this run.
+        let barrier =
+            gwt_core::index_coordinator::verification_coordinator_root().join("heavy.lock");
+        std::fs::remove_file(&barrier).expect("remove idle barrier");
+        std::fs::create_dir(&barrier).expect("unopenable barrier");
+        let failed =
+            run_gc(&repo, "develop", both_opt_ins(), true).expect("coordination error report");
+        assert_eq!(failed.failed.len(), 1, "{failed:?}");
+        assert_eq!(failed.unreclaimed_bytes, 4096, "{failed:?}");
+        assert_eq!(failed.reclaimable_bytes, 0, "{failed:?}");
+        std::fs::remove_dir(&barrier).expect("restore idle barrier path");
 
         // #5082: the pressure probe runs after the process snapshot and plan.
         // Start canonical verification there to exercise the deletion race
