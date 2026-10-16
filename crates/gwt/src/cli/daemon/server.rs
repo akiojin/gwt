@@ -3147,6 +3147,9 @@ fn rebase_issue_monitor_control_candidate(
     control: &IssueMonitorControl,
 ) {
     match control {
+        IssueMonitorControl::Launched { issue_number, .. } => {
+            monitor.rebase_daemon_driver_prefs_for_exact_window_close(disk, *issue_number)
+        }
         IssueMonitorControl::WindowClosed {
             target: Some(target),
             ..
@@ -22557,6 +22560,36 @@ exit 1
             );
             assert_eq!(prefs.failed_issues, disk.failed_issues);
         }
+    }
+
+    #[test]
+    fn issue_4862_late_launch_control_cannot_restore_a_replaced_duplicate_binding() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let mut stale = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        stale.record_candidate(sample_issue_monitor_issue(42));
+        stale.complete_active_launch(42, "tab-1::duplicate");
+        let mut canonical = stale.clone();
+        assert!(canonical.bind_duplicate_runtime_holder(42, "tab-1::duplicate", "tab-1::holder"));
+        crate::save_issue_monitor_prefs(&prefs_path, &canonical.prefs()).unwrap();
+
+        let _ = apply_control_for_test(
+            &prefs_path,
+            &mut stale,
+            IssueMonitorControl::Launched {
+                issue_number: 42,
+                window_id: "tab-1::duplicate".into(),
+                delivery_id: None,
+            },
+        );
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(persisted.launched_issues, canonical.prefs().launched_issues);
+        assert_eq!(
+            stale.launched_window_id(42).as_deref(),
+            Some("tab-1::holder")
+        );
     }
 
     #[test]

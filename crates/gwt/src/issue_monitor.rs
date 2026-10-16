@@ -2708,11 +2708,15 @@ pub enum IssueMonitorExecutionSettlement {
 
 /// Issue #4244: settlement and process liveness are independent. A settled
 /// holder does not prove that another agent in the same worktree has exited.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueMonitorExecutionObservation {
     pub settlement: IssueMonitorExecutionSettlement,
     /// A live worktree agent or ambiguous runtime evidence vetoes recovery.
     pub process_held: bool,
+    /// Exact holder runtime evidence proves its previous GUI host has exited.
+    pub holder_host_dead: bool,
+    /// Current ECR holder identity while its exact runtime is live or uncertain.
+    pub held_holder_session_id: Option<String>,
 }
 
 /// Issue #4084 AC-1: one idle window and its classification.
@@ -10200,6 +10204,14 @@ impl IssueMonitorState {
             return false;
         }
         self.launch_bindings.remove(target_window_id);
+        self.pending_launch_deliveries.retain(|delivery| {
+            delivery.issue_number != issue_number
+                || !delivery
+                    .materializer_window_id
+                    .iter()
+                    .chain(delivery.materialized_window_id.iter())
+                    .any(|window| issue_monitor_window_ids_match(window, target_window_id))
+        });
         self.launch_bindings
             .insert(holder_window_id.to_string(), issue_number);
         self.launched_windows
@@ -11727,6 +11739,71 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         reopened_completion_fences: &BTreeSet<u64>,
     ) {
+        // Exact holder repair removes the duplicate from the durable ledger
+        // and records a newer audit sequence. Absorb that same-claim repair
+        // before the usual union, without rolling back a later local ACK.
+        for launched in &disk.launched_issues {
+            let issue = launched.issue_number;
+            let Some(previous) = self.launched_windows.get(&issue).cloned() else {
+                continue;
+            };
+            let local_version = self
+                .requeue_audit
+                .iter()
+                .filter(|entry| entry.issue_number == issue)
+                .map(|entry| entry.release_version)
+                .max()
+                .unwrap_or(0);
+            let Some(repair) = disk
+                .requeue_audit
+                .iter()
+                .filter(|entry| {
+                    entry.issue_number == issue && entry.release_version > local_version
+                })
+                .max_by_key(|entry| entry.release_version)
+            else {
+                continue;
+            };
+            let repair_covers_local_ack = self
+                .launch_confirmations
+                .get(&issue)
+                .filter(|ack| issue_monitor_window_ids_match(&ack.window_id, &previous))
+                .is_none_or(|ack| {
+                    parse_rfc3339_utc(&ack.confirmed_at)
+                        .zip(parse_rfc3339_utc(&repair.released_at))
+                        .is_some_and(|(confirmed, repaired)| confirmed <= repaired)
+                });
+            if issue_monitor_window_ids_match(&previous, &launched.window_id)
+                || self.merged_issues.contains(&issue)
+                || self.failed_issues.contains_key(&issue)
+                || reopened_completion_fences.contains(&issue)
+                || self.launched_claims.get(&issue) != disk.launched_claims.get(&issue)
+                || !repair_covers_local_ack
+                || !disk.launch_bindings.iter().any(|(window, owner)| {
+                    *owner == issue && issue_monitor_window_ids_match(window, &launched.window_id)
+                })
+                || disk.launch_bindings.iter().any(|(window, owner)| {
+                    *owner == issue && issue_monitor_window_ids_match(window, &previous)
+                })
+            {
+                continue;
+            }
+            self.launched_windows
+                .insert(issue, launched.window_id.clone());
+            self.launch_bindings.retain(|window, owner| {
+                *owner != issue || !issue_monitor_window_ids_match(window, &previous)
+            });
+            self.launch_confirmations.remove(&issue);
+            self.invalidate_idle_launch_observation(issue, &launched.window_id);
+            if let Some(item) = self
+                .inbox
+                .iter_mut()
+                .find(|item| item.issue.number == issue)
+            {
+                item.launched_window_id = Some(launched.window_id.clone());
+                item.state = MonitorInboxState::Launched;
+            }
+        }
         // Issue #3883: the ledger is a union across processes. Absence in a
         // snapshot this process may have started before is not evidence that a
         // window is gone — only the canvas is — so a rebase may add bindings
@@ -16683,6 +16760,26 @@ impl IssueMonitorState {
         delivery_id: Option<&str>,
     ) -> bool {
         let window_id = window_id.into();
+        // A delivery ACK confirms its pane; replacing a running launch first
+        // requires the ordinary stop/retry transition to revoke that binding.
+        // In particular, an ACK delayed past exact ECR-holder repair cannot
+        // take ownership back from the pane that still holds the generation.
+        if self.active_launches.contains(&issue_number)
+            && self
+                .launched_windows
+                .get(&issue_number)
+                .is_some_and(|bound| !issue_monitor_window_ids_match(bound, &window_id))
+        {
+            return false;
+        }
+        if delivery_id.is_none()
+            && self.active_launches.contains(&issue_number)
+            && self.launched_windows.contains_key(&issue_number)
+        {
+            // A legacy re-ACK supplies no new claim or delivery identity.
+            // Keep the confirmed launch unchanged instead of erasing them.
+            return true;
+        }
         let mut launched_claim_id = None;
         let mut consumed_delivery_id = None;
         let mut confirmed_tier = None;
@@ -17732,7 +17829,7 @@ impl IssueMonitorState {
         previous_window_id: &str,
         window_id: &str,
     ) {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         let attempts = self.attempt_count(issue_number);
         self.failure_release_version += 1;
         let reason = format!(
@@ -20514,20 +20611,37 @@ impl IssueMonitorState {
                 .map(|idle| idle.idle_since.clone())
                 .unwrap_or_else(|| now.to_string())
         };
+        let follows_execution_holder = |issue: u64, pane: &IssueMonitorWindowObservation| {
+            settlements.get(&issue).is_none_or(|execution| {
+                execution.held_holder_session_id.as_deref().map_or_else(
+                    || {
+                        !(execution.process_held
+                            && execution.settlement == IssueMonitorExecutionSettlement::Unknown)
+                    },
+                    |holder| pane.session_id.as_deref() == Some(holder),
+                )
+            })
+        };
         let mut classified = Vec::new();
         for (issue_number, window_id) in &self.launched_windows {
-            let owned_here = issue_monitor_qualified_window_id(window_id).is_some_and(|(tab, _)| {
-                self.window_snapshot_tabs.contains(tab)
-                    // A new GUI incarnation has new tab IDs. The startup reaper's
-                    // interrupted settlement proves the previous holder is gone;
-                    // a foreign live host or an unknown execution proves nothing.
+            let owned_here =
+                issue_monitor_qualified_window_id(window_id).is_some_and(|(tab, _)| {
+                    self.window_snapshot_tabs.contains(tab)
+                    // A new GUI incarnation has new tab IDs. Reaper interruption
+                    // or exact host-death evidence for a settled holder proves
+                    // the old runtime is gone; live or unknown authority does not.
                     || (self.window_snapshot_host.is_some()
                         && !self.window_snapshot_tabs.contains(tab)
                         && settlements.get(issue_number).is_some_and(|observation| {
-                            !observation.process_held
-                                && observation.settlement == IssueMonitorExecutionSettlement::Interrupted
+                            (observation.settlement == IssueMonitorExecutionSettlement::Interrupted
+                                && !observation.process_held)
+                                || (observation.holder_host_dead
+                                    && matches!(observation.settlement,
+                                        IssueMonitorExecutionSettlement::Completed
+                                            | IssueMonitorExecutionSettlement::Blocked
+                                            | IssueMonitorExecutionSettlement::Interrupted))
                         }))
-            });
+                });
             if !owned_here
                 || !self.window_observation_covers_launch(
                     *issue_number,
@@ -20554,6 +20668,7 @@ impl IssueMonitorState {
                                 .iter()
                                 .find(|other| {
                                     other.issue_number == Some(*issue_number)
+                                        && follows_execution_holder(*issue_number, other)
                                         && issue_monitor_qualified_window_id(&other.window_id)
                                             .is_some_and(|(tab, _)| tab == snapshot.project_tab_id)
                                         && !other.review_dispatch
@@ -20597,6 +20712,7 @@ impl IssueMonitorState {
                     .iter()
                     .find(|other| {
                         other.issue_number == Some(*issue_number)
+                            && follows_execution_holder(*issue_number, other)
                             && issue_monitor_qualified_window_id(&other.window_id)
                                 .is_some_and(|(tab, _)| self.window_snapshot_tabs.contains(tab))
                             && !other.review_dispatch
@@ -33759,6 +33875,207 @@ mod tests {
     }
 
     #[test]
+    fn issue_4862_late_legacy_ack_cannot_replace_a_repaired_holder_after_reload() {
+        let mut monitor = acked_delivery_monitor();
+        assert!(monitor.bind_duplicate_runtime_holder(42, "tab-1::agent-42", "tab-1::holder"));
+        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        let before = restored.prefs();
+
+        assert!(!restored.complete_active_launch_delivery(42, "tab-1::agent-42", None));
+        assert_eq!(restored.prefs(), before);
+        assert!(restored.complete_active_launch_delivery(42, "tab-1::holder", None));
+        assert_eq!(
+            restored.prefs(),
+            before,
+            "re-ACK retains the holder's claim"
+        );
+        assert_eq!(
+            restored.launched_window_id(42).as_deref(),
+            Some("tab-1::holder")
+        );
+    }
+
+    #[test]
+    fn issue_4862_stale_scan_rebase_keeps_the_authoritatively_repaired_holder() {
+        let mut stale_scan = launched_monitor(42, "tab-1::duplicate");
+        let mut canonical = stale_scan.clone();
+        assert!(canonical.bind_duplicate_runtime_holder(42, "tab-1::duplicate", "tab-1::holder"));
+
+        stale_scan.rebase_daemon_driver_prefs(&canonical.prefs());
+
+        assert_eq!(
+            stale_scan.launched_window_id(42).as_deref(),
+            Some("tab-1::holder")
+        );
+        assert_eq!(stale_scan.launched_window_issue("tab-1::duplicate"), None);
+    }
+
+    #[test]
+    fn issue_4862_retained_duplicate_canvas_cannot_undo_live_holder_repair() {
+        for (holder, candidate_session) in [
+            (Some("holder-session"), Some("duplicate-session")),
+            (Some("holder-session"), None),
+            (None, Some("duplicate-session")),
+        ] {
+            let mut monitor = launched_monitor(42, "tab-1::duplicate");
+            assert!(monitor.bind_duplicate_runtime_holder(42, "tab-1::duplicate", "tab-1::holder"));
+            let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Unknown)]);
+            let execution = observed.get_mut(&42).unwrap();
+            execution.process_held = true;
+            execution.held_holder_session_id = holder.map(str::to_string);
+            let mut duplicate =
+                idle_observation("tab-1::duplicate", Some(42), WindowState::Running, false);
+            duplicate.session_id = candidate_session.map(str::to_string);
+            monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, vec![duplicate]));
+
+            let outcome = monitor.reconcile_idle_windows(&observed, IDLE_NOW);
+
+            assert!(outcome.rebound.is_empty());
+            assert_eq!(
+                monitor.launched_window_id(42).as_deref(),
+                Some("tab-1::holder")
+            );
+        }
+    }
+
+    #[test]
+    fn issue_4862_rebinding_selects_the_exact_live_holder_session() {
+        let mut monitor = launched_monitor(42, "tab-1::gone");
+        let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Unknown)]);
+        let execution = observed.get_mut(&42).unwrap();
+        execution.process_held = true;
+        execution.held_holder_session_id = Some("holder-session".into());
+        let mut holder = idle_observation("tab-1::holder", Some(42), WindowState::Running, false);
+        holder.session_id = Some("holder-session".into());
+        monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, vec![holder]));
+
+        let outcome = monitor.reconcile_idle_windows(&observed, IDLE_NOW);
+
+        assert_eq!(outcome.rebound, vec![(42, "tab-1::holder".into())]);
+    }
+
+    #[test]
+    fn issue_4862_dead_holder_rebinds_a_live_survivor_without_vetoing_its_process() {
+        for predecessor in ["tab-1::gone", "previous-tab::gone"] {
+            let mut monitor = launched_monitor(42, predecessor);
+            let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
+            let execution = observed.get_mut(&42).unwrap();
+            execution.process_held = true;
+            execution.holder_host_dead = true;
+            let mut survivor =
+                idle_observation("tab-1::survivor", Some(42), WindowState::Running, false);
+            survivor.session_id = Some("survivor-session".into());
+            monitor.record_window_snapshot_from_host(
+                idle_snapshot(IDLE_NOW, vec![survivor]),
+                123,
+                1,
+                BTreeSet::new(),
+            );
+
+            let outcome = monitor.reconcile_idle_windows(&observed, IDLE_NOW);
+
+            assert_eq!(
+                outcome.rebound,
+                vec![(42, "tab-1::survivor".into())],
+                "{predecessor}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_4862_stale_holder_repair_cannot_roll_back_a_later_local_ack() {
+        let mut local = launched_monitor(42, "tab-1::duplicate");
+        let mut repaired = local.clone();
+        assert!(repaired.bind_duplicate_runtime_holder(42, "tab-1::duplicate", "tab-1::holder"));
+        let repair_at = parse_rfc3339_utc(&repaired.prefs().requeue_audit[0].released_at).unwrap();
+        let after = (repair_at + chrono::Duration::seconds(1)).to_rfc3339();
+        local.clear_active_tracking(42);
+        local.complete_active_launch_at(42, "tab-1::successor", &after);
+
+        local.rebase_daemon_driver_prefs(&repaired.prefs());
+
+        assert_eq!(
+            local.launched_window_id(42).as_deref(),
+            Some("tab-1::successor")
+        );
+        assert_eq!(local.launched_window_issue("tab-1::successor"), Some(42));
+    }
+
+    #[test]
+    fn issue_4862_holder_repair_cancels_only_the_duplicate_materializer_delivery() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        scan_queued_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-10-02T00:00:00Z",
+        );
+        for number in [42, 43] {
+            assert!(monitor.apply_confirmed_claim(
+                number,
+                format!("claim-{number}"),
+                "host/session",
+                &format!("effect-{number}"),
+                "2026-10-02T00:00:00Z",
+            ));
+        }
+        let delivery = monitor.pending_launch_deliveries.front_mut().unwrap();
+        delivery.materializer_window_id = Some("tab-1::duplicate".into());
+        delivery.materialized_window_id = Some("tab-1::duplicate".into());
+        delivery.workspace_durable_window_id = Some("tab-1::duplicate".into());
+        monitor.complete_active_launch(42, "tab-1::duplicate");
+
+        assert!(monitor.bind_duplicate_runtime_holder(42, "tab-1::duplicate", "tab-1::holder"));
+        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        assert_eq!(restored.pending_launch_delivery_id(42), None);
+        assert_eq!(
+            restored.pending_launch_delivery_id(43).as_deref(),
+            Some("launch:effect-43")
+        );
+        let before = restored.prefs();
+        assert!(!restored.complete_active_launch_delivery(
+            42,
+            "tab-1::duplicate",
+            Some("launch:effect-42"),
+        ));
+        assert_eq!(restored.prefs(), before);
+    }
+
+    #[test]
+    fn issue_4862_a_new_delivery_can_ack_after_the_previous_launch_is_revoked() {
+        let mut monitor = launched_monitor(42, "tab-1::predecessor");
+        monitor.clear_active_tracking(42);
+        monitor.set_inbox_state(42, MonitorInboxState::Queued);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "successor-claim",
+            "host/session",
+            "successor-effect",
+            "2026-10-02T00:01:00Z",
+        ));
+        let delivery = monitor.pending_launch_deliveries.front_mut().unwrap();
+        delivery.materializer_window_id = Some("tab-1::successor".into());
+        delivery.materialized_window_id = Some("tab-1::successor".into());
+        delivery.workspace_durable_window_id = Some("tab-1::successor".into());
+
+        assert!(monitor.complete_active_launch_delivery(
+            42,
+            "tab-1::successor",
+            Some("launch:successor-effect"),
+        ));
+        assert_eq!(
+            monitor.launched_window_id(42).as_deref(),
+            Some("tab-1::successor")
+        );
+        assert_eq!(
+            monitor.live_claim_id(42).as_deref(),
+            Some("successor-claim")
+        );
+    }
+
+    #[test]
     fn issue_5248_post_close_snapshot_survives_delayed_scan_and_requeue() {
         let window_id = "tab-1::agent-42";
         let before_close = "2026-10-10T00:00:00.100Z";
@@ -34837,6 +35154,12 @@ mod tests {
             Some("launch:effect-42"),
         ));
         let acked = monitor.prefs();
+        assert!(monitor.complete_active_launch_delivery(42, "tab-1::agent-42", None));
+        assert_eq!(
+            monitor.prefs(),
+            acked,
+            "legacy re-ACK keeps the confirmed identity"
+        );
         assert_eq!(acked.pending_launch_deliveries.len(), 1);
         assert_eq!(
             acked.launched_claims.get(&42).map(String::as_str),
@@ -41699,6 +42022,77 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_4862_settled_previous_host_windows_requeue_after_confirmed_absence() {
+        for settlement in [
+            IssueMonitorExecutionSettlement::Completed,
+            IssueMonitorExecutionSettlement::Blocked,
+        ] {
+            let mut monitor = launched_cohort(&[(42, "previous-tab::gone")]);
+            let mut observed = settlements(&[(42, settlement)]);
+            observed.get_mut(&42).unwrap().holder_host_dead = true;
+            monitor.record_window_snapshot_from_host(
+                idle_snapshot(IDLE_NOW, Vec::new()),
+                123,
+                1,
+                BTreeSet::new(),
+            );
+            assert!(monitor
+                .reconcile_idle_windows(&observed, IDLE_NOW)
+                .requeued
+                .is_empty());
+            let later = "2026-09-07T04:01:00Z";
+            monitor.record_window_snapshot_from_host(
+                idle_snapshot(later, Vec::new()),
+                123,
+                1,
+                BTreeSet::new(),
+            );
+            assert_eq!(
+                monitor.reconcile_idle_windows(&observed, later).requeued,
+                vec![42],
+                "{settlement:?}"
+            );
+            assert_eq!(monitor.attempt_count(42), 0);
+        }
+    }
+
+    #[test]
+    fn issue_4862_foreign_tab_recovery_requires_settlement_and_unheld_dead_host_proof() {
+        for (settlement, process_held, holder_host_dead) in [
+            (IssueMonitorExecutionSettlement::Completed, false, false),
+            (IssueMonitorExecutionSettlement::Completed, true, true),
+            (IssueMonitorExecutionSettlement::Unknown, false, true),
+        ] {
+            let mut monitor = launched_cohort(&[(42, "foreign-tab::holder")]);
+            let observed = BTreeMap::from([(
+                42,
+                IssueMonitorExecutionObservation {
+                    settlement,
+                    process_held,
+                    holder_host_dead,
+                    held_holder_session_id: None,
+                },
+            )]);
+            for now in [IDLE_NOW, "2026-09-07T04:01:00Z"] {
+                monitor.record_window_snapshot_from_host(
+                    idle_snapshot(now, Vec::new()),
+                    123,
+                    1,
+                    BTreeSet::new(),
+                );
+                assert!(monitor
+                    .reconcile_idle_windows(&observed, now)
+                    .requeued
+                    .is_empty());
+            }
+            assert_eq!(
+                monitor.launched_window_id(42).as_deref(),
+                Some("foreign-tab::holder")
+            );
+        }
+    }
+
     fn idle_observation(
         window_id: &str,
         issue_number: Option<u64>,
@@ -41739,6 +42133,8 @@ mod tests {
                     IssueMonitorExecutionObservation {
                         settlement: *settlement,
                         process_held: false,
+                        holder_host_dead: false,
+                        held_holder_session_id: None,
                     },
                 )
             })
@@ -41854,6 +42250,8 @@ mod tests {
             IssueMonitorExecutionObservation {
                 settlement: IssueMonitorExecutionSettlement::Completed,
                 process_held: true,
+                holder_host_dead: false,
+                held_holder_session_id: None,
             },
         )]);
         monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));

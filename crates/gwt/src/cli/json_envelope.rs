@@ -738,6 +738,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
             // FR-031: an unexplained stop is not auditable.
             reason: required_string(params, "reason")?,
+            remove_from_queue: optional_bool(params, "remove_from_queue")?.unwrap_or(true),
             // Which identity components are required is a property of the live
             // launch, not of the request shape, so the state layer decides.
             claim_id: optional_string(params, "claim_id")?,
@@ -5131,6 +5132,7 @@ mod tests {
                 project_root: None,
                 number: 42,
                 reason: "provider rate limit".to_string(),
+                remove_from_queue: true,
                 claim_id: None,
                 delivery_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
@@ -5143,6 +5145,7 @@ mod tests {
                     "project_root": "/tmp/project",
                     "number": 7,
                     "reason": "switch provider",
+                    "remove_from_queue": false,
                     "claim_id": "claim-1",
                     "delivery_id": "launch:effect-1",
                 })
@@ -5151,6 +5154,7 @@ mod tests {
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
                 reason: "switch provider".to_string(),
+                remove_from_queue: false,
                 claim_id: Some("claim-1".to_string()),
                 delivery_id: Some("launch:effect-1".to_string()),
                 window_id: None,
