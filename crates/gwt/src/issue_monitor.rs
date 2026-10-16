@@ -41769,7 +41769,8 @@ mod tests {
             IssueMonitorExecutionObservation {
                 settlement: IssueMonitorExecutionSettlement::Completed,
                 process_held: true,
-                holder_host_dead: true,
+                // The existing-pane cleanup below models a live holder.
+                holder_host_dead: false,
             },
         )]);
         monitor.record_window_snapshot(idle_snapshot(IDLE_NOW, Vec::new()));
