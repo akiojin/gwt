@@ -1200,6 +1200,24 @@ mod tests {
         None
     }
 
+    fn refresh_target_measurement(
+        root: &Path,
+        mut refresh: impl FnMut() -> io::Result<()>,
+    ) -> MachineCapacitySnapshot {
+        let pending = format!(
+            "target_measurement_in_progress: {}; wait for the scan or use Manual",
+            root.join("target").display()
+        );
+        for _ in 0..100 {
+            refresh().unwrap();
+            let snapshot = read_snapshot(&snapshot_path()).unwrap();
+            if !snapshot.diagnostics.contains(&pending) {
+                return snapshot;
+            }
+        }
+        panic!("target measurement remained in progress after 100 refreshes: {pending}");
+    }
+
     #[test]
     fn target_measurement_resumes_small_budgets_and_ignores_symlinked_children() {
         let temp = tempfile::tempdir().unwrap();
@@ -1688,8 +1706,7 @@ mod tests {
         std::fs::create_dir_all(root.join("target")).unwrap();
         std::fs::write(root.join("target/artifact"), [0_u8; 8]).unwrap();
         let root = normalized(&root);
-        refresh_machine_capacity(&root).unwrap();
-        let snapshot = read_snapshot(&snapshot_path()).unwrap();
+        let snapshot = refresh_target_measurement(&root, || refresh_machine_capacity(&root));
         assert_eq!(snapshot.targets[&root.join("target")].bytes, 8);
         assert_eq!(snapshot.per_agent_ram_bytes, RAM_FLOOR_BYTES);
         assert!(snapshot.inventory.sessions.is_empty());
@@ -1927,15 +1944,13 @@ mod tests {
         let root = normalized(&root);
         let target = root.join("target");
         let mut probe = RuntimeProbe::default();
-        probe.refresh(&root).unwrap();
-        let mut snapshot = read_snapshot(&snapshot_path()).unwrap();
+        let mut snapshot = refresh_target_measurement(&root, || probe.refresh(&root));
         snapshot.targets.get_mut(&target).unwrap().observed_at =
             epoch_seconds() - TARGET_TTL_SECS / 2 - 1;
         gwt_github::cache::write_atomic(&snapshot_path(), &serde_json::to_vec(&snapshot).unwrap())
             .unwrap();
         std::fs::remove_dir_all(&target).unwrap();
-        probe.refresh(&root).unwrap();
-        let failed = read_snapshot(&snapshot_path()).unwrap();
+        let failed = refresh_target_measurement(&root, || probe.refresh(&root));
         assert!(
             !failed.targets.contains_key(&target),
             "I/O failure invalidates a required measured target"
@@ -1944,10 +1959,7 @@ mod tests {
         assert_eq!(view.recommended_worker_limit, 0);
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("artifact"), [0_u8; 7]).unwrap();
-        probe.refresh(&root).unwrap();
-        assert_eq!(
-            read_snapshot(&snapshot_path()).unwrap().targets[&target].bytes,
-            7
-        );
+        let recovered = refresh_target_measurement(&root, || probe.refresh(&root));
+        assert_eq!(recovered.targets[&target].bytes, 7);
     }
 }

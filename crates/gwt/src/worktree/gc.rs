@@ -79,6 +79,12 @@ pub struct BuildArtifactGcRecord {
     pub finished_at: String,
     /// The disk warning that started the run.
     pub trigger: String,
+    /// Filesystems observed under pressure and successfully reclaimed bytes
+    /// per filesystem (Issue #5624). Defaults preserve old history records.
+    #[serde(default)]
+    pub pressure_volumes: Vec<String>,
+    #[serde(default)]
+    pub reclaimed_volumes: BTreeMap<String, u64>,
     pub base: String,
     /// Whether enumeration and reclaim succeeded. [`Self::outcome`] also
     /// interprets legacy records that lack this field or call zero bytes swept.
@@ -300,6 +306,7 @@ fn run_exclusive(project_root: &Path, record_path: &Path, trigger: &str) {
     let base = gwt_git::pr_status::SETTLEMENT_BASE_BRANCH;
     let config = current_config();
     let observe_disk = || probe_disk(project_root, &config);
+    let initial_pressure_volumes = observe_disk().low_volume_ids();
     let result = worktree_gc::run_gc_with_pressure(
         project_root,
         base,
@@ -309,7 +316,10 @@ fn run_exclusive(project_root: &Path, record_path: &Path, trigger: &str) {
     )
     .map_err(|error| error.to_string());
     let finished_at = now_rfc3339();
-    let record = record_from_result(result, started_at, finished_at, trigger, base);
+    let mut record = record_from_result(result, started_at, finished_at, trigger, base);
+    record.pressure_volumes.extend(initial_pressure_volumes);
+    record.pressure_volumes.sort();
+    record.pressure_volumes.dedup();
     if let Some(warning) = &record.warning {
         tracing::warn!(%warning, kept_by_reason = ?record.kept_by_reason, "build artifact auto-gc did not reclaim space");
     }
@@ -349,6 +359,8 @@ fn record_from_result(
                 started_at,
                 finished_at,
                 trigger: trigger.to_string(),
+                pressure_volumes: Vec::new(),
+                reclaimed_volumes: BTreeMap::new(),
                 base: base.to_string(),
                 recorded_outcome: Some(BuildArtifactGcOutcome::EnumerationFailed),
                 candidates: 0,
@@ -375,6 +387,8 @@ fn record_from_result(
         started_at,
         finished_at,
         trigger: trigger.to_string(),
+        pressure_volumes: report.pressure_volumes.into_iter().collect(),
+        reclaimed_volumes: report.reclaimed_volumes,
         base: report.base,
         recorded_outcome: Some(BuildArtifactGcOutcome::Swept),
         candidates: report.candidates.len(),
@@ -407,6 +421,7 @@ mod tests {
     fn volume(free_bytes: u64, total_bytes: u64) -> DiskVolume {
         DiskVolume {
             path: "/work".to_string(),
+            volume_id: None,
             free_bytes,
             total_bytes,
         }
@@ -572,6 +587,8 @@ mod tests {
             reclaimed_bytes: 4096,
             unreclaimed_bytes: 350,
             unreclaimed_by_reason: Vec::new(),
+            pressure_volumes: Default::default(),
+            reclaimed_volumes: Default::default(),
             disk_space: evaluate(Vec::new()),
         };
         report.unreclaimed_by_reason =
@@ -649,6 +666,8 @@ mod tests {
             reclaimed_bytes: 0,
             unreclaimed_bytes: 4096,
             unreclaimed_by_reason: Vec::new(),
+            pressure_volumes: Default::default(),
+            reclaimed_volumes: Default::default(),
             disk_space: evaluate(Vec::new()),
         };
 
@@ -697,6 +716,8 @@ mod tests {
             started_at: finished_at.to_string(),
             finished_at: finished_at.to_string(),
             trigger: "disk space low".to_string(),
+            pressure_volumes: Vec::new(),
+            reclaimed_volumes: BTreeMap::new(),
             base: "develop".to_string(),
             recorded_outcome: Some(BuildArtifactGcOutcome::Swept),
             candidates: 1,

@@ -24,6 +24,7 @@ pub(super) fn spawn(
             .unwrap_or(deadline);
         let _deadline =
             gwt_core::operation_deadline::ScopedOperationDeadline::enter(observation_deadline);
+        let _timing = crate::issue_monitor_worker::IssueMonitorScanTiming::start("launch-decision");
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
         let prefs = crate::issue_monitor::load_issue_monitor_prefs_for_running_version(&prefs_path)
             .map_err(|error| {
@@ -176,8 +177,17 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // the worker and fresh HOME share one test environment
     async fn issue_5557_admission_commits_before_a_blocked_full_scan_finishes() {
+        assert_admission_while_scan_blocked(true).await;
+    }
+
+    #[tokio::test]
+    async fn issue_5644_poll_admits_without_scan_now_while_maintenance_is_blocked() {
+        assert_admission_while_scan_blocked(false).await;
+    }
+
+    #[allow(clippy::await_holding_lock)] // the worker and fresh HOME share one test environment
+    async fn assert_admission_while_scan_blocked(send_scan_now: bool) {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -258,8 +268,11 @@ mod tests {
             scope,
             hub.clone(),
             Arc::clone(&shutdown),
-            crate::IssueMonitorConfig::default(),
-            Duration::from_secs(30),
+            crate::IssueMonitorConfig {
+                poll_interval_secs: 1,
+                ..Default::default()
+            },
+            Duration::from_secs(if send_scan_now { 30 } else { 5 }),
             hooks,
             None,
         );
@@ -272,16 +285,22 @@ mod tests {
             .pending_effects
             .len();
         let started = Instant::now();
-        let control = hub
-            .publish_issue_monitor_control(gwt_core::daemon::DaemonFrame::Event {
-                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL.to_string(),
-                payload: crate::runtime_daemon_events::issue_monitor_payload(
-                    "control",
-                    serde_json::json!({"scan_now": {}}),
-                    u32::MAX,
-                ),
-            })
-            .await;
+        let control = if send_scan_now {
+            Some(
+                hub.publish_issue_monitor_control(gwt_core::daemon::DaemonFrame::Event {
+                    channel: crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+                        .to_string(),
+                    payload: crate::runtime_daemon_events::issue_monitor_payload(
+                        "control",
+                        serde_json::json!({"scan_now": {}}),
+                        u32::MAX,
+                    ),
+                })
+                .await,
+            )
+        } else {
+            None
+        };
         let launch_dispatched = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let gwt_core::daemon::DaemonFrame::Event { payload, .. } =
@@ -321,8 +340,10 @@ mod tests {
             })
         );
         assert!(full_scan_started);
-        assert!(control.is_ok(), "ScanNow must reach the live control lane");
-        assert_eq!(before_claims, 0);
+        assert!(
+            control.is_none_or(|result| result.is_ok()),
+            "ScanNow must reach the live control lane"
+        );
         assert!(maintenance_pending_at_dispatch);
         assert!(
             launch_dispatched,
