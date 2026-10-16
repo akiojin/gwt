@@ -90,19 +90,22 @@ fn main() {
     while !home.join(format!("ready-{session}")).exists() {
         std::thread::sleep(Duration::from_millis(100));
     }
-    let mut child = Command::new(std::env::var_os("GWT_BIN_PATH").unwrap())
-        .args(["hook", "event", "SessionStart"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(serde_json::json!({"session_id":session,"hook_event_name":"SessionStart","source":"startup","cwd":std::env::current_dir().unwrap()}).to_string().as_bytes()).unwrap();
-    let output = child.wait_with_output().unwrap();
+    let mut success = true;
+    for event in ["SessionStart", "UserPromptSubmit"] {
+        let mut child = Command::new(std::env::var_os("GWT_BIN_PATH").unwrap())
+            .args(["hook", "event", event])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(serde_json::json!({"session_id":session,"hook_event_name":event,"source":"startup","cwd":std::env::current_dir().unwrap(),"prompt":args.last().unwrap()}).to_string().as_bytes()).unwrap();
+        success &= child.wait_with_output().unwrap().status.success();
+    }
     // Hook output may contain launch-scoped credentials; retain success only.
     std::fs::write(
         home.join(format!("hook-{session}.json")),
-        serde_json::json!({"success":output.status.success()}).to_string(),
+        serde_json::json!({"success":success}).to_string(),
     )
     .unwrap();
     println!("FIXTURE_SESSION_START_COMPLETE {session}");

@@ -38,15 +38,12 @@ fn set_worktree_launch_path(
     env_vars.insert("GWT_PROJECT_ROOT".to_string(), path.display().to_string());
 }
 
-fn launch_worktree_materialization_lock_path(main_repo_path: &Path, branch_name: &str) -> PathBuf {
+fn launch_worktree_materialization_lock_path(main_repo_path: &Path) -> PathBuf {
     let repo_hash = gwt_core::repo_hash::compute_path_hash(main_repo_path);
-    let branch_digest = format!(
-        "{:x}",
-        <sha2::Sha256 as sha2::Digest>::digest(branch_name.as_bytes())
-    );
+    // Worktrees on distinct branches also update the repository's Git config.
     gwt_core::paths::gwt_home()
         .join("locks/launch-worktree-materialization")
-        .join(format!("{repo_hash}-{}.lock", &branch_digest[..16]))
+        .join(format!("{repo_hash}.lock"))
 }
 
 /// Causal test boundary: reports each lock path a resolver found contended,
@@ -80,7 +77,7 @@ fn with_launch_worktree_materialization_lock<T>(
     branch_name: &str,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let lock_path = launch_worktree_materialization_lock_path(main_repo_path, branch_name);
+    let lock_path = launch_worktree_materialization_lock_path(main_repo_path);
     let lock_dir = lock_path.parent().ok_or_else(|| {
         format!(
             "launch materialization lock has no parent: {}",
@@ -1443,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_worktree_materialization_waits_for_same_branch_lock() {
+    fn launch_worktree_materialization_waits_for_the_shared_repository_lock() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = init_launch_test_repo(temp.path());
@@ -1462,13 +1459,10 @@ mod tests {
 
         let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main repo");
         let repo_hash = gwt_core::repo_hash::compute_path_hash(&main_repo);
-        let branch_digest = format!(
-            "{:x}",
-            <sha2::Sha256 as sha2::Digest>::digest(branch.as_bytes())
-        );
         let lock_dir = gwt_core::paths::gwt_home().join("locks/launch-worktree-materialization");
         fs::create_dir_all(&lock_dir).expect("lock dir");
-        let lock_path = lock_dir.join(format!("{repo_hash}-{}.lock", &branch_digest[..16]));
+        // Distinct Issue branches also write the repository's shared config.
+        let lock_path = lock_dir.join(format!("{repo_hash}.lock"));
         let lock = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -1507,7 +1501,7 @@ mod tests {
                 break;
             }
             if let Ok(outcome) = rx.try_recv() {
-                panic!("resolver ignored the same-branch materialization lock: {outcome:?}");
+                panic!("resolver ignored the shared repository materialization lock: {outcome:?}");
             }
             assert!(
                 std::time::Instant::now() < guard_expiry,

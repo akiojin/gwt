@@ -117,22 +117,24 @@ try {
   $environment.PATH = "$checkHome/bin;$($environment.PATH)"
   $environment.GWT_TEST_GH = "$checkHome/bin/gh.exe"
   $environment.GWT_TEST_GH_SANDBOX = '1'
-  $issues = @(1..12 | ForEach-Object { @{number=(559600+$_);title="Offline launch fixture $_";state='OPEN';body="## Acceptance Criteria`n- [ ] AC-1: Record local provider handoff.";labels=@();comments=@();updatedAt='2026-10-16T00:00:00Z';url="https://github.com/fixture/launch-perf/issues/$(559600+$_)"} })
+  $issues = @(1..12 | ForEach-Object { @{number=(559600+$_);title="Offline launch fixture $_";state='OPEN';body="## Acceptance Criteria`n- [ ] AC-1: Record local provider handoff.";labels=@(@{name='gwt-queued'});comments=@();updatedAt='2026-10-16T00:00:00Z';url="https://github.com/fixture/launch-perf/issues/$(559600+$_)"} })
   [IO.File]::WriteAllText("$checkHome/github-issues.json", ($issues | ConvertTo-Json -Depth 5 -AsArray))
   # Read-only loopback owner API. Every unsupported/mutating request fails locally.
   $serverSource = @'
 const fs=require('node:fs'),http=require('node:http'),path=require('node:path');
-const home=process.argv[2], issues=JSON.parse(fs.readFileSync(path.join(home,'github-issues.json'),'utf8'));
+const home=process.argv[2];
 const connection=nodes=>({nodes,totalCount:nodes.length,pageInfo:{hasNextPage:false,endCursor:null}});
 const server=http.createServer(async(req,res)=>{try{
  let text='';for await(const chunk of req)text+=chunk;const input=text?JSON.parse(text):{};
+ const issues=JSON.parse(fs.readFileSync(path.join(home,'github-issues.json'),'utf8'));
  fs.appendFileSync(path.join(home,'github-requests.jsonl'),JSON.stringify({method:req.method,url:req.url})+'\n');
  if(req.method!=='GET'&&!(req.method==='POST'&&req.url==='/graphql'&&!/\bmutation\b/.test(input.query||'')))throw Error('mutations forbidden');
- const graph=i=>i&&({...i,labels:connection(i.labels),comments:connection([]),timelineItems:connection([])});
+ const graph=i=>i&&({...i,labels:connection(i.labels),comments:connection(i.comments),timelineItems:connection([])});
  let result;
  if(req.url==='/graphql')result={data:{repository:{issue:graph(issues.find(i=>i.number===Number(input.variables?.number))),issues:connection(issues.map(graph))},rateLimit:{remaining:5000,resetAt:'2099-01-01T00:00:00Z',cost:1}}};
  else if(/^\/repos\/fixture\/launch-perf\/issues\/\d+(?:\?.*)?$/.test(req.url)){const i=issues.find(i=>i.number===Number(req.url.match(/issues\/(\d+)/)[1]));result={...i,state:'open',html_url:i.url,updated_at:i.updatedAt};}
- else if(/\/(comments|pulls|commits)(?:\?|$)/.test(req.url))result=[];
+ else if(/\/issues\/\d+\/comments(?:\?|$)/.test(req.url))result=issues.find(i=>i.number===Number(req.url.match(/issues\/(\d+)/)[1]))?.comments||[];
+ else if(/\/(pulls|commits)(?:\?|$)/.test(req.url))result=[];
  else if(/^\/repos\/fixture\/launch-perf\/issues(?:\?|$)/.test(req.url))result=issues;
  else throw Error('unsupported read endpoint');
  res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(result));
@@ -156,10 +158,6 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $state = "$checkHome/.gwt/projects/$key/project-state"
   [void](New-Item -ItemType Directory -Path $state -Force)
   [IO.File]::WriteAllText("$state/pm.json", '{"settings":{"auto_start":false}}')
-  $deliveries = @($issues | ForEach-Object { @{delivery_id=[guid]::NewGuid().ToString();issue_number=$_.number;branch_name="work/issue-$($_.number)";linked_issue_kind='issue';claim_id=[guid]::NewGuid().ToString();claim_owner='fixture';launch_session_strategy='fresh_required';created_at=[DateTime]::UtcNow.ToString('o')} })
-  # Already-admitted delivery replay targets the measured completion handler;
-  # queue admission and upstream claim creation are outside this acceptance run.
-  [IO.File]::WriteAllText("$state/issue-monitor.json", (@{enabled=$true;autonomous_mode=$false;max_active_agents=12;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=$deliveries} | ConvertTo-Json -Depth 8))
   [IO.File]::WriteAllText("$checkHome/.gwt/session.json", (@{active_tab_id='launch-perf';tabs=@(@{id='launch-perf';title='Offline launch fixture';project_root=$project;kind='git'});recent_projects=@()} | ConvertTo-Json -Depth 6))
   [void](Invoke-IsolatedGwtd 'hook.register_codex_managed_project_trust' @{codex_config="$checkHome/.codex/config.toml";project_root=$project})
   $hookBin = ((Invoke-IsolatedGwtd 'hook.doctor').output | ConvertFrom-Json).managed_hook_bin
@@ -170,19 +168,36 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   [void](Invoke-IsolatedGwtd 'hook.register_codex_managed_hook_trust' @{codex_config="$checkHome/.codex/config.toml";codex_hook_discovery='both';project_root=$project})
   $health = Assert-Hooks (Invoke-IsolatedGwtd 'hook.health' $hookParams)
   [IO.File]::WriteAllText("$EvidenceDirectory/hook-audit.json", ($health | ConvertTo-Json -Depth 6))
+  # Hook convergence can take a minute. Start the existing 120-second delivery
+  # deadline only when the GUI can consume this already-admitted replay.
+  $deliveries = @($issues | ForEach-Object { @{delivery_id=[guid]::NewGuid().ToString();issue_number=$_.number;branch_name="work/issue-$($_.number)";linked_issue_kind='issue';claim_id=[guid]::NewGuid().ToString();claim_owner='fixture';launch_session_strategy='fresh_required';created_at=[DateTime]::UtcNow.ToString('o')} })
+  # Keep the replay's already-confirmed claims visible to ordinary background
+  # reconciliation. Empty comments would describe lost upstream ownership.
+  foreach ($delivery in $deliveries) {
+    $claim = @{claim_id=$delivery.claim_id;owner=$delivery.claim_owner;issue_number=$delivery.issue_number;status='active';heartbeat_at='2099-01-01T00:00:00Z';expires_at='2099-01-01T01:00:00Z'} | ConvertTo-Json -Compress
+    ($issues | Where-Object number -EQ $delivery.issue_number).comments = @(@{id="IC_fixture_$($delivery.issue_number)";databaseId=$delivery.issue_number;body="<!-- gwt-auto-improve-claim v1 -->`n$claim`n<!-- /gwt-auto-improve-claim -->";createdAt='2026-10-16T00:00:00Z';updatedAt='2026-10-16T00:00:00Z';author=@{login='fixture'}})
+  }
+  [IO.File]::WriteAllText("$checkHome/github-issues.json", ($issues | ConvertTo-Json -Depth 8 -AsArray))
+  # Queue admission and upstream claim creation are outside this acceptance run.
+  [IO.File]::WriteAllText("$state/issue-monitor.json", (@{enabled=$true;autonomous_mode=$false;max_active_agents=12;max_active_agents_mode='manual';priority_order=@();terminal_queue_auto_refill=$false;auto_apply_updates=$false;launch_auto=$false;launch_profile=@{agent_id='codex';runtime_target='Host';skip_permissions=$true};pending_launch_deliveries=$deliveries} | ConvertTo-Json -Depth 8))
   $start = New-OwnedProcess $gwt @('--no-tray','--no-open')
+  # Runtime authority must use this checkout too. Keep GWT_HOOK_BIN pinned to
+  # the stable public hook fallback audited above.
+  $start.Environment['GWT_BIN_PATH'] = $gwtd
   $start.Environment['GWT_BROWSER_URL_FILE'] = "$checkHome/url"
   $gui = [Diagnostics.Process]::Start($start)
   $streams.guiOut = $gui.StandardOutput.ReadToEndAsync()
   $streams.guiErr = $gui.StandardError.ReadToEndAsync()
   $sourceRevision = (& $realGit -C $repoRoot rev-parse HEAD).Trim()
-  $sourceSnapshot = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/perf/dispatch.rs',
+  $sourceSnapshot = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt-config/src/home.rs','crates/gwt/src/perf/dispatch.rs',
     'scripts/verify-issue-5596.ps1','crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts','crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs') | ForEach-Object {
     $fromCommit = $Phase -eq 'baseline' -and $_.StartsWith('crates/gwt/src/')
     $blobSha = if ($fromCommit) { (& $realGit -C $repoRoot rev-parse "${sourceRevision}:$_").Trim() } else { (& $realGit -C $repoRoot hash-object -- $_).Trim() }
     @{path=$_;blob_sha=$blobSha;source= $(if ($fromCommit) { $sourceRevision } else { 'working-tree' })}
   }
   $fixture = @{phase=$Phase;gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');checkout_binary=$gwt;binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;binary_modified_at=(Get-Item -LiteralPath $gwt).LastWriteTimeUtc.ToString('o');source_snapshot=@($sourceSnapshot);checkout=$repoRoot;checkout_sha=(& $realGit -C $repoRoot rev-parse HEAD).Trim();isolated_home=$checkHome;project=$project;project_key=$key;issues=@($issues.number);evidence_directory=$EvidenceDirectory}
+  $fixture.checkout_daemon = $gwtd
+  $fixture.daemon_sha256 = (Get-FileHash -LiteralPath $gwtd -Algorithm SHA256).Hash
   [IO.File]::WriteAllText("$checkHome/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
   [IO.File]::WriteAllText("$EvidenceDirectory/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
   Write-Output "Owned checkout PID: $($gui.Id); retained evidence: $EvidenceDirectory; isolated HOME: $checkHome"

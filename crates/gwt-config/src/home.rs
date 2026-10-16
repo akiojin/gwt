@@ -25,7 +25,7 @@ pub fn user_home() -> Option<PathBuf> {
     let home = resolve_config_home_dir(
         std::env::var_os("HOME"),
         std::env::var_os("USERPROFILE"),
-        dirs::home_dir(),
+        dirs::home_dir,
     );
     if is_test_process() {
         if let Some(home) = &home {
@@ -50,12 +50,12 @@ pub fn user_home() -> Option<PathBuf> {
 pub(crate) fn resolve_config_home_dir(
     home: Option<OsString>,
     userprofile: Option<OsString>,
-    fallback: Option<PathBuf>,
+    fallback: impl FnOnce() -> Option<PathBuf>,
 ) -> Option<PathBuf> {
     home.filter(|value| !value.is_empty())
         .or_else(|| userprofile.filter(|value| !value.is_empty()))
         .map(PathBuf::from)
-        .or(fallback)
+        .or_else(fallback)
 }
 
 fn is_test_process() -> bool {
@@ -271,6 +271,22 @@ impl Drop for ScopedGwtHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_home_does_not_query_the_os_fallback() {
+        assert_eq!(
+            resolve_config_home_dir(Some("home-env".into()), None, || {
+                panic!("HOME must not query the OS fallback")
+            }),
+            Some(PathBuf::from("home-env"))
+        );
+        assert_eq!(
+            resolve_config_home_dir(Some("".into()), Some("userprofile-env".into()), || {
+                panic!("USERPROFILE must not query the OS fallback")
+            }),
+            Some(PathBuf::from("userprofile-env"))
+        );
+    }
 
     #[cfg(unix)]
     #[test]

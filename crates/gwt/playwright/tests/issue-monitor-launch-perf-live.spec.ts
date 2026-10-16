@@ -27,8 +27,8 @@ test('Issue #5596: twelve admitted launches keep completion handlers within budg
     await expect.poll(async () => {
       const providers = await launches();
       // Startup admission can wait for a provider handshake before opening
-      // another PTY. Release each recorder as it appears, while the twelve
-      // admitted deliveries are still being materialized concurrently.
+      // another PTY. Release each recorder as the twelve admitted requests
+      // drain through their per-project materialization lane.
       await Promise.all(providers.map(provider => writeFile(join(HOME, `ready-${provider.session_id}`), 'start\n')));
       return providers.length;
     }, {
