@@ -797,11 +797,11 @@ same profile to try again.
 ### Closing an inactive Work
 
 Use `workspace.close {work_id, close_kind}` for a specific inactive Work.
-`work_id` is required; `close_kind` is `done` or `discarded`. This uses
+`work_id` is required; for normal closes, `close_kind` is `done` or `discarded`. This uses
 normal registered-PM authority, without a scoped approval. Only the live
 registered PM may call it through the authenticated Host route.
 
-The Host requires that the exact child Work's `manual_close_allowed` is `true`
+For normal closes, the Host requires that the exact child Work's `manual_close_allowed` is `true`
 and there are zero active agents for that Work, then rechecks the current
 runtime before recording the close. Unavailable, refreshing, stale, unknown,
 or foreign target state refuses the close. Follow a retryable reply's refresh
@@ -810,6 +810,18 @@ successful close or bypass it by editing Work state or closing its pane.
 
 A successful close records terminal Work history and retains its branch and worktree.
 Git and build-cache cleanup remain separate operations with their own gates.
+
+For an invalid deterministic successor occupying a fresh launch's slot, use
+`workspace.close {work_id: "<occupied-work-id>", close_kind: "superseded"}`.
+This explicit repair also handles an already terminal invalid successor; it
+does not use the normal `manual_close_allowed` cache gate. The live registered
+PM is still required. The Host proves the exact terminal predecessor, canonical
+owner branch and local checkout, and rechecks every member's runtime. Foreign
+ownership or lineage, a live writer, or unprovable runtime state refuses repair.
+Success appends a supersession audit and preserves the original events and completion time,
+branch and worktree. It never reopens the occupied Work or attaches a new Session
+to it. After a successful supersession, call `issue.monitor.requeue` with the
+owning Issue number; the next fresh launch creates a new successor Work.
 
 ### Fallback cleanup of windows the runtime failed to close
 
@@ -3615,6 +3627,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Update the existing owner's FR/AC",
             "`owner_check`",
             "one to three lines",
+            "invalid deterministic successor",
+            "`workspace.close {work_id: \"<occupied-work-id>\", close_kind: \"superseded\"}`",
+            "preserves the original events and completion time",
+            "After a successful supersession, call `issue.monitor.requeue`",
         ] {
             assert!(
                 intake.contains(phrase),

@@ -3,7 +3,7 @@ use std::path::Path;
 use gwt::cli::execution_state as execution;
 use gwt_core::workspace_projection::{
     canonical_work_id, load_workspace_projection, load_workspace_work_items,
-    record_workspace_work_event, save_workspace_projection,
+    record_workspace_work_event, save_workspace_projection, successor_work_id,
     transact_workspace_close_state_for_work_event_root, WorkEvent, WorkEventKind,
     WorkspaceExecutionContainerRef, WorkspaceProjection,
 };
@@ -83,6 +83,22 @@ fn main() {
                 ))
             })
             .unwrap();
+            // Issue #5288: a stale Active successor can retain its owner and
+            // container while losing its explicit predecessor link.
+            let mut invalid = WorkEvent::new(
+                WorkEventKind::Start,
+                successor_work_id(&work_id),
+                record.settled_at.unwrap(),
+            );
+            invalid.owner = Some(format!("Issue #{}", owner.number));
+            invalid.execution_container = Some(WorkspaceExecutionContainerRef {
+                branch: Some(format!("work/issue-{}", owner.number)),
+                worktree_path: Some(worktree.to_path_buf()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            });
+            record_workspace_work_event(worktree, invalid).unwrap();
         }
         "inspect" => {}
         _ => panic!("unknown fixture action"),
