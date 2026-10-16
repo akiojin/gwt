@@ -1,0 +1,1 @@
+{"passed":false,"reason":"Empty forwarded argument selected 642 Playwright cases instead of 2. Owned runner stopped before memory observation; fixture finally confirmed owned GUI cleanup.","fixed_in":"Both PowerShell wrappers now filter empty forwarded arguments; restarted command selects exactly 2 cases."}

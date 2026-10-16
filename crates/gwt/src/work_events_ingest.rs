@@ -157,7 +157,7 @@ struct PendingWorkEventsSource {
     key: String,
     fingerprint: String,
     content: Arc<str>,
-    container: Option<WorkspaceExecutionContainerRef>,
+    container: Option<Arc<WorkspaceExecutionContainerRef>>,
     reload_from_worktree: bool,
 }
 
@@ -371,7 +371,7 @@ fn load_pending_sources_for_rebuild(
         if source.reload_from_worktree {
             continue;
         }
-        contents.push(SharedWorkEventsSource::new(
+        contents.push(SharedWorkEventsSource::with_shared_container(
             Arc::clone(&source.content),
             source.container.clone(),
         ));
@@ -406,7 +406,7 @@ fn load_pending_sources_for_rebuild(
             // The scan took metadata before this content read: a write racing
             // the read leaves the older fingerprint behind, so the next pass
             // reads the source again.
-            let fingerprint = source_fingerprint(&source.metadata, source.container.as_ref());
+            let fingerprint = source_fingerprint(&source.metadata, source.container.as_deref());
             let key = source.key();
             let content = match prelock_reads.get(key.as_str()) {
                 Some(prelock) if prelock.fingerprint == fingerprint => Arc::clone(&prelock.content),
@@ -417,7 +417,10 @@ fn load_pending_sources_for_rebuild(
                 )?,
             };
             fingerprints.push((key, fingerprint));
-            contents.push(SharedWorkEventsSource::new(content, source.container));
+            contents.push(SharedWorkEventsSource::with_shared_container(
+                content,
+                source.container,
+            ));
         }
     }
     Ok((contents, fingerprints))
@@ -671,7 +674,7 @@ where
             group.name,
             ScannedGroup {
                 snapshot: group.snapshot,
-                discovered,
+                discovered: SourceSetFingerprint::capture(&discovered),
             },
         );
     }
@@ -734,6 +737,7 @@ where
                     rebuild_required = true;
                     if batch.len() < ref_scans.len() {
                         // The unchanged refs' payloads are needed as well.
+                        drop(result.take());
                         batch = ref_scans.iter().collect();
                         result = Some(read_ref_batch(project_root, &batch, &mut store, true));
                     }
@@ -763,10 +767,10 @@ where
                     for ((scan, blobs), discovered) in
                         batch.iter().zip(blobs_by_ref).zip(discovered_by_ref)
                     {
-                        summary.sources_rederived += discovered.len();
+                        summary.sources_rederived += discovered.count;
                         discovered_groups.insert(
                             scan.group.clone(),
-                            (scan.snapshot.clone(), !discovered.is_empty()),
+                            (scan.snapshot.clone(), discovered.count > 0),
                         );
                         for blob in blobs {
                             if is_work_event_writer_temp_residue(Path::new(&blob.path)) {
@@ -781,9 +785,8 @@ where
                                 }
                             };
                             let key = format!("{SOURCE_REF}{}:{}", scan.refname, blob.path);
-                            let Some(fingerprint) = discovered.get(&key).cloned() else {
-                                continue;
-                            };
+                            let fingerprint =
+                                source_fingerprint_in_context(&blob.oid, &scan.context);
                             let bytes = match blob.content {
                                 Some(bytes) if rebuild_required || new_keys.contains(&key) => bytes,
                                 _ => {
@@ -935,12 +938,6 @@ where
     }
 
     before_intake();
-    let shared_sources = pending_sources
-        .iter()
-        .map(|source| {
-            SharedWorkEventsSource::new(Arc::clone(&source.content), source.container.clone())
-        })
-        .collect::<Vec<_>>();
     let intake = if rebuild_required {
         rebuild_work_events_with_shared_loader(
             work_items_path,
@@ -981,6 +978,9 @@ where
                         }
                     }
                 }
+                // The authoritative re-scan and recovery checks are complete.
+                // Release the discovery generation before decode/fold begins.
+                drop(std::mem::take(&mut pending_sources));
                 Ok(loaded)
             },
             close_path.as_deref(),
@@ -989,6 +989,15 @@ where
         // A close writer can append successfully and fail to save Works while
         // this pass prepares shared events. Include lifecycle truth and its CAS
         // guard even when discovery considered its fingerprint current.
+        let shared_sources = pending_sources
+            .iter()
+            .map(|source| {
+                SharedWorkEventsSource::with_shared_container(
+                    Arc::clone(&source.content),
+                    source.container.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
         ingest_work_event_sources_with_local_path(
             work_items_path,
             shared_sources,
@@ -1005,6 +1014,7 @@ where
             )
         })
     };
+    drop(pending_sources);
     phases.mark("intake");
     match intake {
         Ok((report, shared_fingerprints, local_fingerprint)) => {
@@ -1054,8 +1064,36 @@ where
 /// One group this pass derived source by source.
 struct ScannedGroup {
     snapshot: String,
-    /// Source key → fingerprint, exactly as this scan discovered them.
-    discovered: BTreeMap<String, String>,
+    discovered: SourceSetFingerprint,
+}
+
+/// The final snapshot check needs identity, not another owned copy of every
+/// source path. BTreeMap order and length prefixes make this content signature
+/// deterministic and unambiguous while keeping each scanned group fixed-size.
+#[derive(Debug, PartialEq, Eq)]
+struct SourceSetFingerprint {
+    count: usize,
+    digest: [u8; 32],
+}
+
+impl SourceSetFingerprint {
+    fn capture(sources: &BTreeMap<String, String>) -> Self {
+        let mut hasher = Sha256::new();
+        for (key, fingerprint) in sources {
+            for field in [key, fingerprint] {
+                hasher.update((field.len() as u64).to_le_bytes());
+                hasher.update(field.as_bytes());
+            }
+        }
+        Self {
+            count: sources.len(),
+            digest: hasher.finalize().into(),
+        }
+    }
+
+    fn matches(&self, sources: &BTreeMap<String, String>) -> bool {
+        self.count == sources.len() && *self == Self::capture(sources)
+    }
 }
 
 /// The fingerprints `discovered` adds to `group`, or `None` when a source
@@ -1066,20 +1104,23 @@ fn group_additions<'a>(
     group: &str,
     discovered: &'a BTreeMap<String, String>,
 ) -> Option<Vec<&'a str>> {
-    let previous = store.group_sources(group)?;
-    if previous
-        .iter()
-        .any(|(key, fingerprint)| discovered.get(key) != Some(fingerprint))
-    {
-        return None;
-    }
-    Some(
-        discovered
-            .keys()
-            .filter(|key| !previous.contains_key(*key))
-            .map(String::as_str)
-            .collect(),
-    )
+    let additions = store.group_sources(group).and_then(|previous| {
+        if previous
+            .iter()
+            .any(|(key, fingerprint)| discovered.get(key) != Some(fingerprint))
+        {
+            return None;
+        }
+        Some(
+            discovered
+                .keys()
+                .filter(|key| !previous.contains_key(*key))
+                .map(String::as_str)
+                .collect(),
+        )
+    });
+    store.evict_clean_group_sources(group);
+    additions
 }
 
 /// After an incremental pass: add what was ingested to each derived group.
@@ -1098,24 +1139,37 @@ fn record_scanned_groups(
             .push(source);
     }
     for (group, scanned) in scanned_groups {
-        let Some(previous) = store.group_sources(group).cloned() else {
+        let Some(previous) = store.group_sources(group) else {
             continue;
         };
-        let mut sources = previous.clone();
-        for (key, fingerprint) in ingested_by_group.remove(group.as_str()).unwrap_or_default() {
-            sources.insert(key.clone(), fingerprint.clone());
+        let additions = ingested_by_group.remove(group.as_str()).unwrap_or_default();
+        // A metadata-only verification borrows the held group. An actual
+        // addition needs one owned replacement, never two full-map clones.
+        let mut updated = (!additions.is_empty()).then(|| previous.clone());
+        if let Some(sources) = updated.as_mut() {
+            for (key, fingerprint) in additions {
+                sources.insert(key.clone(), fingerprint.clone());
+            }
         }
-        let snapshot = (sources == scanned.discovered).then(|| scanned.snapshot.clone());
-        if store.group(group).is_none() && sources.is_empty() && snapshot.is_none() {
+        let sources = updated.as_ref().unwrap_or(previous);
+        let empty = sources.is_empty();
+        let changed = sources != previous;
+        let snapshot = scanned
+            .discovered
+            .matches(sources)
+            .then(|| scanned.snapshot.clone());
+        if store.group(group).is_none() && empty && snapshot.is_none() {
             // Nothing held and nothing verified: there is no information to
             // record, and a pass that failed to read must not mutate state.
+            store.evict_clean_group_sources(group);
             continue;
         }
-        if store.group(group).is_none() || sources != previous {
-            store.set_group(group, snapshot, sources);
+        if store.group(group).is_none() || changed {
+            store.set_group(group, snapshot, updated.unwrap_or_default());
         } else {
             store.set_group_snapshot(group, snapshot);
         }
+        store.evict_clean_group_sources(group);
     }
 }
 
@@ -1138,7 +1192,7 @@ fn record_rebuilt_groups(
     for (name, sources) in groups {
         let snapshot = scanned_groups
             .get(&name)
-            .filter(|scanned| scanned.discovered == sources)
+            .filter(|scanned| scanned.discovered.matches(&sources))
             .map(|scanned| scanned.snapshot.clone());
         store.set_group(&name, snapshot, sources);
     }
@@ -1158,15 +1212,15 @@ struct RefScan {
     refname: String,
     commit: String,
     group: String,
-    container: Option<WorkspaceExecutionContainerRef>,
+    container: Option<Arc<WorkspaceExecutionContainerRef>>,
     context: String,
     snapshot: String,
 }
 
 impl RefScan {
     fn new(refname: &str, commit: &str) -> Self {
-        let container = origin_ref_execution_container(refname);
-        let context = container_context(container.as_ref());
+        let container = origin_ref_execution_container(refname).map(Arc::new);
+        let context = container_context(container.as_deref());
         // A commit pins its whole tree, so an unchanged commit is an
         // unchanged set of event sources.
         let snapshot = group_snapshot("ref-commit-v1", &context, [("commit", commit)]);
@@ -1183,8 +1237,8 @@ impl RefScan {
 
 struct RefBatch {
     blobs_by_ref: Vec<Vec<gwt_git::blob::WorkEventBlob>>,
-    /// Per batched ref: source key → fingerprint.
-    discovered: Vec<BTreeMap<String, String>>,
+    /// Per batched ref: identity of its sources, without retaining their paths.
+    discovered: Vec<SourceSetFingerprint>,
     /// Sources the store did not hold yet.
     new_keys: HashSet<String>,
     requires_rebuild: bool,
@@ -1241,7 +1295,7 @@ fn read_ref_batch(
                         None => requires_rebuild = true,
                     }
                 }
-                discovered.push(sources);
+                discovered.push(SourceSetFingerprint::capture(&sources));
             }
             if select_all || requires_rebuild {
                 all_oids
@@ -1276,7 +1330,7 @@ fn local_group_scans(sources: Vec<WorkEventsSource>) -> Vec<LocalGroupScan> {
             .entry(name.clone())
             .or_insert_with(|| LocalGroupScan {
                 name,
-                context: container_context(source.container.as_ref()),
+                context: container_context(source.container.as_deref()),
                 snapshot: String::new(),
                 sources: Vec::new(),
             });
@@ -1337,16 +1391,15 @@ fn worktree_event_sources(
 ) -> gwt_core::Result<Vec<WorkEventsSource>> {
     let mut sources = Vec::new();
     for entry in entries {
-        let container = entry
-            .branch
-            .clone()
-            .map(|branch| WorkspaceExecutionContainerRef {
+        let container = entry.branch.clone().map(|branch| {
+            Arc::new(WorkspaceExecutionContainerRef {
                 branch: Some(branch),
                 worktree_path: Some(entry.path.clone()),
                 pr_number: None,
                 pr_url: None,
                 pr_state: None,
-            });
+            })
+        });
         let legacy_path = entry.path.join(EVENTS_TREE_PATH);
         match std::fs::symlink_metadata(&legacy_path) {
             Ok(metadata) => sources.push(WorkEventsSource {
@@ -1402,7 +1455,7 @@ fn worktree_event_sources(
 fn push_scanned_shard(
     sources: &mut Vec<WorkEventsSource>,
     entry: &std::fs::DirEntry,
-    container: Option<WorkspaceExecutionContainerRef>,
+    container: Option<Arc<WorkspaceExecutionContainerRef>>,
 ) -> gwt_core::Result<()> {
     let events_path = entry.path();
     let metadata = match entry.metadata() {
@@ -1450,7 +1503,7 @@ fn is_work_event_writer_temp_residue(path: &Path) -> bool {
 struct WorkEventsSource {
     events_path: PathBuf,
     kind: WorkEventsSourceKind,
-    container: Option<WorkspaceExecutionContainerRef>,
+    container: Option<Arc<WorkspaceExecutionContainerRef>>,
     /// Size/mtime identity from the scan (`immutable-metadata-v1:…`).
     metadata: String,
 }
@@ -1567,6 +1620,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scanned_source_fingerprints_do_not_retain_source_paths() {
+        let mut sources = (0..512)
+            .map(|index| {
+                (
+                    format!("worktree:/repo/.gwt/work/events/{index}.jsonl"),
+                    "fp".into(),
+                )
+            })
+            .collect::<BTreeMap<String, String>>();
+        let scanned = SourceSetFingerprint::capture(&sources);
+        assert!(
+            !std::mem::needs_drop::<SourceSetFingerprint>(),
+            "each scanned group must retain only fixed-size metadata"
+        );
+        assert!(scanned.matches(&sources));
+        sources.insert(
+            "worktree:/repo/.gwt/work/events/0.jsonl".into(),
+            "changed".into(),
+        );
+        assert!(!scanned.matches(&sources));
+        assert_ne!(
+            SourceSetFingerprint::capture(&BTreeMap::from([("a".into(), "bc".into())])),
+            SourceSetFingerprint::capture(&BTreeMap::from([("ab".into(), "c".into())])),
+            "field lengths must distinguish identical concatenated bytes"
+        );
+    }
+
+    #[test]
     fn project_ingest_coalesces_bursts_and_releases_failed_workers() {
         let queue = Arc::new(WorkEventsIngestQueue::default());
         let project = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
@@ -1640,6 +1721,27 @@ mod tests {
         assert_eq!(first.sources.len(), 1);
         drop(first);
         assert!(scans.next().expect("later scan").is_err());
+    }
+
+    #[test]
+    fn worktree_sources_share_one_container_allocation_per_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = gwt::worktree_inventory::WorktreeEntry {
+            id: "shared-group".into(),
+            kind: gwt::worktree_inventory::WorktreeEntryKind::Workspace,
+            path: temp.path().join("worktree"),
+            label: "shared-group".into(),
+            branch: Some("work/shared-group".into()),
+            is_active: false,
+        };
+        write_shard(&entry.path, "evt-shared-first", "work-shared-first");
+        write_shard(&entry.path, "evt-shared-second", "work-shared-second");
+        let sources = worktree_event_sources(&[entry]).unwrap();
+        assert_eq!(sources.len(), 2);
+        let first = sources[0].container.as_ref().unwrap();
+        let second = sources[1].container.as_ref().unwrap();
+        assert!(Arc::ptr_eq(first, second));
+        assert_eq!(first.branch.as_deref(), Some("work/shared-group"));
     }
 
     #[test]

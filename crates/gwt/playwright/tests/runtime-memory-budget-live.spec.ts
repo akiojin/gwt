@@ -1,5 +1,5 @@
 /** #5381: real PTY and Chromium workload, without contacting model providers.
- * This bounds GUI memory under eight deterministic output producers; provider
+ * This bounds GUI memory under deterministic output producers; provider
  * inference, provider hooks and real implementation builds are not simulated.
  */
 import { execFileSync } from "node:child_process";
@@ -16,22 +16,25 @@ const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME || "";
 const PID = Number(process.env.GWT_PLAYWRIGHT_MEMORY_PID);
 const BRANCH = process.env.GWT_PLAYWRIGHT_MEMORY_BRANCH || "";
 const REQUESTED_DURATION = Number(process.env.GWT_PLAYWRIGHT_MEMORY_SECONDS || "60");
-const BUDGET = 2 * 1024 ** 3;
+const BUDGET = Number(process.env.GWT_PLAYWRIGHT_MEMORY_BUDGET_BYTES || 2 * 1024 ** 3);
+const PANE_COUNT = Number(process.env.GWT_PLAYWRIGHT_MEMORY_PANES || "8");
 const AGENT = "runtime-memory-workload";
 type Receipt = { pid: number; started_at: number; session: string; tick: number; observed_at: string };
 type Sample = { timestamp: string; rss_bytes: number; private_bytes: number; cpu_seconds: number; elapsed_ms: number };
 type Surface = { page: Page; id: string };
 test.use({ headless: false });
 
-test.describe("Issue #5381 runtime memory budget (live backend)", () => {
+test.describe("runtime memory budget (live backend)", () => {
   test.skip(!BASE, "requires scripts/verify-runtime-memory-budget.ps1");
   test.setTimeout((REQUESTED_DURATION + 900) * 1000);
   test.use({ actionTimeout: 30_000, navigationTimeout: 60_000 });
 
-  test("eight deterministic Agent panes remain below 2 GiB", async ({ page }, info) => {
+  test(`${PANE_COUNT} deterministic Agent panes remain within the RSS budget`, async ({ page }, info) => {
     expect(process.platform).toBe("win32");
     expect(Number.isInteger(PID) && PID > 0, "owned GUI PID").toBe(true);
     expect(Number.isFinite(REQUESTED_DURATION) && REQUESTED_DURATION > 0).toBe(true);
+    expect(Number.isInteger(PANE_COUNT) && PANE_COUNT >= 1 && PANE_COUNT <= 12).toBe(true);
+    expect(Number.isFinite(BUDGET) && BUDGET > 0).toBe(true);
     expect(HOME).not.toBe("");
     expect(BRANCH).not.toBe("");
     const errors: string[] = [];
@@ -49,9 +52,9 @@ test.describe("Issue #5381 runtime memory budget (live backend)", () => {
     const startedAt = new Date().toISOString();
     let passed = false;
     try {
-      const projects: Array<{ path: string; project_key: string }> = JSON.parse(await readFile(join(HOME, "workload-projects.json"), "utf8"));
-      expect(projects).toHaveLength(8);
-      for (let index = 0; index < 8; index += 1) {
+      const projects: Array<{ path: string; project_key: string; branch: string }> = JSON.parse(await readFile(join(HOME, "workload-projects.json"), "utf8"));
+      expect(projects).toHaveLength(PANE_COUNT);
+      for (let index = 0; index < PANE_COUNT; index += 1) {
         const surfacePage = index === 0 ? page : await page.context().newPage();
         if (index > 0) {
           surfacePage.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -61,14 +64,16 @@ test.describe("Issue #5381 runtime memory budget (live backend)", () => {
         await clearLiveLaunchWizard(surfacePage);
         await surfacePage.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
         await expect(surfacePage.locator("html")).toHaveAttribute("data-theme", theme);
-        const id = await launch(surfacePage, []);
+        const id = await launch(surfacePage, projects[index].branch);
         panes.push(id);
         surfaces.push({ page: surfacePage, id });
-        await assertOutput([surfaces.at(-1)!]);
+        // A materialized pane can precede its cold host process. Use the
+        // launch wizard's startup budget here; steady observations stay short.
+        await assertOutput([surfaces.at(-1)!], 90_000);
         samples.push(sampleRss(0));
       }
       initial = await liveReceipts();
-      expect(initial, "eight real workload processes").toHaveLength(8);
+      expect(initial, "all real workload processes").toHaveLength(PANE_COUNT);
       await assertOutput(surfaces);
       observationStarted = Date.now();
       observationClock = performance.now();
@@ -76,7 +81,7 @@ test.describe("Issue #5381 runtime memory budget (live backend)", () => {
         samples.push(sampleRss(performance.now() - observationClock));
         expect(samples.at(-1)!.rss_bytes, "owned GUI RSS budget").toBeLessThanOrEqual(BUDGET);
         final = await liveReceipts();
-        expect(final.map(receipt => receipt.pid).sort(), "all eight producers survive")
+        expect(final.map(receipt => receipt.pid).sort(), "all producers survive")
           .toEqual(initial.map(receipt => receipt.pid).sort());
         await assertOutput(surfaces);
         expect(errors, "console and page errors").toEqual([]);
@@ -93,11 +98,13 @@ test.describe("Issue #5381 runtime memory budget (live backend)", () => {
         expect(surviving!.tick, `producer ${receipt.pid} keeps producing`).toBeGreaterThan(receipt.tick);
       }
       expect(errors).toEqual([]);
-      await info.attach(`workload-pane-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      const screenshot = await page.screenshot();
+      await writeFile(join(HOME, `runtime-memory-${theme}.png`), screenshot);
+      await info.attach(`workload-pane-${theme}`, { body: screenshot, contentType: "image/png" });
       passed = true;
     } finally {
       const evidence = {
-        issue: 5381, theme, passed, gui_pid: PID,
+        issue: Number(process.env.GWT_PLAYWRIGHT_MEMORY_ISSUE || "5381"), theme, passed, gui_pid: PID,
         checkout_sha: process.env.GWT_PLAYWRIGHT_MEMORY_SHA,
         checkout: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT,
         checkout_binary: join(process.env.GWT_PLAYWRIGHT_PROJECT_ROOT!, "target", "debug", "gwt.exe"),
@@ -106,8 +113,8 @@ test.describe("Issue #5381 runtime memory budget (live backend)", () => {
         isolated_home: HOME, started_at: startedAt, ended_at: new Date().toISOString(),
         observation_started_at: observationStarted ? new Date(observationStarted).toISOString() : null,
         requested_duration_seconds: duration, budget_bytes: BUDGET, pane_ids: panes,
-        workload: "8 custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls",
-        limitations: "Eight deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project (nine Projects total). This covers #5381's fixture RSS budget; the actual implementation/model fleet 60-minute observation belongs to #5385. Provider inference, hooks and builds are not covered.",
+        workload: `${PANE_COUNT} custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls`,
+        limitations: `${PANE_COUNT} deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project. Provider inference, provider hooks and implementation builds are not covered. This is not same-condition real model-agent fleet evidence.`,
         user_verification_result: "n/a (autonomous)", agent_visual_check: passed ? "pass" : "fail",
         initial_producers: initial, final_producers: final, rss_samples: samples, browser_errors: errors,
       };
@@ -149,11 +156,11 @@ async function liveReceipts(): Promise<Receipt[]> {
     && Math.abs(process.started_at - receipt.started_at) < 1000));
 }
 
-async function assertOutput(surfaces: Surface[]): Promise<void> {
+async function assertOutput(surfaces: Surface[], timeout = 30_000): Promise<void> {
   for (const { page, id } of surfaces) {
-    await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toBeAttached();
+    await expect(page.locator(`.agent-tile[data-agent-id="${id}"]`)).toBeAttached();
     await expect.poll(() => page.evaluate(id => String((window as any).__gwtTerminalTestApi?.bufferText?.(id) || ""), id),
-      { message: `PTY output from ${id}`, timeout: 30_000 }).toContain("GWT_MEMORY_TICK");
+      { message: `PTY output from ${id}`, timeout }).toContain("GWT_MEMORY_TICK");
   }
 }
 
@@ -178,14 +185,12 @@ async function wizardRequest(page: Page, detail: unknown, requireOpen = false): 
   }, { detail, requireOpen });
 }
 
-async function launch(page: Page, before: string[]): Promise<string> {
-  if (before.length === 0) {
-    await sendLiveGwtEvent(page, { kind: "create_window", preset: "work",
-      bounds: { x: 0, y: 0, width: 800, height: 500 } });
-  }
-  const workId = await page.locator('.workspace-window[data-preset="work"]').first().getAttribute("data-id");
-  expect(workId, "Work surface for existing checkout launch").toBeTruthy();
-  await wizardRequest(page, { kind: "open_launch_wizard", id: workId, branch_name: "" }, true);
+async function launch(page: Page, branch: string): Promise<string> {
+  const before: string[] = await page.evaluate(() => {
+    const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state");
+    return message?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows.map((pane: any) => pane.id)) || [];
+  });
+  await wizardRequest(page, { kind: "open_active_work_launch_wizard", branch_name: branch }, true);
   const action = (action: unknown) => wizardRequest(page, { kind: "launch_wizard_action", action,
     bounds: { x: 40, y: 40, width: 650, height: 360 } });
   await action({ kind: "set_launch_path", path: "manual_setup" });
@@ -206,5 +211,6 @@ async function launch(page: Page, before: string[]): Promise<string> {
       .find((pane: any) => !before.includes(pane.id) && pane.agent_id === agent);
   }, { before, agent: AGENT }, { timeout: 90_000 }).then(handle => handle.jsonValue());
   expect(pane.status, "new Agent pane launch status").not.toBe("error");
+  await page.locator('.op-rail__surface[data-surface="agents"]').click();
   return pane.id;
 }

@@ -1,10 +1,12 @@
-# #5381: owned Windows checkout, fresh HOME, eight deterministic real Agent PTYs.
+# #5381/#5561: owned Windows checkout, fresh HOME, deterministic Agent PTYs.
 # Build first: cargo build -p gwt --bin gwt --bin gwtd
 # Set GWT_PLAYWRIGHT_MEMORY_SECONDS=600 for the GUI regression budget observation.
+# GWT_PLAYWRIGHT_MEMORY_PANES defaults to 8 and accepts up to 12.
 # The actual agent fleet one-hour observation belongs to #5385.
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$PlaywrightArgs = @($PlaywrightArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 if (-not $IsWindows) { throw 'This fixture requires Windows and PowerShell 7.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $checkoutGwt = Join-Path $repoRoot 'target/debug/gwt.exe'
@@ -13,12 +15,17 @@ foreach ($binary in @($checkoutGwt, $checkoutGwtd)) {
   if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Build this checkout gwt/gwtd first.' }
 }
 $node = (Get-Command node -CommandType Application).Source
+$paneCount = if ($env:GWT_PLAYWRIGHT_MEMORY_PANES) { [int]$env:GWT_PLAYWRIGHT_MEMORY_PANES } else { 8 }
+if ($paneCount -lt 1 -or $paneCount -gt 12) { throw 'Memory workload requires 1 through 12 panes.' }
 # verify.run gives each command a disposable TEMP. Keep owned evidence and
 # the pinned shared dependency cache outside that disposable command folder.
 $artifactRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Temp'
 $checkHome = Join-Path $artifactRoot ('gwt-runtime-memory-' + [guid]::NewGuid())
 foreach ($relative in @('.gwt', '.codex', 'workload', 'tmp')) {
   [void](New-Item -ItemType Directory -Path (Join-Path $checkHome $relative) -Force)
+}
+if ($env:GWT_PLAYWRIGHT_MEMORY_RECEIPT) {
+  [IO.File]::WriteAllText($env:GWT_PLAYWRIGHT_MEMORY_RECEIPT, $checkHome)
 }
 [IO.File]::WriteAllText("$checkHome/.codex/config.toml", '')
 $realRuntime = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.gwt/runtime'
@@ -123,13 +130,16 @@ $state = "$checkHome/.gwt/projects/$repoHash/project-state"
 [IO.File]::WriteAllText("$state/issue-monitor.json", '{"enabled":false,"max_active_agents":1,"priority_order":[]}')
 $tabs = @(@{id='memory-source';title='Checkout source history';project_root=$repoRoot;kind='git'})
 $workloadProjects = @()
-for ($index = 0; $index -lt 8; $index++) {
+for ($index = 0; $index -lt $paneCount; $index++) {
   $folder = Join-Path $checkHome "workload/project-$index"
   [void](New-Item -ItemType Directory -Path $folder -Force)
-  # Managed Agent assets require Git's local exclude file even for folder
-  # Projects. Initialize metadata only: no commit, ref or worktree is created.
+  # The Add Agent route requires Git. These disposable fixture repositories
+  # are separate from the source checkout and never change its refs.
   & git -C $folder init --quiet
   if ($LASTEXITCODE -ne 0) { throw 'Isolated workload Git metadata initialization failed.' }
+  & git -C $folder -c user.name=MemoryFixture -c user.email=memory@example.invalid commit --quiet --allow-empty -m 'test: initialize memory fixture'
+  if ($LASTEXITCODE -ne 0) { throw 'Isolated workload initial commit failed.' }
+  $fixtureBranch = (& git -C $folder branch --show-current).Trim()
   $folderStatus = Invoke-IsolatedGwtd 'issue.monitor.status' @{} $folder
   $folderKey = $folderStatus.project_store.hash
   if ($folderKey -notmatch '^[a-zA-Z0-9_-]+$') { throw 'Workload folder ProjectKey unavailable.' }
@@ -137,10 +147,10 @@ for ($index = 0; $index -lt 8; $index++) {
   [void](New-Item -ItemType Directory -Path $folderState -Force)
   [IO.File]::WriteAllText("$folderState/pm.json", '{"settings":{"auto_start":false}}')
   [IO.File]::WriteAllText("$folderState/issue-monitor.json", '{"enabled":false,"max_active_agents":1,"priority_order":[]}')
-  $tabs += @{id="memory-workload-$index";title="Memory workload $index";project_root=$folder;kind='non_repo'}
-  $workloadProjects += @{path=$folder;project_key=$folderKey}
+  $tabs += @{id="memory-workload-$index";title="Memory workload $index";project_root=$folder;kind='git'}
+  $workloadProjects += @{path=$folder;project_key=$folderKey;branch=$fixtureBranch}
 }
-[IO.File]::WriteAllText("$checkHome/workload-projects.json", ($workloadProjects | ConvertTo-Json -Depth 5))
+[IO.File]::WriteAllText("$checkHome/workload-projects.json", (ConvertTo-Json -InputObject $workloadProjects -Depth 5))
 [IO.File]::WriteAllText("$checkHome/.gwt/session.json", (@{active_tab_id='memory-source';tabs=$tabs;recent_projects=@()} | ConvertTo-Json -Depth 8))
 $gui = $null
 $anchor = $null
