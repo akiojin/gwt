@@ -26,7 +26,7 @@ pub use hook_delivery::{hook_live_delivery_health, HookLiveDeliveryHealth};
 /// Per-attempt budget of a hook-live POST. Tests that assert delivery pin it
 /// (SPEC #4740): hook-live is fail-open, so an attempt that outlives the
 /// budget on a loaded host drops the event. Issue #5542 measured ordinary
-/// Windows scheduling/ack tails up to 476ms; keep those within a bounded
+/// Windows failure wall times up to 476ms; keep those within a bounded
 /// attempt while the stricter prompt/SessionStart outer deadlines still win.
 pub const HOOK_LIVE_ATTEMPT_BUDGET: DeadlineBudget =
     DeadlineBudget::new("HOOK_LIVE_ATTEMPT", Duration::from_millis(500));
