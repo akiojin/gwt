@@ -1490,7 +1490,7 @@ pub(super) fn lock_build_artifacts(target: &Path) -> std::io::Result<BuildArtifa
     Ok(guard)
 }
 
-fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
+pub(super) fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
     use sha2::{Digest, Sha256};
     let mut existing = if target.is_absolute() {
         target.to_path_buf()
