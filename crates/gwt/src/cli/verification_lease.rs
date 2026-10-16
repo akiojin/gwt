@@ -191,6 +191,7 @@ fn is_short_non_cargo_gate(args: &[String], assignments: &[(String, String)]) ->
         has_check
     };
     match program {
+        Some("rustc") => subcommand == Some("--version") && args.len() == 2,
         // Custom actionlint checkers may be arbitrary executable wrappers.
         Some("actionlint") => !args.iter().skip(1).any(|arg| {
             arg.starts_with('-')
@@ -2020,6 +2021,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
         for command in [
+            "rustc --version",
             "git diff --check",
             "git diff --check --cached",
             "git.exe diff --cached --check -- README.md",
@@ -2036,6 +2038,7 @@ mod tests {
             assert_eq!(short_non_cargo_timeout(command), Some(Duration::from_secs(60)), "{command}");
         }
         for command in [
+            "rustc --version input.rs",
             "git diff",
             "git status",
             "git diff --line-prefix --check --ext-diff -- README.md",
