@@ -275,9 +275,8 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         "Claude and Codex must receive byte-identical coordination contracts"
     );
     assert!(
-        coordination_body
-            .contains(r#""operation":"pane.name","params":{"candidate":"<your candidate>"}"#),
-        "materialized guidance must require the Agent's own AI-generated candidate"
+        coordination_body.contains(r#""operation":"pane.name","params":{}"#),
+        "materialized guidance must read gwt's assigned name without an AI-generated candidate"
     );
     assert!(
         coordination_body.contains("\"operation\":\"workspace.update\""),

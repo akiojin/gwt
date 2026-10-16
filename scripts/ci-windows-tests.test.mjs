@@ -12,7 +12,7 @@ test("required Windows CI builds and runs the gate lifecycle regressions", () =>
     .replace(/\r\n/g, "\n");
   const windowsJob = workflow.split("  test-windows-rust:\n")[1]?.split(/\n  [\w-]+:/)[0];
   assert.ok(windowsJob?.includes(
-    "node scripts/ci-windows-tests.mjs run gwt-terminal test pty_start_gate_test -- --test-threads=1"));
+    "node scripts/ci-windows-tests.mjs run-runtime gwt-terminal test pty_start_gate_test -- --test-threads=1"));
 });
 
 function fixture(t) {
@@ -42,9 +42,30 @@ test("default Windows integration targets use Cargo's consolidated registrations
   for (const [, , name] of selected) assert.ok(declared.includes(name), `${name} must be a Cargo test target`);
 });
 
+test("library and runtime builds partition every default harness and retain all feature roots", (t) => {
+  const root = fixture(t);
+  const libs = targets("default-lib");
+  const runtime = targets("default-runtime");
+  const keys = (items) => items.map((target) => target.join("|")).sort();
+  assert.deepEqual(keys([...libs, ...runtime]), keys(targets("default")));
+  assert.ok(libs.every(([, kind]) => kind === "lib"));
+  assert.ok(runtime.every(([, kind]) => kind !== "lib"));
+  for (const group of ["default-lib", "default-runtime"]) {
+    assert.equal(build(group, root, (command, args) => {
+      assert.deepEqual(args.filter((_, index) => args[index - 1] === "-p"),
+        ["gwt", "gwt-core", "gwt-agent", "gwt-terminal"]);
+      assert.equal(args.includes("--lib"), group === "default-lib");
+      assert.equal(args.includes("--bin"), group === "default-runtime");
+      assert.equal(args.includes("--test"), group === "default-runtime");
+      assert.equal(args.includes("--all-features"), false);
+      return { status: 0, stdout: artifacts(root, group).map(JSON.stringify).join("\n") };
+    }), 0);
+  }
+});
+
 test("each feature set builds once and runs the exact target with Cargo's cwd and failure status", (t) => {
   const root = fixture(t);
-  for (const group of ["default", "warm"]) {
+  for (const group of ["default", "default-lib", "default-runtime", "warm"]) {
     let builds = 0;
     const messages = artifacts(root, group);
     assert.equal(build(group, root, (command, args) => {
@@ -62,9 +83,10 @@ test("each feature set builds once and runs the exact target with Cargo's cwd an
       return { status: 0, stdout: [...decoys, ...messages].map(JSON.stringify).join("\n") };
     }), 0);
     assert.equal(builds, 1);
-    assert.equal(run(group, ["gwt", "lib", "gwt", "the_filter", "--", "--exact", "--test-threads=1"], root,
+    const [pkg, kind, name] = targets(group)[0];
+    assert.equal(run(group, [pkg, kind, name, "the_filter", "--", "--exact", "--test-threads=1"], root,
       (command, args, options) => {
-        assert.equal(command, messages.find((m) => m.target.kind[0] === "lib" && m.target.name === "gwt").executable);
+        assert.equal(command, messages[0].executable);
         assert.deepEqual(args, ["the_filter", "--exact", "--test-threads=1"]);
         assert.equal(options.cwd, path.join(root, "crates", "gwt"));
         const pathKey = Object.keys(options.env).find((key) => key.toLowerCase() === "path");

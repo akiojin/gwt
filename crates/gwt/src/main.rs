@@ -11509,7 +11509,8 @@ fn main() -> std::io::Result<()> {
                 app.ensure_runtime_daemons_for_enabled_projects();
             }
             Event::UserEvent(UserEvent::TerminalConvergenceTick) => {
-                let mut events = app.terminal_convergence_tick_events();
+                let mut events = app.assign_missing_agent_names();
+                events.extend(app.terminal_convergence_tick_events());
                 // Issue #3906 AC-8: the 15 s convergence tick is also the
                 // update drain's clock (two clear ticks = quiescent).
                 events.extend(app.update_drain_tick_events());

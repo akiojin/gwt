@@ -451,11 +451,12 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 `Load earlier entries` to retrieve older posts. When browsing older history,
 choose `Back to latest entries` to resume the latest updates.
 
-Each worker Agent chooses a short memorable name when it starts. Its badge,
-window title, Fleet, and Kanban cards use that name; duplicate choices receive
-a numeric suffix. The name stays the same through restore and in-place restart.
-Until naming finishes, the badge reads `Naming…`. The resident PM keeps its own
-fixed identity.
+gwt assigns each worker Agent a random memorable name in the output language
+when it starts. Its badge, window title, Fleet, Kanban, and Board show that
+name, and the PM uses it when reporting work. Names are unique across the
+project's history and survive restore and in-place restart. Issue comments
+record assignments, handovers, PR creation, and completion; PR bodies also
+include the responsible name. The resident PM keeps its own fixed identity.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -527,6 +528,11 @@ Issue rows. Operators can stop a failed launch with `issue.monitor.stop`,
 `params.number`, and `params.reason`, even after its live claim/window identity
 was lost. The saved failed window is used only while it still belongs to that
 Issue; stopping records a persistent hold and returns any pane to close.
+The hold appears with its reason and removes the Issue from this host's launch
+queue by default. Set `params.remove_from_queue` to `false` to keep queue
+membership while holding the Issue. Launch failures show their category and
+the next recovery operation; repeated unchanged failures stop automatic retries
+after the configured attempt limit.
 
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent

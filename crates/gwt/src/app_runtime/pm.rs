@@ -2987,7 +2987,7 @@ impl AppRuntime {
         // refresh prunes unbundled `gwt-*` skills right after.
         let config = Self::pm_launch_config(worktree, &profile);
         let before = self.pm_window_ids(tab_id);
-        match self.spawn_agent_window_at_geometry(tab_id, config, PM_WINDOW_GEOMETRY, None) {
+        match self.spawn_agent_window_at_geometry(tab_id, config, PM_WINDOW_GEOMETRY, None, None) {
             Ok(events) => {
                 self.mark_new_pm_windows(tab_id, &before, project_root);
                 events

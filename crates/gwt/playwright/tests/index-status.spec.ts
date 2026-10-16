@@ -30,14 +30,19 @@ test("live backend replays fresh index health after reconnect", async ({ page },
       return messages.map((entry: any) => entry.payload)
         .findLast((payload: any) => payload.kind === "project_index_status" && payload.status?.scopes?.issues);
     }).then((handle) => handle.jsonValue());
-    expect(status.status.state).toBe("ready");
-    expect(status.status.scopes.issues.healthy).toBe(true);
+    // A fresh HOME can legitimately have an index awaiting repair. Verify the
+    // backend's actual health rather than requiring the user's populated index.
+    const cellClass = status.status.scopes.issues.healthy ? 'ready' : 'unhealthy';
+    await expect(table.locator(`tr[data-scope='issues'] .settings-index-cell.${cellClass}`)).toBeVisible();
     await sendLiveGwtEvent(page, { kind: "refresh_index_status", project_root: status.project_root });
-    await expect(table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+    await expect(table.locator(`tr[data-scope='issues'] .settings-index-cell.${cellClass}`)).toBeVisible();
 
     await gotoLiveGwt(page, page.url(), { enableTestBridge: true });
     const reconnected = await openIndexHealthPanel(page, false, true);
-    await expect(reconnected.table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+    await expect(reconnected.table.locator(`tr[data-scope='issues'] .settings-index-cell.${cellClass}`)).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("data-theme",
+      testInfo.project.name.includes("light") ? "light" : "dark");
+    await page.screenshot({ path: testInfo.outputPath("index-health-live-reconnect.png") });
     expect(errors).toEqual([]);
   } finally {
     await release();
@@ -60,7 +65,10 @@ test.describe("Project Index status surface", () => {
 
   test("Index window Health renders the scope health table from project_index_status (T-IDX-106)", async ({
     page,
-  }) => {
+  }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(String(error)));
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
       state: "repair_required",
@@ -86,7 +94,9 @@ test.describe("Project Index status surface", () => {
     });
 
     await page.goto(APP_URL);
-    const { table } = await openIndexHealthPanel(page);
+    const { root, table } = await openIndexHealthPanel(page);
+    await expect(page.locator("html")).toHaveAttribute("data-theme",
+      testInfo.project.name.includes("light") ? "light" : "dark");
     await expect(table).toBeVisible();
 
     const specsRow = table.locator("tr[data-scope='specs']");
@@ -100,6 +110,22 @@ test.describe("Project Index status surface", () => {
     // Worktree column header should reflect the supplied branch label.
     await expect(table.locator("thead th[data-worktree-hash='wtAhash']"))
       .toContainText("develop");
+
+    // The same committed status updates the visible Search summary and the
+    // hidden Health table; opening Health must not be the update trigger.
+    await root.locator("[data-index-tab='search']").click();
+    await page.evaluate(() => window.__gwtFixtureWebSocket.setIndexStatus({
+      state: "ready", scopes: {
+        issues: { healthy: true, repair_required: false, document_count: 27 },
+        specs: { healthy: true, repair_required: false, document_count: 6 },
+      }, worktrees: {},
+    }));
+    await expect(root.locator(".index-search-health-summary")).toContainText("2 ready");
+    await expect(table.locator("tr[data-scope='specs'] .settings-index-cell.ready")).toHaveCount(1);
+    await root.locator("[data-index-tab='health']").click();
+    await expect(table.locator("tr[data-scope='issues'] .settings-index-cell.ready")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("index-health-shared-state.png") });
+    expect(errors).toEqual([]);
   });
 
   test("Index window Health tab and refresh button request full status refresh", async ({
@@ -786,6 +812,11 @@ async function installIndexStatusBackend(page, indexStatus, options = {}) {
         const payload = this.pendingRefreshStatus;
         this.pendingRefreshStatus = null;
         this.emit(payload);
+      }
+
+      setIndexStatus(status) {
+        projectIndexStatus.status = status;
+        this.emit(projectIndexStatus);
       }
     }
 

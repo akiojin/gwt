@@ -34,20 +34,18 @@ macro_rules! pane_name_first_action_guidance {
     () => {
         r#"## Agent name — first action
 
-For every new non-PM Agent, your first action must name your own window
+For every new non-PM Agent, your first action must read your own window's name
 before responding to the user or starting normal work.
-Invent a short one-word ASCII English proper-name candidate using your own AI reasoning.
-Keep it unrelated to the task, Issue, branch, pane id, or provider.
-Do not choose from a static name vocabulary or make a second LLM request.
+gwt assigns a random, project-unique name in the project's output language
+when the window starts. Do not invent or submit an AI-generated candidate.
 
     gwtd <<'JSON'
-    {"schema_version":1,"operation":"pane.name","params":{"candidate":"<your candidate>"}}
+    {"schema_version":1,"operation":"pane.name","params":{}}
     JSON
 
 Use the exact assigned name returned by `pane.name` in reports and handoffs,
 including any collision suffix. If your window is already assigned a name,
-retrying returns that existing name without renaming it. If an invalid candidate
-is rejected, invent another candidate and retry.
+retrying returns that existing name without renaming it.
 
 The PM is exempt: do not call `pane.name` from the PM window.
 "#

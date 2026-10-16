@@ -81,7 +81,7 @@ test("Agents tiles, tabs and readonly preview acquire a late assigned name", asy
   const host = document.createElement("div");
   document.querySelector("main").appendChild(host);
   surface.setPreviewHost(host);
-  assert.equal(surface.element.querySelector("h3").textContent, "Naming… — Fix cache");
+  assert.equal(surface.element.querySelector("h3").textContent, "Fix cache");
   const terminal = surface.element.querySelector("textarea");
   setWindows([{ ...data, agent_name: "Lumen" }]);
   assert.equal(surface.element.querySelector("h3").textContent, "Lumen — Fix cache");

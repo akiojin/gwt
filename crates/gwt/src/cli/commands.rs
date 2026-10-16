@@ -284,6 +284,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         reason: String,
+        remove_from_queue: bool,
         claim_id: Option<String>,
         delivery_id: Option<String>,
         window_id: Option<String>,
