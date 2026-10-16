@@ -167,12 +167,13 @@ try {
     GWT_PLAYWRIGHT_CHECKOUT_ROOT: root, GWT_PLAYWRIGHT_CHECK_HOME: home, GWT_PLAYWRIGHT_PROJECT_ROOT: project };
   const forwarded = process.argv.slice(2);
   const completeSpecs = ["surface-rail.spec.ts", "agent-focus-cycle.spec.ts", "agent-window-scroll.spec.ts", "terminal-input-disconnect.spec.ts",
-    "file-drop-attachments.spec.ts", "window-interrupted-state.spec.ts"];
+    "file-drop-attachments.spec.ts", "window-interrupted-state.spec.ts", "project-open-surfaces.spec.ts"];
   const testArgs = [playwright, "test", "--config", join(root, "crates/gwt/playwright/playwright.config.ts"),
-    ...completeSpecs, "issue-preview.spec.ts",
+    ...completeSpecs, "issue-preview.spec.ts", "kanban.spec.ts", "issue-queue-kanban.spec.ts",
     ...(!forwarded.some(argument => argument === "--grep" || argument.startsWith("--grep="))
       ? ["--grep", completeSpecs.map(name => name.replaceAll(".", "\\.")).join("|")
-        + "|Windowize opens the mirrored agent in Agents|Windowize from the split view opens Agents"] : []),
+        + "|Windowize opens the mirrored agent in Agents|Windowize from the split view opens Agents"
+        + "|Issue #5395:|Issue auto refresh reads only|an unfocused Issue window"] : []),
     "--output", join(evidence, "playwright"), "--trace=on", "--workers=1", "--retries=0", ...forwarded];
   if (!testArgs.includes("--headed")) testArgs.push("--headed");
   await finish(start(process.execPath, testArgs, testEnv, root, "", true), 1_800_000);

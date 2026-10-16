@@ -75,6 +75,7 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
   const sent = [];
   const terminalMounts = [];
   const launchRequests = [];
+  const undockRequests = [];
 
   const surface = createAgentKanbanSurface({
     activeWorkspace: () => workspace,
@@ -84,6 +85,10 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
     },
     send: (message) => sent.push(message),
     onLaunchAgent: (target) => launchRequests.push(target),
+    onUndockAgent: (id) => {
+      assert.equal(sent.at(-1).kind, "undock_agent_window", "send the placement change before navigation");
+      undockRequests.push(id);
+    },
     windowDisplayTitle: (windowData) => windowData.dynamic_title || windowData.title || windowData.id,
     windowRoleBadgeLabel: (windowData) => windowData.agent_id || windowData.preset,
   });
@@ -121,6 +126,7 @@ test("Agent Kanban surface renders lanes, card terminals, and card controls", ()
   assert.deepEqual(sent[0], setAgentKanbanCardCollapsedMessage("agent-1", true));
   assert.equal(sent[1].kind, "undock_agent_window");
   assert.equal(sent[1].id, "agent-2");
+  assert.deepEqual(undockRequests, ["agent-2"], "undocking reveals the target in Agents");
   assert.equal(launchRequests[0].boardId, "kanban-1");
   assert.equal(launchRequests[0].laneId, "active");
 });

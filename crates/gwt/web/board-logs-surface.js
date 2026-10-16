@@ -51,6 +51,7 @@ export function createBoardLogsSurface({
   pushAlertToast,
   sendWindowFocus,
   focusOrSpawnPreset,
+  onOpenOriginAgent,
   activeWorkspace,
   activeProjectTab,
   projectWindowContextById,
@@ -606,6 +607,7 @@ export function createBoardLogsSurface({
           origin_session_id: originSessionId,
           bounds: visibleBounds(),
         });
+        onOpenOriginAgent?.(originSessionId);
       }
 
       function logMatchesQuery(entry, query) {

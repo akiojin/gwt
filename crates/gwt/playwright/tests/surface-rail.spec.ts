@@ -23,6 +23,7 @@ type SentMessage = {
   id?: string;
   preset?: string;
   surface_owner?: string;
+  origin_session_id?: string;
   bounds?: { width: number; height: number };
 };
 
@@ -98,6 +99,36 @@ test.describe("Surface rail", () => {
     await expect(page.locator("#split-surfaces")).toHaveAttribute("data-split", "true");
     await expectSurfaceOnly(page);
     await page.screenshot({ path: testInfo.outputPath("fixed-layout-entry-points.png") });
+    expect(errors).toEqual([]);
+  });
+
+  test("Board origin Agent links reveal live and resumed agents in the rail layout", async ({ page }) => {
+    const errors = captureBrowserErrors(page);
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page);
+    await page.goto(surfaceAppUrl);
+    const main = page.getByRole("region", { name: "Main pane", exact: true });
+    await expect(main).toHaveAttribute("data-surface", "board");
+    await page.evaluate(() => (window as any).__surfaceRailSocket().emit({
+      kind: "board_entries", id: "board-window", has_more_before: false,
+      entries: ["session-one", "session-resumed"].map((session, index) => ({
+        id: session, author_kind: "agent", author: "Codex", body: `Agent update ${index}`,
+        origin_agent_id: "codex", origin_session_id: session,
+        created_at: `2026-10-16T00:00:0${index}Z`,
+      })),
+    }));
+    await main.locator('[data-board-entry-id="session-one"] .board-origin-button').click();
+    await expect(main).toHaveAttribute("data-surface", "agents");
+    await expect(main.locator('[data-agent-id="agent-one"] .xterm')).toBeVisible();
+    await expect(main.getByRole("tab", { name: /Aster/ })).toHaveAttribute("aria-selected", "true");
+    await page.locator('.op-rail__surface[data-surface="board"]').click();
+    await main.locator('[data-board-entry-id="session-resumed"] .board-origin-button').click();
+    await expect(main).toHaveAttribute("data-surface", "agents");
+    await expect(main.getByRole("tab", { name: "All agents", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(main.locator('[data-agent-id="agent-resumed"] .xterm')).toBeVisible();
+    expect((await sentMessages(page)).filter(message => message.kind === "open_board_origin_agent")
+      .map(message => message.origin_session_id)).toEqual(["session-one", "session-resumed"]);
+    await expectSurfaceOnly(page);
     expect(errors).toEqual([]);
   });
 
@@ -863,6 +894,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
       dynamic_title: null,
       dynamic_title_detail: null,
       agent_id: null,
+      session_id: null as string | null,
       agent_color: null,
       tab_group_id: null,
       tab_group_active: false,
@@ -1012,6 +1044,15 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
             target.z_index = zCounter;
             this.emit(workspaceState());
           }
+        }
+        if (message.kind === "open_board_origin_agent") {
+          let target = windows.find(data => data.session_id === message.origin_session_id);
+          if (!target) {
+            target = canvasWindow("agent-resumed", { session_id: message.origin_session_id, status: "running" });
+            windows.push(target);
+          }
+          target.z_index = ++zCounter;
+          this.emit(workspaceState());
         }
         if (message.kind === "create_window" && message.preset) {
           zCounter += 1;

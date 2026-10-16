@@ -3946,6 +3946,14 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyProjectBoardConfigEventToBoard,
       } = createBoardLogsSurface({
         send,
+        onOpenOriginAgent: (sessionId) => {
+          const target = (activeWorkspace().windows || []).find(data => data.session_id === sessionId);
+          if (target) frameWindow(target.id);
+          else {
+            splitSurfaces.show("agents");
+            document.getElementById("agents-tab-all")?.click();
+          }
+        },
         createNode,
         createKnowledgeMarkdownBody,
         windowMap,
@@ -4258,6 +4266,7 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       const agentKanbanSurface = createAgentKanbanSurface({
         activeWorkspace,
+        onUndockAgent: requestWindowFrame,
         createTerminalRuntime: (id, terminalRoot) =>
           createTerminalRuntime(id, terminalRoot),
         send,
@@ -6005,7 +6014,11 @@ import { createUiStateStore } from "/ui-state-store.js";
           const preset = surface === "issues" ? "settings" : surface;
           send({ kind: "create_window", preset, bounds: visibleBounds() });
         },
-        onChange: () => syncSurfaceRail(),
+        onChange: () => {
+          syncSurfaceRail();
+          resumeKnowledgeEventRefresh();
+          refreshVisibleKnowledgeWindows();
+        },
         onLayout: (ids) => {
           for (const id of ids) activateTerminalOnReveal(id);
         },

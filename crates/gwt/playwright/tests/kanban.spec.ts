@@ -80,29 +80,19 @@ test.describe("Issue Bridge load recovery", () => {
     }), work);
     await expect(page.locator(".knowledge-related-work-title")).toHaveText("After snapshot");
     expect(await loads()).toBe(beforeStatus);
-    for (const hiddenBy of ["minimized", "inactive tab"]) {
+    {
+      await page.locator('.op-rail__surface[data-surface="settings"]').click();
+      await expect(page.locator(".surface-knowledge")).toBeHidden();
       const beforeHidden = await loads();
-      await page.evaluate(hiddenBy => {
-        const state = window.__issueBridgeWorkspaceState;
-        const issue = state.workspace.tabs[0].workspace.windows[0];
-        issue.minimized = hiddenBy === "minimized";
-        issue.tab_group_id = hiddenBy === "inactive tab" ? "knowledge-tabs" : null;
-        issue.tab_group_active = false;
-        window.__issueBridgeFixtureSocket.emit(state);
+      await page.evaluate(() => {
         for (let agent = 0; agent < 8; agent++) {
           window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_launch_failed" });
           window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_inbox", items: [] });
         }
-      }, hiddenBy);
+      });
       await page.waitForTimeout(2200); // observe the complete real two-second debounce
       expect(await loads()).toBe(beforeHidden);
-      await page.evaluate(() => {
-        const state = window.__issueBridgeWorkspaceState;
-        const issue = state.workspace.tabs[0].workspace.windows[0];
-        issue.minimized = false;
-        issue.tab_group_active = true;
-        window.__issueBridgeFixtureSocket.emit(state);
-      });
+      await page.locator('.op-rail__surface[data-surface="issues"]').click();
       await expect.poll(loads).toBe(beforeHidden + 1);
     }
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
@@ -222,8 +212,9 @@ test.describe("Issue Bridge load recovery", () => {
 
     // Repeated hidden ticks perform neither probes nor list loads. A changed
     // revision is consumed once on restoration through the real receive path.
-    for (const mode of ["hidden", "minimized", "inactive-tab", "document"]) {
-      await page.evaluate(mode => window.__setKnowledgeVisibility(mode, false), mode);
+    for (const mode of ["hidden", "rail", "document"]) {
+      if (mode === "rail") await page.locator('.op-rail__surface[data-surface="settings"]').click();
+      else await page.evaluate(mode => window.__setKnowledgeVisibility(mode, false), mode);
       await settle();
       const before = await counts();
       await page.evaluate(() => {
@@ -231,7 +222,8 @@ test.describe("Issue Bridge load recovery", () => {
         for (let tick = 0; tick < 3; tick++) window.__triggerKnowledgeAutoRefresh();
       });
       expect(await counts()).toEqual(before);
-      await page.evaluate(mode => window.__setKnowledgeVisibility(mode, true), mode);
+      if (mode === "rail") await page.locator('.op-rail__surface[data-surface="issues"]').click();
+      else await page.evaluate(mode => window.__setKnowledgeVisibility(mode, true), mode);
       await expect.poll(async () => (await counts()).loads).toBe(before.loads + 1);
       await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
       expect((await counts()).loads).toBe(before.loads + 1);
@@ -2201,19 +2193,8 @@ async function installIssueBridgeBackend(
       };
 
       window.__setKnowledgeVisibility = (mode, visible) => {
-        const data = workspaceState.workspace.tabs[0].workspace.windows[0];
         if (mode === "hidden") document.querySelector(".surface-knowledge").hidden = !visible;
         if (mode === "document") Object.defineProperty(document, "hidden", { configurable: true, value: !visible });
-        if (mode === "minimized") data.minimized = !visible;
-        if (mode === "inactive-tab") {
-          data.tab_group_id = "knowledge-tabs";
-          data.tab_group_active = visible;
-        }
-        if (mode === "minimized" || mode === "inactive-tab") {
-          window.__issueBridgeFixtureSocket.dispatchEvent(new MessageEvent("message", {
-            data: JSON.stringify(workspaceState),
-          }));
-        }
         document.dispatchEvent(new Event("visibilitychange"));
       };
 

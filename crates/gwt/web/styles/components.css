@@ -601,8 +601,7 @@ body::after {
 }
 .split-surfaces[hidden],
 .split-pane[hidden],
-.split-surfaces[data-split="false"] .split-pane__header,
-.surface-area.has-surface-layout > :not(.split-surfaces) {
+.split-surfaces[data-split="false"] .split-pane__header {
   display: none !important;
 }
 .split-pane {

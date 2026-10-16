@@ -4,6 +4,11 @@ import test from "node:test";
 import { createUiStateStore } from "../ui-state-store.js";
 
 const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+const components = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
+
+test("the permanent surface host leaves project picker and onboarding visible", () => {
+  assert.doesNotMatch(components, /\.surface-area\.has-surface-layout\s*>\s*:not\(\.split-surfaces\)/);
+});
 
 test("all window navigation uses the rail layout without a canvas fallback", () => {
   assert.doesNotMatch(app, /getElementById\("canvas(?:-stage|-world-grid)?"\)/);
