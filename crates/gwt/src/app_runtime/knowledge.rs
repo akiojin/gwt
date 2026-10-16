@@ -22,6 +22,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use gwt::KnowledgeKind;
@@ -845,6 +846,20 @@ fn knowledge_phase_update_error_event(
 fn knowledge_cache_revision(project_root: &Path) -> Option<String> {
     let root = gwt::issue_cache::issue_cache_root_for_repo_path(project_root)?;
     gwt_github::Cache::new(root).revision().ok()
+}
+
+/// Correlate the first cache response with its worker and transport phases.
+/// The frontend's cache-load deadline remains 60 seconds (#5413).
+fn knowledge_load_phase<T>(stage: &'static str, queued_at: Instant, run: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    tracing::info!(target: "gwt::knowledge_load", stage, status = "started",
+        elapsed_ms = queued_at.elapsed().as_secs_f64() * 1000.0, "Issue cache load phase");
+    let result = run();
+    let elapsed_ms = queued_at.elapsed().as_secs_f64() * 1000.0;
+    tracing::info!(target: "gwt::knowledge_load", stage, status = "completed", elapsed_ms,
+        duration_ms = started.elapsed().as_secs_f64() * 1000.0,
+        deadline_exceeded_stage = (elapsed_ms >= 60_000.0).then_some(stage), "Issue cache load phase");
+    result
 }
 
 fn knowledge_view_events(
@@ -1687,10 +1702,53 @@ impl AppRuntime {
         let related_snapshot_generation =
             reserve_related_snapshot_generation(&related_snapshot, &project_root, kind);
         let proxy = self.proxy.clone();
+        let queued_at = Instant::now();
+        let span = tracing::info_span!(target: "gwt::knowledge_load", "knowledge_load",
+            window_id = %id, client_id = %client_id, request_id = ?request_id);
+        span.in_scope(|| {
+            tracing::info!(target: "gwt::knowledge_load", stage = "queue", status = "started",
+                elapsed_ms = 0.0, "Issue cache load phase");
+        });
         self.blocking_tasks.spawn(move || {
-            let cache_revision = knowledge_cache_revision(&project_root);
-            let view = match load_knowledge_bridge(&project_root, kind, selected_number, false) {
+            let _span = span.enter();
+            let queue_ms = queued_at.elapsed().as_secs_f64() * 1000.0;
+            tracing::info!(target: "gwt::knowledge_load", stage = "queue", status = "completed",
+                elapsed_ms = queue_ms, duration_ms = queue_ms,
+                deadline_exceeded_stage = (queue_ms >= 60_000.0).then_some("queue"), "Issue cache load phase");
+            let (cache_revision, loaded) = knowledge_load_phase("cache_read", queued_at, || (
+                knowledge_cache_revision(&project_root),
+                load_knowledge_bridge(&project_root, kind, selected_number, false),
+            ));
+            let view = match loaded {
                 Ok(mut view) => {
+                    // The current frontend owns a correlated cache-load deadline.
+                    // Historical Session/Work enrichment can take minutes on a
+                    // cold ledger: publish usable rows first, keeping any prior
+                    // associations until the complete snapshot arrives below.
+                    // Uncorrelated legacy callers retain their single reply.
+                    if request_id.is_some() {
+                        let mut events = knowledge_load_phase("assembly", queued_at, || {
+                            let mut cached = view.clone();
+                            apply_latest_knowledge_bridge_related_works(
+                                &project_root, &mut cached, &related_snapshot,
+                            );
+                            apply_latest_knowledge_monitor_projection(
+                                &project_root, &mut cached, &monitor_snapshot,
+                            );
+                            knowledge_view_events(client_id.clone(), id.clone(), kind,
+                                request_id, cached, cache_revision.clone())
+                        });
+                        events[0].knowledge_load_timing = Some(gwt::project_transport::KnowledgeLoadTiming {
+                            queued_at,
+                            dispatch_enqueued_at: Instant::now(),
+                        });
+                        knowledge_load_phase("dispatch_enqueue", queued_at, || {
+                            proxy.send(UserEvent::Dispatch(events));
+                        });
+                    }
+                    let related_started = Instant::now();
+                    tracing::info!(target: "gwt::knowledge_load", stage = "related_assembly",
+                        status = "started", initial_response_sent = request_id.is_some(), "Issue related-work enrichment");
                     augment_and_publish_knowledge_bridge_related_works(
                         &project_root,
                         &sessions_dir,
@@ -1704,6 +1762,9 @@ impl AppRuntime {
                         &mut view,
                         &monitor_snapshot,
                     );
+                    tracing::info!(target: "gwt::knowledge_load", stage = "related_assembly",
+                        status = "completed", duration_ms = related_started.elapsed().as_secs_f64() * 1000.0,
+                        initial_response_sent = request_id.is_some(), "Issue related-work enrichment");
                     view
                 }
                 Err(error) => {
