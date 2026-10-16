@@ -2732,6 +2732,53 @@ fn is_certified_pr_delivery_event(worktree: &Path, relative: &[u8]) -> bool {
     }
 }
 
+/// Preserve uncommitted Work history before releasing a defunct execution.
+pub(crate) fn archive_untracked_work_events_for_recovery(worktree: &Path) -> io::Result<usize> {
+    use gwt_core::workspace_projection::{
+        preserve_workspace_work_event_log_as_shards, workspace_work_event_shard_matches, WorkEvent,
+    };
+
+    let canonical_worktree = dunce::canonicalize(worktree)?;
+    let worktree = canonical_worktree.as_path();
+    let dirty = work_event_dirty_paths(worktree)
+        .map_err(|()| io::Error::other("cannot inspect Work events before execution recovery"))?;
+    let archive_dir = gwt_core::paths::gwt_project_dir_for_repo_path(worktree)
+        .join("recovered-work-events")
+        .join("events");
+    let mut archived = 0;
+    for dirty in dirty {
+        if dirty.state != WorkEventPathState::Untracked
+            || classify_path(dirty.path.as_bytes()) != DeliveryPath::WorkEventShard
+        {
+            continue;
+        }
+        let source = worktree.join(&dirty.path);
+        let original = fs::read(&source)?;
+        let Ok(event) = serde_json::from_slice::<WorkEvent>(&original) else {
+            continue;
+        };
+        if source != gwt_core::paths::gwt_repo_local_work_event_shard_path(worktree, &event.id)
+            || !workspace_work_event_shard_matches(worktree, &event).map_err(io::Error::other)?
+        {
+            continue;
+        }
+        let copies = preserve_workspace_work_event_log_as_shards(&source, &archive_dir)
+            .map_err(io::Error::other)?;
+        if copies.len() != 1 || fs::read(&copies[0])? != original || fs::read(&source)? != original
+        {
+            return Err(io::Error::other(
+                "Work event changed during execution recovery",
+            ));
+        }
+        fs::remove_file(&source)?;
+        archived += 1;
+    }
+    if archived > 0 {
+        tracing::info!(archived, path = %archive_dir.display(), "preserved Work events before execution recovery");
+    }
+    Ok(archived)
+}
+
 fn work_event_path_states(worktree: &Path) -> Result<Vec<WorkEventPathState>, ()> {
     let mut states = work_event_dirty_paths(worktree)?
         .into_iter()
@@ -13083,6 +13130,59 @@ mod tests {
         let deleted = WorkEventGitFixture::tracked_shards();
         fs::remove_file(deleted.event_shard_path("base")).expect("delete tracked Work event shard");
         assert_path_dirty(&deleted, vec![WorkEventPathState::Deleted]);
+    }
+
+    #[test]
+    fn issue_5535_recovery_archives_only_untracked_canonical_work_shards() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = WorkEventGitFixture::tracked_shards();
+        let event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Resume,
+            "recovery-work",
+            Utc::now(),
+        );
+        fixture.append_typed_event_shard(&event);
+        let source = fixture.event_shard_path(&event.id);
+        let original = fs::read(&source).unwrap();
+        fixture.write_event_shard("invalid-event", b"{}\n");
+        let staged = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "staged-work",
+            Utc::now(),
+        );
+        fixture.append_typed_event_shard(&staged);
+        fixture.git_ok(&[
+            "add",
+            "--",
+            fixture.event_shard_path(&staged.id).to_str().unwrap(),
+        ]);
+        fs::write(fixture.repo.join("source.rs"), "uncommitted source").unwrap();
+
+        assert_eq!(
+            archive_untracked_work_events_for_recovery(&fixture.repo).unwrap(),
+            1
+        );
+        let archive = gwt_core::paths::gwt_work_event_shard_path(
+            &gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.repo)
+                .join("recovered-work-events")
+                .join("events"),
+            &event.id,
+        );
+        assert_eq!(fs::read(archive).unwrap(), original);
+        assert!(!source.exists());
+        assert!(fixture.event_shard_path("invalid-event").exists());
+        assert!(fixture.event_shard_path(&staged.id).exists());
+        assert_eq!(
+            fs::read_to_string(fixture.repo.join("source.rs")).unwrap(),
+            "uncommitted source"
+        );
+        assert_eq!(
+            archive_untracked_work_events_for_recovery(&fixture.repo).unwrap(),
+            0
+        );
+        assert_eq!(work_event_dirty_paths(&fixture.repo).unwrap().len(), 2);
     }
 
     #[test]

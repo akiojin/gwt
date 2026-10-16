@@ -92,12 +92,12 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
         .iter()
         .any(|s| s["with"]["tool"].as_str() == Some("cargo-nextest@0.9.146")));
     let summary = steps.iter().find(|s| s["run"].as_str() == Some("node scripts/coverage-summary.mjs --output-path target/coverage-summary.json --nextest -- --workspace --all-features")).unwrap();
-    assert_eq!(summary["env"]["LLVM_PROFILE_FILE_NAME"], "gwt-%4m.profraw");
+    assert_eq!(summary["env"]["LLVM_PROFILE_FILE_NAME"], "gwt-%8m.profraw");
     assert_eq!(summary["env"]["NEXTEST_PROFILE"], "coverage");
     let nextest: toml::Value =
         toml::from_str(include_str!("../../../.config/nextest.toml")).unwrap();
     assert_eq!(
         nextest["profile"]["coverage"]["test-threads"].as_integer(),
-        Some(8)
+        Some(16)
     );
 }

@@ -77,9 +77,9 @@ jobs:
       # test failure and re-aggregated once, on record (Issue #4628).
       - name: Generate workspace summary
         env:
-          # Nextest starts one process per test. Share four online-merge
+          # Nextest starts one process per test. Share eight online-merge
           # profiles per instrumented module instead of one copy per PID.
-          LLVM_PROFILE_FILE_NAME: gwt-%4m.profraw
+          LLVM_PROFILE_FILE_NAME: gwt-%8m.profraw
           NEXTEST_PROFILE: coverage
         run: node scripts/coverage-summary.mjs --output-path target/coverage-summary.json --nextest -- --workspace --all-features
         timeout-minutes: 20

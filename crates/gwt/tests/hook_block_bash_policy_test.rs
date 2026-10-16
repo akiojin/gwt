@@ -66,10 +66,16 @@ fn expected_existing_hook_output(
                 format!(
                     "GitHub reads may use direct `gh` commands. Route GitHub writes through gwt JSON-envelope operations so workflow gates and audit state see them.\n\n\
 Recommended alternatives:\n\
-- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.spec.*`\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.review_threads.reply_and_resolve`\n\
-- Merges: gwtd has no merge operation. The repository's merge automation or a human merges; hold a pending merge with `pr.draft`\n\
-- Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
+- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
+- Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
+- Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\
+- Automatic updates: JSON operation `update.settings.set`\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- Merges: existing merge automation and CI/review gates decide delivery; gwtd has no direct merge operation\n\
+- Actions: JSON operations `actions.rerun` (`run_id` + `failed_only`, or `job_id`) and `actions.cancel` (`run_id`)\n\
 Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
                 ),
@@ -81,10 +87,15 @@ Blocked command: {command}"
                 format!(
                     "GitHub writes must go through the canonical gwt operations so the completion/PR gates and audit state see them (SPEC-3248 P10, T-217).\n\n\
 Recommended alternatives:\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.review_threads.reply_and_resolve`\n\
-- Issues/SPECs: JSON operations `issue.create`, `issue.comment`, `issue.spec.*`\n\
+- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
+- Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
+- Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
+- Actions: JSON operations `actions.rerun` and `actions.cancel`\n\
 - lifecycle state: JSON operations `intake.outcome.record`, `execution.*`, `verify.*`\n\
-- releases: the release workflow owns publishing — not agent Bash\n\n\
+- Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\n\
 Blocked command: {command}"
                 ),
             ))
@@ -829,15 +840,15 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
 }
 
 #[test]
-fn github_workflow_cli_blocks_gh_pr_merge_and_names_the_draft_hold() {
+fn github_workflow_cli_blocks_gh_pr_merge_and_names_the_automation_path() {
     let decision = block_bash_policy::evaluate_bash_command("gh pr merge 1949", &root())
         .expect("gh pr merge must block");
     let visible = decision.permission_decision_reason();
     // Issue #4396: the message used to name `pr.merge`, which no operation
-    // implements. It now says so and names the lever that does exist.
+    // implements. Delivery uses merge automation with existing CI/review gates.
     assert!(
-        visible.contains("gwtd has no merge operation")
-            && visible.contains("hold a pending merge with `pr.draft`"),
+        visible.contains("gwtd has no direct merge operation")
+            && visible.contains("existing merge automation and CI/review gates decide delivery"),
         "block message must name the real merge path: {visible}"
     );
     assert!(!visible.contains("`pr.merge`"), "{visible}");

@@ -542,6 +542,31 @@ class SearchMultiContractTests(unittest.TestCase):
                 f"embedding across scopes (AS-2), calls: {counting.encode.call_args_list}",
             )
 
+    def test_model_cache_reuses_each_revision_after_scope_switches(self):
+        now = [100.0]
+
+        def load(*_args, **_kwargs):
+            now[0] += 2.5
+            return runner._FakeEmbeddingModel()
+
+        constructor = mock.Mock(side_effect=load)
+        with mock.patch.dict(os.environ, {"GWT_INDEX_FAKE_EMBEDDING": "0"}), \
+                mock.patch.dict("sys.modules", {
+                    "sentence_transformers": mock.Mock(SentenceTransformer=constructor)
+                }), \
+                mock.patch.object(runner, "_model_load_clock", lambda: now[0]), \
+                mock.patch.object(runner, "_MODEL_LOAD_MS", 0):
+            models, load_times = [], []
+            for revision in (None, runner.FILE_INDEX_V2_MODEL_REVISION) * 2:
+                before = runner._MODEL_LOAD_MS
+                models.append(runner._get_embedding_model(revision))
+                load_times.append(runner._MODEL_LOAD_MS - before)
+            self.assertEqual(load_times, [2500, 2500, 0, 0])
+            self.assertIs(models[0], models[2])
+            self.assertIs(models[1], models[3])
+            self.assertIsNot(models[0], models[1])
+            self.assertEqual(constructor.call_count, 2)
+
     def test_search_multi_reports_model_load_time_for_the_cold_warm_split(self):
         """Report each request's load cost, excluding prior warm worker requests.
         A deterministic clock stands in
@@ -1171,13 +1196,20 @@ class SearchWorkerTests(unittest.TestCase):
             project.mkdir()
             env = dict(os.environ, HOME=tmp, USERPROFILE=tmp,
                        GWT_INDEX_FAKE_EMBEDDING="0" if real_model else "1")
+            subprocess.run(["git", "init", "--quiet", str(project)], env=env,
+                           check=True, capture_output=True, timeout=30)
             if real_model:
                 env["HF_HUB_OFFLINE"] = "1"
                 env["HF_HUB_CACHE"] = os.environ.get(
                     "HF_HUB_CACHE", str(Path.home() / ".cache" / "huggingface" / "hub")
                 )
             common = [sys.executable, str(Path(runner.__file__).resolve()),
-                      "--repo-hash", REPO_HASH, "--project-root", str(project)]
+                      "--repo-hash", REPO_HASH, "--project-root", str(project),
+                      "--worktree-hash", WORKTREE_HASH, "--file-index-protocol", "v2"]
+            source = project / "src" / "worker.rs"
+            source.parent.mkdir()
+            source.write_text("//! Persistent search worker model.\npub fn worker() {}\n",
+                              encoding="utf-8")
             memory = base / ".gwt" / "projects" / REPO_HASH / "work-notes" / "memory.md"
             memory.parent.mkdir(parents=True)
             memory.write_text("## 2026-10-15 — alpha worker\n\nPersistent search model.\n",
@@ -1198,25 +1230,37 @@ class SearchWorkerTests(unittest.TestCase):
             self.assertTrue(first["scope_results"]["memory"]["memoryResults"])
             worker_pid = first["worker_pid"]
             try:
+                invoke("--action", "index-files")
+                files_first = invoke("--action", "search-multi", "--scopes", "files",
+                                     "--query", "persistent worker")
+                self.assertEqual(files_first["worker_pid"], worker_pid)
+                self.assertTrue(files_first.get("results"), files_first)
                 memory.write_text("## 2026-10-15 — beta update\n\nChanged published memory.\n",
                                   encoding="utf-8")
                 invoke("--action", "index-memory")
                 warm_seconds = []
                 warm_timings_ms = []
-                for query in ("beta update", "published memory", "persistent model"):
+                for scope, query in (("memory", "beta update"),
+                                     ("files", "persistent worker"),
+                                     ("memory", "published memory"),
+                                     ("files", "search model")):
                     started = time.monotonic()
-                    second = invoke("--action", "search-multi", "--scopes", "memory",
+                    second = invoke("--action", "search-multi", "--scopes", scope,
                                     "--query", query)
                     warm_seconds.append(time.monotonic() - started)
                     warm_timings_ms.append(second.get("timings_ms"))
                     self.assertEqual(second["worker_pid"], worker_pid)
                     self.assertEqual(second["model_load_ms"], 0)
-                    self.assertIn("beta update", json.dumps(second))
-                    self.assertNotIn("alpha worker", json.dumps(second))
+                    if scope == "memory":
+                        self.assertIn("beta update", json.dumps(second))
+                        self.assertNotIn("alpha worker", json.dumps(second))
+                    else:
+                        self.assertEqual(second["results"][0]["path"], "src/worker.rs")
                 if real_model:
                     print(json.dumps({"platform": sys.platform, "worker_pid": worker_pid,
                                       "cold_seconds": cold_seconds,
                                       "cold_model_load_ms": first["model_load_ms"],
+                                      "files_cold_model_load_ms": files_first["model_load_ms"],
                                       "warm_seconds": warm_seconds,
                                       "cold_timings_ms": first.get("timings_ms"),
                                       "warm_timings_ms": warm_timings_ms,

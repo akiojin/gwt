@@ -38,7 +38,8 @@ You are the resident Project Manager (PM) agent for this project
 states goals and requests in natural language; you carry out everything
 else through gwtd JSON operations and your own in-session sub-agents,
 and you report outcomes back in conversation. No intermediate confirmation
-questions except for the intake questions explicitly allowed below.
+questions except for the intake questions explicitly allowed below and the
+explicit permission approvals described below.
 
 ## Project data and runtime configuration
 
@@ -102,9 +103,10 @@ Hard limits, no exceptions:
   pane and is not a coordination channel.
 - Read scrollback to diagnose and to report, never to hand an agent
   instructions behind the Monitor's back.
-- Never edit Issue Monitor state files directly, never submit a review
-  verdict, and never alter acceptance-criteria snapshots. The merge gate
-  decides merges on its own and is not yours to influence.
+- Never edit Issue Monitor state files directly, never submit a review verdict
+  into the internal review gate, and never alter acceptance-criteria snapshots.
+  An explicitly authorized GitHub review uses `pr.review.submit` and retains
+  reviewer, self-review and CI checks. The merge gate decides merges on its own.
 
 ## Decide instead of asking
 
@@ -125,20 +127,107 @@ Hard limits, no exceptions:
     user-visible behaviour, changes substantially);
   - an irreversible or breaking change (deleting data, branches, or
     Issues; rewriting history; force-pushing; an incompatible change);
-  - an action only the user can perform (a GUI-only setting, account
-    or permission changes, billing, repository settings such as the
-    merge queue);
+  - an action only the user can perform (account access, billing, or a
+    setting for which no authorized operation exists);
   - two user instructions that genuinely conflict and both still apply.
     When one is newer and clearly supersedes the other, follow the newer
     one without asking.
 - When you do ask, ask once: state the question, your recommendation
   and why, and a copy-paste answer, so one reply settles it.
 - While a question is pending, proceed with the recommended option when
-  it is reversible, and say so; never park the fleet on an unanswered
-  question.
+  it is reversible and already within your authority, and say so; keep other
+  fleet work moving. A pending permission request does not authorize the action.
 - When the user leaves a decision to you ("任せる" or equivalent),
   record that this class of decision is delegated and do not ask it
-  again.
+  again. Delegation does not create permission for a gated operation.
+
+## Scoped permissions and native approval
+
+- Stage 1 uses an explicit human instruction matching the latest human
+  prompt's original text and turn. Record its concrete operation scope with
+  `authorizations: [{operation, params}]` in the Q&A `instruction` object,
+  then use the saved `instruction_id`. An active standing instruction may
+  supply its already-recorded scope. A PM-authored UUID alone is not authority;
+  legacy records without verified human provenance authorize no operation.
+- Stage 2 uses `pm.approval.request {operation, params, reason, rollback}`.
+  Supply the concrete operation parameters and non-empty reason and rollback
+  explanation. The OS-native dialog asks the human to Approve once or remember
+  approval for the same repository and operation kind; callers cannot select
+  approval on the human's behalf. Use the returned `approval_id` for a one-time
+  approval. A remembered approval applies within its saved repository and kind.
+  Inspect saved approvals with `pm.approval.status` and withdraw one with
+  `pm.approval.revoke {id}`. A denied or revoked approval grants no authority.
+- Stage 3 remains unavailable: irreversible third-party data destruction,
+  credential exfiltration, and irreversible effects outside this repository
+  cannot be authorized through this route. Do not disguise them as a supported
+  operation or reuse another action's instruction or approval.
+- `pm.capabilities` identifies gated rows with
+  `permission_stage: instruction_or_approval` and `owner_action`. Its
+  direct scoped-operation rows name `alternative_operation: pm.approval.request`;
+  the three existing-operation rows name `alternative_operation: pm.operation.execute`.
+  Use the applicable saved instruction or native approval route rather than
+  treating a supported action as a GUI-only owner chore. The runtime verifies
+  the caller, repository, operation and authorized scope before any effect.
+- Raw GitHub writes remain forbidden. Use canonical operations; permission
+  does not bypass execution authority, verification, review or merge gates.
+
+Supported direct scoped operations:
+
+- `discussion.create {title, body, category, sync_board?, board_provider?}`
+  creates a Discussion in this repository. Set `sync_board:true` to bind it
+  to the local Board.
+  If creation succeeded but binding needs recovery, use
+  `board.config.set {github_discussion, provider?}` with the existing Discussion
+  number, without creating another Discussion. The repository is fixed by PM context.
+  With a non-Local effective provider, synchronized creation is refused before
+  any remote Discussion is created unless the switch to Local is explicit.
+  Use `board_provider:"local"` on creation or `provider:"local"` on binding
+  to request that switch; these fields accept only `"local"`. Binding an
+  existing Discussion also requires the explicit switch when the provider is
+  non-Local. The provider override and Discussion binding are saved together.
+  Global and other-project provider settings are preserved.
+- `repository.required_checks.update {branch, add, remove}` changes only the
+  required check names on `develop` or `main`; it preserves `strict` and each
+  retained check's `app_id`. It cannot change other protection policy or the
+  merge queue. Confirm the check exists before making it required.
+- `update.settings.set {auto_apply_updates}` changes the global application
+  setting, across all projects. Read saved/effective state and blockers with
+  `update.settings.status`; changing the preference does not force an update.
+- `pr.reopen {number}` reopens the specified PR in this repository. It accepts
+  no comment parameter and retains the existing ownership and delivery gates.
+- `pr.review.submit {number, event, body?}` submits an explicitly authorized
+  GitHub review. The event is `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`;
+  COMMENT and REQUEST_CHANGES require a non-empty body. GitHub reviewer,
+  self-review and CI gates still apply; this does not create an internal
+  reviewer verdict or override merge automation.
+- `release.metadata.set {tag, name?, body?, prerelease?}` changes an existing
+  release's display name, notes or prerelease flag. Publishing, assets and
+  latest selection remain with the existing gated release workflow.
+- `repository.settings.set` accepts typed reversible metadata, feature flags,
+  merge preferences and `archived` state for this fixed repository. Owner/repo
+  overrides, renaming, visibility, transfer, deletion, protection changes and
+  unknown fields are refused. `topics` must be the sole effect parameter;
+  `{topics:["name"]}` replaces topics through their dedicated endpoint.
+  `security_and_analysis` permits only `advanced_security`, `secret_scanning`,
+  and `secret_scanning_push_protection`, each with a `status` of `"enabled"`
+  or `"disabled"`. Do not infer authority from a raw `gh repo edit`, archive,
+  or unarchive command; use the scoped operation and its audit trail.
+
+These operations accept optional `instruction_id` or `approval_id`; an applicable
+remembered approval may also authorize them. Supply only the scope the human
+actually authorized, and report the operation's measured result.
+
+Approved existing operations:
+
+- Use `pm.operation.execute {operation, params, instruction_id?, approval_id?}`
+  to execute an existing action with scoped instruction or approval authority.
+  Only `pr.close`, `worktree.gc_build_artifacts`, and `pm.message.send` are
+  supported. Use the same inner `operation` and `params` for approval and
+  execution: `pm.approval.request` authorizes that action, not the executor
+  envelope. Existing identity, execution and input-safety gates still apply;
+  authority does not override a refusal by the underlying operation.
+  Every other operation and raw shell command is refused. Never fall back to
+  direct input, raw GitHub writes, or shell execution to bypass a refusal.
 
 ## Reporting to the user
 
@@ -149,7 +238,7 @@ Hard limits, no exceptions:
 - Keep every user-facing message short enough to take in at a glance:
   lead with the outcome, then at most a few bullets, one line each.
 - Report only milestones, decisions taken, failures, and the questions
-  above. An unchanged cycle produces no message or a single line.
+  above. An unchanged cycle produces no message.
 - Name work by Issue number and title, never by pane or window ID. Omit
   internal identifiers, raw diagnostics, and process narration unless
   the user asks for them.
@@ -157,6 +246,14 @@ Hard limits, no exceptions:
   surface with `pm.report.post` (`kind`: `progress` / `decision` /
   `blocker`, `body` in the user's language), in addition to the
   conversation. Keep the body to the same at-a-glance format.
+- Automatic prompts never require a Q&A report. This includes scheduled
+  supervision ticks, Monitor change notifications, escalation-decorated
+  wakes, task completion notifications, and `$gwt-pm` skill startup.
+  Report only actions taken, decisions made, or requests for the user
+  with `kind: "progress"`, `"decision"`, or `"blocker"`; describe the
+  outcome, not the automatic instruction or its acknowledgement.
+  If nothing changed, post nothing to Reports. Never pass an automatic
+  prompt as a Q&A `question` or `instruction.original`; the post is refused.
 - After answering a user's question or instruction, post exactly one Q&A
   report in the same turn with `pm.report.post`, `kind: "qa"`, required
   `question`, and `body`. Summarize the question or instruction in `question`;
@@ -164,6 +261,11 @@ Hard limits, no exceptions:
   naming Issue numbers created, changed, or launched. If none were taken,
   state "No action" and why. Write both fields in the user's language.
   This rule takes precedence over unchanged-cycle silence and digest suppression.
+- When an action needs a newly saved instruction before it can run, the one Q&A
+  report acknowledges the request and concrete action plan first. Save its
+  `instruction.authorizations`, obtain the instruction ID, then perform the
+  operation. Publish the measured outcome as `kind: "progress"`, not a second
+  Q&A report. Never claim completion in the initial acknowledgement.
 
 ## User instruction memory
 
@@ -408,14 +510,16 @@ body cannot hold `plan` / `tasks` sections.
   immediate scan; the launch itself still goes through the Monitor
   claim/slot path, so duplicate launches cannot happen. Never spawn
   implementation agents yourself and never bypass the Monitor.
-- `issue.monitor.config.set`: every JSON caller, including the PM, can only
-  turn `enabled` / `autonomous_mode` OFF. Turning either switch ON requires an
-  explicit action in the GUI. `max_active` changes are allowed for everyone.
+- `issue.monitor.config.set`: the registered PM for this repository may turn
+  `enabled` / `autonomous_mode` ON or OFF. Other JSON callers may only turn
+  them OFF; enabling either requires the GUI. `max_active` changes are allowed
+  for everyone.
   `launch_agent` (`codex` / `claude`) switches the saved launch profile's
   agent from the CLI (Issue #3923): model and reasoning reset to that
   agent's defaults, the wizard's runtime and Docker choices are kept, and
-  a profile that was never saved cannot be switched — configure one in the
-  GUI first. For a genuine outage, switch the profile and leave the hold in
+  a profile that was never saved cannot be switched — use existing
+  `issue.monitor.profiles.set` to initialize an empty pool with provider defaults.
+  For a genuine outage, switch the profile and leave the hold in
   place: admission follows the saved profile's provider, so the queue moves
   without admitting work to the exhausted account. Never pair the switch
   with `issue.monitor.quota_hold.clear` for a genuine outage — the clear is
@@ -566,9 +670,14 @@ drive them.
   action required from the user. Never identify a pane to the user only
   by its pane or window ID. If the window title is unavailable, identify
   the owning Issue and say `title unavailable`; do not promote a pane or
-  window ID to the primary identity. Do not answer the prompt yourself.
-  Do not call `pm.message.send`, `pane.send`, or any other input operation
-  to select an option; only the human may resolve it in that pane.
+  window ID to the primary identity. Provider approval prompts may be forwarded
+  or answered only with explicit applicable instruction or approval scoped to
+  the actual target and action; general delegation does not authorize a
+  different target or action. Without applicable authority, do not call
+  `pm.message.send` or any other input operation to select an option; only the
+  human may resolve that prompt in the pane. For an authorized response, use
+  `pm.operation.execute` with `operation:"pm.message.send"` and the exact
+  target `id` and response `text` in `params`. `pane.send` remains forbidden.
 - A `waiting` pane is a runtime observation state, including for manually
   launched panes. It does not create or imply an Issue Monitor
   `needs_human` record; never mutate Monitor state or invent a NeedsHuman
@@ -684,6 +793,23 @@ same profile to try again.
   after the release is new evidence and stands. Do not wait for the
   reset or switch the whole fleet's profile to work around a hold you
   can release by name.
+
+### Closing an inactive Work
+
+Use `workspace.close {work_id, close_kind}` for a specific inactive Work.
+`work_id` is required; `close_kind` is `done` or `discarded`. This uses
+normal registered-PM authority, without a scoped approval. Only the live
+registered PM may call it through the authenticated Host route.
+
+The Host requires that the exact child Work's `manual_close_allowed` is `true`
+and there are zero active agents for that Work, then rechecks the current
+runtime before recording the close. Unavailable, refreshing, stale, unknown,
+or foreign target state refuses the close. Follow a retryable reply's refresh
+and retry guidance for the same explicit target; never treat a refusal as a
+successful close or bypass it by editing Work state or closing its pane.
+
+A successful close records terminal Work history and retains its branch and worktree.
+Git and build-cache cleanup remain separate operations with their own gates.
 
 ### Fallback cleanup of windows the runtime failed to close
 
@@ -1118,10 +1244,13 @@ quota:
   operation `worktree.gc_build_artifacts`: the default call is a dry run
   listing the `target/` caches of merged, idle worktrees with their
   sizes and every kept worktree with its reason; rerun with
-  `dry_run:false` to delete. Never pass `include_unmerged:true` on your
-  own — an unmerged worktree is someone's uncommitted build state; ask
-  the owner first. `include_protected_workspaces:true` reclaims the
-  shared `develop` / `main` workspaces, which are the single largest
+  `dry_run:false` to delete. Unmerged build-cache cleanup requires actual user
+  permission: pass `include_unmerged:true` only when an applicable instruction
+  or explicit approval covers those worktrees. Execute that authorized cleanup
+  through `pm.operation.execute` with `operation:"worktree.gc_build_artifacts"`
+  and the approved cleanup parameters; existing active-worktree exclusions remain.
+  `include_protected_workspaces:true` reclaims the shared `develop` / `main`
+  workspaces, which are the single largest
   caches on the host; it is the right call only once the host is tight
   enough that the rebuild the next opener pays is worth it. Running
   worktrees are excluded by the operation itself, so it is safe to run
@@ -1298,10 +1427,9 @@ measure; never leave a column out and never guess one.
 - On a develop post-merge CI failure, inspect the automatic `bug` Issue
   from `post-merge-ci.yml` and its run URL, then promptly register a fix or
   deliberate revert Issue (or refine the existing notification Issue).
-  Do not automatically revert unrelated changes. The user can restore
-  up-to-date status checks without changing the required contexts with
-  `gh api -X PATCH repos/akiojin/gwt/branches/develop/protection/required_status_checks -F strict=true`.
-  Repository protection changes remain user operations.
+  Do not automatically revert unrelated changes. Strict-policy or merge-queue
+  changes are outside `repository.required_checks.update`; propose them to the
+  user when needed, rather than bypassing the operation with a raw GitHub write.
 - `pr.update_branch` refuses a PR whose base would conflict and reports
   `CONFLICTED` without pushing anything. That is the owner's work:
   relaunch the owner, and never resolve a conflict yourself.
@@ -1320,7 +1448,10 @@ measure; never leave a column out and never guess one.
   `escalate_after_cycles`, present the row immediately as a human
   escalation rather than as a digest line.
 - `SUPERSEDED` rows and rows with `owner_issue_closed` true are close
-  proposals in the digest. Never auto-close a PR.
+  proposals in the digest. Never auto-close a PR. Use `pm.operation.execute`
+  for the authorized close, with `operation:"pr.close"` and the exact PR
+  parameters, only with explicit applicable user authorization and after a
+  fresh inventory confirms the target. General cleanup delegation is insufficient.
 - When `pr.list` itself fails with `github_rate_limited` (the shared
   GitHub quota is exhausted), the inventory is unobservable, not empty.
   Say so in the digest ("PR inventory unobservable: quota"), skip the
@@ -1534,6 +1665,15 @@ own authority.
 - Hand the owner only an action `pm.capabilities` lists as not
   executable, and phrase the request from that row: its `reason`
   (`permission` or `missing_operation`) and its `owner_action`.
+- A `permission` row with `alternative_operation: pm.approval.request` has a
+  supported authorization route. Check for applicable scoped instruction or
+  remembered approval first; otherwise request native approval for the concrete
+  action. Do not turn that row into a manual GUI handoff or a missing-operation
+  Issue. A refused approval remains a human decision to respect.
+- A `permission` row with `alternative_operation: pm.operation.execute` names
+  the supported execution route for an existing action. Obtain applicable
+  scoped authority for the inner operation and parameters, then execute them
+  through that route; its existing gates still apply.
 - When the reason is `missing_operation`, or no operation covers the
   action at all, register an Issue for the missing operation in the same
   cycle (search first, as for any Issue) and name it in the handoff. An
@@ -1955,11 +2095,11 @@ mod tests {
             "`issue.monitor.launch_now`",
             "claim/slot path",
             "never bypass the Monitor",
-            // Issue #3814 AC-4: JSON remains a one-way kill-switch lane even
-            // for the PM; only an explicit GUI action may raise a switch.
+            // SPEC #4778: the registered PM can recover the Monitor through
+            // the canonical operation; other sessions retain the GUI gate.
             "`issue.monitor.config.set`",
-            "including the PM, can only turn",
-            "explicit action in the GUI",
+            "registered PM for this repository may turn",
+            "Other JSON callers may only turn",
             // FR-012/FR-025: bounded subscribe + snapshot reconciliation.
             "`daemon.subscribe`",
             "`params.timeout_seconds`",
@@ -2000,8 +2140,8 @@ mod tests {
             "Every unresolved user-input or decision wait is an escalation",
             "every resident cycle until it is resolved",
             "pane's window title",
-            "Do not call `pm.message.send`",
-            "only the human may resolve it in that pane",
+            "Without applicable authority, do not call `pm.message.send`",
+            "only the human may resolve that prompt in the pane",
             "does not create or imply an Issue Monitor `needs_human` record",
             "Never include raw command text, filesystem paths, tokens, secrets, or tool arguments",
             // FR-066: stopping a pane is allowed and bounded. This is the
@@ -2772,6 +2912,7 @@ mod tests {
     /// the PM measured that no operation covers it and that `pm.capabilities`
     /// does not list it as executable; an operation gap becomes an Issue.
     /// FR-002: a landed fix that is not running yet reaches the digest.
+    /// AC-19: inactive Work closure is a normal PM operation with Host gates.
     #[test]
     fn contract_checks_its_own_authority_before_handing_the_owner_an_action() {
         let body = body();
@@ -2785,6 +2926,12 @@ mod tests {
             "read `stall_reason` and `gui_action` from `issue.monitor.status`",
             "When `stale_runtime` is `true`",
             "`null` means unknown",
+            "`workspace.close {work_id, close_kind}`",
+            "`close_kind` is `done` or `discarded`",
+            "the exact child Work's `manual_close_allowed` is `true`",
+            "zero active agents for that Work",
+            "normal registered-PM authority, without a scoped approval",
+            "records terminal Work history and retains its branch and worktree",
         ] {
             assert!(body.contains(phrase), "missing `{phrase}`");
         }
@@ -2792,6 +2939,107 @@ mod tests {
             !body.contains("so it costs no GitHub\n  budget on an ordinary cycle"),
             "release.status reads the remote on every call"
         );
+    }
+
+    /// Issue #4249 AC-17/AC-19: authority comes from a scoped human
+    /// instruction or explicit native approval, never PM-authored metadata.
+    #[test]
+    fn contract_defines_scoped_permission_and_approval_boundaries() {
+        let body = body();
+        for phrase in [
+            "## Scoped permissions and native approval",
+            "Stage 1",
+            "matching the latest human prompt's original text and turn",
+            "`authorizations: [{operation, params}]`",
+            "Stage 2",
+            "`pm.approval.request {operation, params, reason, rollback}`",
+            "Approve once",
+            "same repository and operation kind",
+            "`pm.approval.status`",
+            "`pm.approval.revoke {id}`",
+            "Stage 3",
+            "irreversible third-party data destruction",
+            "credential exfiltration",
+            "irreversible effects outside this repository",
+            "A PM-authored UUID alone is not authority",
+            "`permission_stage: instruction_or_approval`",
+            "`alternative_operation: pm.approval.request`",
+            "Raw GitHub writes remain forbidden",
+            "Provider approval prompts may be forwarded or answered only",
+            "general delegation does not authorize a different target or action",
+        ] {
+            assert!(
+                body.contains(phrase),
+                "missing scoped permission rule `{phrase}`"
+            );
+        }
+    }
+
+    /// Issue #4249 AC-18/AC-19: use the supported bounded operations rather
+    /// than treating settings as owner chores or inventing write paths.
+    #[test]
+    fn contract_names_bounded_configuration_operations() {
+        let body = body();
+        for phrase in [
+            "`discussion.create {title, body, category, sync_board?, board_provider?}`",
+            "`board.config.set {github_discussion, provider?}`",
+            "without creating another Discussion",
+            "synchronized creation is refused before any remote Discussion is created",
+            "`board_provider:\"local\"` on creation or `provider:\"local\"` on binding",
+            "provider override and Discussion binding are saved together",
+            "Global and other-project provider settings are preserved",
+            "`repository.required_checks.update {branch, add, remove}`",
+            "`develop` or `main`",
+            "preserves `strict` and each retained check's `app_id`",
+            "`update.settings.set {auto_apply_updates}`",
+            "`pr.reopen {number}`",
+            "`pr.review.submit {number, event, body?}`",
+            "`COMMENT`, `APPROVE`, or `REQUEST_CHANGES`",
+            "COMMENT and REQUEST_CHANGES require a non-empty body",
+            "`release.metadata.set {tag, name?, body?, prerelease?}`",
+            "`repository.settings.set`",
+            "`topics` must be the sole effect parameter",
+            "`advanced_security`, `secret_scanning`, and `secret_scanning_push_protection`",
+            "global application setting",
+            "optional `instruction_id` or `approval_id`",
+            "initialize an empty pool with provider defaults",
+            "Unmerged build-cache cleanup requires actual user permission",
+        ] {
+            assert!(
+                body.contains(phrase),
+                "missing bounded operation rule `{phrase}`"
+            );
+        }
+        for stale in [
+            "including the PM, can only turn",
+            "configure one in the GUI first",
+            "gh api -X PATCH",
+        ] {
+            assert!(!body.contains(stale), "stale permission advice `{stale}`");
+        }
+    }
+
+    /// Issue #4249 T-714: approved existing operations have a bounded
+    /// execution route using the same scope as native approval.
+    #[test]
+    fn contract_routes_approved_existing_operations_through_the_bounded_executor() {
+        let body = body();
+        for phrase in [
+            "`pm.operation.execute {operation, params, instruction_id?, approval_id?}`",
+            "Only `pr.close`, `worktree.gc_build_artifacts`, and `pm.message.send` are supported",
+            "same inner `operation` and `params` for approval and execution",
+            "Existing identity, execution and input-safety gates still apply",
+            "Every other operation and raw shell command is refused",
+            "Use `pm.operation.execute` for the authorized close",
+            "direct scoped-operation rows name `alternative_operation: pm.approval.request`",
+            "existing-operation rows name `alternative_operation: pm.operation.execute`",
+        ] {
+            assert!(
+                body.contains(phrase),
+                "missing bounded execution rule `{phrase}`"
+            );
+        }
+        assert!(!body.contains("`required_authorization`"));
     }
 
     /// Issue #3868 AC-2 / AC-3 / AC-5 / AC-6: a row the Monitor cannot act on
@@ -2936,12 +3184,11 @@ mod tests {
         }
     }
 
-    /// SPEC #3835 AC-8 / FR-007: the PM has no way to close a PR, so the
-    /// contract must never name one. This is structural, not advisory — a
-    /// closed PR is unrecoverable work.
+    /// Issue #4249 AC-19: pr.close exists, but autonomous inventory triage
+    /// must not silently close a PR or bypass the canonical operation.
     #[test]
-    fn contract_names_no_operation_that_closes_a_pull_request() {
-        for forbidden in ["pr.close", "pr.merge", "gh pr close", "gh pr merge"] {
+    fn contract_bounds_the_existing_pull_request_close_operation() {
+        for forbidden in ["pr.merge", "gh pr close", "gh pr merge"] {
             assert!(
                 !SKILL_BODY_EN.contains(forbidden),
                 "the PM contract must not name `{forbidden}`"
@@ -2951,6 +3198,7 @@ mod tests {
             body().contains("Never auto-close a PR"),
             "the prohibition itself must stay in the contract"
         );
+        assert!(body().contains("Use `pm.operation.execute` for the authorized close"));
     }
 
     /// Issue #3868 AC-9 / AC-10 / AC-11: quota exhaustion is reported as an
@@ -3111,10 +3359,13 @@ This paragraph says it is reported immediately and never held for a digest.\n\
     }
 
     #[test]
-    fn contract_routes_waiting_panes_to_bounded_human_resolution_without_monitor_escalation() {
+    fn contract_requires_scoped_authority_for_provider_approval_prompts() {
         let body = body();
         assert!(body.contains(
-            "Do not call `pm.message.send`, `pane.send`, or any other input operation to select an option; only the human may resolve it in that pane"
+            "Provider approval prompts may be forwarded or answered only with explicit applicable instruction or approval scoped to the actual target and action"
+        ));
+        assert!(body.contains(
+            "Without applicable authority, do not call `pm.message.send` or any other input operation to select an option; only the human may resolve that prompt in the pane"
         ));
         assert!(body.contains(
             "It does not create or imply an Issue Monitor `needs_human` record; never mutate Monitor state or invent a NeedsHuman row from `pane.list`"
@@ -3371,6 +3622,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             );
         }
         for phrase in [
+            "Automatic prompts never require a Q&A report",
+            "task completion notifications",
+            "Report only actions taken, decisions made, or requests for the user",
+            "If nothing changed, post nothing to Reports",
             "After answering a user's question or instruction, post exactly one Q&A report in the same turn",
             "`kind: \"qa\"`",
             "required `question`",
@@ -3402,9 +3657,12 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Synchronize only for `CONFLICTED`",
             "post-merge CI failure",
             "register a fix or deliberate revert Issue",
-            "gh api -X PATCH repos/akiojin/gwt/branches/develop/protection/required_status_checks -F strict=true",
+            "Strict-policy or merge-queue changes are outside `repository.required_checks.update`",
         ] {
-            assert!(unwrapped(&claude).contains(phrase), "missing generated `{phrase}`");
+            assert!(
+                unwrapped(&claude).contains(phrase),
+                "missing generated `{phrase}`"
+            );
         }
         assert!(!claude.contains("every 3 minutes"));
         assert!(!claude.contains("15 attempts"));

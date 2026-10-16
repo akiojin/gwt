@@ -69,9 +69,11 @@ class FlakeDetectionTests(unittest.TestCase):
                 f"trap '{clock_command}' DEBUG\n", encoding="utf-8", newline="\n",
             )
             env["BASH_ENV"] = clock.as_posix()
+            # This is a hang guard; Bash's controlled clock tests the budget.
+            # Native Git Bash process startup is slower on loaded Windows hosts.
             result = subprocess.run(
                 [BASH, SCRIPT.as_posix()], env=env,
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=300 if os.name == "nt" else 60,
             )
             runs = [line for line in trace.read_text().splitlines() if "--no-run" not in line]
             logs = {path.name: path.read_text() for path in (root / "logs").glob("*.log")}
@@ -86,7 +88,7 @@ class FlakeDetectionTests(unittest.TestCase):
         self.assertIn("stable: 20 run(s), every one passed", result.stdout)
 
     def test_changed_outcome_still_fails_with_the_shorter_lib_run_count(self):
-        result, _, _ = self.run_detector(flaky=True)
+        result, _, _ = self.run_detector(flaky=True, targets="gwt|lib|")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FLAKE: gwt|lib| differs between runs", result.stdout)
 

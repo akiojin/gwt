@@ -2277,7 +2277,7 @@ impl Default for IssueMonitorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            poll_interval_secs: 300,
+            poll_interval_secs: 30,
             claim_heartbeat_secs: 300,
             claim_ttl_secs: 1800,
             max_active: 1,
@@ -3354,7 +3354,7 @@ impl std::fmt::Display for IssueMonitorLaunchProfileSwitchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoSavedProfile => f.write_str(
-                "no saved Issue Monitor launch profile; configure one in the GUI before switching its agent",
+                "no saved Issue Monitor launch profile; initialize it with issue.monitor.profiles.set before switching its agent (or use Settings)",
             ),
             Self::InvalidAgent => f.write_str("launch_agent must name an agent (for example codex or claude)"),
         }

@@ -193,7 +193,6 @@ def test_gwtd_capture_roundtrips_through_memory_and_fresh_pm_startup(tmp_path, m
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("GWT_INDEX_FAKE_EMBEDDING", "1")
     monkeypatch.setattr(runner, "_MODEL_CACHE", None)
-    monkeypatch.setattr(runner, "_MODEL_CACHE_REVISION", None)
     # Allowlist only executable lookup/platform state, excluding all inherited
     # GWT session, hook forwarding, execution, Git and credential settings.
     child_env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR", "PATHEXT") if key in os.environ}
@@ -284,7 +283,6 @@ def test_real_multilingual_search_finds_instruction_without_shared_keywords(inst
     monkeypatch.setenv("GWT_INDEX_FAKE_EMBEDDING", "0")
     monkeypatch.setenv("HF_HOME", str(REAL_MODEL_CACHE))
     monkeypatch.setattr(runner, "_MODEL_CACHE", None)
-    monkeypatch.setattr(runner, "_MODEL_CACHE_REVISION", None)
     _, _, source, _, records = instruction_corpus
     records[0].update(
         original="変更を公開する前に必ず自動テストで動作を確かめてください。",

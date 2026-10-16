@@ -91,6 +91,9 @@ pub struct TestEnv {
     pub queued_actions: Option<String>,
     pub queued_actions_call_count: usize,
     pub internal_command_call_log: Vec<InternalCommandCall>,
+    pub discussion_create_call_log: Vec<(String, String, String)>,
+    pub required_checks: serde_json::Value,
+    pub required_checks_updates: Vec<(String, serde_json::Value)>,
 }
 
 impl TestEnv {
@@ -150,6 +153,9 @@ impl TestEnv {
             queued_actions: None,
             queued_actions_call_count: 0,
             internal_command_call_log: Vec::new(),
+            discussion_create_call_log: Vec::new(),
+            required_checks: serde_json::json!({"strict":false,"checks":[]}),
+            required_checks_updates: Vec::new(),
         }
     }
 
@@ -537,6 +543,65 @@ impl CliEnv for TestEnv {
         Ok(format!("rerun requested for {target:?}"))
     }
 
+    fn github_repository(&self) -> io::Result<(String, String)> {
+        Ok(("owner".into(), "repo".into()))
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        _operation: &str,
+        _params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "use production loopback fixture for bounded GitHub settings",
+        ))
+    }
+    fn pm_settings_mutate(
+        &mut self,
+        _operation: &str,
+        _params: &serde_json::Value,
+        _before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "use production loopback fixture for bounded GitHub settings",
+        ))
+    }
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion> {
+        self.discussion_create_call_log
+            .push((category.into(), title.into(), body.into()));
+        Ok(gwt_github::client::http::CreatedDiscussion {
+            id: "discussion-17".into(),
+            number: 17,
+            url: "https://github.com/owner/repo/discussions/17".into(),
+        })
+    }
+    fn required_status_checks(&mut self, _branch: &str) -> io::Result<serde_json::Value> {
+        Ok(self.required_checks.clone())
+    }
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.required_checks_updates
+            .push((branch.into(), settings.clone()));
+        self.required_checks["checks"] = settings["checks"].clone();
+        for check in self.required_checks["checks"]
+            .as_array_mut()
+            .expect("fixture checks")
+        {
+            if check.get("app_id").is_none() {
+                check["app_id"] = serde_json::Value::Null;
+            }
+        }
+        Ok(self.required_checks.clone())
+    }
     fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
         self.dispatch_call_log.push(call);
         Ok("workflow dispatch requested".into())

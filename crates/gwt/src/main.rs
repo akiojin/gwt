@@ -583,25 +583,33 @@ fn request_tray_browser_launch(runtime: &Runtime, url: &str, action: &'static st
 /// Issue #3611: a `Drop` guard rather than a trailing measurement because
 /// several dispatch arms `return` early; a stall in one of those is exactly the
 /// case worth recording.
-struct EventLoopDispatchTimer {
+struct EventLoopDispatchTimer<'a> {
     label: DispatchLabel,
     started: std::time::Instant,
     startup_queued: bool,
     runtime_hook_stages: Option<(u64, u64, usize)>,
+    perf: &'a mut gwt::perf::dispatch::DispatchCollector,
+    proxy: &'a AppEventProxy,
 }
 
-impl EventLoopDispatchTimer {
-    fn start(event: &Event<'_, UserEvent>) -> Self {
+impl<'a> EventLoopDispatchTimer<'a> {
+    fn start(
+        event: &Event<'_, UserEvent>,
+        perf: &'a mut gwt::perf::dispatch::DispatchCollector,
+        proxy: &'a AppEventProxy,
+    ) -> Self {
         Self {
             label: event_loop_dispatch_label(event),
             started: std::time::Instant::now(),
             startup_queued: false,
             runtime_hook_stages: None,
+            perf,
+            proxy,
         }
     }
 }
 
-impl Drop for EventLoopDispatchTimer {
+impl Drop for EventLoopDispatchTimer<'_> {
     fn drop(&mut self) {
         let elapsed = self.started.elapsed();
         // Parking during bootstrap has not executed this event's handler yet.
@@ -610,6 +618,13 @@ impl Drop for EventLoopDispatchTimer {
         } else {
             self.label.as_str()
         };
+        let pending = if elapsed > gwt::perf::dispatch::SLOW_HANDLER {
+            self.proxy.pending_count()
+        } else {
+            None
+        };
+        self.perf
+            .record(label, elapsed, pending, self.started + elapsed);
         // Issue #4520 AC-2: a startup dispatch past 100 ms reaches perf.startup.
         gwt::perf::startup::event_loop_stall(label, elapsed.as_secs_f64() * 1_000.0);
         let elapsed_ms = elapsed.as_millis() as u64;
@@ -655,9 +670,9 @@ const UPDATE_CONTROL_CLIENT_ID: &str = "update-control";
 /// Issue #3633: how often the GUI re-checks that a runtime daemon is serving
 /// each enabled project, and therefore the worst-case gap after one dies.
 ///
-/// Deliberately independent of `IssueMonitorConfig::poll_interval_secs` (300s
-/// by default, and user-tunable). Inheriting the scan cadence would mean a
-/// crashed daemon leaves `scan_now` and `daemon.subscribe` unavailable for
+/// Deliberately independent of the user-tunable
+/// `IssueMonitorConfig::poll_interval_secs`. Inheriting a long scan cadence
+/// would mean a crashed daemon leaves `scan_now` and `daemon.subscribe` unavailable for
 /// minutes, which is the state Issue #3633 was filed about.
 const RUNTIME_DAEMON_ENSURE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -2169,6 +2184,7 @@ enum UserEvent {
         project_root: PathBuf,
         status: Box<gwt::IssueMonitorStatusView>,
     },
+    IssueMonitorListPrepared(Box<app_runtime::PreparedIssueMonitorList>),
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
     IssueMonitorDaemonInbox {
@@ -2677,10 +2693,11 @@ mod tests {
             source.contains("app.ensure_runtime_daemons_for_enabled_projects()"),
             "the ensure tick must reach the supervisor"
         );
+        // Fast scan polling may match or beat supervision. Daemon recovery
+        // keeps its own bound regardless of the scan configuration.
         assert!(
-            crate::RUNTIME_DAEMON_ENSURE_INTERVAL
-                < Duration::from_secs(gwt::IssueMonitorConfig::default().poll_interval_secs),
-            "a crashed daemon must not stay dead for a whole scan interval"
+            crate::RUNTIME_DAEMON_ENSURE_INTERVAL <= Duration::from_secs(30),
+            "daemon supervision must run at least every thirty seconds"
         );
     }
 
@@ -10817,9 +10834,11 @@ fn main() -> std::io::Result<()> {
     let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
 
     let mut dispatch_watchdog = dispatch_watchdog::DispatchWatchdog::start();
+    let mut dispatch_perf = gwt::perf::dispatch::DispatchCollector::start();
     let transient_dispatch_clients = clients.clone();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
+        let mut dispatch_timer = EventLoopDispatchTimer::start(&event, &mut dispatch_perf, &proxy);
         let mut watchdog_guard = dispatch_watchdog.enter(event_loop_dispatch_label(&event).as_str());
         if let Some(app) = app.as_mut() {
             clients.dispatch(app.flush_runtime_output_batches(std::time::Instant::now()));
@@ -10833,7 +10852,7 @@ fn main() -> std::io::Result<()> {
             }
             event => event,
         };
-        let mut dispatch_timer = EventLoopDispatchTimer::start(&event);
+        dispatch_timer.label = event_loop_dispatch_label(&event);
         watchdog_guard.set_event(dispatch_timer.label.as_str());
         let event = match event {
             Event::UserEvent(UserEvent::TransientBrowserEnded { generation }) => {
@@ -11060,6 +11079,9 @@ fn main() -> std::io::Result<()> {
                 received_at,
                 ..
             }) => {
+                let dispatch_kind = frontend_event_kind_label(&event);
+                dispatch_timer.label = dispatch_kind;
+                watchdog_guard.set_event(dispatch_kind.as_str());
                 // Resolve the immutable registration again after queueing: a disconnected
                 // client cannot retain input authority through the fallback queue.
                 let Some(scope) = clients.scope(&client_id) else {
@@ -11110,8 +11132,6 @@ fn main() -> std::io::Result<()> {
                 // on the main event-loop thread so a synchronous repo-scaling
                 // handler that freezes the GUI is diagnosable, and inter-event
                 // timestamps reveal CPU starvation by background indexers.
-                let dispatch_kind = frontend_event_kind_label(&event);
-                watchdog_guard.set_event(dispatch_kind.as_str());
                 let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event_in_scope(client_id, event, &scope);
                 let completed_at = std::time::Instant::now();
@@ -11529,6 +11549,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorScheduledScanPrepared(prepared)) => {
                 clients.dispatch(app.issue_monitor_scheduled_scan_prepared_events(*prepared));
+            }
+            Event::UserEvent(UserEvent::IssueMonitorListPrepared(prepared)) => {
+                clients.dispatch(app.issue_monitor_list_prepared_events(*prepared));
             }
             Event::UserEvent(UserEvent::PmWakeDeliveryComplete(delivery)) => {
                 app.pm_wake_delivery_complete(delivery);

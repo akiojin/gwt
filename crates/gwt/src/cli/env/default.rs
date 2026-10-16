@@ -573,6 +573,76 @@ impl CliEnv for DefaultCliEnv {
         crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
     }
 
+    fn github_repository(&self) -> io::Result<(String, String)> {
+        let identity = gwt_core::repo_hash::detect_repo_identity(&self.repo_path)
+            .ok_or_else(|| io::Error::other("project repository identity is unavailable"))?;
+        let expected = gwt_core::repo_hash::compute_repo_hash(&format!(
+            "https://github.com/{}/{}",
+            self.owner, self.repo
+        ));
+        if identity.hash != expected {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied,"PM settings operations require the project's canonical GitHub repository; repository overrides cannot select another target"));
+        }
+        Ok((self.owner.clone(), self.repo.clone()))
+    }
+    fn pm_settings_snapshot(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .pm_settings_snapshot(operation, params)
+            .map_err(api_to_io)
+    }
+    fn pm_settings_mutate(
+        &mut self,
+        operation: &str,
+        params: &serde_json::Value,
+        before: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .pm_settings_mutate(operation, params, before)
+            .map_err(api_to_io)
+    }
+    fn create_github_discussion(
+        &mut self,
+        category: &str,
+        title: &str,
+        body: &str,
+    ) -> io::Result<gwt_github::client::http::CreatedDiscussion> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .create_github_discussion(category, title, body)
+            .map_err(api_to_io)
+    }
+    fn required_status_checks(&mut self, branch: &str) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .required_status_checks(branch)
+            .map_err(api_to_io)
+    }
+    fn update_required_status_checks(
+        &mut self,
+        branch: &str,
+        settings: &serde_json::Value,
+    ) -> io::Result<serde_json::Value> {
+        self.github_repository()?;
+        self.client
+            .resolve()
+            .map_err(api_to_io)?
+            .update_required_status_checks(branch, settings)
+            .map_err(api_to_io)
+    }
     fn dispatch_actions(&mut self, call: crate::cli::ActionsDispatchCall) -> io::Result<String> {
         use gwt_config::Settings;
         crate::cli::actions::validate_dispatch_call(&call)
