@@ -4250,7 +4250,7 @@ export function createKnowledgeKanbanSurface({
           issueWindowViewModel.update(() => ({ windowId, detailOnly: true, focusPreview }));
           return;
         }
-        renderKnowledgeDetailView(windowId, state);
+        knowledgeBoardViewModel.update(() => ({ windowId, detailOnly: true }));
       }
 
       function renderKnowledgeDetailView(windowId, state) {
@@ -5622,10 +5622,12 @@ export function createKnowledgeKanbanSurface({
         if (kind === "resume") resumeVisibleKnowledgeEventRefresh();
       });
       knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
-      knowledgeBoardViewModel.subscribe(model => model, ({ windowId }) => {
+      knowledgeBoardViewModel.subscribe(model => model, ({ windowId, detailOnly }) => {
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
-        if (element && state) renderKnowledgeBoardView(windowId, element, state);
+        if (!element || !state) return;
+        if (detailOnly) renderKnowledgeDetailView(windowId, state);
+        else renderKnowledgeBoardView(windowId, element, state);
       });
       // List completion publishes data in receive; the synchronous view owns
       // both the full rebuild and revision-preserving selection updates.
