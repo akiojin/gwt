@@ -4435,6 +4435,25 @@ def _active_store_document_count(db_path: Path, scope: str) -> Optional[int]:
         return None
 
 
+def _replace_staging_generation(staging: Path, generation_dir: Path) -> None:
+    """Wait briefly for native SQLite workers to release a closed store.
+
+    Chroma closes its Rust bindings before SQLx's SQLite worker threads have
+    necessarily released their files. Windows cannot rename that directory
+    until those handles close; POSIX can. Retry only Windows access/sharing
+    violations, with at most 1.03 seconds of backoff, preserving the OS error.
+    """
+    for attempt in range(8):
+        try:
+            os.replace(staging, generation_dir)
+            return
+        except OSError as error:
+            if (os.name != "nt" or getattr(error, "winerror", None) not in (5, 32)
+                    or attempt == 7):
+                raise
+            time.sleep(min(0.01 * (2 ** attempt), 0.4))
+
+
 def _publish_generation(
     db_path: Path,
     staging: Path,
@@ -4481,7 +4500,7 @@ def _publish_generation(
                         "retryable": True,
                     }
             generation_dir = gen_root / generation_name
-            os.replace(staging, generation_dir)
+            _replace_staging_generation(staging, generation_dir)
             for residue in (CONTINUATION_FILENAME, LOCK_FILENAME):
                 with contextlib.suppress(OSError):
                     (generation_dir / residue).unlink()
@@ -7427,7 +7446,8 @@ def _read_issue_repair(db_path: Path) -> Dict[str, Any]:
 
 
 def _issue_build_failure(db_path: Path, fingerprint: str, mode: str,
-                         error_code: str, actual: int, expected: int) -> dict:
+                         error_code: str, actual: int, expected: int,
+                         error: Optional[str] = None) -> dict:
     payload = {
         "schema_version": 1, "fingerprint": fingerprint, "failures": 1,
         "last_error": error_code, "actual_document_count": actual,
@@ -7435,9 +7455,11 @@ def _issue_build_failure(db_path: Path, fingerprint: str, mode: str,
     }
     if error_code == "BUILD_INCOMPLETE" and os.environ.get("GWT_INDEX_REFRESH_RUN_ID"):
         payload["refresh_run_id"] = os.environ["GWT_INDEX_REFRESH_RUN_ID"]
+    if error:
+        payload["error"] = error
     _write_json_atomic(db_path / "repair.json", payload)
     return {"ok": False, "scope": "issues", "error_code": error_code,
-            "error": f"issues rebuild failed: {error_code} ({actual}/{expected})",
+            "error": error or f"issues rebuild failed: {error_code} ({actual}/{expected})",
             "repair": payload, "mode": mode}
 
 
@@ -7839,7 +7861,7 @@ def _index_issues_v2_locked(
         if publication_error is not None:
             raise publication_error
         if not publish.get("ok"):
-            return _issue_build_failure(db_path, fingerprint, mode, publish.get("error_code", "PUBLISH_FAILED"), staged_count, total)
+            return _issue_build_failure(db_path, fingerprint, mode, publish.get("error_code", "PUBLISH_FAILED"), staged_count, total, error=publish.get("error"))
 
         # Verify the published generation against the exact source we embedded.
         # A concurrent cache refresh must not turn this check into source drift.
@@ -7851,9 +7873,7 @@ def _index_issues_v2_locked(
             error_code = "COUNT_MISMATCH" if actual != total else "INDEX_UNHEALTHY"
             return _issue_build_failure(db_path, fingerprint, mode, error_code, actual, total)
     except Exception as error:
-        result = _issue_build_failure(db_path, fingerprint, mode, "PUBLISH_FAILED", staged_count, total)
-        result["error"] = str(error)
-        return result
+        return _issue_build_failure(db_path, fingerprint, mode, "PUBLISH_FAILED", staged_count, total, error=str(error))
 
     (db_path / "repair.json").unlink(missing_ok=True)
 

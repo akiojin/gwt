@@ -13,7 +13,7 @@ Agent workspace を materialize するために worktree を使いますが、�
 
 - **Agent workspace** — `Claude Code` / `Codex` / `Grok Build` /
   `Antigravity CLI` / `OpenCode` / `Copilot` /
-  custom agent を共有 canvas から起動・再開・状態確認できます。
+  custom agent を共有 workspace から起動・再開・状態確認できます。
 - **Shared Board** — user と agent の communication を repo-scoped timeline に集約し、
   `status` / `claim` / `next` / `blocked` / `handoff` / `decision` /
   `question` を扱えます。
@@ -27,8 +27,8 @@ Agent workspace を materialize するために worktree を使いますが、�
 - **Managed workflow skills** — discussion、Issue routing、planning、
   TDD implementation、PR、architecture review、project search、agent 管理用の
   bundled `gwt-*` skills を使えます。
-- **Operator canvas** — Agent、Board、Logs、Profile、Index、Settings の
-  surface を mission-control 風 workspace に並べられます。
+- **Operator workspace** — レールから Issues、Agents、Board、Settings を切り替え、
+  必要に応じて Split view と独立した PM 入口を使えます。
 
 ## インストール
 
@@ -371,7 +371,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 1. プロジェクトを開く、GitHub から clone する、または前回のプロジェクトを復元する
 2. `Board`、`Issue`、Knowledge search surface で現在の作業、
    関連 owner、過去の判断を把握する
-3. **Curate** レーンでは、Command Rail または Command Palette の `Intake` を
+3. **Curate** レーンでは、Command Palette の `Intake` を
    選ぶ。branchless で使い捨ての session で、議論・計画し GitHub Issue を
    登録する。設計が必要な作業は同じ Issue に `gwt-spec` design-required label と
    SPEC artifact を付ける。Intake は branch を作らない
@@ -393,9 +393,9 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 - `Board` — reasoning と coordination のための user / agent shared timeline
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
-  Work Item view を開きます。Issue Monitor の自動起動はキャンバスにウィンドウを
-  開かず、Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
-  したいときは `Windowize` で通常のウィンドウにできます。各行には対応する Work
+  Work Item view を開きます。Issue Monitor が自動起動した Agent は、
+  Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
+  したいときは `Windowize` で同じセッションを Agents の個別タブに開けます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
@@ -463,7 +463,7 @@ Max active は **Manual** に切り替えると数値を編集でき、**Auto** 
 
 Kanban は既定で全幅です。カードを選ぶとプレビューが開き、**Issue / Output** で
 本文・受け入れ基準とエージェントの読み取り専用出力を切り替えます。
-**Windowize** でエージェントを Canvas へ移せます。**Close preview** または Escape で
+**Windowize** でエージェントを Agents の個別タブに開けます。**Close preview** または Escape で
 全幅に戻ります。狭い幅ではプレビューをボードの上に重ね、列は縮めず横スクロールします。
 従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
@@ -611,7 +611,7 @@ Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考�
 指定すると、無料枠を確認した後に OS の確認ダイアログを表示します。
 **Redeem free reset** を選ぶと、そのアカウントの無料リセットを1回消費します。
 既定は Cancel で、autonomous モードでも確認を省略しません。
-JSON の承認フラグや過去の承認は利用できません。canvas 上にある、直接インストールした
+JSON の承認フラグや過去の承認は利用できません。独立した Agent タブで動く、直接インストールした
 Host Codex と既定プロバイダの window に対応し、Docker・package runner・独自 backend は拒否します。
 確認画面には対象窓の起動時に記録した認証ルートと由来（host・profile・caller environment）を
 表示し、ヘルパーも同じルートを使用します。証跡のない古い窓は再起動してください。
@@ -1160,19 +1160,19 @@ project 固有の規約を明示的に渡すには、
 `gwt-pm` skill へコピーされ、runtime に project への symlink は作りません。
 指定を外した内容は次回の再生成で除去されます。
 
-## キャンバス操作
+## サーフェス操作
 
-- 画面上の zoom ボタンでキャンバスを拡大・縮小
-- 背景ドラッグでキャンバスを移動
-- `Tile` で表示中のウィンドウをグリッド整列
-- `Stack` でタイトルバーを残したまま重ねて表示
-- `Align` でウィンドウサイズを変えずにグリッド整列
+- レールから **Issues**、**Agents**、**Board**、**Settings** を選ぶと、コンテンツ領域全体に表示します。
+- **PM** は独立したレール入口から開き、単一ペインで表示します。
+- プロジェクトバーの **Split view** で左右のペインを表示し、それぞれのサーフェスを選びます。
+- **Close split** でアクティブなサーフェスを単一ペインに戻します。
+- **Agents** では同じライブターミナルを維持して、**All agents** と個別タブを切り替えます。
 
 ## Agent の巡回
 
 `Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で、個別 Agent タブを
 状態順（running/starting → waiting/idle → その他）に選択します。
-Issue 内に表示された Agent も含み、PM と Shell はスキップします。
+Issue 内に表示された Agent と Shell のターミナルも含み、PM はスキップします。
 分割表示を維持し、選んだターミナルに入力フォーカスを移します。
 選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
 再び開けます。
@@ -1190,7 +1190,7 @@ Operator Design System 採用後、gwt は editorial-industrial 系タイポグ�
 counter、密度の高い作業サーフェスを長時間でも読み取りやすくします。
 一方で display typography は見出しと chrome label に限定して Operator らしさを
 保ちます。Project Bar / Command Rail / Status Strip / Command Palette /
-Hotkey Overlay / Drawer モーダル / フローティングウィンドウ の全クロームが
+Hotkey Overlay / Drawer モーダル / サーフェスパネル の全クロームが
 共通トークンを参照し、 2 つの旗艦テーマで提供されます:
 
 - **Dark Operator** (Mission Control / carbon + neon) — 既定、 長時間作業向け
@@ -1217,20 +1217,15 @@ Contrast) では system colors にフォールバックします。
 | --- | --- |
 | `⌘K` / `⌘P` | Command Palette を開く (全サーフェス アクションの fuzzy 検索) |
 | `⌘B` | Board サーフェスを focus |
-| `⌘G` | Git (Branches) サーフェスを focus |
+| `⌘G` | Issues サーフェスを focus |
 | `⌘L` | Logs サーフェスを focus |
 | `⌘?` | Hotkey Overlay (cheat sheet) を toggle |
 | `Esc` | 開いている Palette / Overlay / Drawer / Dropdown を閉じる |
 
-画面左端の Command Rail は常時表示です。上段に Intake (Curate レーン) と
-Open Workspace (Execute レーン)、
-中段にウィンドウ操作 (Tile / Stack / Align / ウィンドウ一覧 / Add)、
-下段に Command Palette が並びます。Board と Logs はレール項目ではなく、
-Add Window のプリセットメニュー・Command Palette・`⌘B` / `⌘L` のホットキー
-から開けます。レール項目にホバーするとラベルと実際のショートカットが
-表示されます。ウィンドウを閉じる操作
-(タイトルバーの × / タブの ×) は常に確認ダイアログを経由するため、誤クリック
-で実行中のエージェントが失われることはありません。
+レールには **PM** の独立した入口と、ラベル付きの **Issues**、**Agents**、
+**Board**、**Settings** が並びます。選択したサーフェスは固定ペインに表示し、
+**Split view** で必要に応じて2つ目のペインを追加できます。Status Strip は
+コンテンツ領域の下に表示します。その他の操作は Command Palette またはホットキーから使えます。
 
 ### アクセシビリティ
 

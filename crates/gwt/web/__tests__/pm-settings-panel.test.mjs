@@ -232,7 +232,7 @@ test("FR-132: rail gear remains separate from the PM launcher without a standalo
 
   assert.match(
     appJs,
-    /for \(const id of \["op-pm-entry", "canvas-pm-launcher"\]\)/,
+    /document\.getElementById\("op-pm-entry"\)/,
     "PM ランチャーの click 配線は維持する",
   );
   assert.match(appJs, /send\(\{\s*kind:\s*"open_pm_agent"\s*\}\)/);

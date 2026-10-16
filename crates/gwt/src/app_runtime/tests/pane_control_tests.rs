@@ -3959,24 +3959,40 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
     let mut foreign_tab = sample_project_tab_with_window_at(
         "foreign",
         "agent",
-        foreign,
+        foreign.clone(),
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
     foreign_tab
         .workspace
         .set_session_id("agent", Some("same-session".into()));
-    foreign_tab
-        .workspace
-        .set_agent_name("agent", Some("FALCON".into()));
     let (mut runtime, _) =
         sample_runtime_with_events(temp.path(), vec![foreign_tab, own_tab], Some("own"));
+    // Simultaneous launches are serialized through this handler. Both Agents
+    // proposed "Orven" on 2026-10-16; the old runtime assigned Orven / Orven-2.
+    runtime.handle_agent_frontend_event(
+        "foreign-caller".into(),
+        AgentSessionPrincipal::for_test(&foreign, "same-session").unwrap(),
+        AgentFrontendRequest::Name {
+            candidate: "Orven".into(),
+            request_id: "foreign-name".into(),
+        },
+    );
+    let first_assigned = runtime
+        .tab("foreign")
+        .unwrap()
+        .workspace
+        .window("agent")
+        .unwrap()
+        .agent_name
+        .clone()
+        .unwrap();
     let principal = AgentSessionPrincipal::for_test(&own, "same-session").unwrap();
     let events = runtime.handle_agent_frontend_event(
         "caller".into(),
         principal.clone(),
         AgentFrontendRequest::Name {
-            candidate: " falcon ".into(),
+            candidate: "Orven".into(),
             request_id: "name-request".into(),
         },
     );
@@ -3989,7 +4005,12 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
         .agent_name
         .clone()
         .unwrap();
-    assert_ne!(assigned.chars().next().unwrap().to_ascii_lowercase(), 'f');
+    assert_ne!(
+        assigned.chars().next().unwrap().to_ascii_lowercase(),
+        first_assigned.chars().next().unwrap().to_ascii_lowercase()
+    );
+    assert!(!first_assigned.starts_with("Orven"));
+    assert!(!assigned.starts_with("Orven"));
     assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::PaneNameResult { request_id, ok: true, agent_name: Some(name), error: None } if request_id == "name-request" && name == &assigned) && matches!(&event.target, DispatchTarget::Client(id) if id == "caller")));
     assert_eq!(
         runtime
@@ -4000,7 +4021,7 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
             .unwrap()
             .agent_name
             .as_deref(),
-        Some("FALCON")
+        Some(first_assigned.as_str())
     );
     assert_eq!(
         events

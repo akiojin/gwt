@@ -1822,8 +1822,7 @@ export function createKnowledgeKanbanSurface({
       function knowledgeWindowIsVisible(windowId) {
         const data = workspaceWindowById(windowId);
         const element = windowMap.get(windowId);
-        return Boolean(data && element && !document.hidden && !data.minimized &&
-          (!data.tab_group_id || data.tab_group_active) &&
+        return Boolean(data && element && !document.hidden &&
           !element.closest?.("[hidden]") && isKnowledgeWindowVisible(windowId));
       }
 
@@ -3013,8 +3012,11 @@ export function createKnowledgeKanbanSurface({
         const list = createNode("div", "knowledge-related-work-list");
         const liveSessionWindowsByConversation =
           buildKnowledgeRelatedLiveSessionWindowsByConversation(works);
+        const projectedWorks = (getActiveWorkProjection?.()?.active_works || [])
+          .flatMap(workspace => workspace.works || []);
         for (const work of works) {
           const card = createNode("article", "knowledge-related-work");
+          card.dataset.workId = work.id;
           const head = createNode("div", "knowledge-related-work-head");
           head.appendChild(
             createNode("div", "knowledge-related-work-title", work.title || "Untitled work"),
@@ -3029,6 +3031,34 @@ export function createKnowledgeKanbanSurface({
             );
           }
           card.appendChild(head);
+
+          // Closing targets a launch-scoped Work, never its branch Workspace.
+          const projectedWork = projectedWorks.find(item => item.id === work.id);
+          if (projectedWork && !["done", "discarded"].includes(projectedWork.lifecycle_state) &&
+              (projectedWork.manual_close_allowed === true || projectedWork.close_blocked_reason)) {
+            const actions = createNode("div", "workspace-detail-work-actions");
+            for (const [action, label, closeKind] of [
+              ["close-work-done", "Done", "done"],
+              ["close-work-discard", "Discard", "discarded"],
+            ]) {
+              const button = createNode("button", "wizard-button is-compact", label);
+              button.type = "button";
+              button.dataset.action = action;
+              button.dataset.workId = projectedWork.id;
+              if (closeKind === "discarded") button.classList.add("destructive");
+              if (projectedWork.manual_close_allowed !== true) {
+                button.disabled = true;
+                button.title = projectedWork.close_blocked_reason;
+                button.setAttribute("aria-label", `${label} unavailable: ${projectedWork.close_blocked_reason}`);
+              } else {
+                button.addEventListener("click", () =>
+                  send({ kind: "close_work", work_id: projectedWork.id, close_kind: closeKind }),
+                );
+              }
+              actions.appendChild(button);
+            }
+            card.appendChild(actions);
+          }
 
           const meta = createNode("div", "knowledge-related-work-meta");
           if (work.branch) {
@@ -3597,7 +3627,7 @@ export function createKnowledgeKanbanSurface({
       // selected. The agent state itself is the row's single primary badge
       // (AC-5), so the status row carries no second badge. It mounts no terminal;
       // Windowize stays the only hand-off (FR-010). After Windowize the same slot
-      // shows a "Shown on canvas" face (FR-012) that offers focus, never a second
+      // shows a "Shown in Agents" face (FR-012) that offers focus, never a second
       // input face for the PTY.
       function renderIssueAgentStatusRow(windowId, state, entry, faces) {
         const target = faces.inlineWindow || faces.canvasWindow;
@@ -3625,7 +3655,7 @@ export function createKnowledgeKanbanSurface({
           createNode(
             "div",
             "issue-agent-status-meta",
-            onCanvas ? `${meta} · Shown on canvas` : meta,
+            onCanvas ? `${meta} · Shown in Agents` : meta,
           ),
         );
         row.appendChild(titleWrap);
@@ -3637,7 +3667,7 @@ export function createKnowledgeKanbanSurface({
             createNode(
               "div",
               "issue-agent-status-placeholder",
-              "Shown on canvas. Input goes to the canvas window.",
+              "Shown in Agents. Input goes to the Agents tab.",
             ),
           );
           row.appendChild(issueRowActionButton("focus-canvas-window", context));
@@ -3752,7 +3782,7 @@ export function createKnowledgeKanbanSurface({
             createNode(
               "div",
               "issue-split-placeholder",
-              "Shown on canvas. Input goes to the canvas window.",
+              "Shown in Agents. Input goes to the Agents tab.",
             ),
           );
           return pair;
@@ -3983,7 +4013,7 @@ export function createKnowledgeKanbanSurface({
             const canvasWindow = entry ? issueRowFaces(windowId, entry, work).canvasWindow : null;
             if (canvasWindow) {
               detailPane.appendChild(createNode("div", "knowledge-detail-empty issue-preview-empty",
-                "Shown on canvas. Use Focus window to view the agent output."));
+                "Shown in Agents. Use Focus window to view the agent output."));
               detailPane.appendChild(issueRowActionButton("focus-canvas-window", {
                 windowId, state, entry, work, canvasWindow, target: canvasWindow,
               }));
@@ -4220,7 +4250,7 @@ export function createKnowledgeKanbanSurface({
           issueWindowViewModel.update(() => ({ windowId, detailOnly: true, focusPreview }));
           return;
         }
-        renderKnowledgeDetailView(windowId, state);
+        knowledgeBoardViewModel.update(() => ({ windowId, detailOnly: true }));
       }
 
       function renderKnowledgeDetailView(windowId, state) {
@@ -4409,11 +4439,11 @@ export function createKnowledgeKanbanSurface({
         "launch-agent": Object.freeze({ label: "Launch agent", aria: "Launch an agent for" }),
         "windowize-issue-preview": Object.freeze({
           label: "Windowize",
-          aria: "Open the agent terminal as a canvas window for",
+          aria: "Open the agent terminal in an Agents tab for",
         }),
         "focus-canvas-window": Object.freeze({
           label: "Focus window",
-          aria: "Focus the agent's canvas window for",
+          aria: "Focus the Agents tab for",
         }),
         // SPEC #3885 FR-015: the only place an agent can be stopped from.
         "stop-agent": Object.freeze({
@@ -4441,7 +4471,7 @@ export function createKnowledgeKanbanSurface({
         "windowize-issue-preview",
         "focus-canvas-window",
       ]);
-      // Ids this surface Windowized, so the row keeps its "Shown on canvas" face
+      // Ids this surface Windowized, so the row keeps its "Shown in Agents" face
       // even before the Work projection reports the agent's window id.
       const windowizedAgentWindowIds = new Set();
 
@@ -5243,6 +5273,15 @@ export function createKnowledgeKanbanSurface({
             const queuedQuery = state.query.trim();
             const previousNumber = state.selectedNumber;
             const incomingEntries = event.entries || [];
+            const previousSelectedEntry = state.baseEntries.find(entry => entry.number === previousNumber);
+            const incomingSelectedEntry = incomingEntries.find(entry => entry.number === previousNumber);
+            const relatedSnapshot = entry => JSON.stringify([
+              entry.related_work_refs || [], entry.related_work_count || 0,
+              entry.related_session_count || 0,
+            ]);
+            const refreshSelectedDetail = state.selectionGeneration > 0 &&
+              previousSelectedEntry && incomingSelectedEntry &&
+              relatedSnapshot(previousSelectedEntry) !== relatedSnapshot(incomingSelectedEntry);
             const entriesContent = JSON.stringify(incomingEntries);
             const unchangedEntries = !state.error && !state.renderError &&
               ((typeof event.revision === "string" && event.revision.length > 0 &&
@@ -5282,6 +5321,13 @@ export function createKnowledgeKanbanSurface({
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.refreshedAt = Date.now();
             state.error = "";
+            // A cache-first list can precede the related-work snapshot used by
+            // an explicit selection. Refresh its detail without selecting anew.
+            if (refreshSelectedDetail) {
+              knowledgeCompletionViewModel.update(() => ({
+                windowId: event.id, detailRefreshNumber: previousNumber,
+              }));
+            }
             const renderCompletion = () => {
               knowledgeCompletionViewModel.update(() => ({
                 windowId: event.id, unchangedEntries, previousNumber,
@@ -5576,16 +5622,22 @@ export function createKnowledgeKanbanSurface({
         if (kind === "resume") resumeVisibleKnowledgeEventRefresh();
       });
       knowledgeAutoRefreshModel.subscribe(model => model.revision, flushVisibleKnowledgeWindows);
-      knowledgeBoardViewModel.subscribe(model => model, ({ windowId }) => {
+      knowledgeBoardViewModel.subscribe(model => model, ({ windowId, detailOnly }) => {
         const element = windowMap.get(windowId);
         const state = knowledgeBridgeStateMap.get(windowId);
-        if (element && state) renderKnowledgeBoardView(windowId, element, state);
+        if (!element || !state) return;
+        if (detailOnly) renderKnowledgeDetailView(windowId, state);
+        else renderKnowledgeBoardView(windowId, element, state);
       });
       // List completion publishes data in receive; the synchronous view owns
       // both the full rebuild and revision-preserving selection updates.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber }) => {
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber }) => {
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
+        if (detailRefreshNumber) {
+          dispatchKnowledgeDetailRequest(windowId, state.kind, detailRefreshNumber, { explicit: false });
+          return;
+        }
         if (!unchangedEntries) {
           renderKnowledgeBridge(windowId);
           return;

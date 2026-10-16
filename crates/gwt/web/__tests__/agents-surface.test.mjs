@@ -209,12 +209,17 @@ test("tiles keep terminal input as the only input path and report unavailable se
   assert.match(first.textContent, /Interactive/);
 });
 
-test("the dedicated Start Work Shell is interactive without an agent session and retains stopped status gating", async () => {
+test("launched and restored Shells are interactive without agent sessions and retain stopped status gating", async () => {
   const { setWindows, document } = await fixture();
-  const shell = { id: "start-work-shell", preset: "shell", title: "Start Work", surface_owner: "agents", status: "running" };
-  setWindows([shell, { id: "naming", preset: "codex", status: "running" }]);
-  const tile = document.querySelector('[data-agent-id="start-work-shell"]');
-  assert.ok(tile, "Start Work Shell belongs to Agents");
+  const shell = { id: "restored-shell", preset: "shell", title: "Shell", status: "running" };
+  const dedicated = { ...shell, id: "start-work-shell", surface_owner: "agents" };
+  setWindows([shell, dedicated, { id: "naming", preset: "codex", status: "running" },
+    { ...shell, id: "pm", is_pm: true }, { id: "console", preset: "console" },
+    { id: "unknown", preset: "unknown" }]);
+  const tile = document.querySelector('[data-agent-id="restored-shell"]');
+  assert.ok(tile, "restored Shell belongs to Agents");
+  assert.equal(document.querySelectorAll(".agent-tile").length, 3, "PM and non-terminal views stay outside Agents");
+  assert.match(document.querySelector('[data-agent-id="start-work-shell"]').textContent, /Interactive/);
   const input = tile.querySelector("textarea");
   assert.ok(input);
   assert.match(tile.textContent, /Interactive/);

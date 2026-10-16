@@ -39,10 +39,11 @@ test.describe("Agent title role and worktree badges", () => {
     });
 
     await page.goto(appUrl);
+    await page.locator("#window-list-button").click();
 
-    const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
+    const agentWindow = page.locator(".window-list-row").first();
     await expect(agentWindow).toBeVisible({ timeout: 10_000 });
-    await expect(agentWindow.locator(".title-text")).toHaveText("Grok Build");
+    await expect(agentWindow.locator(".window-list-title")).toHaveText("Grok Build");
 
     const badge = agentWindow.locator(".window-role-badge").first();
     await expect(badge).toBeVisible();
@@ -59,10 +60,11 @@ test.describe("Agent title role and worktree badges", () => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installAgentTitleBadgeBackend(page, undefined, false, true);
     await page.goto(appUrl);
-    const owner = page.locator(".workspace-window[data-id='agent-1']");
-    const review = page.locator(".workspace-window[data-id='agent-2']");
-    await expect(owner.locator(".title-text")).toHaveText("Deliver Issue #42");
-    await expect(review.locator(".title-text")).toHaveText("Review · Issue #42");
+    await page.locator("#window-list-button").click();
+    const owner = page.locator(".window-list-row").nth(0);
+    const review = page.locator(".window-list-row").nth(1);
+    await expect(owner.locator(".window-list-title")).toHaveText("Deliver Issue #42");
+    await expect(review.locator(".window-list-title")).toHaveText("Review · Issue #42");
     await expect(review.locator(".window-worktree-badge")).toHaveAttribute("data-worktree-form", "ephemeral");
     await page.screenshot({ path: info.outputPath("independent-review.png") });
   });
@@ -71,6 +73,7 @@ test.describe("Agent title role and worktree badges", () => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installAgentTitleBadgeBackend(page, undefined, true);
     await page.goto(appUrl);
+    await page.locator('.op-rail__surface[data-surface="board"]').click();
     const board = page.locator(".workspace-window[data-id='board-1']");
     await expect(board).toBeVisible();
     const authored = board.locator("[data-board-entry-id='named-post']");
@@ -84,24 +87,23 @@ test.describe("Agent title role and worktree badges", () => {
     await info.attach("Board agent names", { path: screenshot, contentType: "image/png" });
   });
 
-  test("late names reach badge, title, Fleet and Kanban in both themes", async ({ page }, info) => {
+  test("late names reach badge, title and Kanban in both themes", async ({ page }, info) => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installAgentTitleBadgeBackend(page, undefined, true);
     await page.goto(appUrl);
-    const agent = page.locator(".workspace-window[data-id='agent-1']");
+    await page.locator("#window-list-button").click();
+    const agent = page.locator(".window-list-row").first();
     await expect(agent.locator(".window-worktree-badge")).toHaveText("Fix cache");
     await page.evaluate(() => (window as any).__assignAgentName("Lumen"));
     await expect(agent.locator(".window-worktree-badge")).toHaveText("Lumen");
     await expect(agent.locator(".window-worktree-badge")).toHaveAccessibleName("Lumen — Branch-backed worktree");
-    await expect(agent.locator(".title-text")).toHaveText("Lumen — Fix cache");
+    await expect(agent.locator(".window-list-title")).toHaveText("Lumen — Fix cache");
     await expect(agent.locator(".window-role-badge")).toHaveText("Codex");
-    await expect(page.locator(".fleet-minimap__cell[data-window-id='agent-1']"))
-      .toHaveAttribute("aria-label", /Lumen — Fix cache/);
+    await expect(page.locator("#fleet-minimap")).toHaveCount(0);
     await expect(page.locator(".agent-kanban-card[data-window-id='agent-3'] .agent-kanban-card-title"))
       .toHaveText("Lyra");
     await expect(page.locator(".agent-kanban-card[data-window-id='agent-3'] .agent-kanban-card-meta"))
       .toContainText("Review cache");
-    await page.locator("#window-list-button").click();
     await expect(page.locator(".window-list-title", { hasText: "Lumen — Fix cache" })).toBeVisible();
     await page.locator(".window-list-row")
       .filter({ has: page.locator(".window-list-title", { hasText: "Agent Kanban" }) }).click();
@@ -123,12 +125,11 @@ test.describe("Agent title role and worktree badges", () => {
     await installAgentTitleBadgeBackend(page);
 
     await page.goto(appUrl);
+    await page.locator("#window-list-button").click();
 
-    const branchBackedWindow = page.locator(
-      ".workspace-window[data-id='agent-1']",
-    );
-    const ephemeralWindow = page.locator(".workspace-window[data-id='agent-2']");
-    const unknownWindow = page.locator(".workspace-window[data-id='agent-3']");
+    const branchBackedWindow = page.locator(".window-list-row").nth(0);
+    const ephemeralWindow = page.locator(".window-list-row").nth(1);
+    const unknownWindow = page.locator(".window-list-row").nth(2);
     await expect(branchBackedWindow).toBeVisible({ timeout: 10_000 });
     await expect(ephemeralWindow).toBeVisible();
     await expect(unknownWindow).toBeVisible();
@@ -197,55 +198,6 @@ test.describe("Agent title role and worktree badges", () => {
     await expect(unknownBadge).toHaveAttribute("role", "img");
     await expect(unknownBadge).toHaveAccessibleName("Restored Agent — Unknown worktree form");
 
-    const minimap = page.locator("#fleet-minimap");
-    await expect(minimap).toBeVisible();
-    const minimapBranchBacked = minimap.locator(
-      '.fleet-minimap__cell[data-window-id="agent-1"]',
-    );
-    const minimapEphemeral = minimap.locator(
-      '.fleet-minimap__cell[data-window-id="agent-2"]',
-    );
-    const minimapUnknown = minimap.locator(
-      '.fleet-minimap__cell[data-window-id="agent-3"]',
-    );
-    await expect(minimapBranchBacked).toHaveAttribute(
-      "data-worktree-form",
-      "branch-backed",
-    );
-    await expect(minimapBranchBacked).toHaveAttribute(
-      "data-worktree-label",
-      "Branch-backed",
-    );
-    await expect(minimapEphemeral).toHaveAttribute(
-      "data-worktree-form",
-      "ephemeral",
-    );
-    await expect(minimapEphemeral).toHaveAttribute(
-      "data-worktree-label",
-      "Ephemeral",
-    );
-    await expect(minimapUnknown).toHaveAttribute("data-worktree-form", "unknown");
-    await expect(minimapUnknown).toHaveAttribute(
-      "data-worktree-label",
-      "Unknown worktree form",
-    );
-    for (const minimapCell of [
-      minimapBranchBacked,
-      minimapEphemeral,
-      minimapUnknown,
-    ]) {
-      const cellBox = await requiredBoundingBox(
-        minimapCell,
-        "compact minimap worktree cell",
-      );
-      expect(Math.min(cellBox.width, cellBox.height)).toBeLessThan(16);
-      await expect(minimapCell).not.toHaveAttribute(
-        "data-worktree-symbol",
-        /.+/,
-      );
-    }
-
-    await page.locator("#window-list-button").click();
     const panel = page.locator("#window-list-panel");
     await expect(panel).toBeVisible();
     const branchBackedListBadge = panel
@@ -288,16 +240,16 @@ test.describe("Agent title role and worktree badges", () => {
       "Restored Agent — Unknown worktree form",
     );
 
-    await expectWorktreeChromeNotToOverflow(page, false);
+    await expectWorktreeChromeNotToOverflow(page);
     await page.setViewportSize({ width: 640, height: 720 });
-    // Resize reframes the focused window on the next animation frame.
+    // The list stays inside the viewport when the rail becomes a top strip.
     await expect(async () => {
-      await expectWorktreeChromeNotToOverflow(page, true);
+      await expectWorktreeChromeNotToOverflow(page);
     }).toPass();
   });
 });
 
-async function expectWorktreeChromeNotToOverflow(page, expectMinimapMarkers) {
+async function expectWorktreeChromeNotToOverflow(page) {
   const viewport = page.viewportSize();
   expect(viewport).not.toBeNull();
   if (!viewport) {
@@ -309,43 +261,6 @@ async function expectWorktreeChromeNotToOverflow(page, expectMinimapMarkers) {
     width: viewport.width,
     height: viewport.height,
   };
-
-  const titlebars = page.locator(".workspace-window .titlebar");
-  await expect(titlebars).toHaveCount(3);
-  for (let index = 0; index < 3; index += 1) {
-    const titlebar = titlebars.nth(index);
-    const container = titlebar.locator("xpath=..");
-    const badge = titlebar.locator(".window-worktree-badge");
-    const actions = titlebar.locator(".window-actions");
-    await expect(titlebar).toBeVisible();
-    await expect(badge).toHaveCount(1);
-    await expect(badge).toBeVisible();
-    await expect(actions).toHaveCount(1);
-    await expect(actions).toBeVisible();
-    expect(await actions.locator("button:not([hidden])").count()).toBeGreaterThan(0);
-
-    const titlebarBox = await requiredBoundingBox(titlebar, `titlebar ${index}`);
-    const containerBox = await requiredBoundingBox(container, `window ${index}`);
-    const badgeBox = await requiredBoundingBox(badge, `worktree badge ${index}`);
-    const actionsBox = await requiredBoundingBox(actions, `window actions ${index}`);
-    expectBoxInside(titlebarBox, containerBox, `titlebar ${index} in window`);
-    expectBoxInside(titlebarBox, viewportBox, `titlebar ${index} in viewport`);
-    expectBoxInside(badgeBox, titlebarBox, `worktree badge ${index} in titlebar`);
-    expectBoxInside(actionsBox, titlebarBox, `window actions ${index} in titlebar`);
-    expect(
-      badgeBox.x + badgeBox.width,
-      `worktree badge ${index} must not overlap window actions`,
-    ).toBeLessThanOrEqual(actionsBox.x + 1);
-    const titlebarWidths = await titlebar.evaluate((element) => ({
-      clientWidth: element.clientWidth,
-      scrollWidth: element.scrollWidth,
-    }));
-    expect(titlebarWidths.clientWidth).toBeGreaterThan(0);
-    expect(
-      titlebarWidths.scrollWidth,
-      `titlebar ${index} must not overflow horizontally`,
-    ).toBeLessThanOrEqual(titlebarWidths.clientWidth + 1);
-  }
 
   const rows = page.locator("#window-list-panel .window-list-row");
   await expect(rows).toHaveCount(3);
@@ -366,81 +281,6 @@ async function expectWorktreeChromeNotToOverflow(page, expectMinimapMarkers) {
   );
   expectBoxInside(panelBox, viewportBox, "window list panel in viewport");
 
-  if (!expectMinimapMarkers) {
-    return;
-  }
-  const minimap = page.locator("#fleet-minimap");
-  await expect(minimap).toBeVisible();
-  const minimapBox = await requiredBoundingBox(minimap, "fleet minimap");
-  expectBoxInside(minimapBox, viewportBox, "fleet minimap in viewport");
-  const expectedMarkers = [
-    { form: "ephemeral", label: "Ephemeral", symbol: "Ø" },
-    { form: "branch-backed", label: "Branch-backed", symbol: "B" },
-    { form: "unknown", label: "Unknown worktree form", symbol: "?" },
-  ];
-  for (const expectedMarker of expectedMarkers) {
-    const marker = minimap.locator(
-      `.fleet-minimap__cell[data-worktree-form="${expectedMarker.form}"][data-worktree-symbol="${expectedMarker.symbol}"]`,
-    );
-    await expect(marker).toHaveCount(1);
-    await expect(marker).toBeVisible();
-    await expect(marker).toHaveAttribute(
-      "data-worktree-label",
-      expectedMarker.label,
-    );
-    const markerBox = await requiredBoundingBox(
-      marker,
-      `${expectedMarker.form} minimap marker`,
-    );
-    expectBoxInside(
-      markerBox,
-      minimapBox,
-      `${expectedMarker.form} minimap marker in minimap`,
-    );
-    expectBoxInside(
-      markerBox,
-      viewportBox,
-      `${expectedMarker.form} minimap marker in viewport`,
-    );
-    const pseudo = await marker.evaluate((element) => {
-      const cellStyle = getComputedStyle(element);
-      const style = getComputedStyle(element, "::before");
-      const pixels = (value) => Number.parseFloat(value) || 0;
-      const contentWidth = Math.max(pixels(style.width), pixels(style.minWidth));
-      const contentHeight = Math.max(pixels(style.height), pixels(style.minHeight));
-      return {
-        cellBorderBottom: pixels(cellStyle.borderBottomWidth),
-        cellBorderLeft: pixels(cellStyle.borderLeftWidth),
-        content: style.content,
-        bottom: pixels(style.bottom),
-        left: pixels(style.left),
-        outerHeight:
-          contentHeight +
-          pixels(style.paddingTop) +
-          pixels(style.paddingBottom) +
-          pixels(style.borderTopWidth) +
-          pixels(style.borderBottomWidth),
-        outerWidth:
-          contentWidth +
-          pixels(style.paddingLeft) +
-          pixels(style.paddingRight) +
-          pixels(style.borderLeftWidth) +
-          pixels(style.borderRightWidth),
-      };
-    });
-    expect(pseudo.content).toContain(expectedMarker.symbol);
-    expect(pseudo.outerWidth).toBeGreaterThan(0);
-    expect(pseudo.outerHeight).toBeGreaterThan(0);
-    const roundingTolerance = 0.01;
-    expect(
-      pseudo.cellBorderLeft + pseudo.left + pseudo.outerWidth,
-      `${expectedMarker.form} marker must fit its minimap cell horizontally`,
-    ).toBeLessThanOrEqual(markerBox.width + roundingTolerance);
-    expect(
-      pseudo.cellBorderBottom + pseudo.bottom + pseudo.outerHeight,
-      `${expectedMarker.form} marker must fit its minimap cell vertically`,
-    ).toBeLessThanOrEqual(markerBox.height + roundingTolerance);
-  }
 }
 
 async function requiredBoundingBox(locator, label) {

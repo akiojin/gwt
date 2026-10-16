@@ -18,7 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::worktree_gc::{self, GcFailure, GcOptions, GcRemoval, GcReport};
+use crate::cli::worktree_gc::{
+    self, kept_reason_category, GcFailure, GcKept, GcOptions, GcRemoval, GcReport,
+    GcUnreclaimedReason,
+};
 use crate::disk_space::{DiskSpaceStatus, DiskThresholds};
 
 /// The first priority is the same as the manual defaults. Under continued
@@ -88,12 +91,17 @@ pub struct BuildArtifactGcRecord {
     pub removed: Vec<GcRemoval>,
     #[serde(default)]
     pub failed: Vec<GcFailure>,
-    /// Kept worktrees per reason (`active process`, `not merged into
-    /// origin/develop`, …). The per-worktree detail names pids and sessions
-    /// that are meaningless an hour later; the counts are what an operator
-    /// reads to see why space was not reclaimed.
+    /// Retention counts retained for existing status readers.
     #[serde(default)]
     pub kept_by_reason: BTreeMap<String, usize>,
+    /// Per-worktree evidence must survive the live PID/lease disappearing.
+    #[serde(default)]
+    pub kept: Vec<GcKept>,
+    /// Absent on legacy records, rather than a misleading measured zero.
+    #[serde(default)]
+    pub unreclaimed_bytes: Option<u64>,
+    #[serde(default)]
+    pub unreclaimed_by_reason: Vec<GcUnreclaimedReason>,
     /// Pressure was not relieved by any reclaim; kept reasons explain why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -122,8 +130,9 @@ impl BuildArtifactGcRecord {
         self.recorded_outcome = Some(outcome);
         if outcome == BuildArtifactGcOutcome::NoReclaim {
             self.warning = Some(format!(
-                "disk pressure GC reclaimed 0 bytes; kept_by_reason: {:?}",
-                self.kept_by_reason
+                "disk pressure GC reclaimed 0 bytes; unreclaimed_bytes: {}; top_reasons: {:?}; kept_by_reason: {:?}",
+                self.unreclaimed_bytes.map_or_else(|| "unknown (legacy record)".to_string(), |bytes| bytes.to_string()),
+                &self.unreclaimed_by_reason[..self.unreclaimed_by_reason.len().min(3)], self.kept_by_reason
             ));
         }
     }
@@ -348,6 +357,9 @@ fn record_from_result(
                 removed: Vec::new(),
                 failed: Vec::new(),
                 kept_by_reason: BTreeMap::new(),
+                kept: Vec::new(),
+                unreclaimed_bytes: None,
+                unreclaimed_by_reason: Vec::new(),
                 warning: None,
                 error: Some(error),
             };
@@ -371,22 +383,14 @@ fn record_from_result(
         removed: report.removed,
         failed: report.failed,
         kept_by_reason,
+        kept: report.kept,
+        unreclaimed_bytes: Some(report.unreclaimed_bytes),
+        unreclaimed_by_reason: report.unreclaimed_by_reason,
         warning: None,
         error: None,
     };
     record.normalize_outcome();
     record
-}
-
-/// `active process: claude (pid 1)` → `active process`; `not merged into
-/// origin/develop (pass …)` → `not merged into origin/develop`.
-fn kept_reason_category(reason: &str) -> String {
-    reason
-        .split([':', '('])
-        .next()
-        .unwrap_or(reason)
-        .trim()
-        .to_string()
 }
 
 #[cfg(test)]
@@ -537,8 +541,9 @@ mod tests {
             worktree: PathBuf::from(root),
             branch: None,
             reason: reason.to_string(),
+            bytes: 100,
         };
-        let report = GcReport {
+        let mut report = GcReport {
             dry_run: false,
             base: "develop".to_string(),
             include_unmerged: false,
@@ -558,10 +563,19 @@ mod tests {
                 target: PathBuf::from("/d/target"),
                 bytes: 4096,
             }],
-            failed: Vec::new(),
+            failed: vec![GcFailure {
+                worktree: PathBuf::from("/failed"),
+                target: PathBuf::from("/failed/target"),
+                reason: "permission denied".to_string(),
+                bytes: 50,
+            }],
             reclaimed_bytes: 4096,
+            unreclaimed_bytes: 350,
+            unreclaimed_by_reason: Vec::new(),
             disk_space: evaluate(Vec::new()),
         };
+        report.unreclaimed_by_reason =
+            worktree_gc::unreclaimed_reasons(&report.kept, &report.failed);
 
         let record = record_from_result(
             Ok(report),
@@ -575,6 +589,12 @@ mod tests {
         assert_eq!(record.reclaimed_bytes, 4096);
         assert_eq!(record.removed.len(), 1);
         assert_eq!(record.trigger, "disk space low");
+        assert_eq!(record.unreclaimed_bytes, Some(350));
+        assert_eq!(record.unreclaimed_by_reason[0].reason, "active process");
+        assert_eq!(record.unreclaimed_by_reason[0].bytes, 200);
+        assert_eq!(record.unreclaimed_by_reason[2].reason, "removal failed");
+        assert_eq!(record.unreclaimed_by_reason[2].bytes, 50);
+        assert_eq!(record.kept[0].reason, "active process: cargo (pid 1)");
         assert_eq!(
             record.kept_by_reason,
             BTreeMap::from([
@@ -621,11 +641,14 @@ mod tests {
                 worktree: PathBuf::from("/work/busy"),
                 branch: None,
                 reason: "active process: cargo (pid 7)".into(),
+                bytes: 4096,
             }],
             reclaimable_bytes: 0,
             removed: Vec::new(),
             failed: Vec::new(),
             reclaimed_bytes: 0,
+            unreclaimed_bytes: 4096,
+            unreclaimed_by_reason: Vec::new(),
             disk_space: evaluate(Vec::new()),
         };
 
@@ -637,6 +660,8 @@ mod tests {
             .as_str()
             .is_some_and(|text| text.contains("0 bytes")));
         assert_eq!(json["kept_by_reason"]["active process"], 1);
+        assert_eq!(json["unreclaimed_bytes"], 4096);
+        assert_eq!(json["kept"][0]["reason"], "active process: cargo (pid 7)");
     }
 
     /// Legacy zero-byte runs must not keep presenting success after upgrade.
@@ -654,6 +679,7 @@ mod tests {
             serde_json::from_str(&legacy("null")).expect("clean record");
 
         assert_eq!(failed.outcome(), BuildArtifactGcOutcome::EnumerationFailed);
+        assert_eq!(failed.unreclaimed_bytes, None);
         assert_ne!(clean.outcome(), BuildArtifactGcOutcome::Swept);
         let mut old_swept = clean;
         old_swept.recorded_outcome = Some(BuildArtifactGcOutcome::Swept);
@@ -679,6 +705,9 @@ mod tests {
             removed: Vec::new(),
             failed: Vec::new(),
             kept_by_reason: BTreeMap::new(),
+            kept: Vec::new(),
+            unreclaimed_bytes: Some(0),
+            unreclaimed_by_reason: Vec::new(),
             warning: None,
             error: None,
         };
