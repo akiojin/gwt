@@ -74,8 +74,10 @@ function sandbox(
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-coverage-summary-"));
   const fixtureDir = path.join(root, "fixtures");
   const targetDir = path.join(root, "llvm-cov-target");
+  const workspaceRoot = path.join(root, "workspace");
   fs.mkdirSync(fixtureDir);
   fs.mkdirSync(targetDir);
+  fs.mkdirSync(workspaceRoot);
   for (const [name, bytes] of Object.entries(fixtures)) {
     fs.writeFileSync(path.join(fixtureDir, name), bytes);
   }
@@ -84,6 +86,15 @@ function sandbox(
   writeExecutable(
     profdata,
     `const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "merge") {
+  const outputIndex = args.indexOf("-o");
+  const files = args.slice(1, outputIndex).filter((arg) => !arg.startsWith("-"));
+  const readable = files.filter((file) => fs.readFileSync(file).subarray(-3).equals(Buffer.from("#OK")));
+  if (readable.length === 0 || (readable.length !== files.length && !args.includes("--failure-mode=all"))) process.exit(1);
+  fs.writeFileSync(args[outputIndex + 1], "merged#OK");
+  process.exit(0);
+}
 const file = process.argv[process.argv.length - 1];
 const bytes = fs.readFileSync(file);
 if (bytes.length === 0) { console.error("empty raw profile file"); process.exit(1); }
@@ -100,6 +111,7 @@ if (!bytes.subarray(-3).equals(Buffer.from("#OK"))) {
   );
   fs.mkdirSync(path.dirname(currentObject), { recursive: true });
   fs.writeFileSync(currentObject, "100");
+  fs.chmodSync(currentObject, 0o755);
   const cargo = path.join(root, `cargo${suffix}`);
   writeExecutable(
     cargo,
@@ -126,6 +138,15 @@ if (args[0] === "test" && args.includes("--no-run")) {
   console.log(JSON.stringify({ reason: "build-finished", success: true }));
   process.exit(0);
 }
+if (args[0] === "metadata") {
+  console.log(JSON.stringify({ workspace_root: ${JSON.stringify(workspaceRoot)}, target_directory: target }));
+  process.exit(0);
+}
+if (args[0] === "nextest" && args[1] === "list") {
+  if (args.includes("--partition") || !process.env.RUSTFLAGS.includes("instrument-coverage")) process.exit(2);
+  console.log(JSON.stringify({ "rust-suites": { gwt: { testcases: { unit: { ignored: false, "filter-match": { status: "matches" } } } } } }));
+  process.exit(0);
+}
 if (args[1] === "clean") {
   for (const name of profiles()) fs.rmSync(path.join(target, name));
   process.exit(0);
@@ -133,6 +154,12 @@ if (args[1] === "clean") {
 if (args.includes("--no-report")) {
   for (const name of fs.readdirSync(${JSON.stringify(fixtureDir)})) {
     fs.copyFileSync(path.join(${JSON.stringify(fixtureDir)}, name), path.join(target, name));
+  }
+  // Nextest's default store is workspace-relative, independent of Cargo's target.
+  if (!fs.existsSync(${JSON.stringify(path.join(root, "omit-junit"))})) {
+    const junit = path.join(${JSON.stringify(workspaceRoot)}, "target", "nextest", process.env.NEXTEST_PROFILE || "default", "junit.xml");
+    fs.mkdirSync(path.dirname(junit), { recursive: true });
+    fs.writeFileSync(junit, '<testsuites><testsuite name="gwt"><testcase name="unit" time="1"/></testsuite></testsuites>');
   }
   process.exit(${testExit});
 }
@@ -147,6 +174,14 @@ if (args[1] === "report") {
     process.exit(1);
   }
   const out = args[args.indexOf("--output-path") + 1];
+  if (process.platform !== "win32" && fs.readdirSync(path.join(target, "debug", "deps"))
+      .some((name) => !(fs.statSync(path.join(target, "debug", "deps", name)).mode & 0o111))) {
+    console.error("coverage object lost executable permission"); process.exit(1);
+  }
+  if (args.includes("--lcov")) {
+    fs.writeFileSync(out, "TN:roundtrip\\n");
+    process.exit(0);
+  }
   const count = fs.readdirSync(path.join(target, "debug", "deps"))
     .reduce((sum, name) => sum + Number(fs.readFileSync(path.join(target, "debug", "deps", name), "utf8")), 0);
   const summary = { data: [{ files: [{ filename: "crates/gwt/src/lib.rs",
@@ -159,7 +194,7 @@ process.exit(2);`,
   );
   const output = path.join(root, "coverage-summary.json");
   after(() => fs.rmSync(root, { recursive: true, force: true }));
-  return { root, targetDir, profdata, cargo, output, currentObject };
+  return { root, targetDir, workspaceRoot, profdata, cargo, output, currentObject };
 }
 
 function run(box, extraArgs = ["--workspace", "--all-features"], ownArgs = []) {
@@ -173,6 +208,7 @@ function run(box, extraArgs = ["--workspace", "--all-features"], ownArgs = []) {
         CARGO: box.cargo,
         LLVM_PROFDATA: box.profdata,
         CARGO_LLVM_COV_TARGET_DIR: box.targetDir,
+        NEXTEST_PROFILE: "coverage",
       },
     },
   );
@@ -181,6 +217,7 @@ function run(box, extraArgs = ["--workspace", "--all-features"], ownArgs = []) {
         .readFileSync(path.join(box.root, "calls.jsonl"), "utf8")
         .trim()
         .split("\n")
+        .filter(Boolean)
         .map((line) => JSON.parse(line))
     : [];
   return { ...result, calls, text: `${result.stdout}${result.stderr}` };
@@ -201,6 +238,112 @@ test("nextest covers the same workspace without forwarding runner flags to artif
   assert.ok(!build.includes("--nextest") && !build.includes("--retries"));
   assert.deepEqual(result.calls[0], ["llvm-cov", "clean", "--workspace", "--profraw-only"]);
   assert.equal(reportCalls(result.calls).length, 1);
+});
+
+function exportShards(box) {
+  const root = path.join(box.root, "shards");
+  for (let shard = 1; shard <= 2; shard += 1) {
+    const result = run(box, ["--workspace", "--all-features"], [
+      "--nextest", "--partition", `slice:${shard}/2`,
+      "--export-dir", path.join(root, `workspace-tests-${shard}`),
+    ]);
+    assert.equal(result.status, 0, result.text);
+  }
+  fs.writeFileSync(path.join(box.root, "calls.jsonl"), "");
+  return root;
+}
+
+test("coverage shards export only current objects and report the merged profiles without rebuilding", () => {
+  const box = sandbox({ "gwt-111_0.profraw": profile(4096) });
+  fs.writeFileSync(path.join(path.dirname(box.currentObject), "stale-object"), "1000");
+  const root = exportShards(box);
+  const retry = run(box, ["--workspace", "--all-features"], [
+    "--nextest", "--partition", "slice:1/2",
+    "--export-dir", path.join(root, "workspace-tests-1"),
+  ]);
+  assert.equal(retry.status, 0, retry.text);
+  fs.writeFileSync(path.join(box.root, "calls.jsonl"), "");
+  const first = path.join(root, "workspace-tests-1");
+  const second = path.join(root, "workspace-tests-2");
+  const manifest = JSON.parse(fs.readFileSync(path.join(first, "manifest.json"), "utf8"));
+  assert.equal(manifest.success, true);
+  assert.match(manifest.source_sha, /^[0-9a-f]{40}$/);
+  assert.equal(manifest.objects.length, 1);
+  assert.ok(fs.existsSync(path.join(first, "objects", manifest.objects[0].path)));
+  fs.chmodSync(path.join(first, "objects", manifest.objects[0].path), 0o644);
+  assert.ok(!fs.existsSync(path.join(second, "objects")));
+  assert.ok(fs.existsSync(path.join(first, "workspace-test-evidence/inventory.json")));
+  assert.ok(fs.existsSync(path.join(first, "nextest/ci/junit.xml")));
+  const canonicalJunit = path.join(box.workspaceRoot, "target/nextest/coverage/junit.xml");
+  assert.ok(fs.existsSync(canonicalJunit));
+  assert.ok(!fs.existsSync(path.join(box.targetDir, "nextest/coverage/junit.xml")));
+  const lcov = path.join(box.root, "lcov.info");
+  const result = run(box, [], ["--report-from", root, "--shards", "2", "--lcov-output-path", lcov]);
+  assert.equal(result.status, 0, result.text);
+  assert.equal(reportCalls(result.calls).length, 2);
+  assert.ok(result.calls.every((args) => args[1] === "report" || args[0] === "metadata"));
+  assert.equal(JSON.parse(fs.readFileSync(box.output)).data[0].files[0].summary.lines.count, 100);
+  assert.match(fs.readFileSync(lcov, "utf8"), /TN:roundtrip/);
+  // A successful nextest exit without a fresh report cannot reuse old evidence.
+  fs.writeFileSync(path.join(box.root, "omit-junit"), "");
+  const stale = run(box, ["--workspace", "--all-features"], [
+    "--nextest", "--partition", "slice:1/2", "--export-dir", first,
+  ]);
+  assert.equal(stale.status, 4, stale.text);
+  assert.ok(!fs.existsSync(canonicalJunit));
+  assert.ok(!fs.existsSync(path.join(first, "manifest.json")));
+});
+
+test("coverage shard aggregation rejects mismatched, missing and changed artifacts and removes stale reports", () => {
+  const box = sandbox({ "gwt-111_0.profraw": profile(4096) });
+  const root = exportShards(box);
+  const file = path.join(root, "workspace-tests-2/manifest.json");
+  const original = JSON.parse(fs.readFileSync(file, "utf8"));
+  fs.writeFileSync(file, JSON.stringify({ ...original, source_sha: "0".repeat(40) }));
+  fs.writeFileSync(box.output, "stale");
+  let result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+  assert.ok(!fs.existsSync(box.output));
+  assert.equal(reportCalls(result.calls).length, 0);
+  fs.writeFileSync(file, JSON.stringify({ ...original, run_args: ["--workspace"] }));
+  result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+  fs.writeFileSync(file, JSON.stringify(original));
+  const object = path.join(root, "workspace-tests-1/objects", original.objects[0].path);
+  fs.appendFileSync(object, "changed");
+  result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+  fs.writeFileSync(object, "100");
+  fs.appendFileSync(path.join(root, "workspace-tests-2/profiles.profdata"), "changed");
+  result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+  fs.rmSync(path.join(root, "workspace-tests-2"), { recursive: true });
+  result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+});
+
+test("coverage shard export preserves conservative profile recovery and rejects profile damage", () => {
+  const box = sandbox({
+    "gwt-111_0.profraw": profile(4096),
+    "gwt-111_1.profraw": profile(1024, { readable: false }),
+  });
+  const root = exportShards(box);
+  const health = JSON.parse(fs.readFileSync(path.join(root, "workspace-tests-1/profiles.json"), "utf8"));
+  assert.equal(health.classification, "profile-truncated");
+  assert.equal(health.recovered, true);
+  const report = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(report.status, 0, report.text);
+  assert.match(report.text, /RECOVERED \[profile-truncated\]/);
+  const audit = JSON.parse(fs.readFileSync(`${box.output}.profiles.json`, "utf8"));
+  assert.equal(audit.classification, "profile-truncated");
+  assert.equal(audit.recovered, true);
+  assert.deepEqual(audit.shards.map((shard) => shard.shard), [1, 2]);
+  assert.equal(audit.shards[0].damaged[0].name, "gwt-111_1.profraw");
+  const damaged = sandbox({ "bad.profraw": Buffer.from("not a profile") });
+  const destination = path.join(damaged.root, "export");
+  const result = run(damaged, [], ["--nextest", "--partition", "slice:1/2", "--export-dir", destination]);
+  assert.equal(result.status, 3, result.text);
+  assert.ok(!fs.existsSync(path.join(destination, "manifest.json")));
 });
 
 test("inspectProfiles classifies healthy, truncated, empty, malformed, and corrupt profiles", async () => {
