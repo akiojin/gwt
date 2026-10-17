@@ -220,13 +220,10 @@ fn pull_request_workflows_cancel_the_superseded_run_of_the_same_pr() {
                         && key.contains("github.event.pull_request.number")
                 );
                 assert!(key.ends_with(id), "job groups must be independent: {id}");
-                if matches!(
-                    id,
-                    "source-sync" | "changes" | "test-windows-verify-timings"
-                ) {
+                if matches!(id, "source-sync" | "changes") {
                     assert!(
                         cancel_in_progress(id, policy),
-                        "short classifiers and superseded paired measurements remain replaceable"
+                        "short classifiers remain replaceable"
                     );
                 } else {
                     assert!(needs(body).iter().any(|need| need == "source-sync"));
