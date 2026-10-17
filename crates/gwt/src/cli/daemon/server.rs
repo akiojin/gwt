@@ -3580,6 +3580,72 @@ async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
+    let _prefs_budget = pin_prefs_hang_guard();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+    let issue = crate::IssueMonitorIssue {
+        number: 42,
+        title: "Restored agent".to_string(),
+        labels: Vec::new(),
+        state: crate::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: Default::default(),
+        updated_at: None,
+    };
+    monitor.record_candidate(issue.clone());
+    monitor.record_monitor_runtime_counts(
+        101,
+        1001,
+        std::collections::BTreeMap::from([(42, 1)]),
+        "2026-06-29T01:00:00Z",
+    );
+    assert_eq!(monitor.agent_status().active_launches, vec![42]);
+    let before = monitor.prefs();
+    assert!(before.launched_issues.is_empty());
+    crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
+
+    assert!(matches!(
+        try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            AcceptedIssueMonitorControl::new(IssueMonitorControl::WaitDeclared {
+                issue_number: 42,
+                reason: "verification".to_string(),
+                resume_condition: "lease available".to_string(),
+                at: "2026-06-29T01:00:00Z".to_string(),
+            }),
+        ),
+        IssueMonitorControlCommit::Committed {
+            should_scan: false,
+            authority_changed: false,
+        }
+    ));
+    let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("committed wait");
+    assert_eq!(persisted, monitor.prefs());
+    assert!(persisted.last_control_receipt.is_some());
+    assert_eq!(persisted.launched_issues, before.launched_issues);
+    assert_eq!(persisted.launch_bindings, before.launch_bindings);
+    assert_eq!(
+        persisted.effect_authority_epoch,
+        before.effect_authority_epoch
+    );
+    let mut restored =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+    restored.record_candidate(issue);
+    let status = restored.agent_status_at("2026-06-29T02:00:00Z");
+    assert_eq!(status.active_launches, vec![42]);
+    let waiting = status.inbox[0].waiting.as_ref().expect("wait projected");
+    assert_eq!(waiting.reason, "verification");
+    assert_eq!(waiting.resume_condition, "lease available");
+    assert_eq!(waiting.since, "2026-06-29T01:00:00Z");
+    assert!(waiting.in_force);
+}
+
 fn decode_issue_monitor_control_in_repo(
     payload: serde_json::Value,
     repo_path: Option<&std::path::Path>,
@@ -10059,52 +10125,6 @@ exit 0
             vec![42],
             "ordinary detection resumes from the clearing heartbeat"
         );
-    }
-
-    #[test]
-    fn issue_5066_wait_control_rejects_an_untracked_physical_launch_without_a_receipt() {
-        let _prefs_budget = pin_prefs_hang_guard();
-        let temp = TempDir::new().expect("tempdir");
-        let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            crate::IssueMonitorPrefs {
-                enabled: true,
-                autonomous_mode: true,
-                ..crate::IssueMonitorPrefs::default()
-            },
-        );
-        monitor.record_candidate(sample_issue_monitor_issue(42));
-        monitor.record_monitor_runtime_counts(
-            101,
-            1001,
-            std::collections::BTreeMap::from([(42, 1)]),
-            "2026-06-29T01:00:00Z",
-        );
-        assert_eq!(monitor.active_issue_numbers(), vec![42]);
-        let before = monitor.prefs();
-        crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
-
-        assert_eq!(
-            apply_control_for_test(
-                &prefs_path,
-                &mut monitor,
-                IssueMonitorControl::WaitDeclared {
-                    issue_number: 42,
-                    reason: "verification".to_string(),
-                    resume_condition: "lease available".to_string(),
-                    at: "2026-06-29T01:00:00Z".to_string(),
-                },
-            ),
-            super::IssueMonitorControlCommit::WaitNotLaunched
-        );
-        assert_eq!(monitor.prefs(), before);
-        assert_eq!(
-            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
-            before
-        );
-        assert!(monitor.autonomous_wait(42).is_none());
-        assert!(monitor.last_control_receipt().is_none());
     }
 
     #[test]
