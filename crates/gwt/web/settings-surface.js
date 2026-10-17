@@ -73,6 +73,11 @@ function linkSettingsPanel(panel, windowId, tabId) {
   panel.setAttribute("aria-labelledby", settingsTabId(windowId, tabId));
 }
 
+// Keep vendor banners and build hashes in diagnostics, not comparison columns.
+function supportedAgentVersion(value) {
+  return value?.match(/(?:^|[\s(])v?(\d+\.\d+\.\d+(?:-[\da-z.-]+)?)(?:\+[\da-z.-]+)?(?=$|[\s)])/i)?.[1] || null;
+}
+
 // SPEC #5017: maintain the built-in catalog without changing launch profiles.
 function renderSupportedAgentsPanel(panel, agents, options) {
   const document = panel.ownerDocument;
@@ -128,6 +133,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
     const cell = document.createElement("th");
     cell.setAttribute("scope", "col");
     cell.textContent = label;
+    cell.title = label;
     header.appendChild(cell);
   }
   const body = document.createElement("tbody");
@@ -136,24 +142,28 @@ function renderSupportedAgentsPanel(panel, agents, options) {
     const row = document.createElement("tr");
     body.appendChild(row);
     row.dataset.agentId = agent.id;
-    const version = agent.installed_version?.trim();
+    const rawVersion = agent.installed_version?.trim();
+    const version = supportedAgentVersion(rawVersion);
     const values = [
       `${agent.name} (${agent.id})`,
       agent.installed ? "Installed" : "Not installed",
       agent.installed
-        ? version || "Unknown (version unavailable)"
+        ? version || "Unknown"
         : "Not installed",
       agent.available_version
         ? agent.up_to_date
           ? `${agent.available_version} · Latest`
           : agent.available_version
-        : agent.update_check_error || "Version check unavailable",
+        : "Unknown",
     ];
     for (const value of values) {
       const cell = document.createElement("td");
       cell.textContent = value;
+      cell.title = value;
       row.appendChild(cell);
     }
+    if (agent.installed) row.children[2].title = rawVersion || "Installed version unavailable";
+    row.children[3].title = agent.update_check_error || agent.available_version || "Available version unavailable";
     const actions = document.createElement("td");
     const action = !agent.installed && agent.install_supported
       ? "install"
@@ -163,7 +173,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
       button.type = "button";
       button.className = "wizard-button";
       const label = `${action === "install" ? "Install" : "Update"} ${agent.name}`;
-      button.textContent = label;
+      button.textContent = action === "install" ? "Install" : "Update";
       button.setAttribute("aria-label", label);
       button.disabled = busy;
       button.addEventListener("click", () => {
@@ -181,6 +191,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
         status.textContent += ` Before: ${result.before_version || "Unknown (version unavailable)"}. `
           + `After: ${result.after_version || "Unknown (version unavailable)"}.`;
       }
+      status.title = status.textContent;
       actions.appendChild(status);
     }
     row.appendChild(actions);

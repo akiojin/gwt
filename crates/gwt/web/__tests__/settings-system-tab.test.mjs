@@ -57,7 +57,7 @@ function loadFunctionWithDeps(name, deps) {
 test("Supported Agents renders the catalog, identifiers, versions, and install actions", () => {
   const { document } = parseHTML("<html><body><section></section></body></html>");
   const panel = document.querySelector("section");
-  const render = loadFunction("renderSupportedAgentsPanel");
+  const render = loadFunctionWithDeps("renderSupportedAgentsPanel", ["supportedAgentVersion"]);
   render(panel, [
     { id: "claude", name: "Claude Code", installed: true, installed_version: "2.1.0" },
     { id: "codex", name: "Codex", installed: true, installed_version: null },
@@ -66,9 +66,10 @@ test("Supported Agents renders the catalog, identifiers, versions, and install a
   const rows = panel.querySelectorAll("[data-agent-id]");
   assert.equal(rows.length, 3);
   assert.match(rows[0].textContent, /Claude Code.*Installed.*2\.1\.0/);
-  assert.match(rows[1].textContent, /Codex.*Installed.*Unknown \(version unavailable\)/);
+  assert.equal(rows[1].children[2].textContent, "Unknown");
+  assert.match(rows[1].children[2].title, /version unavailable/i);
   assert.match(rows[2].textContent, /Grok Build.*Not installed/);
-  assert.doesNotMatch(rows[2].textContent, /Unknown/);
+  assert.equal(rows[2].children[2].textContent, "Not installed");
   assert.match(rows[0].textContent, /\(claude\)/);
   assert.equal(rows[2].querySelector("button")?.getAttribute("aria-label"), "Install Grok Build");
   assert.equal(panel.querySelectorAll("th[scope='col']").length, 5);
@@ -77,10 +78,35 @@ test("Supported Agents renders the catalog, identifiers, versions, and install a
   assert.equal(panel.querySelectorAll("[data-agent-id]").length, 0);
 });
 
+test("Issue #5594 normalizes the five reported CLI outputs without losing diagnostic details", () => {
+  const normalize = loadFunction("supportedAgentVersion");
+  const examples = [
+    ["2.1.301 (Claude Code)", "2.1.301"],
+    ["codex-cli 0.162.1", "0.162.1"],
+    ["grok 1.0.46 (2765805b9442) [stable]", "1.0.46"],
+    ["OpenClaw 2026.3.23-2 (7ffe7e4)", "2026.3.23-2"],
+    ["Unknown (version unavailable)", null],
+  ];
+  for (const [raw, version] of examples) assert.equal(normalize(raw), version, raw);
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  const render = loadFunctionWithDeps("renderSupportedAgentsPanel", ["supportedAgentVersion"]);
+  render(panel, examples.map(([raw], index) => ({
+    id: String(index), name: "Agent", installed: true, installed_version: raw,
+    update_check_error: "Release channel cannot be verified. Run the native updater manually.",
+  })));
+  for (const [index, row] of [...panel.querySelectorAll("tbody tr")].entries()) {
+    assert.equal(row.children[2].textContent, examples[index][1] || "Unknown");
+    assert.equal(row.children[2].title, examples[index][0]);
+    assert.equal(row.children[3].textContent, "Unknown");
+    assert.match(row.children[3].title, /Release channel cannot be verified/);
+  }
+});
+
 test("Supported Agents sends maintenance requests and exposes failures and automatic update conditions", () => {
   const { document, Event } = parseHTML("<html><body><section></section></body></html>");
   const panel = document.querySelector("section");
-  const render = loadFunction("renderSupportedAgentsPanel");
+  const render = loadFunctionWithDeps("renderSupportedAgentsPanel", ["supportedAgentVersion"]);
   const messages = [];
   const agents = [
     { id: "opencode", name: "OpenCode", installed: false, install_supported: true },
@@ -90,6 +116,8 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   render(panel, agents, options);
   const install = panel.querySelector('[aria-label="Install OpenCode"]');
   assert.ok(install, "a missing supported agent needs an Install action");
+  assert.equal(install.textContent, "Install");
+  assert.equal(panel.querySelector('[aria-label="Update Grok Build"]').textContent, "Update");
   install.click();
   panel.querySelector('[aria-label="Update Grok Build"]').click();
   const automatic = panel.querySelector('[aria-label="Automatically update agents"]');
@@ -140,6 +168,7 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, true);
   handlers.applySupportedAgentMaintenance({ agent_id: "opencode", pending: false, success: false, message: "Registry unavailable. Check your connection and retry." });
   assert.match(panel.querySelector('[role="alert"]').textContent, /Check your connection and retry/);
+  assert.equal(panel.querySelector('[role="alert"]').title, "Registry unavailable. Check your connection and retry.");
   assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false);
   agents[1].installed_version = "grok 2.0.0";
   agents[1].update_available = false;
@@ -179,6 +208,14 @@ test("Supported Agents table uses Operator tokens in both themes", () => {
   assert.match(cells[1], /var\(--space-/);
   assert.match(cells[1], /var\(--color-border\)/);
   assert.doesNotMatch(table[1] + cells[1], /#[\da-f]{3,8}\b|\brgba?\(/i);
+  assert.match(table[1], /table-layout:\s*fixed/);
+  assert.match(cells[1], /white-space:\s*nowrap/);
+  assert.match(cells[1], /text-overflow:\s*ellipsis/);
+  const button = componentsCss.match(/\.settings-supported-agents \.wizard-button\s*\{([^}]*)\}/);
+  assert.ok(button, "action buttons need a shared width and one-line labels");
+  assert.match(button[1], /width:/);
+  assert.match(button[1], /white-space:\s*nowrap/);
+  assert.doesNotMatch(button[1], /#[\da-f]{3,8}\b|\brgba?\(/i);
 });
 
 test("two Settings System panels keep labels associated with controls in their own window", () => {
