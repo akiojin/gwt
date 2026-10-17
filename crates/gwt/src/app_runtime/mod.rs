@@ -623,7 +623,7 @@ mod title_sync;
 mod ui_trace;
 mod window;
 mod wizard;
-pub(crate) use wizard::IssueMonitorLaunchPrepared;
+pub(crate) use wizard::{IssueMonitorLaunchFactsPrefetched, IssueMonitorLaunchPrepared};
 mod workspace;
 mod workspace_views;
 use attachments::UploadedImagePasteOperation;
@@ -1529,7 +1529,7 @@ impl IssueMonitorLaunchClaimInput {
 
 /// Issue #4378 AC-2: one Issue Monitor launch delivery held until the startup
 /// generation reaper reports back.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeferredIssueMonitorLaunch {
     pub(crate) project_root: PathBuf,
     pub(crate) issue_number: u64,

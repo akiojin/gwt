@@ -258,6 +258,40 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
         runtime.agent_maintenance_rejection().is_some(),
         "confirmed wizard preparation owns launch admission"
     );
+    runtime
+        .project_state_mut(&runtime.test_context())
+        .unwrap()
+        .pending_launch_wizard_materializations
+        .clear();
+    runtime.set_window_status("tab-1", "pm", WindowProcessStatus::Stopped);
+    assert!(runtime.agent_maintenance_rejection().is_none());
+    let context = runtime.test_context();
+    runtime.issue_monitor_launch_preparations.insert((
+        context.tab_id.clone(),
+        context.generation,
+        5596,
+        None,
+        true,
+    ));
+    let (spawner, _tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.auto_launch_issue_monitor_delivery_events_for_project(
+        &context.project_root,
+        5597,
+        LinkedIssueKind::Issue,
+        Some("launch:maintenance-queued".to_string()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    assert_eq!(runtime.issue_monitor_launch_queue.len(), 1);
+    runtime.issue_monitor_launch_preparations.clear();
+    assert!(runtime.inflight_launches.is_empty());
+    assert!(runtime.runtimes.is_empty());
+    assert!(
+        runtime.agent_maintenance_rejection().is_some(),
+        "a waiting Monitor queue alone must retain launch admission"
+    );
+    runtime.issue_monitor_launch_queue.clear();
+    assert!(runtime.agent_maintenance_rejection().is_none());
 }
 
 #[test]

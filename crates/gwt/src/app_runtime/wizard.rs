@@ -14,6 +14,7 @@
 //! phases land the struct can move here too.
 
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     thread,
 };
@@ -576,10 +577,25 @@ pub(crate) struct IssueMonitorLaunchPrepared {
 
 pub(crate) type IssueMonitorLaunchPreparationKey = (String, u64, u64, Option<String>, bool);
 
+#[derive(Debug, Clone)]
+pub(crate) struct IssueMonitorLaunchFactsPrefetched {
+    context: super::ProjectContext,
+    request: super::DeferredIssueMonitorLaunch,
+    token: Uuid,
+    reusable: Option<IssueMonitorLaunchPreparation>,
+}
+
+enum IssueMonitorFactsPrefetch {
+    NotStarted,
+    Pending(Uuid),
+    Finished,
+}
+
 pub(crate) struct PendingIssueMonitorLaunch {
     context: super::ProjectContext,
     request: super::DeferredIssueMonitorLaunch,
     reusable: Option<IssueMonitorLaunchPreparation>,
+    prefetch: IssueMonitorFactsPrefetch,
 }
 
 fn issue_monitor_launch_preparation_key(
@@ -3186,6 +3202,7 @@ impl AppRuntime {
             delivery_id,
             launch_session_strategy,
             None,
+            false,
         )
     }
 
@@ -3197,13 +3214,107 @@ impl AppRuntime {
         })
     }
 
+    /// Speculate only on the current FIFO prefix. Pending completions keep their
+    /// slot until the GUI consumes them, even after the worker has returned.
+    fn prefetch_issue_monitor_launch_facts(&mut self) {
+        let mut positions = HashMap::new();
+        for index in 0..self.issue_monitor_launch_queue.len() {
+            let pending = &self.issue_monitor_launch_queue[index];
+            if !self.project_context_is_current(&pending.context) {
+                continue;
+            }
+            let limit = if self.issue_monitor_launch_lane_busy(&pending.context) {
+                1
+            } else {
+                2
+            };
+            let position = positions
+                .entry(pending.context.project_key.clone())
+                .or_insert(0);
+            *position += 1;
+            if *position > limit
+                || !matches!(pending.prefetch, IssueMonitorFactsPrefetch::NotStarted)
+                || pending.reusable.is_some()
+                || pending.request.delivery_id.is_none()
+                || pending.request.launch_session_strategy
+                    != gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
+            {
+                continue;
+            }
+            let context = pending.context.clone();
+            let request = pending.request.clone();
+            let token = Uuid::new_v4();
+            let cache = self.launch_wizard_cache.clone();
+            let sessions_dir = self.sessions_dir.clone();
+            let profile_config_path = self.profile_config_path();
+            let provider_usage = self.provider_usage_accounts.clone();
+            let auth_probe = self.issue_monitor_provider_auth_probe;
+            let branch = knowledge_launch_target_branch_name(
+                request.linked_issue_kind,
+                request.issue_number,
+            );
+            let live_sessions = self.live_sessions_for_branch(&context.tab_id, &branch);
+            let proxy = self.proxy.clone();
+            self.issue_monitor_launch_queue[index].prefetch =
+                IssueMonitorFactsPrefetch::Pending(token);
+            if self.blocking_tasks.try_spawn(move || {
+                let _span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_facts_prefetch", issue_number = request.issue_number, delivery_id = request.delivery_id.as_deref().unwrap_or("none")).entered();
+                let mut phase_started = std::time::Instant::now();
+                // This worker performs reads only. The normal head worker owns
+                // claim, tier writes, admission and all Answer side effects.
+                let reusable = (|| {
+                    let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request).ok()??;
+                    let handoff = issue_monitor_resume_handoff(&request.project_root, request.issue_number);
+                    if !handoff.as_ref().is_ok_and(Option::is_none) {
+                        return None;
+                    }
+                    let facts = prepare_issue_monitor_launch(&context, live_sessions, &request, &cache, &sessions_dir, &profile_config_path, choice, auth_probe, handoff).ok()?;
+                    (facts.fresh.as_ref().is_some_and(Result::is_ok)
+                        && facts.resume.as_ref().is_ok_and(Option::is_none))
+                        .then(|| IssueMonitorLaunchPreparation::Launch(Box::new(facts)))
+                })();
+                record_issue_monitor_worker_phase("monitor_facts_prefetch", &mut phase_started);
+                proxy.send(UserEvent::IssueMonitorLaunchFactsPrefetched(Box::new(IssueMonitorLaunchFactsPrefetched { context, request, token, reusable })));
+            }).is_err() {
+                self.issue_monitor_launch_queue[index].prefetch = IssueMonitorFactsPrefetch::Finished;
+            }
+        }
+    }
+
+    pub(crate) fn handle_issue_monitor_launch_facts_prefetched(
+        &mut self,
+        prefetched: IssueMonitorLaunchFactsPrefetched,
+    ) -> Vec<OutboundEvent> {
+        if self.project_context_is_current(&prefetched.context) {
+            let Some(pending) = self.issue_monitor_launch_queue.iter_mut().find(|pending| {
+                pending.context == prefetched.context
+                    && pending.request == prefetched.request
+                    && matches!(pending.prefetch, IssueMonitorFactsPrefetch::Pending(token) if token == prefetched.token)
+            }) else {
+                return Vec::new();
+            };
+            pending.prefetch = IssueMonitorFactsPrefetch::Finished;
+            pending.reusable = prefetched.reusable;
+        }
+        self.advance_issue_monitor_launch_queue_events()
+    }
+
     /// Capture the next sibling after pane registration advances the preview.
     /// Independent branches can materialize concurrently; shared Git config
     /// writers and same-branch freshness are protected at their own boundaries.
     pub(super) fn advance_issue_monitor_launch_queue_events(&mut self) -> Vec<OutboundEvent> {
         let mut events = Vec::new();
+        let mut waiting = HashSet::new();
         for pending in std::mem::take(&mut self.issue_monitor_launch_queue) {
             if self.project_context_is_current(&pending.context) {
+                if self.issue_monitor_launch_lane_busy(&pending.context)
+                    || waiting.contains(&pending.context.project_key)
+                    || matches!(pending.prefetch, IssueMonitorFactsPrefetch::Pending(_))
+                {
+                    waiting.insert(pending.context.project_key.clone());
+                    self.issue_monitor_launch_queue.push(pending);
+                    continue;
+                }
                 let request = pending.request;
                 events.extend(
                     self.auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
@@ -3213,13 +3324,16 @@ impl AppRuntime {
                         request.delivery_id,
                         request.launch_session_strategy,
                         pending.reusable,
+                        true,
                     ),
                 );
             }
         }
+        self.prefetch_issue_monitor_launch_facts();
         events
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn auto_launch_issue_monitor_delivery_events_for_project_with_reusable(
         &mut self,
         project_root: &Path,
@@ -3228,6 +3342,7 @@ impl AppRuntime {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
         reusable: Option<IssueMonitorLaunchPreparation>,
+        queue_head: bool,
     ) -> Vec<OutboundEvent> {
         let Some(context) = self.project_context_for_root(project_root) else {
             return Vec::new();
@@ -3294,17 +3409,35 @@ impl AppRuntime {
         if self.issue_monitor_launch_preparations.contains(&key) {
             return Vec::new();
         }
-        if self.issue_monitor_launch_lane_busy(&context) {
+        if self.issue_monitor_launch_lane_busy(&context)
+            || (!queue_head
+                && self.issue_monitor_launch_queue.iter().any(|pending| {
+                    pending.context.project_key == context.project_key
+                        && self.project_context_is_current(&pending.context)
+                }))
+        {
             if !self.issue_monitor_launch_queue.iter().any(|pending| {
                 issue_monitor_launch_preparation_key(&pending.context, &pending.request) == key
             }) {
-                self.issue_monitor_launch_queue
-                    .push(PendingIssueMonitorLaunch {
+                let index = if queue_head {
+                    self.issue_monitor_launch_queue
+                        .iter()
+                        .position(|pending| pending.context.project_key == context.project_key)
+                        .unwrap_or(self.issue_monitor_launch_queue.len())
+                } else {
+                    self.issue_monitor_launch_queue.len()
+                };
+                self.issue_monitor_launch_queue.insert(
+                    index,
+                    PendingIssueMonitorLaunch {
                         context,
                         request,
                         reusable,
-                    });
+                        prefetch: IssueMonitorFactsPrefetch::NotStarted,
+                    },
+                );
             }
+            self.prefetch_issue_monitor_launch_facts();
             return Vec::new();
         }
         self.issue_monitor_launch_preparations.insert(key.clone());
@@ -3953,6 +4086,7 @@ impl AppRuntime {
                 request.delivery_id,
                 request.launch_session_strategy,
                 reusable,
+                true,
             );
         }
         let events = self.apply_issue_monitor_launch_delivery(
@@ -4235,6 +4369,7 @@ impl AppRuntime {
                             delivery_id,
                             launch_session_strategy,
                             reusable,
+                            true,
                         ),
                     );
                 } else {
