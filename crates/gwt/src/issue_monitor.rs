@@ -6376,6 +6376,12 @@ pub(crate) fn establish_issue_monitor_authority_fence_with_lease(
                 persist_issue_monitor_authority_fence(prefs_path, current)?;
             }
         }
+        // The caller holds the exclusive lifetime lease, so the previous
+        // GUI/daemon driver has handed over authority. Its recent heartbeat
+        // cannot establish concurrent scanning by this new owner.
+        if prefs.last_scan_driver.take().is_some() {
+            save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
+        }
         Ok(prefs)
     })
 }
@@ -36936,6 +36942,11 @@ mod tests {
             &prefs_path,
             &IssueMonitorPrefs {
                 effect_authority_epoch: 7,
+                last_scan_driver: Some(IssueMonitorScanDriver {
+                    kind: IssueMonitorScanDriverKind::Daemon,
+                    pid: u32::MAX,
+                    at: "2026-10-17T02:00:00Z".into(),
+                }),
                 ..IssueMonitorPrefs::default()
             },
         )
@@ -36956,11 +36967,63 @@ mod tests {
                 .expect("free lifetime lock proves that the current fence is stale");
 
         assert_eq!(prefs.effect_authority_epoch, 8);
+        assert!(prefs.last_scan_driver.is_none());
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            monitor.diagnose_scan_drive(
+                IssueMonitorScanDriverKind::Daemon,
+                std::process::id(),
+                "2026-10-17T02:00:01Z",
+            ),
+            None,
+            "restarting a dead daemon is a fenced takeover, not a second driver"
+        );
         assert_eq!(
             load_issue_monitor_authority_fence(&prefs_path).expect("load replacement fence"),
             IssueMonitorAuthorityFenceState::Active(current)
         );
         drop(lease);
+    }
+
+    #[test]
+    fn exclusive_daemon_takeover_does_not_diagnose_the_previous_gui_as_concurrent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let now = "2026-10-17T02:00:00Z";
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                last_scan_at: Some(now.to_string()),
+                last_scan_driver: Some(IssueMonitorScanDriver {
+                    kind: IssueMonitorScanDriverKind::GuiFrontDoor,
+                    pid: std::process::id(),
+                    at: now.to_string(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (prefs, _lease) = establish_issue_monitor_authority_fence(
+            &prefs_path,
+            &IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .expect("exclusive lease proves the GUI no longer drives the monitor");
+        assert_eq!(prefs.last_scan_at.as_deref(), Some(now));
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            monitor.diagnose_scan_drive(
+                IssueMonitorScanDriverKind::Daemon,
+                std::process::id(),
+                now
+            ),
+            None,
+            "a fenced handover is not simultaneous scan ownership"
+        );
+        assert!(load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .last_scan_driver
+            .is_none());
     }
 
     #[test]

@@ -46,7 +46,16 @@ impl DaemonClient {
     pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self, String> {
         let stream = IpcStream::connect(&endpoint.bind)
             .await
-            .map_err(|err| format!("daemon connect failed ({}): {err}", endpoint.bind))?;
+            .map_err(|err| {
+                if crate::process::host_process_liveness(endpoint.pid) == Some(false) {
+                    format!(
+                        "daemon owner exited (pid={}, bind={}): {err}; retry after the supervisor restarts the daemon",
+                        endpoint.pid, endpoint.bind
+                    )
+                } else {
+                    format!("daemon connect failed ({}): {err}", endpoint.bind)
+                }
+            })?;
         check_server_identity(&stream, endpoint.pid)?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
@@ -157,6 +166,21 @@ mod tests {
             token.to_string(),
             "test-daemon".to_string(),
         )
+    }
+
+    #[tokio::test]
+    async fn exited_daemon_connect_error_names_the_dead_owner_and_recovery() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut endpoint =
+            sample_endpoint(sample_scope(&temp), &temp.path().join("dead.sock"), "dead");
+        endpoint.pid = u32::MAX;
+        let error = DaemonClient::connect(&endpoint)
+            .await
+            .err()
+            .expect("an exited daemon cannot accept a connection");
+        assert!(error.contains("daemon owner exited"), "{error}");
+        assert!(error.contains(&endpoint.pid.to_string()), "{error}");
+        assert!(error.contains("supervisor"), "{error}");
     }
 
     #[tokio::test]
