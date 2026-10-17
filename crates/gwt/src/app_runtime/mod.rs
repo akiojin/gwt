@@ -188,6 +188,11 @@ pub enum AppEventProxy {
     },
     #[cfg(test)]
     Stub(Arc<Mutex<Vec<UserEvent>>>),
+    #[cfg(test)]
+    Notifying {
+        inner: Box<AppEventProxy>,
+        sent: std::sync::mpsc::Sender<()>,
+    },
 }
 
 impl AppEventProxy {
@@ -199,6 +204,8 @@ impl AppEventProxy {
             Self::Project { inner, .. } => inner.pending_count(),
             #[cfg(test)]
             Self::Stub(events) => events.try_lock().ok().map(|events| events.len()),
+            #[cfg(test)]
+            Self::Notifying { inner, .. } => inner.pending_count(),
         }
     }
 
@@ -264,6 +271,12 @@ impl AppEventProxy {
                 }
                 Ok(())
             }
+            #[cfg(test)]
+            Self::Notifying { inner, sent } => {
+                let result = inner.send_event(event);
+                let _ = sent.send(());
+                result
+            }
         }
     }
 
@@ -276,6 +289,8 @@ impl AppEventProxy {
                 drop(discarded);
             }
             Self::Project { inner, .. } => inner.close(),
+            #[cfg(test)]
+            Self::Notifying { inner, .. } => inner.close(),
             #[cfg(test)]
             Self::Stub(events) => {
                 let discarded = std::mem::take(&mut *events.lock().expect("stub app events"));
@@ -326,6 +341,11 @@ impl AppEventProxy {
                     .expect("stub app events")
                     .splice(0..0, events);
             }
+            #[cfg(test)]
+            Self::Notifying { inner, sent } => {
+                inner.prepend_events(events);
+                let _ = sent.send(());
+            }
         }
     }
 
@@ -350,6 +370,8 @@ impl AppEventProxy {
                 next
             }
             Self::Project { inner, .. } => inner.take_next(),
+            #[cfg(test)]
+            Self::Notifying { inner, .. } => inner.take_next(),
             #[cfg(test)]
             Self::Stub(events) => {
                 let mut events = events.lock().expect("stub app events");
@@ -3976,6 +3998,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         }
     }
     let mut loaded_for_commit = None;
+    let mut idle_settlements = None;
     let mut merge_reconciliation_error = None;
     let mut completion_probe_error = None;
     let mut local_repo_identity = None;
@@ -4003,6 +4026,13 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 &repo,
             ) {
                 Ok(loaded) => {
+                    let observations =
+                        gwt::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+                            &mut monitor,
+                            project_root,
+                        );
+                    monitor.reconcile_dead_terminal_launches(&observations, now);
+                    idle_settlements = Some(observations);
                     gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                         &mut monitor,
                         &loaded,
@@ -4040,14 +4070,12 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // Issue #4084: read every launched Issue's execution record before taking
     // the prefs lock. The classification itself is pure; only this read is
     // I/O, and an unreadable record fails closed to `stuck_unknown`.
-    let idle_settlements = window_snapshot
-        .map(|_| {
-            gwt::issue_monitor_worker::read_execution_observations(
-                project_root,
-                &monitor.execution_settlement_issue_numbers(),
-            )
-        })
-        .unwrap_or_default();
+    let idle_settlements = idle_settlements.unwrap_or_else(|| {
+        gwt::issue_monitor_worker::read_execution_observations(
+            project_root,
+            &monitor.execution_settlement_issue_numbers(),
+        )
+    });
     let live_launch_owners = window_snapshot
         .map(|snapshot| {
             gwt::issue_monitor_worker::verified_live_launch_owners(project_root, snapshot, now)
@@ -4079,6 +4107,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     let prepare = |latest: &mut gwt::IssueMonitorState| {
         latest.refresh_agent_capacity(project_root);
         latest.expire_stale_unbound_launches(now);
+        // Retire exact dead terminal holders before duplicate-binding repair
+        // can mistake their displaced projections for unfinished work.
+        latest.reconcile_dead_terminal_launches(&idle_settlements, now);
         // Issue #3883 AC-2/AC-3: restore tracking for agent windows that
         // are still on the canvas, inside the transaction that persists
         // this scan. Same store, same generation as the restart restore
@@ -4129,9 +4160,6 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 );
             }
         }
-        // Issue #4084 AC-2/AC-3/AC-4: release the idle windows inside the
-        // same transaction that persists this scan, after re-adoption has
-        // restored every binding a live window still owns.
         if window_snapshot.is_some() {
             latest.reconcile_idle_windows(&idle_settlements, now);
         }
@@ -9053,6 +9081,7 @@ impl AppRuntime {
             std::time::Instant::now() + ISSUE_MONITOR_SCAN_BUDGET,
         );
         let mut loaded_for_commit = None;
+        let mut window_observations = None;
         let mut merge_reconciliation_error = None;
         #[cfg(not(unix))]
         let mut completion_probe_error = None;
@@ -9077,6 +9106,27 @@ impl AppRuntime {
                     &repo,
                 ) {
                     Ok(loaded) => {
+                        let executions =
+                            gwt::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+                                &mut monitor,
+                                &project_root,
+                            );
+                        let terminal = monitor.reconcile_dead_terminal_launches(&executions, &now);
+                        let (live_launch_owners, observed_at) =
+                            gwt::issue_monitor_worker::read_verified_live_launch_owners(
+                                &monitor,
+                                &project_root,
+                                &now,
+                            );
+                        gwt::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+                            &mut monitor,
+                            &executions,
+                            &live_launch_owners,
+                            &observed_at,
+                            &now,
+                            terminal,
+                        );
+                        window_observations = Some((executions, live_launch_owners, observed_at));
                         gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                             &mut monitor,
                             &loaded,
@@ -9126,6 +9176,19 @@ impl AppRuntime {
         );
         let persisted =
             rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
+                // Reapply the proposal to the latest prefs using the same
+                // runtime evidence; the short commit budget owns no observation I/O.
+                if let Some((executions, live_launch_owners, observed_at)) = &window_observations {
+                    let terminal = monitor.reconcile_dead_terminal_launches(executions, &now);
+                    gwt::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+                        monitor,
+                        executions,
+                        live_launch_owners,
+                        observed_at,
+                        &now,
+                        terminal,
+                    );
+                }
                 if let Some(loaded) = &loaded_for_commit {
                     gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                         monitor,
@@ -10743,6 +10806,28 @@ impl AppRuntime {
             }
             return vec![update_notice("warn", refusal.notice(version))];
         }
+        self.begin_update_drain_for_project(context, version, prefs, automatic)
+            .0
+    }
+
+    fn begin_update_drain_for_project(
+        &mut self,
+        context: &ProjectContext,
+        version: &str,
+        prefs: gwt::IssueMonitorPrefs,
+        automatic: bool,
+    ) -> (Vec<OutboundEvent>, bool) {
+        let project_root = context.project_root.clone();
+        let observe = |stage: &str, reason: &str| {
+            record_pending_update_observation(
+                version,
+                Some(&project_root),
+                stage,
+                reason,
+                chrono::Utc::now(),
+                None,
+            );
+        };
         tracing::info!(
             target: "gwt::update",
             version,
@@ -10753,7 +10838,7 @@ impl AppRuntime {
                 "pending_failed",
                 "project state unavailable while starting drain",
             );
-            return Vec::new();
+            return (Vec::new(), false);
         };
         state.update_auto_apply.reset();
         let version = version.to_string();
@@ -10785,12 +10870,15 @@ impl AppRuntime {
                             "pending_failed",
                             &format!("cannot commit update drain: {local_error}"),
                         );
-                        return self.issue_monitor_control_error_events(
-                            Some(&context.project_root),
-                            None,
-                            local_error,
-                            "update-drain",
-                            None,
+                        return (
+                            self.issue_monitor_control_error_events(
+                                Some(&context.project_root),
+                                None,
+                                local_error,
+                                "update-drain",
+                                None,
+                            ),
+                            false,
                         );
                     }
                 }
@@ -10800,12 +10888,15 @@ impl AppRuntime {
                     "pending_failed",
                     &format!("cannot publish update drain: {error}"),
                 );
-                return self.issue_monitor_control_error_events(
-                    Some(&context.project_root),
-                    None,
-                    error,
-                    "update-drain",
-                    None,
+                return (
+                    self.issue_monitor_control_error_events(
+                        Some(&context.project_root),
+                        None,
+                        error,
+                        "update-drain",
+                        None,
+                    ),
+                    false,
                 );
             }
         };
@@ -10840,7 +10931,7 @@ impl AppRuntime {
                 "Update v{version} staged — draining agents before applying automatically; new launches are held."
             ),
         ));
-        events
+        (events, true)
     }
 
     /// Issue #3906 AC-2 / AC-7 / AC-8 / AC-9 (#4076 AC-2 / AC-5): one drain
@@ -11640,6 +11731,10 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)
             }
+            FrontendEvent::GetUpdateRestartImpact { request_id } => {
+                self.get_update_restart_impact_events(&client_id, &request_id)
+            }
+            FrontendEvent::ApplyUpdateWhenIdle => self.apply_update_when_idle_events(&client_id),
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
             FrontendEvent::SetAutoApplyUpdates { enabled } => {
                 self.set_global_auto_apply_updates_events(&client_id, enabled)
@@ -12766,6 +12861,10 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)
             }
+            FrontendEvent::GetUpdateRestartImpact { request_id } => {
+                self.get_update_restart_impact_events(&client_id, &request_id)
+            }
+            FrontendEvent::ApplyUpdateWhenIdle => self.apply_update_when_idle_events(&client_id),
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
             FrontendEvent::OpenUpdateLog { log_path } => {
                 self.open_update_log_events(&client_id, log_path)

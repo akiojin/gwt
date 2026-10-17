@@ -1,0 +1,160 @@
+{
+  "captured_utc": "2026-10-16T07:35:14.008090+00:00",
+  "home": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-recovery-home",
+  "boundary": "Read-only post-measurement audit. Native TTL and published corpus remain unchanged; acquire_write administrative lock rows may grow during native query opens.",
+  "source_preflight": "../final-snapshot-reuse-audit.json",
+  "checks": {
+    "meta_bytes_unchanged": true,
+    "manifest_bytes_unchanged": true,
+    "pointer_value_unchanged": true,
+    "document_count_1622": true,
+    "corpus_and_management_tables_unchanged_except_acquire_write": true,
+    "no_failure_guards": true
+  },
+  "meta": {
+    "schema_version": 1,
+    "mode": "incremental",
+    "last_full_refresh": "2026-10-16T03:25:26.544786+00:00",
+    "ttl_minutes": 15,
+    "document_count": 1622,
+    "source_cache_fingerprint": "252185e3264bd84c6b965b737c8e16165a87dc620d3c25d3469c75641f144ae3",
+    "source_document_count": 1622,
+    "source_cache_refresh_at": "2026-10-16T02:52:31.476200300+00:00"
+  },
+  "pointer": {
+    "schema_version": 1,
+    "generation": "gen-1792121126541-50828",
+    "scope": "issues",
+    "document_count": 1622,
+    "published_at": "2026-10-16T03:25:26.544017+00:00"
+  },
+  "table_checks": [
+    {
+      "table": "acquire_write",
+      "count": 35,
+      "rows_sha256": "1f2013635e87af467138c98ca9ba7895e790191afd0d5414cf77faf74225434e",
+      "matches_pre_measurement_table": false
+    },
+    {
+      "table": "collection_metadata",
+      "count": 1,
+      "rows_sha256": "9b7bfef39a4a9165f078678d8e6dcddea30da45d71e507fc761cef4e18cd0996",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "collections",
+      "count": 1,
+      "rows_sha256": "304667a399de970f3f24ee104df4501959aad2251bc06c792922cbb0ef11f32a",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "databases",
+      "count": 1,
+      "rows_sha256": "0bda620f6b01852eaef2e25349f075b34cda868f9f1d25774208f65e9accbbc5",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embedding_fulltext_search",
+      "count": 1622,
+      "rows_sha256": "757057247fd3be31115680a35eb5d23d50212669e5b0f977e05ca3d7b7979267",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embedding_fulltext_search_config",
+      "count": 1,
+      "rows_sha256": "a64c819e94cda03f2e1d953f16175a513caf6c850595ab8f13c4a83d51998cb4",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embedding_fulltext_search_content",
+      "count": 1622,
+      "rows_sha256": "f742ebd2238bea4cd3dfff8850649bd490f22e3ae72bc1955cd3bebe0cd8f965",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embedding_fulltext_search_data",
+      "count": 2572,
+      "rows_sha256": "3f73f7bdcb07d165be3b53c84906480ea2587efa3eec940be88bf652a9b127c6",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embedding_fulltext_search_docsize",
+      "count": 1622,
+      "rows_sha256": "2b7135f8d0995502b7c0cad79da7c14e38333b26848d0416b6692f00b36ad909",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embedding_fulltext_search_idx",
+      "count": 2544,
+      "rows_sha256": "93d066bdf674d22730b1f6932155568a28fbb88da5ee3c65054060701dac04b4",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embedding_metadata",
+      "count": 9732,
+      "rows_sha256": "8664b45b0d7491595a7b2f98c23ddd2eda45d5e521ce93f2918f0c2ac25a6543",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embedding_metadata_array",
+      "count": 0,
+      "rows_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embeddings",
+      "count": 1622,
+      "rows_sha256": "5176be7af2671197228ab0e295fe21805b073ec8ebcd1b01b7f060326f3701cf",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embeddings_queue",
+      "count": 87,
+      "rows_sha256": "ab9004cac9cfd71596296a896b0ef58efa3217868823bbd65785efae520f1338",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "embeddings_queue_config",
+      "count": 1,
+      "rows_sha256": "f82728d85ec38a9077e996a60ad9c0c94100177af471e13403bca81e6c8a1298",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "maintenance_log",
+      "count": 0,
+      "rows_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "max_seq_id",
+      "count": 2,
+      "rows_sha256": "a7e9222038f96cfe538c9d37cfb48254b419199660a2d867acea5a80548ec35b",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "migrations",
+      "count": 18,
+      "rows_sha256": "58850fb0d1a91647eb4e0aa989cb31fb627dafdd93788292b668eaaeb3e7c72d",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "segment_metadata",
+      "count": 0,
+      "rows_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "segments",
+      "count": 2,
+      "rows_sha256": "79803abee068262a78f562174489c8d9f625ca4e3a03b2f415565ffddb271771",
+      "matches_pre_measurement_table": true
+    },
+    {
+      "table": "tenants",
+      "count": 1,
+      "rows_sha256": "d0b5624c11bd333e9fb27869bf88cbab9b91fd3359d487f4647df023019f042e",
+      "matches_pre_measurement_table": true
+    }
+  ],
+  "repair_failure_backoff_guards": []
+}

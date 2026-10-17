@@ -18,6 +18,7 @@ function fixture() {
     activeWorkspace: () => ({ windows: [{ id: "board", preset: "board" }] }),
     focusOrSpawnPreset: () => {},
     activeProjectTab: () => null,
+    projectWindowContextById: () => null,
     getActiveWorkProjection: () => null,
   });
   const state = surface.ensureBoardState("board");
@@ -30,6 +31,31 @@ function fixture() {
 function entry(id, body = id) {
   return { id, body, created_at: `2026-10-15T00:00:0${id}Z` };
 }
+
+test("Issue #5531: resync reissues lost Board and Logs reads without clearing the composer", () => {
+  const { surface, state, sent } = fixture();
+  state.loading = true;
+  state.loadingOlder = true;
+  state.composerBody = "Unsent draft";
+  state.pendingSubmit = { body: "Submitted draft" };
+  const log = surface.ensureLogState("logs");
+  log.loading = true;
+  log.scope = "global";
+  log.query = "retained filter";
+  surface.ensureBoardState("other-project").loading = true;
+
+  surface.resyncBoardLogs(["board", "logs"]);
+
+  assert.deepEqual(sent, [
+    { kind: "load_board", id: "board", all: false },
+    { kind: "load_logs", id: "logs", scope: "global" },
+  ]);
+  assert.equal(state.loadingOlder, false);
+  assert.equal(state.resetToLatest, true, "a lost history page must not create a gap with the latest window");
+  assert.equal(state.composerBody, "Unsent draft");
+  assert.equal(state.pendingSubmit.body, "Submitted draft");
+  assert.equal(log.query, "retained filter");
+});
 
 test("Board incremental entries preserve history, update IDs, and ignore repeated mention notifications", () => {
   const { surface, state, receive, notifications } = fixture();
@@ -49,6 +75,21 @@ test("Board incremental entries preserve history, update IDs, and ignore repeate
   assert.equal(state.hasMoreBefore, true);
   assert.equal(state.forYouUnread, 1);
   assert.equal(notifications.length, 1);
+});
+
+test("Issue #5531: a lost post reply settles from the recovered Board without losing the draft", () => {
+  for (const delivered of [false, true]) {
+    const { surface, state, receive } = fixture();
+    state.composerBody = "Submitted draft";
+    state.submitting = true;
+    state.pendingSubmit = { body: state.composerBody, parentId: null, existingEntryIds: new Set() };
+    surface.resyncBoardLogs(["board"]);
+    receive(delivered ? [{ ...entry("posted", state.composerBody), author_kind: "user" }] : []);
+    assert.equal(state.submitting, false, "a dropped failure cannot lock Post forever");
+    assert.equal(state.pendingSubmit, null);
+    assert.equal(state.composerBody, delivered ? "" : "Submitted draft");
+    assert.equal(Boolean(state.error), !delivered, "an unconfirmed write must be explicit");
+  }
 });
 
 test("Board scope changes request a fresh projection through the existing all flag", () => {

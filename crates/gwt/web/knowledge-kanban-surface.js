@@ -355,10 +355,11 @@ export function issueQueueColumn(entry, work = null, liveWindow = null) {
   if (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry.monitor_state)) return "done";
   if (issueStopReason(entry) !== null) return "backlog";
   if (liveWindow && ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(liveWindow).status)) return "active";
-  if (["launch_failed", "agent_failed"].includes(entry.monitor_state) ||
-      issueLaunchAttemptsExhausted(entry) ||
-      (entry.monitor_state === "needs_human" && issueLaunchRecovery(entry))) return "backlog";
-  if (["launching", "launched"].includes(entry.monitor_state) || Number(work?.active_agents) > 0) return "active";
+  // Judgment holds are not live launches; Work activity can outlast the agent.
+  if (["needs_human", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
+  if (["launching", "launched"].includes(entry.monitor_state)) return "active";
+  if (work?.status_category === "blocked") return "backlog";
+  if (Number(work?.active_agents) > 0) return "active";
   return isIssueInTerminalQueue(entry) ? "queued" : "backlog";
 }
 
@@ -2044,6 +2045,29 @@ export function createKnowledgeKanbanSurface({
           refresh,
         });
         scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
+      }
+
+      function resyncKnowledge(windowIds) {
+        for (const windowId of windowIds) {
+          const state = knowledgeBridgeStateMap.get(windowId);
+          if (!state) continue;
+          clearKnowledgeLoadRecoveryTimer(state);
+          invalidateKnowledgeSearchOwner(state, state.kind, state.query);
+          state.inFlightSearchIntent = null;
+          state.searchInFlight = false;
+          state.inFlightSearchRequestId = 0;
+          state.searching = false;
+          state.detailRequestId = 0;
+          state.revisionPending = false;
+          state.ownedLoadRequestIds.clear();
+          state.loading = false;
+          // A dropped phase reply cannot settle a pending marker. Reload the
+          // authoritative phase without retrying the write or rolling it back.
+          state.pendingPhaseUpdates.clear();
+          state.dndSnapshot = null;
+          // The full read includes selected detail; keep query and selection.
+          requestKnowledgeBridge(windowId, state.kind, false);
+        }
       }
 
       function scheduleKnowledgeRelatedWorkRefresh(forceReload = false) {
@@ -5702,6 +5726,7 @@ export function createKnowledgeKanbanSurface({
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
+        resyncKnowledge,
         scheduleKnowledgeRelatedWorkRefresh,
         resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,

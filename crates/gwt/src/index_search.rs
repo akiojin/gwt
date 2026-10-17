@@ -1372,7 +1372,7 @@ fn classify_search_payload(payload: Value) -> Result<Value, IndexSearchAttemptEr
 /// Keep the existing model worker; avoid launching a Python transport process
 /// for every warm query. The home-specific paths also isolate browser checks
 /// whose runtime directory is a junction to the installed assets.
-fn search_worker_dir() -> PathBuf {
+pub(crate) fn search_worker_dir() -> PathBuf {
     use sha2::{Digest, Sha256};
     let identity = serde_json::json!([
         gwt_core::runtime::project_index_runner_path(),

@@ -73,6 +73,11 @@ function linkSettingsPanel(panel, windowId, tabId) {
   panel.setAttribute("aria-labelledby", settingsTabId(windowId, tabId));
 }
 
+// Keep vendor banners and build hashes in diagnostics, not comparison columns.
+function supportedAgentVersion(value) {
+  return value?.match(/(?:^|[\s(])v?(\d+\.\d+\.\d+(?:-[\da-z.-]+)?)(?:\+[\da-z.-]+)?(?=$|[\s)])/i)?.[1] || null;
+}
+
 // SPEC #5017: maintain the built-in catalog without changing launch profiles.
 function renderSupportedAgentsPanel(panel, agents, options) {
   const document = panel.ownerDocument;
@@ -128,6 +133,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
     const cell = document.createElement("th");
     cell.setAttribute("scope", "col");
     cell.textContent = label;
+    cell.title = label;
     header.appendChild(cell);
   }
   const body = document.createElement("tbody");
@@ -136,24 +142,28 @@ function renderSupportedAgentsPanel(panel, agents, options) {
     const row = document.createElement("tr");
     body.appendChild(row);
     row.dataset.agentId = agent.id;
-    const version = agent.installed_version?.trim();
+    const rawVersion = agent.installed_version?.trim();
+    const version = supportedAgentVersion(rawVersion);
     const values = [
       `${agent.name} (${agent.id})`,
       agent.installed ? "Installed" : "Not installed",
       agent.installed
-        ? version || "Unknown (version unavailable)"
+        ? version || "Unknown"
         : "Not installed",
       agent.available_version
         ? agent.up_to_date
           ? `${agent.available_version} · Latest`
           : agent.available_version
-        : agent.update_check_error || "Version check unavailable",
+        : "Unknown",
     ];
     for (const value of values) {
       const cell = document.createElement("td");
       cell.textContent = value;
+      cell.title = value;
       row.appendChild(cell);
     }
+    if (agent.installed) row.children[2].title = rawVersion || "Installed version unavailable";
+    row.children[3].title = agent.update_check_error || agent.available_version || "Available version unavailable";
     const actions = document.createElement("td");
     const action = !agent.installed && agent.install_supported
       ? "install"
@@ -163,7 +173,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
       button.type = "button";
       button.className = "wizard-button";
       const label = `${action === "install" ? "Install" : "Update"} ${agent.name}`;
-      button.textContent = label;
+      button.textContent = action === "install" ? "Install" : "Update";
       button.setAttribute("aria-label", label);
       button.disabled = busy;
       button.addEventListener("click", () => {
@@ -181,6 +191,7 @@ function renderSupportedAgentsPanel(panel, agents, options) {
         status.textContent += ` Before: ${result.before_version || "Unknown (version unavailable)"}. `
           + `After: ${result.after_version || "Unknown (version unavailable)"}.`;
       }
+      status.title = status.textContent;
       actions.appendChild(status);
     }
     row.appendChild(actions);
@@ -967,6 +978,40 @@ export function createSettingsSurface({
         purgeDetachedSettingsBodies();
         if (settingsWindowBodies.size) send({ kind: "list_supported_agents" });
       }
+
+      function requestSettingsSnapshots(recovering = false) {
+        if (activeProjectTab()?.project_root) {
+          send({ kind: "list_issue_monitor" });
+          send({ kind: "get_issue_monitor_profiles" });
+        }
+        send({ kind: "list_supported_agents" });
+        send({ kind: "get_system_settings" });
+        send({ kind: "get_update_settings" });
+        send({ kind: "get_board_auth_status" });
+        const shouldRequestAutostartStatus = recovering || (!systemSettingsState.autostartPending
+          && !systemSettingsState.autostartChecking);
+        if (shouldRequestAutostartStatus) {
+          systemSettingsState.autostartChecking = true;
+          systemSettingsState.autostartStatusMessage = "";
+          systemSettingsState.autostartStatusKind = "";
+          send({ kind: "get_autostart_status" });
+        }
+        if (recovering || (!customAgentsState.loading && customAgentsState.agents.length === 0)) {
+          customAgentsState.loading = true;
+          send({ kind: "list_custom_agents" });
+        }
+        for (const agent of ["claudeCode", "codex"]) {
+          send({ kind: "list_agent_backends", agent });
+        }
+      }
+
+      function resyncSettings() {
+        purgeDetachedSettingsBodies();
+        if (settingsWindowBodies.size) {
+          requestSettingsSnapshots(true);
+          renderSystemPanelInAllSettingsWindows();
+        }
+      }
       let pendingAddFromPreset = null;
       let editingCustomAgentId = null;
 
@@ -1179,47 +1224,16 @@ export function createSettingsSurface({
           }
         }));
         renderProjectSettings(body);
-        if (project?.project_root) {
-          send({ kind: "list_issue_monitor" });
-          send({ kind: "get_issue_monitor_profiles" });
-        }
-
-        const shouldRequestAutostartStatus = !systemSettingsState.autostartPending
-          && !systemSettingsState.autostartChecking;
-        if (shouldRequestAutostartStatus) {
-          systemSettingsState.autostartChecking = true;
-          systemSettingsState.autostartStatusMessage = "";
-          systemSettingsState.autostartStatusKind = "";
-        }
+        requestSettingsSnapshots();
         renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
-        send({ kind: "list_supported_agents" });
         renderUsagePanel(panelUsage);
-        // Always request fresh system settings on open so the dropdown
-        // reflects the on-disk config, even if the user changed it from a
-        // different gwt instance.
-        send({ kind: "get_system_settings" });
-        send({ kind: "get_update_settings" });
-        // SPEC-2963: also fetch remote Board provider sign-in state.
-        send({ kind: "get_board_auth_status" });
-        if (shouldRequestAutostartStatus) {
-          send({ kind: "get_autostart_status" });
-        }
-
         renderSettingsAgentList();
-        if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
-          customAgentsState.loading = true;
-          send({ kind: "list_custom_agents" });
-        }
-
         // SPEC-1921 2026-05-18 amendment / FR-099: hydrate the Agent
         // Backends panel for both built-in agents that support Backend
         // Override (Claude Code, Codex). The backend returns the redacted
         // list (api_key replaced with `***REDACTED***`).
         renderAgentBackendsPanel(panelBackends);
-        for (const agent of ["claudeCode", "codex"]) {
-          send({ kind: "list_agent_backends", agent });
-        }
 
         // Honour any pending settings:open dispatch (e.g. from the badge
         // click) by switching to the requested tab once the panel is mounted.
@@ -1417,7 +1431,46 @@ export function createSettingsSurface({
         return { teamId, channelId };
       }
 
+      function syncAutostartCheckbox(autostartCheckbox) {
+        autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
+        autostartCheckbox.disabled = !systemSettingsState.autostartLoaded ||
+          systemSettingsState.autostartChecking === true ||
+          systemSettingsState.autostartPending === true;
+      }
+
+      function renderAutostartStatus(autostartStatus) {
+        if (systemSettingsState.autostartPending) {
+          autostartStatus.textContent = "Saving…";
+          autostartStatus.dataset.kind = "info";
+        } else if (systemSettingsState.autostartChecking) {
+          autostartStatus.textContent = "Checking login launch status…";
+          autostartStatus.dataset.kind = "info";
+        } else {
+          const message = systemSettingsState.autostartStatusMessage || "";
+          autostartStatus.textContent = !systemSettingsState.autostartLoaded && message
+            ? `Login launch status unavailable. ${message}`
+            : message;
+          if (systemSettingsState.autostartStatusKind) {
+            autostartStatus.dataset.kind = systemSettingsState.autostartStatusKind;
+          } else {
+            delete autostartStatus.dataset.kind;
+          }
+        }
+      }
+
       function renderSystemPanel(panel) {
+        // Reads used for recovery must not destroy explicit-save drafts,
+        // including secrets that only exist in these input elements.
+        if (panel.querySelector(".board-config-form[data-dirty='true'], .board-oauth-port-form[data-dirty='true']")) {
+          const autostart = panel.querySelector("input[id$='-settings-system-autostart']");
+          if (autostart) {
+            syncAutostartCheckbox(autostart);
+          }
+          const autostartStatus = panel.querySelector("[data-role='autostart-settings-status']");
+          if (autostartStatus) renderAutostartStatus(autostartStatus);
+          renderSystemPanelStatus(panel);
+          return;
+        }
         while (panel.firstChild) panel.removeChild(panel.firstChild);
 
         const section = createDiv("settings-section");
@@ -1710,6 +1763,7 @@ export function createSettingsSurface({
         boardSelect.value = systemSettingsState.boardProvider || "local";
         boardSelect.addEventListener("change", (e) => {
           const next = e.target.value;
+          for (const form of panel.querySelectorAll("[data-dirty]")) delete form.dataset.dirty;
           systemSettingsState.boardProvider = next;
           systemSettingsState.statusMessage = "Saving…";
           systemSettingsState.statusKind = "info";
@@ -1740,6 +1794,7 @@ export function createSettingsSurface({
           const cfg = systemSettingsState.boardConfig || {};
           const configForm = createDiv("settings-section board-config-form");
           configForm.dataset.provider = selectedProvider;
+          configForm.addEventListener("input", () => { configForm.dataset.dirty = "true"; });
 
           const makeField = (id, labelText, value, opts = {}) => {
             const wrap = createDiv("settings-field");
@@ -1866,6 +1921,7 @@ export function createSettingsSurface({
                   parsedTeamsChannel.channelId,
                 );
               }
+              delete configForm.dataset.dirty;
               send({
                 kind: "update_board_provider_config",
                 provider: selectedProvider,
@@ -1890,6 +1946,7 @@ export function createSettingsSurface({
                 payload.client_secret = secretInput.value;
               }
             }
+            delete configForm.dataset.dirty;
             send(payload);
           });
           configForm.appendChild(saveBtn);
@@ -1930,12 +1987,14 @@ export function createSettingsSurface({
           };
           renderRedirectHint();
           portInput.addEventListener("input", renderRedirectHint);
+          portInput.addEventListener("input", () => { oauthForm.dataset.dirty = "true"; });
           oauthForm.appendChild(redirectHint);
 
           const savePortBtn = createNode("button", "wizard-button", "Save port");
           savePortBtn.type = "button";
           savePortBtn.addEventListener("click", () => {
             const next = Number(portInput.value);
+            delete oauthForm.dataset.dirty;
             send({
               kind: "update_board_oauth_port",
               port: Number.isFinite(next) && next > 0 ? Math.floor(next) : 0,
@@ -2001,10 +2060,7 @@ export function createSettingsSurface({
         autostartCheckbox.type = "checkbox";
         autostartCheckbox.className = "settings-checkbox";
         autostartCheckbox.id = "settings-system-autostart";
-        autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
-        autostartCheckbox.disabled = !systemSettingsState.autostartLoaded ||
-          systemSettingsState.autostartChecking === true ||
-          systemSettingsState.autostartPending === true;
+        syncAutostartCheckbox(autostartCheckbox);
         autostartCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
           systemSettingsState.autostartPreviousEnabled =
@@ -2045,21 +2101,7 @@ export function createSettingsSurface({
         autostartStatus.dataset.role = "autostart-settings-status";
         autostartStatus.setAttribute("role", "status");
         autostartStatus.setAttribute("aria-live", "polite");
-        if (systemSettingsState.autostartPending) {
-          autostartStatus.textContent = "Saving…";
-          autostartStatus.dataset.kind = "info";
-        } else if (systemSettingsState.autostartChecking) {
-          autostartStatus.textContent = "Checking login launch status…";
-          autostartStatus.dataset.kind = "info";
-        } else {
-          const message = systemSettingsState.autostartStatusMessage || "";
-          autostartStatus.textContent = !systemSettingsState.autostartLoaded && message
-            ? `Login launch status unavailable. ${message}`
-            : message;
-          if (systemSettingsState.autostartStatusKind) {
-            autostartStatus.dataset.kind = systemSettingsState.autostartStatusKind;
-          }
-        }
+        renderAutostartStatus(autostartStatus);
         autostartSection.appendChild(autostartStatus);
 
         const status = document.createElement("p");
@@ -2334,6 +2376,7 @@ export function createSettingsSurface({
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,

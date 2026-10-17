@@ -249,16 +249,18 @@ pub fn cleanup_abandoned_workspace_transaction_temps(
         let Some(pid) = name.to_str().and_then(transaction_temp_writer_pid) else {
             continue;
         };
+        // Inspect the contents only after the writer is gone: it may finish
+        // writing between an earlier metadata read and the liveness probe.
+        if process_liveness(pid) != Some(false) {
+            continue;
+        }
         let path = entry.path();
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
-        if !metadata.file_type().is_file()
-            || metadata.len() != 0
-            || process_liveness(pid) != Some(false)
-        {
+        if !metadata.file_type().is_file() || metadata.len() != 0 {
             continue;
         }
         match fs::remove_file(path) {

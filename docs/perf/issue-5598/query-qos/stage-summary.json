@@ -1,0 +1,161 @@
+{
+  "boundary": "Recorded Rust CLI search perf samples from each complete benchmark; includes cold, warmup, warmed burst, and cold-worker recovery stress.",
+  "sampling": "Recorded samples only; collector omissions are not filled. Nested phases overlap and must not be added.",
+  "percentile": "nearest rank",
+  "variants": {
+    "after": {
+      "all_measured_phases": {
+        "phase:search.admission": {
+          "samples": 37,
+          "mean_ms": 6447.3129108108105,
+          "p95_ms": 10101.2541,
+          "max_ms": 10144.3268
+        },
+        "phase:search.assemble": {
+          "samples": 14,
+          "mean_ms": 1.3908571428571428,
+          "p95_ms": 1.8824,
+          "max_ms": 1.8824
+        },
+        "phase:search.git_context": {
+          "samples": 37,
+          "mean_ms": 4.766443243243243,
+          "p95_ms": 8.2757,
+          "max_ms": 9.7743
+        },
+        "phase:search.runner.assemble": {
+          "samples": 14,
+          "mean_ms": 0.005535714285714285,
+          "p95_ms": 0.0076,
+          "max_ms": 0.0076
+        },
+        "phase:search.runner.index_read": {
+          "samples": 14,
+          "mean_ms": 230.54805,
+          "p95_ms": 3150.9838,
+          "max_ms": 3150.9838
+        },
+        "phase:search.runner.model_load": {
+          "samples": 14,
+          "mean_ms": 807.2142857142857,
+          "p95_ms": 11301.0,
+          "max_ms": 11301.0
+        },
+        "phase:search.runner.query": {
+          "samples": 14,
+          "mean_ms": 20.303807142857142,
+          "p95_ms": 34.071400000000004,
+          "max_ms": 34.071400000000004
+        },
+        "phase:search.runner.query_encode": {
+          "samples": 14,
+          "mean_ms": 174.61414285714287,
+          "p95_ms": 504.81379999999996,
+          "max_ms": 504.81379999999996
+        },
+        "phase:search.runner_transport": {
+          "samples": 15,
+          "mean_ms": 3254.9372866666668,
+          "p95_ms": 28829.4549,
+          "max_ms": 28829.4549
+        },
+        "phase:search.runtime": {
+          "samples": 37,
+          "mean_ms": 90.82144324324324,
+          "p95_ms": 320.17580000000004,
+          "max_ms": 327.27689999999996
+        },
+        "phase:search.scope_context": {
+          "samples": 37,
+          "mean_ms": 12.051575675675675,
+          "p95_ms": 10.6592,
+          "max_ms": 283.8032
+        },
+        "phase:search.search_and_repair": {
+          "samples": 14,
+          "mean_ms": 2823.7386571428574,
+          "p95_ms": 18720.1971,
+          "max_ms": 18720.1971
+        }
+      },
+      "warmed_burst": {
+        "started_utc": "2026-10-16T04:22:17.016747+00:00",
+        "finished_utc": "2026-10-16T04:22:20.727016+00:00",
+        "stages": {
+          "phase:search.admission": {
+            "samples": 12,
+            "mean_ms": 1449.376775,
+            "p95_ms": 2748.5937,
+            "max_ms": 2748.5937
+          },
+          "phase:search.assemble": {
+            "samples": 12,
+            "mean_ms": 1.4313833333333335,
+            "p95_ms": 1.8824,
+            "max_ms": 1.8824
+          },
+          "phase:search.git_context": {
+            "samples": 12,
+            "mean_ms": 5.129491666666667,
+            "p95_ms": 9.7743,
+            "max_ms": 9.7743
+          },
+          "phase:search.runner.assemble": {
+            "samples": 12,
+            "mean_ms": 0.005241666666666667,
+            "p95_ms": 0.005699999999999999,
+            "max_ms": 0.005699999999999999
+          },
+          "phase:search.runner.index_read": {
+            "samples": 12,
+            "mean_ms": 6.142058333333333,
+            "p95_ms": 31.8631,
+            "max_ms": 31.8631
+          },
+          "phase:search.runner.model_load": {
+            "samples": 12,
+            "mean_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0
+          },
+          "phase:search.runner.query": {
+            "samples": 12,
+            "mean_ms": 18.194175,
+            "p95_ms": 33.185199999999995,
+            "max_ms": 33.185199999999995
+          },
+          "phase:search.runner.query_encode": {
+            "samples": 12,
+            "mean_ms": 173.112725,
+            "p95_ms": 504.81379999999996,
+            "max_ms": 504.81379999999996
+          },
+          "phase:search.runner_transport": {
+            "samples": 12,
+            "mean_ms": 204.641775,
+            "p95_ms": 536.2896000000001,
+            "max_ms": 536.2896000000001
+          },
+          "phase:search.runtime": {
+            "samples": 12,
+            "mean_ms": 44.388125,
+            "p95_ms": 48.3969,
+            "max_ms": 48.3969
+          },
+          "phase:search.scope_context": {
+            "samples": 12,
+            "mean_ms": 4.826499999999999,
+            "p95_ms": 7.2517,
+            "max_ms": 7.2517
+          },
+          "phase:search.search_and_repair": {
+            "samples": 12,
+            "mean_ms": 1716.5488,
+            "p95_ms": 2947.4451999999997,
+            "max_ms": 2947.4451999999997
+          }
+        }
+      }
+    }
+  }
+}

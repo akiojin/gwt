@@ -413,6 +413,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       let inputTraceSeq = 0;
 
       let socket = null;
+      let socketInputHandoff = null;
       let hubSocket = null;
       let hubReconnectTimer = null;
       const pendingHubMessages = [];
@@ -823,6 +824,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         setIndexStatus,
         handleProjectIndexSearchResults,
         handleProjectIndexSearchError,
+        resyncProjectIndexSearch,
         mountProjectIndexSurface,
         disposeIndexSearchWindow,
         pendingIndexOpenTargetsByPreset,
@@ -941,6 +943,15 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function send(message) {
+        const liveInputHandoff = (message.kind === "terminal_input" || message.kind === "pane_send_input")
+          && socket?.readyState !== WebSocket.OPEN
+          && socketInputHandoff?.projectKey === activeProjectKey()
+          && socketProjectKey === activeProjectKey()
+          && socketInputHandoff.socket.readyState === WebSocket.OPEN;
+        return sendOnSocket(message, liveInputHandoff ? socketInputHandoff.socket : socket);
+      }
+
+      function sendOnSocket(message, socket) {
         if (isHubNavigationMessage(message.kind)) {
           if (hubSocket?.readyState === WebSocket.OPEN) {
             hubSocket.send(JSON.stringify(message));
@@ -991,7 +1002,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       }
 
-      const uiTraceWiring = createUiTraceWiring({
+      const { receive: applyUiTraceReceiveEvent, ...uiTraceWiring } = createUiTraceWiring({
         profiler: uiTraceProfiler,
         send,
         alert: (message) => window.alert(message),
@@ -1153,6 +1164,10 @@ import { createUiStateStore } from "/ui-state-store.js";
           window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`),
         openReleaseNotes: (version) => releaseNotesWindow.open(version || null),
       });
+      const updateRestartImpactModel = createUiStateStore(null);
+      updateRestartImpactModel.subscribe(impact => impact, impact => {
+        if (impact) updateCtaController.handleUpdateRestartImpact(impact);
+      });
 
       // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
       // WebSocket bridge is down — a tiny status-strip label alone reads as
@@ -1258,13 +1273,41 @@ import { createUiStateStore } from "/ui-state-store.js";
       // Project. Show the path-free not-found view and stop reconnecting.
       function showProjectRouteNotFound() {
         routeProjectMissing = true;
-        for (const connection of [socket, hubSocket]) {
+        for (const connection of [socket, hubSocket, socketInputHandoff?.socket]) {
           try { connection?.close(); } catch { /* already closed */ }
         }
+        socketInputHandoff = null;
         renderRouteNotFound(document);
       }
 
-      function handleSocketOpen() {
+      function resyncSocketSurfaces() {
+        if (!socketProjectKey) return;
+        const ids = (activeWorkspace()?.windows || []).map((entry) => entry.id);
+        resyncBoardLogs(ids);
+        resyncBranches(ids);
+        resyncKnowledge(ids);
+        resyncProfile(ids);
+        resyncProjectIndexSearch(ids);
+        resyncSettings();
+      }
+
+      function requestSocketSnapshots() {
+        if (socket?.readyState !== WebSocket.OPEN) return;
+        send({ kind: "frontend_ready" });
+        recoveryCenterController?.reconnect();
+        resyncSocketSurfaces();
+        if (socketProjectKey) requestVisiblePmReports();
+      }
+
+      function closeSocketInputHandoff() {
+        const handoff = socketInputHandoff;
+        socketInputHandoff = null;
+        handoff?.socket.close();
+      }
+
+      function handleSocketOpen(recoverSnapshots = false) {
+        closeSocketInputHandoff();
+        socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcherGeneration += 1;
         const ownGeneration = socketReceiveDispatcherGeneration;
         socketReceiveDispatcher = createSocketReceiveDispatcher({
@@ -1278,6 +1321,13 @@ import { createUiStateStore } from "/ui-state-store.js";
             traceUi(kind, fields);
           },
           shouldTrace: uiTraceWiring.isTracing,
+          onResync: (reason) => {
+            if (ownGeneration !== socketReceiveDispatcherGeneration) return;
+            // A native receive backlog precedes snapshots on the old socket.
+            // Replace the project transport on foreground recovery to discard it.
+            if ((reason === "visible" || reason === "overflow") && socketProjectKey) connectSocket(true);
+            else requestSocketSnapshots();
+          },
           // Issue #3365 — a receive() failure keeps the event stream alive but
           // must not stay console-only: surface it as a degradation notice.
           onReceiveError: (error, eventKind) => {
@@ -1304,6 +1354,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
+        if (recoverSnapshots === true) resyncSocketSurfaces();
         syncRunningBranchCleanups();
         requestVisiblePmReports();
         requestSupportedAgentRefresh();
@@ -1378,22 +1429,23 @@ import { createUiStateStore } from "/ui-state-store.js";
         return false;
       }
 
-      function handleSocketClose() {
+      function handleSocketClose(recoverSnapshots = false) {
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
+        socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
         setConnectionState(false);
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
         }
-        reconnectTimer = window.setTimeout(connectSocket, 1000);
+        reconnectTimer = window.setTimeout(() => connectSocket(recoverSnapshots === true), 1000);
       }
 
-      function installSocketEventHandlers(activeSocket) {
+      function installSocketEventHandlers(activeSocket, recoverSnapshots = false) {
         for (const [kind, handler] of [
-          ["open", handleSocketOpen],
+          ["open", () => handleSocketOpen(recoverSnapshots)],
           ["message", handleSocketMessage],
-          ["close", handleSocketClose],
+          ["close", () => handleSocketClose(recoverSnapshots)],
         ]) {
           activeSocket.addEventListener(kind, (event) => {
             if (socket === activeSocket) handler(event);
@@ -1450,25 +1502,34 @@ import { createUiStateStore } from "/ui-state-store.js";
         });
       }
 
-      function connectSocket() {
+      function connectSocket(force = false) {
         if (routeProjectMissing) return;
         const projectKey = activeProjectKey();
         connectHubSocket();
-        if (socket && socket.readyState <= WebSocket.OPEN
+        if (force !== true && socket && socket.readyState <= WebSocket.OPEN
           && socketProjectKey === projectKey) {
           return;
         }
         const previousSocket = socket;
+        if (force === true && socketProjectKey === projectKey) {
+          if (previousSocket?.readyState === WebSocket.OPEN && previousSocket !== hubSocket) {
+            closeSocketInputHandoff();
+            socketInputHandoff = { socket: previousSocket, projectKey };
+          }
+        } else closeSocketInputHandoff();
+        if (force === true) closeProjectController.connectionLost();
         socket = null;
         socketReceiveDispatcherGeneration += 1;
+        socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = null;
-        if (previousSocket && previousSocket !== hubSocket && socketProjectKey) previousSocket.close();
+        if (previousSocket && previousSocket !== hubSocket && socketProjectKey
+          && previousSocket !== socketInputHandoff?.socket) previousSocket.close();
         socketProjectKey = projectKey;
         socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;
         setConnectionState(false);
-        if (projectKey) installSocketEventHandlers(socket);
+        if (projectKey) installSocketEventHandlers(socket, force === true);
         else if (socket.readyState === WebSocket.OPEN) handleSocketOpen();
       }
 
@@ -2069,6 +2130,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         onClosed: (projectKey) => {
           if (projectKey !== routeProjectKey) return;
           routeProjectMissing = true;
+          closeSocketInputHandoff();
           if (reconnectTimer) clearTimeout(reconnectTimer);
           if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
           const oldSocket = socket;
@@ -3722,6 +3784,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       const {
         ensureProfileState,
         requestProfile,
+        resyncProfile,
         renderProfile,
         createProfile,
         setActiveProfile,
@@ -3816,6 +3879,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
+        resyncKnowledge,
         scheduleKnowledgeRelatedWorkRefresh,
         resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,
@@ -3915,6 +3979,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         ensureBoardState,
         ensureLogState,
         requestBoard,
+        resyncBoardLogs,
         requestOlderBoardEntries,
         requestLogs,
         renderBoard,
@@ -4093,6 +4158,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         branchListStateMap,
         ensureBranchListState,
         requestBranches,
+        resyncBranches,
         renderBranches,
         syncBranchSelectionState,
         openBranchCleanupModal,
@@ -4673,6 +4739,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
@@ -5187,12 +5254,8 @@ import { createUiStateStore } from "/ui-state-store.js";
             );
             break;
           case "ui_trace_saved":
-            window.alert(
-              `UI trace saved\n${event.path}\nentries: ${event.entries}`,
-            );
-            break;
           case "ui_trace_error":
-            window.alert(`UI trace error: ${event.message}`);
+            applyUiTraceReceiveEvent(event);
             break;
           case "release_notes_payload":
             applyReleaseNotesPayload(event);
@@ -5537,6 +5600,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             updateCtaController.handleUpdateApplyPendingPersisted({
               version: event.version,
             });
+            break;
+          case "update_restart_impact":
+            updateRestartImpactModel.update(() => event);
             break;
           case "update_auto_apply":
             // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
@@ -6137,9 +6203,16 @@ import { createUiStateStore } from "/ui-state-store.js";
         scheduleFit: scheduleTerminalFit,
         markPending: markTerminalViewportRefreshPending,
       });
-      document.addEventListener("visibilitychange", () => {
+      document.addEventListener("visibilitychange", (event) => {
         if (document.hidden) {
           return;
+        }
+        // Pane visibility notifications also use this event. Only a native
+        // foreground event should discard the receive backlog; a hidden
+        // event need not have reached this document before the restore.
+        if (event.isTrusted) {
+          if (socketReceiveDispatcher) socketReceiveDispatcher.resume();
+          else if (socketProjectKey) connectSocket(true);
         }
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
