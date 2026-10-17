@@ -4006,13 +4006,15 @@ fn embedded_web_issue_monitor_candidate_pool_contract() {
         "issue_monitor_profiles_set",
         "Add candidate",
         "prefer_for",
-        "usage_threshold_percent",
+        "next candidate when a provider rejects a launch due to a rate limit",
     ] {
         assert!(
             surface.contains(contract),
             "missing pool contract: {contract}"
         );
     }
+    assert!(!surface.contains("usage_threshold_percent"));
+    assert!(!surface.contains("Usage threshold (%)"));
     let css = static_asset_text("/styles/components.css");
     let control_styles = js_braced_block_after(css, ":root[data-theme] .settings-input")
         .expect("Settings input styles");

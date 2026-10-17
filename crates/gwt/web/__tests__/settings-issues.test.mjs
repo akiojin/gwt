@@ -212,7 +212,7 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
     { agent_id: "claude", model: "opus", reasoning: "medium", prefer_for: [] },
   ];
   const render = load("renderAgentsSettingsPanel");
-  render(a, { project: { project_root: "/A", name: "A" }, profiles, send: m => sent.push(m) });
+  render(a, { project: { project_root: "/A", name: "A" }, profiles, status: { usage_threshold_percent: 73 }, send: m => sent.push(m) });
   render(b, { project: { project_root: "/B", name: "B" }, profiles: [{ agent_id: "codex", model: "B model" }], send: () => assert.fail("wrong project") });
   const model = a.querySelector('[aria-label="Model codex"]');
   assert.equal(model.value, "gpt-6");
@@ -224,6 +224,9 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.equal(sent[0].profiles[0].model, "new model");
   assert.equal(sent[0].profiles[0].docker_service, "dev");
   assert.deepEqual(sent[0].profiles[0].prefer_for, ["type:fix"]);
+  assert.equal(Object.hasOwn(sent[0], "usage_threshold_percent"), false);
+  assert.equal(a.querySelector('[data-profile-field="threshold"]'), null);
+  assert.match(a.textContent, /next candidate when a provider rejects a launch due to a rate limit/);
   assert.equal(b.querySelector('[aria-label="Model codex"]').value, "B model");
   a.querySelector('[aria-label="Move down codex"]').click();
   assert.deepEqual(sent.at(-1).profiles.map(p => p.agent_id), ["claude", "codex"]);

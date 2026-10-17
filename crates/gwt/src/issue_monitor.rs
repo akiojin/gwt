@@ -982,9 +982,9 @@ pub struct IssueMonitorPrefs {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tier_overrides: BTreeMap<u64, u8>,
 
-    /// SPEC #3914 FR-002: a candidate whose known usage is at or above this
-    /// percentage yields to the next candidate. Unknown usage never blocks.
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    /// Legacy in-memory compatibility field. Old JSON values are ignored and
+    /// the retired threshold is never written back to preferences.
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     pub launch_usage_threshold_percent: u8,
     /// Issue #3785 / SPEC #3165: provider-wide launch admission holds keyed by
     /// the canonical agent command. Values are concrete RFC3339 reset
@@ -3503,8 +3503,8 @@ pub struct IssueMonitorStatusView {
     /// force, whether or not a candidate uses that provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_quota_holds: Vec<IssueMonitorProviderQuotaHold>,
-    /// SPEC #3914 FR-009: the usage demotion threshold.
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    /// Legacy in-memory compatibility field, excluded from status payloads.
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     pub usage_threshold_percent: u8,
 }
 
@@ -3684,7 +3684,7 @@ pub struct IssueMonitorAgentStatus {
     /// head (`launch_profile_candidates[0]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_launch_profile: Option<IssueMonitorEffectiveLaunchProfile>,
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     pub usage_threshold_percent: u8,
     /// Issue #3923 AC-1: every provider hold in force, with its evidence, so
     /// the PM can see a hold on a provider the profile is not using and
@@ -4657,7 +4657,7 @@ pub struct IssueMonitorState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     tier_overrides: BTreeMap<u64, u8>,
 
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     launch_usage_threshold_percent: u8,
     /// Durable provider-wide launch admission source of truth. Keys and values
     /// are canonicalized on restore and joined monotonically across rebases.
@@ -25527,12 +25527,19 @@ mod tests {
     #[test]
     fn legacy_prefs_without_launch_profiles_read_as_a_single_candidate_pool() {
         let prefs: IssueMonitorPrefs = serde_json::from_str(
-            r#"{"enabled":false,"max_active_agents":1,"priority_order":[],"launch_profile":{"agent_id":"codex"}}"#,
+            r#"{"enabled":false,"max_active_agents":1,"priority_order":[],"launch_profile":{"agent_id":"codex"},"launch_usage_threshold_percent":65}"#,
         )
         .expect("legacy prefs with one saved profile");
 
         assert!(prefs.launch_profiles.is_empty());
         assert_eq!(prefs.launch_usage_threshold_percent, 80);
+        assert!(
+            serde_json::to_value(&prefs)
+                .expect("serialize legacy prefs")
+                .get("launch_usage_threshold_percent")
+                .is_none(),
+            "the retired threshold is accepted and discarded on save"
+        );
         let pool = prefs.launch_profile_pool();
         assert_eq!(pool.len(), 1);
         assert_eq!(pool[0].agent_id, "codex");
@@ -26846,7 +26853,10 @@ mod tests {
             status.launch_profile_summary
         );
         assert!(status.launch_profile_summary.contains(" | "));
-        assert_eq!(status.usage_threshold_percent, 65);
+        assert!(serde_json::to_value(&status)
+            .expect("GUI status")
+            .get("usage_threshold_percent")
+            .is_none());
         assert_eq!(status.launch_profile_candidates.len(), 2);
         assert_eq!(status.launch_profile_candidates[0].index, 0);
         assert_eq!(status.launch_profile_candidates[0].agent_id, "codex");
@@ -26873,7 +26883,7 @@ mod tests {
         );
 
         let agent = serde_json::to_value(monitor.agent_status_at(now)).expect("agent status");
-        assert_eq!(agent["usage_threshold_percent"], 65);
+        assert!(agent.get("usage_threshold_percent").is_none());
         assert_eq!(
             agent["launch_profile_candidates"].as_array().map(Vec::len),
             Some(2)

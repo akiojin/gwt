@@ -8542,7 +8542,6 @@ impl AppRuntime {
             context,
             serde_json::json!({ "profiles_set": {
                 "profiles": profiles,
-                "usage_threshold_percent": usage_threshold_percent,
             }}),
         );
         let outcome = match publication {
@@ -8556,9 +8555,6 @@ impl AppRuntime {
                         .advance_effect_authority_epoch()
                         .ok_or_else(|| "authority epoch exhausted".to_string())?;
                     monitor.set_launch_profile_pool(profiles);
-                    if let Some(percent) = usage_threshold_percent {
-                        monitor.set_launch_usage_threshold_percent(percent);
-                    }
                     Ok(())
                 })
                 .map(|(monitor, ())| Some(monitor)),

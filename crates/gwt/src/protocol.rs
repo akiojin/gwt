@@ -946,6 +946,8 @@ pub enum FrontendEvent {
     GetIssueMonitorProfiles,
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
+        /// Legacy clients may still send this retired setting; ignore it.
+        #[serde(skip)]
         usage_threshold_percent: Option<u8>,
         request_id: Option<u64>,
     },
