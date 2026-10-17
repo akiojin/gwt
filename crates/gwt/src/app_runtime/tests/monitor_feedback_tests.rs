@@ -623,7 +623,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     fixture.runtime.issue_monitor_provider_auth_probe = auth_probe;
     // Reap the real first materialization before assertions can unwind.
     // Its PTY preparation is never applied, so this test starts no provider.
-    let (_first_window, first_result) =
+    let (first_window, first_result) =
         take_monitor_launch_complete_event("facts-prefetch", &fixture.recorded_events);
     assert!(first_result.is_ok(), "first launch: {first_result:?}");
     assert!(fixture.runtime.issue_monitor_launch_preparations.is_empty());
@@ -666,6 +666,30 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
         "a new arrival cannot bypass the waiting head or extend its two-entry prefix"
     );
     fixture.runtime.issue_monitor_launch_queue.pop();
+    let first_delivery = fixture.delivery_id.clone().expect("first durable delivery");
+    let Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { started_at, .. }) =
+        fixture
+            .runtime
+            .issue_monitor_launch_deliveries
+            .get_mut(&first_delivery)
+    else {
+        panic!("the first delivery must still be materializing");
+    };
+    *started_at =
+        Instant::now() - super::super::ISSUE_MONITOR_MATERIALIZING_TTL - Duration::from_secs(1);
+    // Ordinary expired-delivery recovery may queue, but its tracked pane
+    // makes another speculative facts calculation unnecessary.
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            Some(first_delivery.clone()),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    assert!(fixture.runtime.tracked_window_exists(&first_window));
+    assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 3);
     let expected_window = combined_window_id(
         "tab-1",
         &fixture
@@ -725,7 +749,41 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
         .issue_monitor_launch_preparations
         .iter()
         .any(|key| key.2 == 3167));
-    assert_eq!(queued.lock().unwrap().len(), 1);
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "the expired same-delivery pane must not consume another prefetch slot"
+    );
+    let materializing = fixture.runtime.issue_monitor_launch_deliveries[&first_delivery].clone();
+    for settled in [
+        super::super::IssueMonitorLaunchDeliveryState::LaunchedPendingAck {
+            window_id: first_window.clone(),
+        },
+        super::super::IssueMonitorLaunchDeliveryState::Launched {
+            window_id: first_window.clone(),
+        },
+        super::super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            message: "settled delivery".to_string(),
+            session_mode: gwt_agent::SessionMode::Normal,
+            retryable: true,
+            fresh_execution: None,
+        },
+    ] {
+        fixture
+            .runtime
+            .issue_monitor_launch_deliveries
+            .insert(first_delivery.clone(), settled);
+        fixture.runtime.advance_issue_monitor_launch_queue_events();
+        assert_eq!(
+            queued.lock().unwrap().len(),
+            1,
+            "settled deliveries must not start speculative facts workers"
+        );
+    }
+    fixture
+        .runtime
+        .issue_monitor_launch_deliveries
+        .insert(first_delivery, materializing);
     let before = gwt_core::process::thread_git_spawn_count();
     run_worker(0);
     assert!(

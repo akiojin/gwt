@@ -3241,6 +3241,24 @@ impl AppRuntime {
             {
                 continue;
             }
+            // Leave TTL/recovery decisions to the normal head path. Existing
+            // panes and settled deliveries do not need speculative facts.
+            match pending
+                .request
+                .delivery_id
+                .as_deref()
+                .and_then(|id| self.issue_monitor_launch_deliveries.get(id))
+            {
+                Some(super::IssueMonitorLaunchDeliveryState::Materializing {
+                    window_id, ..
+                }) if self.tracked_window_exists(window_id) => continue,
+                Some(
+                    super::IssueMonitorLaunchDeliveryState::LaunchedPendingAck { .. }
+                    | super::IssueMonitorLaunchDeliveryState::Launched { .. }
+                    | super::IssueMonitorLaunchDeliveryState::LaunchFailed { .. },
+                ) => continue,
+                _ => {}
+            }
             let context = pending.context.clone();
             let request = pending.request.clone();
             let token = Uuid::new_v4();
