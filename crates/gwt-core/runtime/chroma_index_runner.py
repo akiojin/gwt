@@ -1863,6 +1863,21 @@ _MODEL_CACHE: Optional[dict[Optional[str], Any]] = None
 # subtracts it to hold the warm remainder to its own budget.
 _MODEL_LOAD_MS = 0
 _model_load_clock = time.monotonic
+_SEARCH_WORKER_ENDPOINT: Optional[Path] = None
+
+
+def _publish_search_model_state(state: str) -> None:
+    """Expose model loading without probing or waking the resident worker."""
+    if _SEARCH_WORKER_ENDPOINT is None:
+        return
+    try:
+        endpoint = json.loads(_SEARCH_WORKER_ENDPOINT.read_text(encoding="utf-8"))
+        if isinstance(endpoint, dict) and endpoint.get("pid") == os.getpid():
+            endpoint.update(model_state=state, model_load_ms=_MODEL_LOAD_MS)
+            _write_json_atomic(_SEARCH_WORKER_ENDPOINT, endpoint)
+            _SEARCH_WORKER_ENDPOINT.chmod(0o600)
+    except (OSError, ValueError):
+        pass  # Diagnostics must never fail a query.
 
 
 def _get_embedding_model(revision: Optional[str] = None) -> Any:
@@ -1875,21 +1890,27 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
     if _MODEL_CACHE is None:
         _MODEL_CACHE = {}
     if revision in _MODEL_CACHE:
+        _publish_search_model_state("warm")
         return _MODEL_CACHE[revision]
 
-    if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
-        _MODEL_CACHE[revision] = _FakeEmbeddingModel()
-        return _MODEL_CACHE[revision]
+    _publish_search_model_state("warming")
+    try:
+        if os.environ.get("GWT_INDEX_FAKE_EMBEDDING") == "1":
+            model = _FakeEmbeddingModel()
+        else:
+            started = _model_load_clock()
+            from sentence_transformers import SentenceTransformer  # type: ignore
 
-    started = _model_load_clock()
-    from sentence_transformers import SentenceTransformer  # type: ignore
-
-    if revision is None:
-        model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
-    else:
-        model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
-    _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
-    _MODEL_CACHE[revision] = model
+            if revision is None:
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
+            else:
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=revision)
+            _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
+        _MODEL_CACHE[revision] = model
+    except Exception:
+        _publish_search_model_state("cold")
+        raise
+    _publish_search_model_state("warm")
     return model
 
 
@@ -9803,6 +9824,7 @@ def _search_worker_request(args: argparse.Namespace) -> Dict[str, Any]:
 
 def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
     """Serve search-multi only; release model memory after idle expiry."""
+    global _SEARCH_WORKER_ENDPOINT
     worker_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     worker_dir.chmod(0o700)
     endpoint_path = worker_dir / "endpoint.json"
@@ -9814,8 +9836,10 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
         server.settimeout(idle_timeout)
         _write_json_atomic(endpoint_path, {
             "pid": pid, "port": server.getsockname()[1], "token": token,
+            "model_state": "cold", "model_load_ms": 0,
         })
         endpoint_path.chmod(0o600)
+        _SEARCH_WORKER_ENDPOINT = endpoint_path
         try:
             while True:
                 try:
@@ -9874,6 +9898,7 @@ def _serve_search_worker(worker_dir: Path, idle_timeout: float = 300) -> int:
                     except OSError:
                         pass
         finally:
+            _SEARCH_WORKER_ENDPOINT = None
             # A stale worker must never erase a replacement worker's endpoint.
             with contextlib.suppress(OSError, ValueError):
                 if json.loads(endpoint_path.read_text(encoding="utf-8")).get("pid") == pid:

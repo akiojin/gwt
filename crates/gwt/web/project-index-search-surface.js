@@ -329,6 +329,17 @@ export function createProjectIndexSearchSurface({
         renderProjectIndexSearch(windowId);
       }
 
+      function resyncProjectIndexSearch(windowIds) {
+        for (const windowId of windowIds) {
+          const state = indexSearchStateMap.get(windowId);
+          if (!state) continue;
+          if (state.searchTimer) clearTimeout(state.searchTimer);
+          state.searchTimer = 0;
+          invalidateProjectIndexSearchRequest(state);
+          sendProjectIndexSearch(windowId);
+        }
+      }
+
       function renderProjectIndexSearch(windowId) {
         const local = ensureIndexSearchState(windowId);
         const state = { ...local, ...indexSearchModel.read()[windowId] };
@@ -859,6 +870,7 @@ export function createProjectIndexSearchSurface({
         setIndexStatus,
         handleProjectIndexSearchResults,
         handleProjectIndexSearchError,
+        resyncProjectIndexSearch,
         mountProjectIndexSurface,
         disposeIndexSearchWindow,
         indexSearchStateMap,

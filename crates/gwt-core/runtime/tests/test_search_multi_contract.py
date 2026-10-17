@@ -1177,6 +1177,18 @@ class SearchMultiContractTests(unittest.TestCase):
 
 
 class SearchWorkerTests(unittest.TestCase):
+    def test_model_load_failure_never_leaves_worker_warming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            endpoint = Path(tmp) / "endpoint.json"
+            endpoint.write_text(json.dumps({"pid": os.getpid(), "model_state": "cold"}))
+            with mock.patch.object(runner, "_SEARCH_WORKER_ENDPOINT", endpoint), \
+                 mock.patch.object(runner, "_MODEL_CACHE", None), \
+                 mock.patch.dict(os.environ, GWT_INDEX_FAKE_EMBEDDING="1"), \
+                 mock.patch.object(runner, "_FakeEmbeddingModel", side_effect=RuntimeError("load failed")):
+                with self.assertRaisesRegex(RuntimeError, "load failed"):
+                    runner._get_embedding_model()
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "cold")
+
     def test_worker_retains_repo_generation_clients_and_closes_replaced_stores(self):
         fake_chroma = mock.Mock()
         clients = [mock.Mock() for _ in range(5)]
@@ -1259,6 +1271,19 @@ class SearchWorkerTests(unittest.TestCase):
         self.assertTrue(payload["retryable"])
 
     def test_cli_searches_reuse_worker_and_reopen_published_store(self):
+        evidence = self._exercise_cli_worker_reuse()
+        if os.environ.get("GWT_INDEX_REAL_SEARCH_BENCHMARK") == "1":
+            self.assertLessEqual(max(evidence["warm_seconds"]), 2.0)
+
+    @unittest.skipUnless(
+        os.environ.get("GWT_INDEX_REAL_SEARCH_BENCHMARK") == "1",
+        "requires the opt-in real embedding model",
+    )
+    def test_real_model_worker_exposes_readiness(self):
+        evidence = self._exercise_cli_worker_reuse()
+        self.assertIn("warming", evidence["observed_model_states"])
+
+    def _exercise_cli_worker_reuse(self):
         real_model = os.environ.get("GWT_INDEX_REAL_SEARCH_BENCHMARK") == "1"
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1275,6 +1300,7 @@ class SearchWorkerTests(unittest.TestCase):
                 )
             common = [sys.executable, str(Path(runner.__file__).resolve()),
                       "--repo-hash", REPO_HASH, "--project-root", str(project),
+                      "--worker-dir", str(base / "worker"),
                       "--worktree-hash", WORKTREE_HASH, "--file-index-protocol", "v2"]
             source = project / "src" / "worker.rs"
             source.parent.mkdir()
@@ -1293,8 +1319,31 @@ class SearchWorkerTests(unittest.TestCase):
 
             invoke("--action", "index-memory")
             cold_started = time.monotonic()
-            first = invoke("--action", "search-multi", "--scopes", "memory",
-                           "--query", "alpha worker")
+            first_args = ["--action", "search-multi", "--scopes", "memory",
+                          "--query", "alpha worker"]
+            observed_states = []
+            if real_model:
+                child = subprocess.Popen(common + first_args, env=env,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    deadline = time.monotonic() + 60
+                    while child.poll() is None and time.monotonic() < deadline:
+                        try:
+                            state = json.loads((base / "worker" / "endpoint.json").read_text())["model_state"]
+                            if state not in observed_states:
+                                observed_states.append(state)
+                        except FileNotFoundError:
+                            pass
+                        time.sleep(0.1)
+                    stdout, stderr = child.communicate(timeout=10)
+                    self.assertEqual(child.returncode, 0, stderr + stdout)
+                    first = json.loads(stdout.strip().splitlines()[-1])
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.communicate()
+            else:
+                first = invoke(*first_args)
             cold_seconds = time.monotonic() - cold_started
             self.assertTrue(first["ok"])
             self.assertTrue(
@@ -1302,6 +1351,7 @@ class SearchWorkerTests(unittest.TestCase):
             )
             worker_pid = first["worker_pid"]
             try:
+                self.assertEqual(json.loads((base / "worker" / "endpoint.json").read_text())["model_state"], "warm")
                 invoke("--action", "index-files")
                 files_first = invoke("--action", "search-multi", "--scopes", "files",
                                      "--query", "persistent worker")
@@ -1323,6 +1373,7 @@ class SearchWorkerTests(unittest.TestCase):
                     warm_timings_ms.append(second.get("timings_ms"))
                     self.assertEqual(second["worker_pid"], worker_pid)
                     self.assertEqual(second["model_load_ms"], 0)
+                    self.assertEqual(json.loads((base / "worker" / "endpoint.json").read_text())["model_state"], "warm")
                     if scope == "memory":
                         self.assertIn("beta update", json.dumps(second))
                         self.assertNotIn("alpha worker", json.dumps(second))
@@ -1330,6 +1381,7 @@ class SearchWorkerTests(unittest.TestCase):
                         self.assertEqual(second["results"][0]["path"], "src/worker.rs")
                 if real_model:
                     print(json.dumps({"platform": sys.platform, "worker_pid": worker_pid,
+                                      "observed_model_states": observed_states,
                                       "cold_seconds": cold_seconds,
                                       "cold_model_load_ms": first["model_load_ms"],
                                       "files_cold_model_load_ms": files_first["model_load_ms"],
@@ -1338,7 +1390,6 @@ class SearchWorkerTests(unittest.TestCase):
                                       "warm_timings_ms": warm_timings_ms,
                                       "warm_model_load_ms": second["model_load_ms"]}), flush=True)
                     self.assertGreater(first["model_load_ms"], 0)
-                    self.assertLessEqual(max(warm_seconds), 2.0)
                 db_path = runner.resolve_db_path(
                     REPO_HASH, None, "memory", db_root=base / ".gwt" / "index"
                 )
@@ -1353,10 +1404,31 @@ class SearchWorkerTests(unittest.TestCase):
                                    "--query", "beta update")
                 self.assertEqual(corrupted["worker_pid"], worker_pid)
                 self.assertEqual(corrupted["scopes"]["memory"]["state"], "corrupt")
+                return {"observed_model_states": observed_states,
+                        "warm_seconds": warm_seconds}
             finally:
                 # This PID came from the worker launched by this isolated fixture.
                 import signal
                 os.kill(worker_pid, signal.SIGTERM)
+
+    def test_worker_readiness_surrounds_model_construction_and_cache_hits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            endpoint = Path(tmp) / "endpoint.json"
+            endpoint.write_text(json.dumps({"pid": os.getpid(), "model_state": "cold"}))
+
+            def construct():
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "warming")
+                return object()
+
+            with mock.patch.object(runner, "_SEARCH_WORKER_ENDPOINT", endpoint), \
+                 mock.patch.object(runner, "_MODEL_CACHE", None), \
+                 mock.patch.dict(os.environ, GWT_INDEX_FAKE_EMBEDDING="1"), \
+                 mock.patch.object(runner, "_FakeEmbeddingModel", side_effect=construct) as model:
+                first = runner._get_embedding_model()
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "warm")
+                self.assertIs(runner._get_embedding_model(), first)
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "warm")
+                model.assert_called_once()
 
     def test_idle_worker_exits_and_removes_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1373,6 +1445,7 @@ class SearchWorkerTests(unittest.TestCase):
                 while not endpoint.exists() and child.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.1)
                 self.assertTrue(endpoint.exists(), "worker must publish readiness before idle exit")
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "cold")
                 stdout, stderr = child.communicate(timeout=15)
                 self.assertEqual(child.returncode, 0, (stdout, stderr))
                 self.assertFalse(endpoint.exists(), "idle exit must remove its endpoint")
