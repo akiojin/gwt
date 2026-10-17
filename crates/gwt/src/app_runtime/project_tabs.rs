@@ -897,6 +897,7 @@ impl AppRuntime {
             .collect::<Vec<_>>();
         for window_id in window_ids {
             self.invalidate_launch_delivery_ack(&window_id);
+            self.initial_launch_workers.remove(&window_id);
             self.pending_launch_completions.remove(&window_id);
         }
         let Some(tab) = self.tab(tab_id).cloned() else {

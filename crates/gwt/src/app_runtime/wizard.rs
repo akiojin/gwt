@@ -3084,9 +3084,9 @@ impl AppRuntime {
                     started_at,
                 }) => {
                     let window_exists = self.tracked_window_exists(&window_id);
-                    // Issue #3851: the TTL bounds pre-PTY materialization only.
-                    // Once a runtime exists, SessionStart may legitimately wait
-                    // for terminal input; runtime status owns exit recovery.
+                    // A live preparation or its queued completion still owns
+                    // this window. The TTL only recovers abandoned placeholders.
+                    // Once a runtime exists, runtime status owns exit recovery.
                     let live_runtime = self.runtimes.contains_key(&window_id)
                         && self.window_status(&window_id).is_some_and(|status| {
                             !matches!(
@@ -3095,7 +3095,8 @@ impl AppRuntime {
                             )
                         });
                     if window_exists
-                        && (live_runtime
+                        && (self.has_pending_agent_launch_worker(&window_id)
+                            || live_runtime
                             || started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL)
                     {
                         return Vec::new();

@@ -5506,6 +5506,148 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
 }
 
 #[test]
+fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "initial-worker-lifetime",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    let delivery_id = fixture.delivery_id.clone().expect("durable delivery");
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
+        3165,
+        LinkedIssueKind::Spec,
+        Some(delivery_id.clone()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    // Keep the real initial worker's successful completion queued. It still
+    // owns this placeholder until the GUI consumes that exact generation.
+    wait_for_recorded_event_with_timeout(
+        "initial launch completion queued",
+        &fixture.recorded_events,
+        Duration::from_secs(60),
+        |events| {
+            events.iter().any(|event| {
+                matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_ok())
+            })
+        },
+    );
+    let window_id = match fixture
+        .runtime
+        .issue_monitor_launch_deliveries
+        .get_mut(&delivery_id)
+        .expect("materializing delivery")
+    {
+        super::super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id,
+            started_at,
+        } => {
+            *started_at = Instant::now() - Duration::from_secs(61);
+            window_id.clone()
+        }
+        state => panic!("expected materializing delivery, got {state:?}"),
+    };
+    let generation = fixture.runtime.window_lifecycle_generations.lock().unwrap()[&window_id];
+    let inflight = fixture.runtime.inflight_launches.clone();
+    let feedback = fixture.runtime.pending_launch_feedback_contexts[&window_id]
+        .issue_monitor_delivery_id
+        .clone();
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
+        3165,
+        LinkedIssueKind::Spec,
+        Some(delivery_id),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    let generation_after = fixture
+        .runtime
+        .window_lifecycle_generations
+        .lock()
+        .unwrap()
+        .get(&window_id)
+        .copied();
+    let inflight_after = fixture.runtime.inflight_launches.clone();
+    let feedback_after = fixture
+        .runtime
+        .pending_launch_feedback_contexts
+        .get(&window_id)
+        .and_then(|feedback| feedback.issue_monitor_delivery_id.clone());
+    let agent_windows = fixture.runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| window.preset == WindowPreset::Agent)
+        .count();
+
+    // Wait for every spawned worker before teardown, including a duplicate on
+    // RED. No LaunchComplete is applied, so this test never creates a PTY.
+    let expected_completions =
+        1 + usize::from(generation_after != Some(generation) && !inflight_after.is_empty());
+    wait_for_recorded_event_with_timeout(
+        "initial launch workers returned",
+        &fixture.recorded_events,
+        Duration::from_secs(60),
+        |events| {
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::LaunchComplete { .. }
+                    )
+                })
+                .count()
+                >= expected_completions
+        },
+    );
+    let initial_worker_before_refresh = fixture
+        .runtime
+        .initial_launch_workers
+        .contains_key(&window_id);
+    let tab_id = fixture.runtime.tabs[0].id.clone();
+    fixture.runtime.refresh_project_tab_incarnation(&tab_id);
+    let initial_worker_after_refresh = fixture
+        .runtime
+        .initial_launch_workers
+        .contains_key(&window_id);
+    let (spawner, cleanup_tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .close_window_after_issue_monitor_finalize_events(&window_id);
+    drain_queued_blocking_tasks(&cleanup_tasks);
+
+    assert_eq!(
+        generation_after,
+        Some(generation),
+        "a queued initial completion still owns its original window generation"
+    );
+    assert_eq!(
+        inflight_after, inflight,
+        "the original launch remains in flight"
+    );
+    assert_eq!(feedback_after, feedback);
+    assert_eq!(agent_windows, 1);
+    assert!(initial_worker_before_refresh);
+    assert!(
+        !initial_worker_after_refresh,
+        "project incarnation refresh must retire its initial launch worker tracking"
+    );
+    assert!(fixture.runtime.initial_launch_workers.is_empty());
+}
+
+#[test]
 fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_it_stops() {
     let _env_lock = env_test_lock()
         .lock()
@@ -5598,6 +5740,9 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
         }
         state => panic!("expected materializing delivery, got {state:?}"),
     };
+    // The synthetic PTY represents an initial completion already consumed by
+    // the GUI, so retire that exact initial phase at the same transition.
+    runtime.initial_launch_workers.remove(&live_window_id);
     insert_test_pane_runtime(&mut runtime, &live_window_id);
 
     let waiting_replay = runtime.auto_launch_issue_monitor_delivery_events(

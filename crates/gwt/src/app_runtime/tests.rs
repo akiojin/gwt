@@ -1418,6 +1418,7 @@ fn sample_runtime_with_events(
 
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
+        initial_launch_workers: HashMap::new(),
         project_open_started: None,
         pending_startup_pm_tabs: Vec::new(),
         deferred_issue_monitor_launches: None,
@@ -1551,6 +1552,9 @@ fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
     runtime
         .runtime_hook_agent_failures_in_flight
         .insert(window_id.to_string(), identity);
+    runtime
+        .initial_launch_workers
+        .insert(window_id.to_string(), None);
     runtime
         .launch_error_terminal_details
         .insert(window_id.to_string(), "x".repeat(64 * 1024));

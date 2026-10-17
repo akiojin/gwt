@@ -4748,6 +4748,7 @@ mod tests {
             pending_fresh_execution_finalizations: HashMap::new(),
 
             inflight_launches: HashMap::new(),
+            initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,

@@ -5087,6 +5087,34 @@ impl AppRuntime {
         self.handle_launch_complete_for_generation(window_id, window_generation, result)
     }
 
+    pub(super) fn has_pending_agent_launch_worker(&mut self, window_id: &str) -> bool {
+        if self
+            .pending_launch_completions
+            .get(window_id)
+            .is_some_and(|pending| pending.current.load(Ordering::Acquire))
+        {
+            return true;
+        }
+        let Some(worker) = self.initial_launch_workers.get_mut(window_id) else {
+            return false;
+        };
+        let Some(handle) = worker.as_ref() else {
+            return true; // A normally returned worker has queued its completion.
+        };
+        if !handle.is_finished() {
+            return true;
+        }
+        let returned = worker
+            .take()
+            .expect("finished launch worker")
+            .join()
+            .is_ok();
+        if !returned {
+            self.initial_launch_workers.remove(window_id);
+        }
+        returned
+    }
+
     pub(crate) fn handle_launch_complete_for_generation(
         &mut self,
         window_id: String,
@@ -5109,6 +5137,7 @@ impl AppRuntime {
             });
             return Vec::new();
         }
+        self.initial_launch_workers.remove(&window_id);
         // Issue #3851: an Err result is produced before this handler spawns a
         // PTY. If this window already owns a live agent runtime, the result is
         // necessarily from an older preparation attempt and must not consume
@@ -6750,7 +6779,8 @@ impl AppRuntime {
                 .insert(window_id.clone(), continuation);
         }
 
-        thread::spawn(move || {
+        let worker_window_id = window_id.clone();
+        let worker = thread::spawn(move || {
             Self::spawn_agent_window_async_with_claim(
                 proxy,
                 sessions_dir,
@@ -6764,6 +6794,8 @@ impl AppRuntime {
                 issue_monitor_trust_candidate,
             );
         });
+        self.initial_launch_workers
+            .insert(worker_window_id, Some(worker));
 
         Ok(events)
     }
