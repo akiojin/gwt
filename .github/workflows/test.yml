@@ -405,8 +405,9 @@ jobs:
   # Its target filter is the exception to the optional-job filter above.
   # No changed test targets intentionally means there is nothing to compare.
   # Libraries run twice; integration targets run up to 20 times within the
-  # 600s test execution budget. Compile is excluded, and the minimum two-run
-  # comparison takes precedence over the budget. Pinned by
+  # 220s detector budget, including build and test listing. This reserves
+  # time for job setup/cleanup under Issue #5566's 300s wall-time target.
+  # The minimum two-run comparison takes precedence over the budget. Pinned by
   # crates/gwt/tests/ci_flake_hygiene_contract_test.rs.
   flake-detection:
     name: Flake detection (changed test targets)
@@ -443,9 +444,14 @@ jobs:
       # is the number the contract test reads.
       - name: Re-run the changed test targets until the outcome wobbles
         env:
+          # Omit workspace line tables only for repetition artifacts. Keep
+          # these after cache restore: dependencies already use debug=false.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
           GWT_FLAKE_TARGETS: ${{ needs.changes.outputs.flake_targets }}
           GWT_FLAKE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           GWT_FLAKE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          GWT_FLAKE_BUDGET_SECS: "220"
           GWT_FLAKE_LOG_DIR: ${{ runner.temp }}/gwt-flake-logs
         run: scripts/ci-flake-detect.sh
         timeout-minutes: 45
