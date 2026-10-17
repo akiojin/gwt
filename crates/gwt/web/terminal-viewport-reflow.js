@@ -4,8 +4,8 @@
 // window interaction features must be covered by behavior tests, not just
 // source-string contracts).
 
-export const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
-export const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
+const DEFAULT_MAX_TERMINAL_FITS_PER_FRAME = 4;
+const DEFAULT_MAX_TERMINAL_REFRESHES_PER_FRAME = 4;
 
 function defaultScheduleFrame(callback) {
   if (typeof requestAnimationFrame === "function") {
@@ -835,7 +835,7 @@ function activationResult({
   };
 }
 
-export function terminalActivationLayoutSnapshot(runtime) {
+function terminalActivationLayoutSnapshot(runtime) {
   const terminal = runtime?.terminal;
   const parent = terminal?.element?.parentElement;
   if (!terminal || !parent || !elementHasLayoutBox(parent)) {

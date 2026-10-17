@@ -98,6 +98,8 @@ jobs:
         run: cargo doc --workspace --no-deps --document-private-items
       - name: Check frontend bundle syntax
         run: bash scripts/check-frontend-bundle.sh
+      - name: Check unused frontend modules and exports
+        run: bash scripts/run-node-tests-with-linkedom.sh crates/gwt/web/__tests__/unused-code.test.mjs
       - name: Check release flow contract
         run: bash scripts/check-release-flow.sh
       # SPEC #3576: the Git hook contract, including the rule that `git push`
