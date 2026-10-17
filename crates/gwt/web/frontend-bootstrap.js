@@ -8,7 +8,7 @@ import { mountHubApp } from "./hub-app.js";
 // import(): an inserted script delays the document `load` event until it has
 // run, so "page loaded" keeps meaning "application wired" (dynamic imports do
 // not delay `load`).
-export const PROJECT_APP_MODULE = "/app.js";
+const PROJECT_APP_MODULE = "/app.js";
 
 export function bootFrontendRoute({ window: win, document: doc }) {
   const route = parseFrontendRoute(win.location.pathname);

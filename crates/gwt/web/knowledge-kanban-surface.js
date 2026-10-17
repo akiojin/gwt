@@ -224,14 +224,14 @@ export function formatAgentElapsed(ms) {
 // this frontend last saw the state change, so it restarts at every reload and
 // at every state transition; it stays the fallback for a window whose runtime
 // the backend cannot name (a restored window with no live PTY).
-export function issueAgentElapsedMs(windowData, observedSince, now = Date.now()) {
+function issueAgentElapsedMs(windowData, observedSince, now = Date.now()) {
   const started = Number(windowData?.runtime_started_at_ms);
   const since = Number.isFinite(started) && started > 0 ? started : Number(observedSince);
   if (!Number.isFinite(since) || since <= 0) return null;
   return Math.max(0, now - since);
 }
 
-export function issuePreviewStatusView(windowData) {
+function issuePreviewStatusView(windowData) {
   const status = String(windowData?.status || "").trim().toLowerCase();
   const known = ISSUE_PREVIEW_STATUS_VIEWS[status];
   return known
@@ -586,7 +586,7 @@ export function issueAcceptanceProgress(markdown) {
 // window / Move to top (⋯ keeps Requeue and Stop), done = Open PR. Every other
 // state falls back to the row's own order. Only actions the row model would
 // allow are offered, so the band never shows a button that cannot act.
-export const ISSUE_DETAIL_ACTION_LIMIT = 3;
+const ISSUE_DETAIL_ACTION_LIMIT = 3;
 const ISSUE_DETAIL_TERMINAL_ACTIONS = new Set(["windowize-issue-preview", "focus-canvas-window"]);
 
 function issueDetailPhase({ entry, inlineWindow, canvasWindow }) {
@@ -662,7 +662,7 @@ export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds, is
 // composite piece — an Issue header above the interactive terminal — not a bare
 // terminal window. The header reuses the row's own badge and secondary vocabulary so
 // the same agent reads identically in the list and on the canvas.
-export const ISSUE_WINDOW_HEADER_ACTION_LIMIT = 2;
+const ISSUE_WINDOW_HEADER_ACTION_LIMIT = 2;
 
 const ISSUE_WINDOW_HEADER_ACTIONS = Object.freeze([
   Object.freeze({
@@ -1089,22 +1089,6 @@ export function createKnowledgeKanbanSurface({
       const knowledgeAutoRefreshModel = createUiStateStore({ revision: 0 });
       const knowledgeCompletionViewModel = createUiStateStore({ windowId: null });
 
-      function issueMonitorStateText(state) {
-        switch (String(state || "")) {
-          case "disabled":
-            return "Stopped";
-          case "auth_required":
-            return "Auth required";
-          case "settings_required":
-            return "Settings required";
-          case "quota_hold":
-            return "Quota hold";
-          default: {
-            const value = String(state || (issueMonitorModel.read().status.enabled ? "idle" : "disabled"));
-            return value.charAt(0).toUpperCase() + value.slice(1);
-          }
-        }
-      }
 
       function issueMonitorSettingsSourceLabel(source) {
         switch (source) {
@@ -3149,16 +3133,7 @@ export function createKnowledgeKanbanSurface({
         return section;
       }
 
-      function issueEntryState(entry) {
-        return String(entry?.state || "open").toLowerCase() === "closed"
-          ? "closed"
-          : "open";
-      }
 
-      function issueEntryMatchesStateFilter(entry, filter) {
-        if (filter === "all") return true;
-        return issueEntryState(entry) === filter;
-      }
 
       function filteredKnowledgeEntries(state) {
         const query = state.query.trim().toLowerCase();
