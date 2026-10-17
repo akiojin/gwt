@@ -8673,7 +8673,9 @@ impl IssueMonitorState {
         resume_condition: &str,
         now: &str,
     ) -> AutonomousWaitOutcome {
-        if !self.active_launches.contains(&issue_number) {
+        // Restored runtimes may be accounted for before their launch binding
+        // is recovered. A wait records liveness, not new launch authority.
+        if !self.active_issue_numbers().contains(&issue_number) {
             return AutonomousWaitOutcome::NotLaunched;
         }
         declare_wait_on_record(

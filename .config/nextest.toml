@@ -8,6 +8,9 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [profile.coverage]
 test-threads = 16
 
+[profile.coverage.junit]
+path = "junit.xml"
+
 # Issue #5564: retain execution identities for the required shard-union check.
 [profile.ci.junit]
 path = "junit.xml"
