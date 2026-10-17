@@ -156,12 +156,12 @@
 
 ### カバレッジの判定と報告
 
-- 正本は `.github/workflows/coverage.yml`、呼び出し元の `lint.yml`、`scripts/check-coverage-threshold.mjs`。workspace の Rust テストを `--workspace --all-features` で計測し、**行カバレッジをスコープ別に判定する。workspace 全体に一律 90% を要求しない。**
+- 正本は `.github/workflows/coverage.yml`、呼び出し元の `coverage-ci.yml`、`scripts/check-coverage-threshold.mjs`。workspace の Rust テストを `--workspace --all-features` で計測し、**行カバレッジをスコープ別に判定する。workspace 全体に一律 90% を要求しない。**
 - CI の gate は次の 2 本。いずれも下記 outer shell を分母から除外する。
   - `node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"` — `gwt-core` と `gwt` の対象行が 90% 以上。
   - `node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude "crates/(gwt-core|gwt)/"` — 残りの domain crates の対象行が 80% 以上。
 - 除外対象は `crates/gwt/src/` 配下の `main.rs`、`bin/gwtd.rs`、`app_runtime.rs`、`app_runtime/**/*.rs`、`docker_launch.rs`、`index_worker.rs`、`issue_cache.rs`、`launch_runtime.rs`、`native_app.rs`、`update_front_door.rs`、`cli/daemon/mod.rs`、`cli/index.rs`、`cli/index/**/*.rs`。これらの outer shell は専用の contract test 等で検証する。
-- **PR（base: develop / main）では `lint.yml` が `workflow_call` で coverage を実行する。** 対象は PR head SHA。develop push と `merge_group` でも呼び出し、日次（UTC 00:00）は develop、`workflow_dispatch` は選択した ref の SHA を計測する。手動実行も develop 固定ではない。lcov 生成・Codecov upload は日次／手動実行のみ。
+- **PR（base: develop / main）では独立した `coverage-ci.yml` が `workflow_call` で coverage を実行する。** Lint workflow の所要時間から分離し、必須チェック名 `coverage / Rust Coverage` を維持する。対象は PR head SHA。develop push と `merge_group` でも呼び出し、日次（UTC 00:00）は develop、`workflow_dispatch` は選択した ref の SHA を計測する。6分割の全件実行集合とビルドの一致を検証してからプロファイルを統合し、90% / 80% を判定する。手動実行も develop 固定ではない。lcov 生成・Codecov upload は日次／手動実行のみ。
 - **PR の着地には必須チェック `coverage / Rust Coverage` の成功が必要。ローカルで別途 workspace 全体 90% を証明する義務はない。** CI 対応を確認した `gwt-verify --mode pre-pr` では必須 CI に閾値判定を委ね、coverage のためだけに追加の full matrix を投入しない。ローカル計測は任意。定期レポートと競合する `coverage.yml` の手動 dispatch は担当 agent が行わず、必要なら PM が実施する。
 - **報告には対象 SHA・スコープ・除外の有無・covered lines / total lines・割合・適用閾値を併記する。** `gate: gwt-core + gwt、outer shell 除外後、900/1000 = 90.00%、閾値 90%` のように書く。workspace 全体の値は `workspace 全体（参考値、gate 判定ではない）` と明記し、outer shell を含む生の集計か除外後かも区別する。
 - `--scope` / `--scope-exclude` を両方省略した script の結果は outer shell 除外後の workspace 集計であり、指定閾値との比較は行うが **CI の 90% / 80% の gate 判定ではない**。その結果を「CI の 90% 未達」と報告しない。
@@ -189,10 +189,10 @@
 
 GitHub merge queue は organization 所有のリポジトリに限定され、User 所有の `akiojin/gwt` では有効化できない（#4937 の実操作は `422 Invalid rule 'merge_queue'`）。2026-10-08 のユーザー裁定で develop の `required_status_checks.strict` を `false` に変更し、元の必須チェック 11 件は維持した（#5173 で独立した coverage チェックを加えて現在は 12 件）。全緑の PR は `BEHIND` でも auto-merge で着地できる。最新 base と組み合わせた事前検証は保証されないため、develop push の post-merge CI で検出し、PM が修正または revert の Issue を起票する。
 
-- **workflow 側の契約:** `test.yml` / `lint.yml` / `build.yml` は develop push でも PR と同じ Test / Lint / Build を走らせる。PR の同期判定と concurrency（#5059 / #4119）は維持し、push の commit range でファイルを分類する。将来の organization 移行に備え `merge_group` 対応も残す。`crates/gwt/tests/ci_concurrency_contract_test.rs` が固定する。
+- **workflow 側の契約:** `test.yml` / `lint.yml` / `build.yml` / `coverage-ci.yml` は develop push でも PR と同じ Test / Lint / Build / Coverage を走らせる。PR の同期判定と concurrency（#5059 / #4119）は維持し、push の commit range でファイルを分類する。将来の organization 移行に備え `merge_group` 対応も残す。`crates/gwt/tests/ci_concurrency_contract_test.rs` が固定する。
 - **必須チェック（2026-10-08 実測、12 件）:** `Commit Message Lint` / `Clippy & Rustfmt` / `Test (Rust)` / `Build` / `Test (Python runner)` / `Test (Rust, Windows)` / `Cargo Deny (advisories + sources)` / `Check (Windows)` / `Check (macOS)` / `Test (Windows agent launch)` / `Flake detection (changed test targets)` / `coverage / Rust Coverage`。#5173 により coverage の閾値判定を Clippy から独立した必須チェックへ分離した。現在値は `gh api repos/akiojin/gwt/branches/develop/protection --jq '.required_status_checks'` で strict と contexts を一緒に読む。
 - **必須チェックを追加・改名するときの順序:** 先にその job（develop push / PR / `merge_group` で走るもの）を develop に着地させ、その後で branch protection の contexts を変える。逆順にすると、全 PR が報告されない check を待って止まる。
-- **失敗の検出と復旧:** `post-merge-ci.yml` が develop push の Test / Lint / Build の失敗を検出し、run URL を付けた `bug` Issue を作成または既存 Issue に追記する。PM は通知 Issue を確認し、原因調査から修正または revert を手配する。自動 revert は行わない。
+- **失敗の検出と復旧:** `post-merge-ci.yml` が develop push の Test / Lint / Build / Coverage の失敗を検出し、run URL を付けた `bug` Issue を作成または既存 Issue に追記する。PM は通知 Issue を確認し、原因調査から修正または revert を手配する。自動 revert は行わない。
 - **BEHIND の扱い:** strict は base の branch protection から読む。`strict=false` の `BEHIND` は同期不要で、`pr.list` は `leave:` と operation なしを返す。`BEHIND` だけを理由に `pr.update_branch` しない。strict=true または strict 不明の場合は従来の同期指示を維持する。merge queue が有効な他リポジトリでは既存の queue に任せる挙動を維持する。
 - **切り戻し（設定変更はユーザー操作）:** `gh api -X PATCH repos/akiojin/gwt/branches/develop/protection/required_status_checks -F strict=true`。必須 contexts を変えずにマージ前の up-to-date 必須へ戻す。post-merge CI と `merge_group` 対応は残してよい。
 - **再測定:** 着地間隔と PR branch への base 同期回数を変更前と同じ方法で測り、観測期間と raw count を #4937 に記録する。
