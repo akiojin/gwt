@@ -57,6 +57,15 @@ fn coverage_measures_the_requested_source_without_cancelling_its_caller() {
     let steps = coverage["jobs"]["rust-coverage"]["steps"]
         .as_sequence()
         .unwrap();
+    let download = steps
+        .iter()
+        .find(|s| s["name"] == "Download pre-shard head summary")
+        .unwrap();
+    assert_eq!(download["with"]["name"], "workspace-tests-1");
+    assert_eq!(
+        download["with"]["path"],
+        "target/coverage-shards/workspace-tests-1"
+    );
     assert!(steps
         .iter()
         .any(|s| s["run"].as_str() == Some("test \"$COVERAGE_SHARDS_RESULT\" = success")));
@@ -79,6 +88,75 @@ fn coverage_measures_the_requested_source_without_cancelling_its_caller() {
             .contains("node scripts/check-coverage-threshold.mjs")
             && run.contains(threshold)
             && run.contains(scope))));
+    }
+}
+
+#[test]
+fn coverage_keeps_pre_shard_pr_heads_on_their_supported_full_workspace_transport() {
+    let coverage = workflow("coverage.yml");
+    for job in ["coverage-shard", "rust-coverage"] {
+        let steps = coverage["jobs"][job]["steps"].as_sequence().unwrap();
+        let mode = steps.iter().find(|s| s["id"] == "transport").unwrap();
+        let run = mode["run"].as_str().unwrap();
+        assert!(run.contains("git show HEAD:.github/workflows/coverage.yml"));
+        assert!(run.contains("grep -q '^  coverage-shard:'"));
+        assert!(run.contains("sharded=true") && run.contains("sharded=false"));
+        assert!(!run.contains("|| true"));
+    }
+    let steps = coverage["jobs"]["coverage-shard"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let legacy = steps
+        .iter()
+        .find(|s| s["name"] == "Run pre-shard head coverage")
+        .unwrap();
+    assert_eq!(
+        legacy["if"],
+        "${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 }}"
+    );
+    let run = legacy["run"].as_str().unwrap();
+    assert!(run.contains("node scripts/coverage-summary.mjs --output-path target/coverage-export/coverage-summary.json --nextest -- --workspace --all-features"));
+    assert!(!run.contains("--partition") && !run.contains("--export-dir"));
+    assert_eq!(legacy["env"]["NEXTEST_PROFILE"], "coverage");
+    let legacy_lcov = steps
+        .iter()
+        .find(|s| s["name"] == "Generate pre-shard head lcov")
+        .unwrap();
+    let run = legacy_lcov["run"].as_str().unwrap();
+    assert!(run.contains("coverage-summary.json.profiles.json"));
+    assert!(run.contains("--failure-mode all"));
+    assert!(run.contains("--lcov --output-path target/coverage-export/lcov.info"));
+    let steps = coverage["jobs"]["rust-coverage"]["steps"]
+        .as_sequence()
+        .unwrap();
+    for name in [
+        "Verify the complete workspace test union",
+        "Generate workspace summary",
+    ] {
+        let step = steps.iter().find(|s| s["name"] == name).unwrap();
+        assert_eq!(
+            step["if"],
+            "${{ steps.transport.outputs.sharded == 'true' }}"
+        );
+    }
+    let legacy = steps
+        .iter()
+        .find(|s| s["name"] == "Restore pre-shard head summary")
+        .unwrap();
+    assert_eq!(
+        legacy["if"],
+        "${{ steps.transport.outputs.sharded == 'false' }}"
+    );
+    assert_eq!(legacy["run"], "cp target/coverage-shards/workspace-tests-1/coverage-summary.json target/coverage-summary.json");
+    for step in steps.iter().filter(|s| {
+        s["name"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("Enforce coverage"))
+    }) {
+        assert!(
+            step.get("if").is_none(),
+            "both transports must enforce the same thresholds"
+        );
     }
 }
 
