@@ -3312,26 +3312,22 @@ fn resolved_child_environment(isolated_baseline: bool) -> Vec<(String, String)> 
 /// an armed debug artifact, even without --all-features (Issue #4317).
 /// This recovery belongs only to the gwt workspace, not projects using gwt.
 fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'static str> {
-    // Windows' canonical unit-target matrix avoids rebuilding the regular
-    // gwtd.exe (#4182, #4968). That default matrix does not overwrite the binary.
-    // Explicit binary matrices include their own bootstrap as the last command.
-    if cfg!(windows)
-        || !commands.iter().any(|command| {
-            split_command_line(command).is_ok_and(|args| {
-                args.first().map(String::as_str) == Some("cargo")
-                    && args.get(1).map(String::as_str) == Some("test")
-            })
+    // The verification driver is pinned outside Cargo's artifacts on Windows,
+    // so restoring the operational executable is safe there too (Issue #5480).
+    if !commands.iter().any(|command| {
+        split_command_line(command).is_ok_and(|args| {
+            args.first().map(String::as_str) == Some("cargo")
+                && (args.get(1).map(String::as_str) == Some("test")
+                    || (args.get(1).map(String::as_str) == Some("nextest")
+                        && args.get(2).map(String::as_str) == Some("run")))
         })
-    {
+    }) {
         return None;
     }
     gwtd_artifact_restore_command(worktree)
 }
 
 fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
-    if cfg!(windows) {
-        return None;
-    }
     is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd")
 }
 
@@ -8788,6 +8784,110 @@ mod tests {
             output_tail.len() <= OUTPUT_TAIL_LIMIT * 2 + 128,
             "persisted output exceeded the stdout+stderr tail budget: {} bytes",
             output_tail.len()
+        );
+    }
+
+    #[test]
+    fn nextest_restores_gwtd_only_in_the_gwt_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = ["cargo nextest run -p gwt --lib".to_string()];
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"unrelated\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(gwtd_artifact_restoration(dir.path(), &commands), None);
+
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            gwtd_artifact_restoration(dir.path(), &commands),
+            Some("cargo build -p gwt --bin gwtd")
+        );
+        assert_eq!(
+            gwtd_artifact_restoration(dir.path(), &["cargo nextest list".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn default_integration_test_restores_unarmed_gwtd_after_all_features_clippy() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _target_dir = ScopedEnvVar::unset("CARGO_TARGET_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("crates/gwt");
+        fs::create_dir_all(package.join("src/bin")).unwrap();
+        fs::create_dir_all(package.join("tests")).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"gwt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+             [features]\ntest-gh-guard = []\n\
+             [[bin]]\nname = \"gwtd\"\npath = \"src/bin/gwtd.rs\"\n\
+             [dev-dependencies]\ngwt = { path = \".\", features = [\"test-gh-guard\"] }\n",
+        )
+        .unwrap();
+        fs::write(package.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            package.join("src/bin/gwtd.rs"),
+            "fn main() { println!(\"{}\", if cfg!(feature = \"test-gh-guard\") { \"guarded\" } else { \"operational\" }); }\n",
+        )
+        .unwrap();
+        fs::write(
+            package.join("tests/artifact_state.rs"),
+            r#"#[test]
+fn default_integration_test_builds_a_guarded_binary() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gwtd")).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "guarded");
+}
+"#,
+        )
+        .unwrap();
+
+        let (record, transcript) = run_verification(
+            dir.path(),
+            "sess-artifact-default",
+            &[
+                "cargo clippy -p gwt --all-features --all-targets -- -D warnings".to_string(),
+                "cargo test -p gwt --test artifact_state".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert!(record.all_passed, "{transcript}");
+        assert_eq!(record.commands.len(), 3, "{transcript}");
+        assert_eq!(record.commands[2].command, "cargo build -p gwt --bin gwtd");
+        let output = gwt_core::process::hidden_command(
+            dir.path()
+                .join("target/debug")
+                .join(format!("gwtd{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .output()
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "operational",
+            "verification must leave the executable without the test-only feature"
         );
     }
 
