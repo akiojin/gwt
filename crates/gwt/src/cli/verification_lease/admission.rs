@@ -1868,7 +1868,7 @@ mod tests {
         assert_eq!(admission.command_progress().timeout(), None);
         assert_eq!(
             verification_lease::short_non_cargo_timeout(command),
-            Some(Duration::from_secs(60))
+            Some(Duration::from_secs(300))
         );
         drop(admission);
         assert!(

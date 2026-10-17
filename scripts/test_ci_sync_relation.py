@@ -14,19 +14,15 @@ SCRIPT = Path(__file__).with_name("ci_sync_relation.py")
 
 
 class WorkflowPolicyTests(unittest.TestCase):
-    def test_paired_cancellation_waits_for_source_classification(self):
-        workflow = (SCRIPT.parent.parent / ".github/workflows/test.yml").read_text()
+    def test_paired_measurement_is_outside_pull_request_cancellation(self):
+        workflow = (SCRIPT.parent.parent / ".github/workflows/test.yml").read_text(encoding="utf-8")
         header, jobs = workflow.split("\njobs:", 1)
         self.assertIn("github.run_id", header,
                       "workflow-wide cancellation must not kill a base-only run")
-        paired = jobs.split("\n  test-windows-verify-timings:", 1)[1].split("\n  #", 1)[0]
-        self.assertIn("source-sync", paired)
-        self.assertIn("cancel-in-progress: true", paired,
-                      "admitted paired jobs must replace obsolete measurements")
-        self.assertIn("github.event.pull_request.number || github.ref", paired)
-        self.assertIn("if: ${{ !cancelled() && needs.source-sync.outputs.base_only != 'true' }}", paired,
-                      "only proven base synchronization skips paired admission; unknown history still measures")
-        self.assertIn("'ubuntu-latest' || 'windows-latest'", paired)
+        self.assertNotIn("test-windows-verify-timings", jobs,
+                         "PR correctness gates must not wait for a schedule benchmark")
+        self.assertNotIn("verify_timings", jobs,
+                         "the nightly measurement needs no PR path classifier")
         runner = jobs.split("\n  test-python-runner:", 1)[1].split("\n  test-index-e2e:", 1)[0]
         self.assertIn("python -m unittest discover -s scripts -p 'test_ci_*.py'", runner,
                       "the source classifier regressions must run in CI")
