@@ -10,6 +10,19 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Board auth receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', surface]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/board_auth_status');
+  assert.deepEqual(findings(app), [], 'Board auth replies update the shared model without drawing');
+  const bypass = app.replace('case "board_auth_status":',
+    'case "board_auth_status": document.body.textContent = event.message;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
 test("Autostart receivers commit shared state and reject bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const settings = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
