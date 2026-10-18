@@ -3330,7 +3330,7 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
 }
 
 fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
-    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd")
+    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd --target-dir target")
 }
 
 /// Identify this repository without comparing another project's HEAD to gwt's.
@@ -3396,11 +3396,8 @@ fn restore_gwtd_after_deferral_cancellable(
     let Some(command) = gwtd_artifact_restore_command(worktree) else {
         return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
     };
-    // Restore this checkout's operational path, even when Cargo's environment
-    // or user configuration points ordinary builds at another target directory.
-    let command = format!("{command} --target-dir target");
     match execute_command_with_artifact_guard_cancellable(
-        worktree, &command, true, None, host, None, artifacts, check,
+        worktree, command, true, None, host, None, artifacts, check,
     ) {
         Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output, _)) => format!(
@@ -4872,7 +4869,7 @@ where
             .then(headed_e2e::Capture::new)
             .transpose()
             .map_err(|error| format!("failed to prepare headed E2E reporter: {error}"))?;
-        let args = split_command_line(command)?;
+        let (_, args) = take_env_assignments(split_command_line(command)?)?;
         let nextest_capture = (args.starts_with(&["cargo".into(), "nextest".into(), "run".into()])
             && args
                 .windows(2)
@@ -8902,14 +8899,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             gwtd_artifact_restoration(dir.path(), &commands),
-            Some("cargo build -p gwt --bin gwtd")
+            Some("cargo build -p gwt --bin gwtd --target-dir target")
         );
         assert_eq!(
             gwtd_artifact_restoration(
                 dir.path(),
                 &[r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string()]
             ),
-            Some("cargo build -p gwt --bin gwtd")
+            Some("cargo build -p gwt --bin gwtd --target-dir target")
         );
         assert_eq!(
             gwtd_artifact_restoration(dir.path(), &["cargo nextest list".to_string()]),
@@ -8922,11 +8919,17 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _target_dir = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().unwrap();
+        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", dir.path().join("ambient-target"));
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src/bin")).unwrap();
         fs::create_dir_all(package.join("tests")).unwrap();
+        fs::create_dir_all(dir.path().join(".config")).unwrap();
+        fs::write(
+            dir.path().join(".config/nextest.toml"),
+            "[profile.gwt-verify]\nretries = 0\n",
+        )
+        .unwrap();
         fs::write(
             dir.path().join("Cargo.toml"),
             "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
@@ -8962,15 +8965,15 @@ fn default_integration_test_builds_a_guarded_binary() {
             dir.path(),
             "sess-artifact-default",
             &[
-                "cargo clippy -p gwt --all-features --all-targets -- -D warnings".to_string(),
-                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state"#.to_string(),
+                "cargo clippy -p gwt --all-features --all-targets --target-dir target -- -D warnings".to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state --target-dir target"#.to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --test artifact_state --target-dir target --profile gwt-verify --retries 0"#.to_string(),
             ],
         )
         .unwrap();
 
         assert!(record.all_passed, "{transcript}");
-        assert_eq!(record.commands.len(), 3, "{transcript}");
-        assert_eq!(record.commands[2].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(record.commands.len(), 4, "{transcript}");
         let output = gwt_core::process::hidden_command(
             dir.path()
                 .join("target/debug")
@@ -8980,9 +8983,16 @@ fn default_integration_test_builds_a_guarded_binary() {
         .unwrap();
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
-            String::from_utf8(output.stdout).unwrap().trim(),
-            "operational",
-            "verification must leave the executable without the test-only feature"
+            (
+                String::from_utf8(output.stdout).unwrap().trim(),
+                record.commands[2].nextest.as_ref().map(|evidence| evidence.total_tests)
+            ),
+            ("operational", Some(1)),
+            "verification must restore the fixed artifact path and retain prefixed Nextest evidence"
+        );
+        assert_eq!(
+            record.commands[3].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
         );
     }
 
@@ -9019,7 +9029,10 @@ fn default_integration_test_builds_a_guarded_binary() {
 
         assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
-        assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(
+            record.commands[1].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
         assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
@@ -9078,7 +9091,10 @@ fn default_integration_test_builds_a_guarded_binary() {
 
         assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
-        assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(
+            record.commands[1].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
         assert_eq!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
         assert_eq!(record.skipped_after_failure, vec!["git --version"]);
