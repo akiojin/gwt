@@ -1584,6 +1584,7 @@ pub(crate) enum ProjectNavigationSource {
         request_id: Option<String>,
     },
     Clone {
+        client_id: String,
         workspace_home: PathBuf,
     },
     #[cfg(test)]
