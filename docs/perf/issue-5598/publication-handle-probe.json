@@ -1,0 +1,18 @@
+{
+  "runner": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\runtime\\runners\\chroma_index_runner-04eaf92932fa8080.py",
+  "cache_enabled": false,
+  "document_count": 1622,
+  "attempts": [
+    {
+      "phase": "after_client_close",
+      "rename": "success"
+    },
+    {
+      "phase": "after_reference_drop_and_gc",
+      "rename": "success"
+    }
+  ],
+  "source": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-benchmark-home\\.gwt\\index\\99a8660247f5bc49\\issues.staging",
+  "clone": "E:\\gwt\\work\\issue-5598\\target\\issue-5598-publication-probe-1792122715629310500\\store",
+  "client_close": "success"
+}

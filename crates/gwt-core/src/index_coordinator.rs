@@ -901,6 +901,10 @@ impl IndexCoordinator {
     /// holding the root lock exclusively. Capacity counts physical locks;
     /// terminal or corrupt diagnostics cannot grant an extra slot.
     pub fn heavy_pool_status(&self) -> Result<HeavyPoolStatus, CoordinatorError> {
+        // Snapshot probes must not look like holders to another reader or mix
+        // a released root holder with a successor admitted to a numbered slot.
+        let allocator = open_lock_file(&self.root.join(VERIFICATION_ALLOCATOR_LOCK))?;
+        fs2::FileExt::lock_exclusive(&allocator)?;
         let capacity = if self.root.join(VERIFICATION_CAPACITY_FILE).exists() {
             read_verification_capacity(&self.root)?
         } else {
@@ -911,14 +915,11 @@ impl IndexCoordinator {
         let legacy_locked = match fs2::FileExt::try_lock_exclusive(&root_probe) {
             Ok(()) => {
                 reconcile_orphaned_heavy_ticket(&self.root, &self.root);
-                let _ = fs2::FileExt::unlock(&root_probe);
                 false
             }
             Err(err) if is_contended(&err) => match fs2::FileExt::try_lock_shared(&root_probe) {
-                Ok(()) => {
-                    let _ = fs2::FileExt::unlock(&root_probe);
-                    false
-                }
+                // Keep the probe through the slot scan to fence legacy grants.
+                Ok(()) => false,
                 Err(err) if is_contended(&err) => true,
                 Err(err) => return Err(err.into()),
             },
@@ -933,6 +934,8 @@ impl IndexCoordinator {
             used += usize::from(legacy_occupied);
             slots.push(HeavySlotStatus { slot: None, status });
         }
+        #[cfg(test)]
+        tests::after_pool_root_status();
         for (slot, storage) in verification_slot_paths(&self.root)? {
             let status = self.heavy_storage_status(&storage)?;
             used += usize::from(status.held || status.holder_stale);
@@ -2021,13 +2024,21 @@ fn try_acquire_heavy_storage(
     } else {
         None
     };
-    if heavy_claim_must_defer(root, me) {
+    if verification_pool && heavy_claim_must_defer(root, me) {
         return Ok(None);
     }
     let root_file = open_lock_file(&root.join("heavy.lock"))?;
     if !verification_pool {
         return match fs2::FileExt::try_lock_exclusive(&root_file) {
             Ok(()) => {
+                // A busy exclusive slot cannot grant anyone a turn. Inspect
+                // the queue only once it is free, avoiding a full registration
+                // scan on every poll by every waiting search. Enrollment has
+                // already happened, and the existing fairness rules still run
+                // under the physical lock before publishing any grant.
+                if heavy_claim_must_defer(root, me) {
+                    return Ok(None);
+                }
                 reconcile_orphaned_heavy_ticket(root, root);
                 if let Some(budgets) = disk_budgets {
                     if !disk_budgets_fit(budgets, &[])? {
@@ -3319,10 +3330,20 @@ fn sweep_heavy_queue_entry(
 }
 
 fn read_registration(path: &Path) -> Result<Option<Registration>, CoordinatorError> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(err) if registration_is_gone(path, &err) => return Ok(None),
-        Err(err) => return Err(CoordinatorError::Io(err)),
+    // Atomic reservation replacement can briefly reject opens on Windows.
+    // Keep gone entries immediate and range-lock contention nonblocking.
+    let Some(mut file) =
+        crate::atomic_file::retry_on_sharing_violation(|| match File::open(path) {
+            Ok(file) => Ok(Some(file)),
+            Err(err) if registration_is_gone(path, &err) => Ok(None),
+            Err(err) => {
+                #[cfg(all(test, windows))]
+                tests::before_status_retry();
+                Err(err)
+            }
+        })?
+    else {
+        return Ok(None);
     };
     // Preserve nonblocking admission budgets when a concurrent cleanup probe
     // owns this inode. The caller keeps the unreadable arrival for its retry.
@@ -3428,6 +3449,78 @@ mod tests {
             const { std::cell::RefCell::new(None) };
         static STATUS_RETRY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
+        static POOL_ROOT_STATUS_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn after_pool_root_status() {
+        let hook = POOL_ROOT_STATUS_HOOK.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[test]
+    fn verification_pool_status_does_not_mix_successive_root_and_slot_holders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
+        let root_owner = own(
+            &coordinator,
+            &TargetKey::verification("repo", "root"),
+            JobPriority::ManualRebuild,
+        );
+        let root_lease = root_owner
+            .acquire_exclusive_heavy_with_disk_budget(Duration::ZERO, HANG_GUARD, &[])
+            .unwrap();
+        let slot_owner = std::rc::Rc::new(own(
+            &coordinator,
+            &TargetKey::verification("repo", "slot"),
+            JobPriority::ManualRebuild,
+        ));
+        let slot_lease = std::rc::Rc::new(std::cell::RefCell::new(None));
+        POOL_ROOT_STATUS_HOOK.with(|hook| {
+            let slot_owner = std::rc::Rc::clone(&slot_owner);
+            let slot_lease = std::rc::Rc::clone(&slot_lease);
+            *hook.borrow_mut() = Some(Box::new(move || {
+                root_lease.release().unwrap();
+                match slot_owner.acquire_heavy(Duration::ZERO) {
+                    Ok(lease) => *slot_lease.borrow_mut() = Some(lease),
+                    Err(CoordinatorError::Timeout { .. }) => {}
+                    Err(error) => panic!("unexpected successor admission: {error}"),
+                }
+            }));
+        });
+
+        let status = coordinator.heavy_pool_status().unwrap();
+        assert_eq!(
+            status.used, 1,
+            "one snapshot must not mix successive holders"
+        );
+        assert_eq!(status.available, 0);
+    }
+
+    #[test]
+    fn verification_pool_status_keeps_its_root_probe_through_slot_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
+        let owner = own(
+            &coordinator,
+            &verification_key(),
+            JobPriority::ManualRebuild,
+        );
+        let lease = owner.acquire_heavy(Duration::ZERO).unwrap();
+        let root_lock = open_lock_file(&coordinator.heavy_lock_path()).unwrap();
+        POOL_ROOT_STATUS_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                lease.release().unwrap();
+                let error = fs2::FileExt::try_lock_exclusive(&root_lock)
+                    .expect_err("the status probe must fence legacy admission until its scan ends");
+                assert!(is_contended(&error), "{error}");
+            }));
+        });
+
+        let status = coordinator.heavy_pool_status().unwrap();
+        assert_eq!((status.used, status.available), (0, 1));
     }
 
     pub(super) fn before_status_retry() {
@@ -3635,6 +3728,38 @@ mod tests {
         writer.join().unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn lease_status_rereads_a_reservation_during_a_sharing_conflict() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = verification_key();
+        coordinator
+            .reserve_heavy(&key, JobPriority::ManualRebuild, HANG_GUARD, None)
+            .unwrap();
+        let path = coordinator.heavy_reservation_path(&key);
+        let blocker = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        STATUS_RETRY_HOOK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || drop(blocker))));
+
+        let result = coordinator.heavy_lease_status();
+        STATUS_RETRY_HOOK.with(|hook| hook.borrow_mut().take());
+        let queue = result
+            .unwrap_or_else(|error| {
+                panic!(
+                    "reservation open at {} must recover: {error}",
+                    path.display()
+                )
+            })
+            .queue;
+        assert_eq!(queue[0].target.as_deref(), Some(key.file_stem().as_str()));
+    }
+
     #[test]
     fn reservation_refreshed_after_snapshot_survives_sweep() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3748,6 +3873,35 @@ mod tests {
         assert_eq!(verification.root(), verification_coordinator_root());
         assert_ne!(verification.heavy_lock_path(), index.heavy_lock_path());
         assert_ne!(verification.heavy_pending_dir(), index.heavy_pending_dir());
+    }
+
+    #[test]
+    fn busy_exclusive_heavy_probe_does_not_scan_pending_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::search("repo", None);
+        enroll_in_heavy_queue(
+            &coordinator.heavy_pending_dir(),
+            &key.file_stem(),
+            JobPriority::InteractiveSearch,
+        )
+        .unwrap();
+        let me = heavy_queue(&coordinator.heavy_pending_dir())
+            .unwrap()
+            .pop()
+            .unwrap();
+        let held = open_lock_file(&coordinator.heavy_lock_path()).unwrap();
+        fs2::FileExt::try_lock_exclusive(&held).unwrap();
+        REGISTRATION_SNAPSHOT_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|_| panic!("busy slot must not scan the queue")));
+        });
+
+        assert!(
+            try_acquire_heavy_storage(coordinator.root(), &me, false, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(REGISTRATION_SNAPSHOT_HOOK.with(|hook| hook.borrow_mut().take().is_some()));
     }
 
     #[test]
@@ -4316,7 +4470,7 @@ mod tests {
             let root = tmp.path().to_path_buf();
             *hook.borrow_mut() = Some(Box::new(move |_| {
                 let observer = IndexCoordinator::open(root).unwrap();
-                let queue = observer.heavy_pool_status().unwrap().queue;
+                let queue = published_heavy_queue(&observer.heavy_pending_dir()).unwrap();
                 assert!(queue[0].resident);
                 assert_eq!(queue[0].attempt_id.as_deref(), Some("racing"));
                 assert_eq!(queue[0].job_status, Some(JobStatus::Running));

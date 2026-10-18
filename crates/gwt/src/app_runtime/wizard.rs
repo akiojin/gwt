@@ -3084,9 +3084,9 @@ impl AppRuntime {
                     started_at,
                 }) => {
                     let window_exists = self.tracked_window_exists(&window_id);
-                    // Issue #3851: the TTL bounds pre-PTY materialization only.
-                    // Once a runtime exists, SessionStart may legitimately wait
-                    // for terminal input; runtime status owns exit recovery.
+                    // A live preparation or its queued completion still owns
+                    // this window. The TTL only recovers abandoned placeholders.
+                    // Once a runtime exists, runtime status owns exit recovery.
                     let live_runtime = self.runtimes.contains_key(&window_id)
                         && self.window_status(&window_id).is_some_and(|status| {
                             !matches!(
@@ -3095,7 +3095,8 @@ impl AppRuntime {
                             )
                         });
                     if window_exists
-                        && (live_runtime
+                        && (self.has_pending_agent_launch_worker(&window_id)
+                            || live_runtime
                             || started_at.elapsed() < super::ISSUE_MONITOR_MATERIALIZING_TTL)
                     {
                         return Vec::new();
@@ -3509,15 +3510,34 @@ impl AppRuntime {
             delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
         })?;
         let bound_window_id = delivery.materializer_window_id.as_deref()?;
-        let window_id = tab
+        let window = tab
             .workspace
             .persisted()
             .windows
             .iter()
-            .map(|window| combined_window_id(&tab_id, &window.id))
-            .find(|window_id| window_id == bound_window_id)?;
+            .find(|window| combined_window_id(&tab_id, &window.id) == bound_window_id)?;
+        // Window IDs can be reused after close. The old reservation alone
+        // cannot authorize adopting or closing its current occupant.
+        let owners = [
+            window.linked_issue_number,
+            self.issue_monitor_pending_feedback_for_window(bound_window_id, &tab.project_root)
+                .and_then(|feedback| feedback.issue_monitor_issue_number),
+            window.session_id.as_deref().and_then(|session_id| {
+                self.launch_wizard_cache
+                    .session_by_id(session_id)
+                    .and_then(|session| session.linked_issue_number)
+            }),
+        ];
+        if !owners.contains(&Some(issue_number))
+            || owners
+                .into_iter()
+                .flatten()
+                .any(|owner| owner != issue_number)
+        {
+            return None;
+        }
         Some((
-            window_id,
+            bound_window_id.to_string(),
             delivery.materialized_window_id.as_deref() == Some(bound_window_id),
             delivery.workspace_durable_window_id.as_deref() == Some(bound_window_id),
         ))
@@ -4345,6 +4365,22 @@ impl AppRuntime {
             if autonomous_handoff.is_some() {
                 return Err(
                     "answered autonomous handoff requires execution.reopen before Resume"
+                        .to_string(),
+                );
+            }
+            return Ok((None, None));
+        }
+        // Issue #5696: terminal Work cannot rebound in the same Session,
+        // including a Completed owner that has been reopened. The Resume
+        // coordinator would degrade to observation-only, so route Monitor
+        // back through the fresh-launch readiness transaction instead.
+        if session.linked_issue_number == Some(issue_number)
+            && gwt::continuation_requires_new_session(project_root, &session)
+                .map_err(|error| format!("failed to inspect Monitor resume Work: {error}"))?
+        {
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff requires a fresh Session because its Work is terminal"
                         .to_string(),
                 );
             }

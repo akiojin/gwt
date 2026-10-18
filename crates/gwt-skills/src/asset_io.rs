@@ -16,6 +16,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use gwt_core::atomic_file::retry_on_sharing_violation;
+
 /// Which stage of a managed asset transaction touched the filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AssetRoute {
@@ -91,38 +93,6 @@ pub fn read_to_string(path: impl AsRef<Path>) -> Result<String, AssetIoError> {
     let path = path.as_ref();
     retry_on_sharing_violation(|| std::fs::read_to_string(path))
         .map_err(|source| AssetIoError::new(AssetRoute::Read, path, source))
-}
-
-fn retry_on_sharing_violation<T>(
-    mut operation: impl FnMut() -> std::io::Result<T>,
-) -> std::io::Result<T> {
-    #[cfg(not(windows))]
-    {
-        operation()
-    }
-
-    #[cfg(windows)]
-    {
-        let original = match operation() {
-            Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => error,
-            result => return result,
-        };
-        // Replacement can temporarily reject a concurrent open even with delete
-        // sharing. Bound recovery rather than hiding permanent permission errors.
-        let mut remaining = std::time::Duration::from_secs(1);
-        let mut delay = std::time::Duration::from_millis(1);
-        while !remaining.is_zero() {
-            let wait = delay.min(remaining);
-            std::thread::sleep(wait);
-            remaining -= wait;
-            match operation() {
-                Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => {}
-                result => return result,
-            }
-            delay *= 2;
-        }
-        Err(original)
-    }
 }
 
 /// Read a file's bytes, tagging failure as [`AssetRoute::Read`].

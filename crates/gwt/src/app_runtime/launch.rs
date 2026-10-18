@@ -16,7 +16,7 @@
 //!   `record_issue_branch_link_with_cache_dir`, ...) and the codex managed
 //!   hook discovery / trust registration helpers
 //! - The launch / spawn / close-work method surface
-//!   ([`AppRuntime::handle_launch_complete`], [`AppRuntime::start_window`],
+//!   ([`AppRuntime::handle_launch_complete_for_generation`], [`AppRuntime::start_window`],
 //!   [`AppRuntime::spawn_agent_window_async`], [`AppRuntime::close_work`],
 //!   [`AppRuntime::mark_agent_session_stopped`], ...)
 //!
@@ -1332,6 +1332,52 @@ impl FinalizedAgentCapabilityLaunch<'_> {
         // PTY and burns the Issue Monitor retry budget. A heal failure is
         // logged and the strict read reports the real state.
         heal_lost_generation_publication_best_effort(worktree, owner);
+        // Issue #5288: the shared Host may still be alive after this owner's
+        // PTY child exited. Reap that exact holder before the duplicate gate,
+        // so launch cannot race the scan reaper and strand a recoverable owner.
+        // Invalid authority sentinels and every other runtime disposition keep
+        // the existing fail-closed gate; the reaper rechecks under its leases.
+        if session.launch_route == gwt_agent::LaunchRoute::Autonomous
+            && gwt::cli::execution_state::load(worktree)
+                .map_err(|error| error.to_string())?
+                .is_some_and(|record| {
+                    record.owner_kind == owner.kind
+                        && record.owner_number == owner.number
+                        && record.status
+                            == gwt::cli::execution_state::ExecutionControlStatus::Active
+                        && gwt::cli::execution_state::integrity_ok(&record)
+                })
+        {
+            let scan = gwt::cli::execution_state::inspect_startup_active_generation_ledgers(&[
+                worktree.to_path_buf(),
+            ]);
+            for candidate in scan
+                .candidates
+                .into_iter()
+                .filter(|candidate| candidate.owner == owner)
+            {
+                let Some(holder) = gwt::cli::execution_state::startup_candidate_holder_identity(
+                    sessions_dir,
+                    &candidate,
+                )
+                .map_err(|error| error.to_string())?
+                else {
+                    continue;
+                };
+                if gwt::cli::execution_state::classify_exact_session_runtime(sessions_dir, &holder)
+                    .map_err(|error| error.to_string())?
+                    == gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited
+                {
+                    gwt::cli::execution_state::reap_startup_defunct_active_generation(
+                        &candidate,
+                        sessions_dir,
+                        &holder,
+                        &[],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+            }
+        }
         // Issue #5478 AC-3: Monitor must not materialize another producer over
         // an Active owner. Manual concurrent launches retain SPEC #3590, and
         // the projection read also covers generation-less legacy executions.
@@ -3071,6 +3117,7 @@ fn queue_stale_prepared_cleanup(
 pub(super) fn dispatch_agent_launch_success<F>(
     proxy: AppEventProxy,
     window_id: String,
+    window_generation: Option<u64>,
     completion: AgentLaunchCompletion,
     spawn_project_index_bootstrap: F,
 ) where
@@ -3079,6 +3126,7 @@ pub(super) fn dispatch_agent_launch_success<F>(
     let project_index_root = completion.4.clone();
     proxy.send(UserEvent::LaunchComplete {
         window_id,
+        window_generation,
         result: Box::new(Ok(completion)),
     });
     spawn_project_index_bootstrap(proxy, project_index_root);
@@ -4742,14 +4790,8 @@ fn pm_successor_recovery_checkout(
             },
         };
         let expected_owner = super::workspace::workspace_owner_label(owner);
-        if [parent, target].iter().any(|item| {
-            item.owner.as_deref().is_some_and(|known| {
-                known != expected_owner
-                    && !work::can_upgrade_work_owner(Some(known), Some(&expected_owner))
-            })
-        }) {
-            return Err("known Work owner conflicts with the execution owner".into());
-        }
+        // Recovery authority comes from the PM and this proven checkout,
+        // not the historical labels on the invalid successor being retired.
         let resolved = (owner, expected_owner, container);
         if selected
             .as_ref()
@@ -5024,11 +5066,72 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_launch_complete(
         &mut self,
         window_id: String,
         result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
+        let window_generation = self
+            .window_lifecycle_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&window_id)
+            .copied();
+        self.handle_launch_complete_for_generation(window_id, window_generation, result)
+    }
+
+    pub(super) fn has_pending_agent_launch_worker(&mut self, window_id: &str) -> bool {
+        if self
+            .pending_launch_completions
+            .get(window_id)
+            .is_some_and(|pending| pending.current.load(Ordering::Acquire))
+        {
+            return true;
+        }
+        let Some(worker) = self.initial_launch_workers.get_mut(window_id) else {
+            return false;
+        };
+        let Some(handle) = worker.as_ref() else {
+            return true; // A normally returned worker has queued its completion.
+        };
+        if !handle.is_finished() {
+            return true;
+        }
+        let returned = worker
+            .take()
+            .expect("finished launch worker")
+            .join()
+            .is_ok();
+        if !returned {
+            self.initial_launch_workers.remove(window_id);
+        }
+        returned
+    }
+
+    pub(crate) fn handle_launch_complete_for_generation(
+        &mut self,
+        window_id: String,
+        window_generation: Option<u64>,
+        result: AgentLaunchResult,
+    ) -> Vec<OutboundEvent> {
+        // The pre-PTY worker can finish after close and ID reuse. Fence it
+        // before capturing the current occupant's feedback or Session state.
+        let current_generation = self
+            .window_lifecycle_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&window_id)
+            .copied();
+        if current_generation != window_generation {
+            self.cleanup_stale_project_completion(&UserEvent::LaunchComplete {
+                window_id,
+                window_generation,
+                result: Box::new(result),
+            });
+            return Vec::new();
+        }
+        self.initial_launch_workers.remove(&window_id);
         // Issue #3851: an Err result is produced before this handler spawns a
         // PTY. If this window already owns a live agent runtime, the result is
         // necessarily from an older preparation attempt and must not consume
@@ -6608,6 +6711,12 @@ impl AppRuntime {
         }
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
+        let window_generation = self
+            .window_lifecycle_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&window_id)
+            .copied();
 
         let initial_status = initial_agent_window_status(&config);
         self.window_pty_statuses
@@ -6664,12 +6773,14 @@ impl AppRuntime {
                 .insert(window_id.clone(), continuation);
         }
 
-        thread::spawn(move || {
+        let worker_window_id = window_id.clone();
+        let worker = thread::spawn(move || {
             Self::spawn_agent_window_async_with_claim(
                 proxy,
                 sessions_dir,
                 project_root,
                 window_id,
+                window_generation,
                 config,
                 profile_config_path,
                 agent_capability_issuer,
@@ -6677,6 +6788,8 @@ impl AppRuntime {
                 issue_monitor_trust_candidate,
             );
         });
+        self.initial_launch_workers
+            .insert(worker_window_id, Some(worker));
 
         Ok(events)
     }
@@ -6700,6 +6813,7 @@ impl AppRuntime {
             Err(error) => {
                 proxy.send(UserEvent::LaunchComplete {
                     window_id,
+                    window_generation: None,
                     result: Box::new(Err(error.into())),
                 });
                 return;
@@ -6710,6 +6824,7 @@ impl AppRuntime {
             sessions_dir,
             project_root,
             window_id,
+            None,
             config,
             profile_config_path,
             agent_capability_issuer,
@@ -6724,6 +6839,7 @@ impl AppRuntime {
         sessions_dir: PathBuf,
         project_root: String,
         window_id: String,
+        window_generation: Option<u64>,
         mut config: gwt_agent::LaunchConfig,
         profile_config_path: PathBuf,
         agent_capability_issuer: Option<AgentCapabilityIssuer>,
@@ -7262,6 +7378,7 @@ impl AppRuntime {
                 dispatch_agent_launch_success(
                     proxy,
                     window_id,
+                    window_generation,
                     (
                         process_launch,
                         session_id,
@@ -7299,6 +7416,7 @@ impl AppRuntime {
                 }
                 proxy.send(UserEvent::LaunchComplete {
                     window_id,
+                    window_generation,
                     result: Box::new(Err(error)),
                 });
             }
@@ -7613,7 +7731,7 @@ impl AppRuntime {
                             locked_parent,
                             &locked_target,
                             container.clone(),
-                            &expected_owner,
+                            super::workspace::SuccessorSupersessionAuthority::RegisteredPm,
                             &live_session_ids,
                             chrono::Utc::now(),
                         )?;
@@ -7628,7 +7746,9 @@ impl AppRuntime {
                             &context.project_root,
                             container.branch.as_deref(),
                             container.worktree_path.as_deref(),
-                            Some(&expected_owner),
+                            // Diagnose structural occupancy independently of
+                            // the foreign owner this PM recovery is repairing.
+                            None,
                         )?;
                         if current.as_deref() != Some(locked_parent.id.as_str()) {
                             return Err(gwt_core::GwtError::Other(
@@ -8399,7 +8519,7 @@ mod agent_endpoint_env_tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for legacy in [false, true] {
+        for state in ["legacy", "unknown", "live", "corrupt"] {
             let home = tempfile::tempdir().expect("home tempdir");
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -8409,7 +8529,7 @@ mod agent_endpoint_env_tests {
                 "ws://127.0.0.1:46234/ws",
                 "ws://127.0.0.1:45123/internal/pane-ws",
             );
-            if legacy {
+            if state == "legacy" {
                 gwt::cli::execution_state::materialize_at_launch(
                     &launch.project,
                     launch.owner.kind,
@@ -8437,12 +8557,51 @@ mod agent_endpoint_env_tests {
                 .install(&mut HashMap::new())
                 .expect("materialize the first producing generation");
             }
+            if state == "live" {
+                let identity = gwt_agent::SessionExecutionIdentity::from_session(&launch.session)
+                    .expect("holder identity")
+                    .expect("bound holder");
+                let started_at = gwt::process::host_process_start_time(std::process::id())
+                    .expect("test process identity");
+                gwt_agent::SessionRuntimeState::for_execution_process(
+                    gwt_agent::AgentStatus::Running,
+                    &identity,
+                    1,
+                    started_at,
+                    std::process::id(),
+                    started_at,
+                )
+                .save(&gwt_agent::runtime_state_path(
+                    &launch.sessions_dir,
+                    &launch.session.id,
+                ))
+                .expect("persist a live exact holder");
+            } else if state == "corrupt" {
+                gwt::cli::trusted_store::write(
+                    &launch.project,
+                    "execution-generation-pointer.json",
+                    b"{}",
+                )
+                .expect("invalidate the pointer");
+                assert_eq!(
+                    gwt::cli::execution_state::load(&launch.project)
+                        .expect("read fail-closed sentinel")
+                        .expect("sentinel record")
+                        .content_hash,
+                    "invalid-generation-authority",
+                );
+            }
             let projection =
                 gwt::cli::trusted_store::read(&launch.project, "execution-control.json")
                     .expect("read Active projection");
-            let ledger =
-                gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
-                    .expect("read Active ledger");
+            let pointer =
+                gwt::cli::trusted_store::read(&launch.project, "execution-generation-pointer.json")
+                    .expect("read generation pointer");
+            let ledger = gwt::cli::execution_state::load_owner_generation_ledger(
+                &launch.project,
+                launch.owner,
+            )
+            .expect("read Active ledger");
             let mut relaunch = gwt_agent::Session::new(
                 &launch.project,
                 "work/issue-2359",
@@ -8479,11 +8638,114 @@ mod agent_endpoint_env_tests {
                 projection
             );
             assert_eq!(
-                gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
-                    .expect("read preserved Active ledger"),
+                gwt::cli::trusted_store::read(&launch.project, "execution-generation-pointer.json")
+                    .expect("read preserved generation pointer"),
+                pointer
+            );
+            assert_eq!(
+                gwt::cli::execution_state::load_owner_generation_ledger(
+                    &launch.project,
+                    launch.owner
+                )
+                .expect("read preserved Active ledger"),
                 ledger
             );
         }
+    }
+
+    #[test]
+    fn autonomous_fresh_launch_reaps_exited_child_before_active_owner_gate() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let (launch, issuer, _) = rebound_relaunch_fixture(home.path());
+        let holder_path = launch
+            .sessions_dir
+            .join(format!("{}.toml", launch.session.id));
+        let mut holder = gwt_agent::Session::load(&holder_path).expect("reload holder");
+        holder.update_status(gwt_agent::AgentStatus::Running);
+        holder
+            .save(&launch.sessions_dir)
+            .expect("persist Running holder");
+        let holder_bytes = std::fs::read(&holder_path).expect("read Running holder");
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
+            .expect("holder identity")
+            .expect("bound holder");
+        let host_started_at = gwt::process::host_process_start_time(std::process::id())
+            .expect("test Host process identity");
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            1,
+            host_started_at,
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &launch.sessions_dir,
+            &holder.id,
+        ))
+        .expect("persist exited child under a live Host");
+        assert_eq!(
+            gwt::cli::execution_state::classify_exact_session_runtime(
+                &launch.sessions_dir,
+                &identity
+            )
+            .expect("classify holder"),
+            gwt::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited,
+        );
+
+        let mut successor = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        successor.project_state_root = Some(launch.project.clone());
+        successor.linked_issue_number = Some(launch.owner.number);
+        successor.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        let mut env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut successor,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+            permission_decision: None,
+        }
+        .install(&mut env)
+        .expect("Monitor launch must reap the exited child and prepare its Blocked successor");
+
+        let ledger =
+            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+                .expect("read reaped ledger")
+                .expect("owner ledger");
+        assert!(ledger.current_generation_settled_by_host_reaper());
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
+        );
+        assert_eq!(
+            ledger
+                .continuation_attempts
+                .last()
+                .expect("Prepared successor")
+                .status,
+            gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+        );
+        assert!(env.contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV));
+        assert_eq!(
+            std::fs::read(&holder_path).expect("read holder after reaping"),
+            holder_bytes
+        );
     }
 
     /// SPEC #3590 FR-001 / US-1 / US-4: a live Active holder must not refuse

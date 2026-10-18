@@ -8,6 +8,7 @@ at 4. Inter-op parallelism is 1 and tokenizer parallelism is disabled.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 import types
@@ -83,6 +84,27 @@ class QosThreadEnvTests(unittest.TestCase):
             runner.configure_qos_threads("interactive")
             fake_torch.set_num_threads.assert_called_once_with(4)
             fake_torch.set_num_interop_threads.assert_called_once_with(1)
+
+    def test_single_query_uses_one_thread_and_normal_windows_priority(self):
+        kernel = mock.Mock()
+        kernel.GetCurrentProcess.return_value = 123
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            ctypes, "windll", types.SimpleNamespace(kernel32=kernel), create=True
+        ):
+            runner.configure_qos_threads("interactive", single_query=True)
+        for key in THREAD_ENV_KEYS:
+            self.assertEqual(os.environ[key], "1")
+        kernel.SetPriorityClass.assert_called_once_with(123, 0x00000020)
+
+    def test_resident_worker_selects_single_query_profile(self):
+        args = types.SimpleNamespace(
+            action="serve-search-worker", qos="interactive", worker_dir="owned-worker"
+        )
+        with mock.patch.object(runner, "parse_args", return_value=args), mock.patch.object(
+            runner, "configure_qos_threads"
+        ) as configure, mock.patch.object(runner, "_serve_search_worker", return_value=0):
+            self.assertEqual(runner.main(), 0)
+        configure.assert_called_once_with("interactive", single_query=True)
 
     @unittest.skipIf(os.name == "nt", "POSIX process priority uses nice")
     def test_background_qos_lowers_process_priority_on_posix(self):

@@ -4,6 +4,31 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
+import { createUiStateStore } from "../ui-state-store.js";
+
+test("Issue #5531: Profile resync reloads a lost read while preserving the draft and save", () => {
+  const source = readFileSync(new URL("../profile-window-surface.js", import.meta.url), "utf8");
+  const createProfileWindowSurface = Function("createUiStateStore",
+    '"use strict"; ' + source.slice(source.indexOf("export function"))
+      .replace("export function", "function") + "; return createProfileWindowSurface;",
+  )(createUiStateStore);
+  const sent = [];
+  const surface = createProfileWindowSurface({ send: message => sent.push(message), windowMap: new Map() });
+  const state = surface.ensureProfileState("profile");
+  surface.requestProfile("profile");
+  state.draft = { name: "unsaved profile" };
+  state.saveInFlight = true;
+  state.saveTimer = 17;
+  surface.requestProfile("other-project");
+  sent.length = 0;
+
+  surface.resyncProfile(["profile"]);
+
+  assert.deepEqual(sent, [{ kind: "load_profile", id: "profile" }]);
+  assert.equal(state.draft.name, "unsaved profile");
+  assert.equal(state.saveInFlight, true);
+  assert.equal(state.saveTimer, 17);
+});
 
 const here = dirname(fileURLToPath(import.meta.url));
 const indexPath = resolve(here, "../index.html");
@@ -879,16 +904,6 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     !document.querySelector("#project-workspace-overview-button"),
     "Workspace Overview is per-project content and must live in the Sidebar, not the global Project Bar",
   );
-  assert.match(
-    appSource,
-    /function\s+openWorkspaceOverview\(/,
-    "expected a shared opener for the Sidebar entry",
-  );
-  assert.match(
-    appSource,
-    /function\s+openWorkspaceOverview\(\)\s*\{[\s\S]{0,300}?focusOrSpawnPreset\("issue"\)/,
-    "expected Workspace Overview to open the Work window instead of a drawer",
-  );
   // Issue #4777 T-1: the entry is the Issues surface of the rail.
   assert.equal(
     document.querySelector("#op-workspace-overview-entry")?.dataset.surface,
@@ -944,15 +959,6 @@ test("Workspace Overview uses the Quiet Work list filter + Detail layout", () =>
     /function\s+workspacesFromProjection\([^)]*\)[\s\S]+projection\.works[\s\S]+projection\.workspaces[\s\S]+projection\.work_items/,
     "expected Work Overview to render Work entries from active_work_projection",
   );
-  // SPEC-2359 US-42 — Resume action now opens the Workspace Resume
-  // Picker via `list_resumable_agents` instead of the legacy
-  // `resume_workspace` event. The picker drives the actual restart with
-  // `resume_workspace_agent` after the user selects a candidate agent.
-  assert.match(
-    workspaceOverviewSource,
-    /function\s+resumeWorkspace\([^)]*\)[\s\S]+list_resumable_agents/,
-    "expected Workspace Resume action to ask the backend to list resumable agents",
-  );
   assert.doesNotMatch(
     workspaceOverviewSource,
     /workspace-kanban-board|data-workspace-column|workspace-kanban-column/,
@@ -990,14 +996,6 @@ test("Workspace Overview legacy drawer scaffold is retired", () => {
     appSource,
     /closeWorkspaceOverview|renderWorkspaceOverview|workspaceOverviewFocusTrapRelease/,
     "Workspace Overview drawer lifecycle code should not remain in app.js",
-  );
-});
-
-test("no surface presets auto-maximize — uniform 720×420 floating windows", () => {
-  assert.match(
-    appSource,
-    /function\s+isAutoMaximizedSurfacePreset\([^)]*\)\s*\{[^}]*return\s+false/,
-    "expected isAutoMaximizedSurfacePreset to always return false (auto-maximize abolished)",
   );
 });
 
@@ -2029,11 +2027,6 @@ test("shared overlays use semantic z-index tokens in interaction order", () => {
       name: "usage popover",
       rule: componentsStyle.match(/\.op-usage-hover\s*\{[^}]*\}/)?.[0],
       token: "--z-popover",
-    },
-    {
-      name: "usage modal overlay",
-      rule: componentsStyle.match(/\.op-usage-modal-overlay\s*\{[^}]*\}/)?.[0],
-      token: "--z-modal",
     },
     {
       name: "render degradation banner",

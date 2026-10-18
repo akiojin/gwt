@@ -856,13 +856,29 @@ impl RuntimeProbe {
             &gwt_core::paths::gwt_sessions_dir(),
             &mut self.system,
         );
-        let gui = self
+        let gui_pids = self
             .system
             .processes()
             .values()
             .filter(|process| {
                 is_gui_process(process.exe().unwrap_or_else(|| Path::new(process.name())))
             })
+            .map(sysinfo::Process::pid)
+            .collect::<Vec<_>>();
+        #[cfg(windows)]
+        {
+            // Session liveness needs fresh identities for every process; CPU
+            // counters are consumed only for GUI roots. On Windows, sampling
+            // every unrelated process repeats GetSystemTimes for each one.
+            self.system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&gui_pids),
+                true,
+                sysinfo::ProcessRefreshKind::nothing().with_cpu(),
+            );
+        }
+        let gui = gui_pids
+            .iter()
+            .filter_map(|pid| self.system.process(*pid))
             .collect::<Vec<_>>();
         let current_gui = gui
             .iter()
@@ -1198,6 +1214,24 @@ mod tests {
             }
         }
         None
+    }
+
+    fn refresh_target_measurement(
+        root: &Path,
+        mut refresh: impl FnMut() -> io::Result<()>,
+    ) -> MachineCapacitySnapshot {
+        let pending = format!(
+            "target_measurement_in_progress: {}; wait for the scan or use Manual",
+            root.join("target").display()
+        );
+        for _ in 0..100 {
+            refresh().unwrap();
+            let snapshot = read_snapshot(&snapshot_path()).unwrap();
+            if !snapshot.diagnostics.contains(&pending) {
+                return snapshot;
+            }
+        }
+        panic!("target measurement remained in progress after 100 refreshes: {pending}");
     }
 
     #[test]
@@ -1688,8 +1722,7 @@ mod tests {
         std::fs::create_dir_all(root.join("target")).unwrap();
         std::fs::write(root.join("target/artifact"), [0_u8; 8]).unwrap();
         let root = normalized(&root);
-        refresh_machine_capacity(&root).unwrap();
-        let snapshot = read_snapshot(&snapshot_path()).unwrap();
+        let snapshot = refresh_target_measurement(&root, || refresh_machine_capacity(&root));
         assert_eq!(snapshot.targets[&root.join("target")].bytes, 8);
         assert_eq!(snapshot.per_agent_ram_bytes, RAM_FLOOR_BYTES);
         assert!(snapshot.inventory.sessions.is_empty());
@@ -1721,6 +1754,28 @@ mod tests {
         for name in ["gwtd", "gwt-helper", "codex", "cargo"] {
             assert!(!is_gui_process(Path::new(name)));
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn machine_sampling_does_not_initialize_non_gui_cpu_counters() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut probe = RuntimeProbe::default();
+        probe.sample_machine(&MachineCapacitySnapshot::default(), epoch_seconds());
+        let current = probe
+            .system
+            .process(sysinfo::Pid::from_u32(std::process::id()))
+            .expect("fresh census includes the test process");
+        assert!(!is_gui_process(current.exe().unwrap()));
+        assert_eq!(
+            current.accumulated_cpu_time(),
+            0,
+            "capacity consumes GUI CPU only; other processes need identity, not CPU sampling"
+        );
     }
 
     #[test]
@@ -1927,15 +1982,13 @@ mod tests {
         let root = normalized(&root);
         let target = root.join("target");
         let mut probe = RuntimeProbe::default();
-        probe.refresh(&root).unwrap();
-        let mut snapshot = read_snapshot(&snapshot_path()).unwrap();
+        let mut snapshot = refresh_target_measurement(&root, || probe.refresh(&root));
         snapshot.targets.get_mut(&target).unwrap().observed_at =
             epoch_seconds() - TARGET_TTL_SECS / 2 - 1;
         gwt_github::cache::write_atomic(&snapshot_path(), &serde_json::to_vec(&snapshot).unwrap())
             .unwrap();
         std::fs::remove_dir_all(&target).unwrap();
-        probe.refresh(&root).unwrap();
-        let failed = read_snapshot(&snapshot_path()).unwrap();
+        let failed = refresh_target_measurement(&root, || probe.refresh(&root));
         assert!(
             !failed.targets.contains_key(&target),
             "I/O failure invalidates a required measured target"
@@ -1944,10 +1997,7 @@ mod tests {
         assert_eq!(view.recommended_worker_limit, 0);
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("artifact"), [0_u8; 7]).unwrap();
-        probe.refresh(&root).unwrap();
-        assert_eq!(
-            read_snapshot(&snapshot_path()).unwrap().targets[&target].bytes,
-            7
-        );
+        let recovered = refresh_target_measurement(&root, || probe.refresh(&root));
+        assert_eq!(recovered.targets[&target].bytes, 7);
     }
 }

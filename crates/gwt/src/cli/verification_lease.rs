@@ -166,7 +166,9 @@ pub(crate) fn classify_command(command: &str) -> CommandWeight {
 /// Arbitrary interpreters/wrappers and coverage producers remain Heavy.
 pub(crate) fn short_non_cargo_timeout(command: &str) -> Option<Duration> {
     if is_short_non_cargo_slot_gate(command) {
-        return Some(Duration::from_secs(60));
+        // Fixture subprocesses exceed two minutes on a saturated Windows host.
+        // Keep one ordinary slot and a finite limit without shortening the suite.
+        return Some(Duration::from_secs(300));
     }
     let (assignments, args) = crate::cli::verification_record::split_command_line(command)
         .and_then(crate::cli::verification_record::take_env_assignments)
@@ -230,6 +232,7 @@ fn is_short_non_cargo_gate(args: &[String], assignments: &[(String, String)]) ->
         has_check
     };
     match program {
+        Some("rustc") => subcommand == Some("--version") && args.len() == 2,
         // Custom actionlint checkers may be arbitrary executable wrappers.
         Some("actionlint") => !args.iter().skip(1).any(|arg| {
             arg.starts_with('-')
@@ -1490,7 +1493,7 @@ pub(super) fn lock_build_artifacts(target: &Path) -> std::io::Result<BuildArtifa
     Ok(guard)
 }
 
-fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
+pub(super) fn build_artifact_lock_path(target: &Path) -> std::io::Result<PathBuf> {
     use sha2::{Digest, Sha256};
     let mut existing = if target.is_absolute() {
         target.to_path_buf()
@@ -2048,6 +2051,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
         for command in [
+            "rustc --version",
             "git diff --check",
             "git diff --check --cached",
             "git.exe diff --cached --check -- README.md",
@@ -2064,6 +2068,7 @@ mod tests {
             assert_eq!(short_non_cargo_timeout(command), Some(Duration::from_secs(60)), "{command}");
         }
         for command in [
+            "rustc --version input.rs",
             "git diff",
             "git status",
             "git diff --line-prefix --check --ext-diff -- README.md",
@@ -2105,7 +2110,7 @@ mod tests {
             assert_eq!(classify_command(command), CommandWeight::Heavy, "{command}");
             assert_eq!(
                 short_non_cargo_timeout(command),
-                Some(Duration::from_secs(60)),
+                Some(Duration::from_secs(300)),
                 "{command}"
             );
         }

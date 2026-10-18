@@ -1,6 +1,6 @@
 import { createLaunchOperationId } from "./launch-pending-controller.js";
 
-export function compactText(value, fallback = "") {
+function compactText(value, fallback = "") {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text || fallback;
 }
@@ -162,7 +162,6 @@ export function createIssueOtherSurface({
   openWorkspaceCleanup,
   send,
   windowMap,
-  openWorkspaceResumePicker,
   getResumeBounds,
   focusBoardEntry,
   launchPending,
@@ -1659,18 +1658,6 @@ export function createIssueOtherSurface({
       list.appendChild(item);
   }
 
-  function resumeWorkspace(workspace) {
-    const workspaceId = workspace?.id ?? null;
-    let operationId = "";
-    if (typeof openWorkspaceResumePicker === "function") {
-      operationId = String(openWorkspaceResumePicker(workspaceId) || "");
-    }
-    send({
-      kind: "list_resumable_agents",
-      operation_id: operationId,
-      workspace_id: workspaceId ?? undefined,
-    });
-  }
 
   function renderWorkspaceDetail(container, workspace, windowId) {
     container.innerHTML = "";

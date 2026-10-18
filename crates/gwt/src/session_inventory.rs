@@ -1,6 +1,6 @@
 //! Read-only process observations, separate from Issue Monitor admission.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -14,19 +14,55 @@ struct CachedRuntime {
     value: Result<Arc<SessionRuntimeState>, String>,
 }
 
-static RUNTIME_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, CachedRuntime>>> = OnceLock::new();
+static RUNTIME_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRuntime>>> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    static RUNTIME_PATH_STAMP_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn cached_runtime_entry(
+    entry: &std::fs::DirEntry,
+    path: &Path,
+) -> std::io::Result<Arc<SessionRuntimeState>> {
+    cached_runtime_with_stamp(path, || {
+        let metadata = entry.metadata()?;
+        let follow_target = metadata.file_type().is_symlink();
+        #[cfg(windows)]
+        let follow_target = {
+            use std::os::windows::fs::MetadataExt;
+            // FILE_ATTRIBUTE_REPARSE_POINT: preserve fs::metadata's target semantics.
+            follow_target || metadata.file_attributes() & 0x400 != 0
+        };
+        if follow_target {
+            return runtime_stamp(path);
+        }
+        // Windows directory enumeration already supplies this metadata.
+        Ok((metadata.modified()?, metadata.len()))
+    })
+}
+
+fn runtime_stamp(path: &Path) -> std::io::Result<(SystemTime, u64)> {
+    #[cfg(test)]
+    RUNTIME_PATH_STAMP_PROBES.with(|count| count.set(count.get().wrapping_add(1)));
+    let metadata = std::fs::metadata(path)?;
+    Ok((metadata.modified()?, metadata.len()))
+}
 
 /// Cache decoded sidecars only. Process identity/liveness is never cached.
 fn cached_runtime(path: &Path) -> std::io::Result<Arc<SessionRuntimeState>> {
+    cached_runtime_with_stamp(path, || runtime_stamp(path))
+}
+
+fn cached_runtime_with_stamp(
+    path: &Path,
+    stamp: impl FnOnce() -> std::io::Result<(SystemTime, u64)>,
+) -> std::io::Result<Arc<SessionRuntimeState>> {
     let mut cache = RUNTIME_CACHE
         .get_or_init(Mutex::default)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stamp = |path| {
-        let metadata = std::fs::metadata(path)?;
-        Ok::<_, std::io::Error>((metadata.modified()?, metadata.len()))
-    };
-    let (modified, size) = match stamp(path) {
+    let (modified, size) = match stamp() {
         Ok(stamp) => stamp,
         Err(error) => {
             cache.remove(path);
@@ -54,7 +90,7 @@ fn cached_runtime(path: &Path) -> std::io::Result<Arc<SessionRuntimeState>> {
     cache.remove(path);
     // A writer may atomically replace the sidecar during the read. Never memoize
     // that result against a stamp that no longer describes the file.
-    if stamp(path).is_ok_and(|after| after == (modified, size)) {
+    if runtime_stamp(path).is_ok_and(|after| after == (modified, size)) {
         cache.insert(
             path.to_path_buf(),
             CachedRuntime {
@@ -126,20 +162,19 @@ pub fn observe_machine_sessions(sessions_dir: &Path) -> MachineSessionInventory 
     finish_machine_inventory(inventory, attribution, &resources)
 }
 
-/// Share the capacity sampler's persistent CPU baseline and process census.
+/// Share the capacity sampler's process census. On Windows its caller scopes CPU refresh.
 pub(crate) fn observe_machine_sessions_with_system(
     sessions_dir: &Path,
     system: &mut sysinfo::System,
 ) -> MachineSessionInventory {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
     observe_machine_sessions_with_system_refresh(sessions_dir, system, |system| {
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_exe(UpdateKind::OnlyIfNotSet),
-        );
+        let refresh_kind = ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet);
+        // Linux advances process-time baselines even during metadata refresh;
+        // keep its existing single CPU pass instead of splitting the sample.
+        #[cfg(not(windows))]
+        let refresh_kind = refresh_kind.with_cpu();
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
     })
 }
 
@@ -345,6 +380,7 @@ impl ProjectSessionCensus {
             &mut snapshot,
         );
         let resources = capture_process_resources(&candidates, &inventory, false, snapshot);
+        inventory.check_deadline(&sessions_dir.join("runtime"));
         let uncertainties = inventory
             .uncertainties
             .into_iter()
@@ -401,7 +437,7 @@ impl ProjectSessionCensus {
 /// Observe one Session before cross-Session process deduplication. Recovery
 /// callers hold its Session lease and must also check every uncertainty.
 /// A live host without recorded identity remains uncertain for recovery.
-pub(crate) fn observe_session(session: &Session, sessions_dir: &Path) -> SessionInventory {
+pub fn observe_session(session: &Session, sessions_dir: &Path) -> SessionInventory {
     observe_sessions_filtered(
         session
             .project_state_root
@@ -429,8 +465,12 @@ fn observe_live_candidates(
     measure_resources: bool,
     require_host_absence: bool,
 ) -> MachineProcessResources {
+    if !inventory.check_deadline(Path::new("runtime")) {
+        return MachineProcessResources::default();
+    }
     let resources = capture_process_resources(&candidates, inventory, measure_resources, None);
     observe_candidate_resources(candidates, inventory, &resources, require_host_absence);
+    inventory.check_deadline(Path::new("runtime"));
     resources
 }
 
@@ -916,7 +956,12 @@ fn read_candidates_with_liveness(
         .and_then(gwt_core::repo_hash::detect_repo_identity)
         .map(|identity| identity.hash.as_str().to_string());
     let mut runtimes = Vec::new();
-    for namespace in read_paths(&sessions_dir.join("runtime"), inventory) {
+    let runtime_root = sessions_dir.join("runtime");
+    for entry in read_entries(&runtime_root, inventory) {
+        let namespace = entry.path();
+        if !inventory.check_deadline(&runtime_root) {
+            break;
+        }
         let Some(host_pid) = namespace
             .file_name()
             .and_then(|name| name.to_str())
@@ -925,7 +970,11 @@ fn read_candidates_with_liveness(
         else {
             continue;
         };
-        for path in read_paths(&namespace, inventory) {
+        for entry in read_entries(&namespace, inventory) {
+            let path = entry.path();
+            if !inventory.check_deadline(&runtime_root) {
+                break;
+            }
             if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
@@ -947,18 +996,20 @@ fn read_candidates_with_liveness(
             // Read every small sidecar before taking any process snapshot so
             // children published during the scan are not compared with an
             // older parent-PID inventory. No Session ledger is retained here.
-            let runtime = cached_runtime(&path);
+            let runtime = cached_runtime_entry(&entry, &path);
             runtimes.push((host_pid, path, runtime));
         }
     }
-    if session_id.is_none() {
+    if session_id.is_none()
+        && gwt_core::operation_deadline::ensure_remaining("session census").is_ok()
+    {
         // Full sweeps drop files that GC or a Host removed. A filtered recovery
         // observation must not evict other Sessions' entries.
         let root = sessions_dir.join("runtime");
         let seen = runtimes
             .iter()
             .map(|(_, path, _)| path.as_path())
-            .collect::<BTreeSet<_>>();
+            .collect::<HashSet<_>>();
         if let Some(cache) = RUNTIME_CACHE.get() {
             cache
                 .lock()
@@ -968,6 +1019,9 @@ fn read_candidates_with_liveness(
     }
     let mut candidates = Vec::new();
     for (host_pid, path, runtime) in runtimes {
+        if !inventory.check_deadline(&runtime_root) {
+            break;
+        }
         let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -1003,10 +1057,14 @@ fn read_candidates_with_liveness(
             }
         }
     }
+    inventory.check_deadline(&runtime_root);
     candidates
 }
 
-fn read_paths(directory: &Path, inventory: &mut SessionInventory) -> Vec<PathBuf> {
+fn read_entries(directory: &Path, inventory: &mut SessionInventory) -> Vec<std::fs::DirEntry> {
+    if !inventory.check_deadline(directory) {
+        return Vec::new();
+    }
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -1019,10 +1077,13 @@ fn read_paths(directory: &Path, inventory: &mut SessionInventory) -> Vec<PathBuf
             return Vec::new();
         }
     };
-    let mut paths = Vec::new();
+    let mut captured = Vec::new();
     for entry in entries {
+        if !inventory.check_deadline(directory) {
+            break;
+        }
         match entry {
-            Ok(entry) => paths.push(entry.path()),
+            Ok(entry) => captured.push(entry),
             Err(error) => inventory.uncertain(
                 directory,
                 None,
@@ -1030,8 +1091,9 @@ fn read_paths(directory: &Path, inventory: &mut SessionInventory) -> Vec<PathBuf
             ),
         }
     }
-    paths.sort();
-    paths
+    // Every entry shares this parent; sorting file names preserves path order.
+    captured.sort_by_cached_key(std::fs::DirEntry::file_name);
+    captured
 }
 
 fn observe_candidates(
@@ -1193,6 +1255,18 @@ fn observe_candidates(
 }
 
 impl SessionInventory {
+    fn check_deadline(&mut self, path: &Path) -> bool {
+        match gwt_core::operation_deadline::ensure_remaining("session census") {
+            Ok(_) => true,
+            Err(error) => {
+                // No Session attribution: missing rows in a partial census are
+                // uncertain for every owner, never proof of process absence.
+                self.uncertain(path, None, error.to_string());
+                false
+            }
+        }
+    }
+
     fn uncertain(&mut self, path: &Path, session_id: Option<&str>, reason: String) {
         self.uncertainties.push(SessionObservationUncertainty {
             runtime_path: path.to_path_buf(),
@@ -1223,6 +1297,23 @@ impl SessionInventory {
 mod tests {
     use super::*;
     use gwt_agent::{AgentId, AgentStatus};
+
+    #[test]
+    fn issue_5644_expired_inventory_is_uncertain_instead_of_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let deadline = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(deadline);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline);
+        let inventory = observe_sessions(temp.path(), &temp.path().join("sessions"));
+        assert!(inventory.sessions.is_empty());
+        assert!(
+            inventory
+                .uncertainties
+                .iter()
+                .any(|row| row.reason.contains("deadline expired")),
+            "a partial census must not authorize releasing a running owner"
+        );
+    }
 
     #[test]
     fn project_census_keeps_scopes_and_uncertainties_without_rereading_the_tick() {
@@ -1269,6 +1360,64 @@ mod tests {
                 "scoped and unknown failures survive"
             );
         }
+    }
+
+    #[test]
+    fn warm_runtime_entry_reuses_directory_stamp_without_path_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.json");
+        SessionRuntimeState::new(AgentStatus::Running)
+            .save(&path)
+            .unwrap();
+        let entry = std::fs::read_dir(temp.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let before_cold = RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get);
+        let first = cached_runtime_entry(&entry, &path).unwrap();
+        assert_eq!(
+            RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get) - before_cold,
+            1,
+            "cold entry must validate the path stamp after reading"
+        );
+        let before = RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get);
+        let second = cached_runtime_entry(&entry, &path).unwrap();
+        let probes = RUNTIME_PATH_STAMP_PROBES.with(std::cell::Cell::get) - before;
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            probes, 0,
+            "warm regular entry must reuse its directory stamp"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_entry_symlink_rechecks_the_target_stamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.json");
+        let link = temp.path().join("link.json");
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Running);
+        runtime.save(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let entry = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| entry.path() == link)
+            .unwrap();
+        assert!(cached_runtime_entry(&entry, &link)
+            .unwrap()
+            .source_event
+            .is_none());
+        runtime.source_event = Some("changed target".to_string());
+        runtime.save(&target).unwrap();
+        assert_eq!(
+            cached_runtime_entry(&entry, &link)
+                .unwrap()
+                .source_event
+                .as_deref(),
+            Some("changed target")
+        );
     }
 
     #[test]

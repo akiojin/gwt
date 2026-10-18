@@ -188,6 +188,11 @@ pub enum AppEventProxy {
     },
     #[cfg(test)]
     Stub(Arc<Mutex<Vec<UserEvent>>>),
+    #[cfg(test)]
+    Notifying {
+        inner: Box<AppEventProxy>,
+        sent: std::sync::mpsc::Sender<()>,
+    },
 }
 
 impl AppEventProxy {
@@ -199,6 +204,8 @@ impl AppEventProxy {
             Self::Project { inner, .. } => inner.pending_count(),
             #[cfg(test)]
             Self::Stub(events) => events.try_lock().ok().map(|events| events.len()),
+            #[cfg(test)]
+            Self::Notifying { inner, .. } => inner.pending_count(),
         }
     }
 
@@ -264,6 +271,12 @@ impl AppEventProxy {
                 }
                 Ok(())
             }
+            #[cfg(test)]
+            Self::Notifying { inner, sent } => {
+                let result = inner.send_event(event);
+                let _ = sent.send(());
+                result
+            }
         }
     }
 
@@ -276,6 +289,8 @@ impl AppEventProxy {
                 drop(discarded);
             }
             Self::Project { inner, .. } => inner.close(),
+            #[cfg(test)]
+            Self::Notifying { inner, .. } => inner.close(),
             #[cfg(test)]
             Self::Stub(events) => {
                 let discarded = std::mem::take(&mut *events.lock().expect("stub app events"));
@@ -326,6 +341,11 @@ impl AppEventProxy {
                     .expect("stub app events")
                     .splice(0..0, events);
             }
+            #[cfg(test)]
+            Self::Notifying { inner, sent } => {
+                inner.prepend_events(events);
+                let _ = sent.send(());
+            }
         }
     }
 
@@ -350,6 +370,8 @@ impl AppEventProxy {
                 next
             }
             Self::Project { inner, .. } => inner.take_next(),
+            #[cfg(test)]
+            Self::Notifying { inner, .. } => inner.take_next(),
             #[cfg(test)]
             Self::Stub(events) => {
                 let mut events = events.lock().expect("stub app events");
@@ -1562,6 +1584,7 @@ pub(crate) enum ProjectNavigationSource {
         request_id: Option<String>,
     },
     Clone {
+        client_id: String,
         workspace_home: PathBuf,
     },
     #[cfg(test)]
@@ -1850,6 +1873,9 @@ pub struct AppRuntime {
     /// pending window instead of spawning a duplicate. Entries clear on
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
+    /// Initial launch threads owned by the current window generation. A normal
+    /// return leaves `None` until its queued completion reaches the GUI.
+    pub(crate) initial_launch_workers: HashMap<String, Option<std::thread::JoinHandle<()>>>,
     /// Issue #4145 AC-1: the navigation request id and start instant of the
     /// project open in flight. Opening spans a synchronous reserve, a
     /// blocking-pool prepare and an event-loop commit, and
@@ -3976,6 +4002,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         }
     }
     let mut loaded_for_commit = None;
+    let mut idle_settlements = None;
     let mut merge_reconciliation_error = None;
     let mut completion_probe_error = None;
     let mut local_repo_identity = None;
@@ -4003,6 +4030,13 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 &repo,
             ) {
                 Ok(loaded) => {
+                    let observations =
+                        gwt::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+                            &mut monitor,
+                            project_root,
+                        );
+                    monitor.reconcile_dead_terminal_launches(&observations, now);
+                    idle_settlements = Some(observations);
                     gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                         &mut monitor,
                         &loaded,
@@ -4040,14 +4074,20 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // Issue #4084: read every launched Issue's execution record before taking
     // the prefs lock. The classification itself is pure; only this read is
     // I/O, and an unreadable record fails closed to `stuck_unknown`.
-    let idle_settlements = window_snapshot
-        .map(|_| {
-            gwt::issue_monitor_worker::read_execution_observations(
-                project_root,
-                &monitor.execution_settlement_issue_numbers(),
-            )
+    let idle_settlements = idle_settlements.unwrap_or_else(|| {
+        gwt::issue_monitor_worker::read_execution_observations(
+            project_root,
+            &monitor.execution_settlement_issue_numbers(),
+        )
+    });
+    let live_launch_owners = window_snapshot
+        .map(|snapshot| {
+            gwt::issue_monitor_worker::verified_live_launch_owners(project_root, snapshot, now)
         })
         .unwrap_or_default();
+    let live_launch_observed_at = window_snapshot
+        .map(|snapshot| snapshot.observed_at.as_str())
+        .unwrap_or(now);
 
     // A daemon may have started while the side-effect-free scan was running.
     // The second lease acquisition is the commit-time authority decision; the
@@ -4071,6 +4111,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     let prepare = |latest: &mut gwt::IssueMonitorState| {
         latest.refresh_agent_capacity(project_root);
         latest.expire_stale_unbound_launches(now);
+        // Retire exact dead terminal holders before duplicate-binding repair
+        // can mistake their displaced projections for unfinished work.
+        latest.reconcile_dead_terminal_launches(&idle_settlements, now);
         // Issue #3883 AC-2/AC-3: restore tracking for agent windows that
         // are still on the canvas, inside the transaction that persists
         // this scan. Same store, same generation as the restart restore
@@ -4085,14 +4128,20 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
         if let (Some(project_tab_id), Some(live_window_ids)) =
             (expected_project_tab_id, live_window_ids)
         {
-            let reconciliation =
-                latest.reconcile_launch_bindings(project_tab_id, live_window_ids, now);
+            let reconciliation = latest.reconcile_launch_bindings(
+                project_tab_id,
+                live_window_ids,
+                &live_launch_owners,
+                live_launch_observed_at,
+            );
             if !reconciliation.readopted.is_empty() {
                 tracing::warn!(
                     issues = ?reconciliation.readopted,
                     "issue monitor recovered launches whose agent windows were still running"
                 );
             }
+        } else {
+            latest.readopt_live_launch_bindings(&live_launch_owners, live_launch_observed_at);
         }
         if let Some(loaded) = &loaded_for_commit {
             gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
@@ -4115,9 +4164,6 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 );
             }
         }
-        // Issue #4084 AC-2/AC-3/AC-4: release the idle windows inside the
-        // same transaction that persists this scan, after re-adoption has
-        // restored every binding a live window still owns.
         if window_snapshot.is_some() {
             latest.reconcile_idle_windows(&idle_settlements, now);
         }
@@ -4778,6 +4824,7 @@ impl AppRuntime {
             launch_wizard_cache,
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
+            initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
@@ -8500,7 +8547,6 @@ impl AppRuntime {
             context,
             serde_json::json!({ "profiles_set": {
                 "profiles": profiles,
-                "usage_threshold_percent": usage_threshold_percent,
             }}),
         );
         let outcome = match publication {
@@ -8514,9 +8560,6 @@ impl AppRuntime {
                         .advance_effect_authority_epoch()
                         .ok_or_else(|| "authority epoch exhausted".to_string())?;
                     monitor.set_launch_profile_pool(profiles);
-                    if let Some(percent) = usage_threshold_percent {
-                        monitor.set_launch_usage_threshold_percent(percent);
-                    }
                     Ok(())
                 })
                 .map(|(monitor, ())| Some(monitor)),
@@ -9039,6 +9082,7 @@ impl AppRuntime {
             std::time::Instant::now() + ISSUE_MONITOR_SCAN_BUDGET,
         );
         let mut loaded_for_commit = None;
+        let mut window_observations = None;
         let mut merge_reconciliation_error = None;
         #[cfg(not(unix))]
         let mut completion_probe_error = None;
@@ -9063,6 +9107,27 @@ impl AppRuntime {
                     &repo,
                 ) {
                     Ok(loaded) => {
+                        let executions =
+                            gwt::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+                                &mut monitor,
+                                &project_root,
+                            );
+                        let terminal = monitor.reconcile_dead_terminal_launches(&executions, &now);
+                        let (live_launch_owners, observed_at) =
+                            gwt::issue_monitor_worker::read_verified_live_launch_owners(
+                                &monitor,
+                                &project_root,
+                                &now,
+                            );
+                        gwt::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+                            &mut monitor,
+                            &executions,
+                            &live_launch_owners,
+                            &observed_at,
+                            &now,
+                            terminal,
+                        );
+                        window_observations = Some((executions, live_launch_owners, observed_at));
                         gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                             &mut monitor,
                             &loaded,
@@ -9112,6 +9177,19 @@ impl AppRuntime {
         );
         let persisted =
             rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
+                // Reapply the proposal to the latest prefs using the same
+                // runtime evidence; the short commit budget owns no observation I/O.
+                if let Some((executions, live_launch_owners, observed_at)) = &window_observations {
+                    let terminal = monitor.reconcile_dead_terminal_launches(executions, &now);
+                    gwt::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+                        monitor,
+                        executions,
+                        live_launch_owners,
+                        observed_at,
+                        &now,
+                        terminal,
+                    );
+                }
                 if let Some(loaded) = &loaded_for_commit {
                     gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates_for_project_tab(
                         monitor,
@@ -10729,6 +10807,28 @@ impl AppRuntime {
             }
             return vec![update_notice("warn", refusal.notice(version))];
         }
+        self.begin_update_drain_for_project(context, version, prefs, automatic)
+            .0
+    }
+
+    fn begin_update_drain_for_project(
+        &mut self,
+        context: &ProjectContext,
+        version: &str,
+        prefs: gwt::IssueMonitorPrefs,
+        automatic: bool,
+    ) -> (Vec<OutboundEvent>, bool) {
+        let project_root = context.project_root.clone();
+        let observe = |stage: &str, reason: &str| {
+            record_pending_update_observation(
+                version,
+                Some(&project_root),
+                stage,
+                reason,
+                chrono::Utc::now(),
+                None,
+            );
+        };
         tracing::info!(
             target: "gwt::update",
             version,
@@ -10739,7 +10839,7 @@ impl AppRuntime {
                 "pending_failed",
                 "project state unavailable while starting drain",
             );
-            return Vec::new();
+            return (Vec::new(), false);
         };
         state.update_auto_apply.reset();
         let version = version.to_string();
@@ -10771,12 +10871,15 @@ impl AppRuntime {
                             "pending_failed",
                             &format!("cannot commit update drain: {local_error}"),
                         );
-                        return self.issue_monitor_control_error_events(
-                            Some(&context.project_root),
-                            None,
-                            local_error,
-                            "update-drain",
-                            None,
+                        return (
+                            self.issue_monitor_control_error_events(
+                                Some(&context.project_root),
+                                None,
+                                local_error,
+                                "update-drain",
+                                None,
+                            ),
+                            false,
                         );
                     }
                 }
@@ -10786,12 +10889,15 @@ impl AppRuntime {
                     "pending_failed",
                     &format!("cannot publish update drain: {error}"),
                 );
-                return self.issue_monitor_control_error_events(
-                    Some(&context.project_root),
-                    None,
-                    error,
-                    "update-drain",
-                    None,
+                return (
+                    self.issue_monitor_control_error_events(
+                        Some(&context.project_root),
+                        None,
+                        error,
+                        "update-drain",
+                        None,
+                    ),
+                    false,
                 );
             }
         };
@@ -10826,7 +10932,7 @@ impl AppRuntime {
                 "Update v{version} staged — draining agents before applying automatically; new launches are held."
             ),
         ));
-        events
+        (events, true)
     }
 
     /// Issue #3906 AC-2 / AC-7 / AC-8 / AC-9 (#4076 AC-2 / AC-5): one drain
@@ -11626,6 +11732,10 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)
             }
+            FrontendEvent::GetUpdateRestartImpact { request_id } => {
+                self.get_update_restart_impact_events(&client_id, &request_id)
+            }
+            FrontendEvent::ApplyUpdateWhenIdle => self.apply_update_when_idle_events(&client_id),
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
             FrontendEvent::SetAutoApplyUpdates { enabled } => {
                 self.set_global_auto_apply_updates_events(&client_id, enabled)
@@ -12752,6 +12862,10 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)
             }
+            FrontendEvent::GetUpdateRestartImpact { request_id } => {
+                self.get_update_restart_impact_events(&client_id, &request_id)
+            }
+            FrontendEvent::ApplyUpdateWhenIdle => self.apply_update_when_idle_events(&client_id),
             FrontendEvent::CancelUpdateAutoApply => self.cancel_update_auto_apply_events(),
             FrontendEvent::OpenUpdateLog { log_path } => {
                 self.open_update_log_events(&client_id, log_path)
@@ -14387,6 +14501,7 @@ impl AppRuntime {
         self.invalidate_workspace_projection_patch(tab_id);
         let window_id = combined_window_id(tab_id, raw_id);
         self.invalidate_launch_delivery_ack(&window_id);
+        self.initial_launch_workers.remove(&window_id);
         self.pending_launch_completions.remove(&window_id);
         self.window_lookup.insert(
             window_id.clone(),

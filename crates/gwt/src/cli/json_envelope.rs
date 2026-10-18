@@ -980,6 +980,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             project_root: optional_path(params, "project_root")?,
         }),
         "issue.monitor.profiles.set" | "issue.monitor.profiles-set" => {
+            if lookup(params, "usage_threshold_percent").is_some() {
+                return Err(CliParseError::InvalidJson(
+                    "usage_threshold_percent is retired because usage percentages no longer control launch selection; omit this parameter"
+                        .to_string(),
+                ));
+            }
             let Some(profiles) = lookup(params, "profiles") else {
                 return Err(CliParseError::MissingFlag("profiles"));
             };
@@ -994,19 +1000,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "profiles must be an array of launch profiles with agent_id: {error}"
                 ))
             })?;
-            let usage_threshold_percent = optional_u64(params, "usage_threshold_percent")?
-                .map(|value| {
-                    u8::try_from(value).map_err(|_| {
-                        CliParseError::InvalidJson(
-                            "usage_threshold_percent must be between 1 and 100".to_string(),
-                        )
-                    })
-                })
-                .transpose()?;
             CliCommand::Issue(IssueCommand::MonitorProfilesSet {
                 project_root: optional_path(params, "project_root")?,
                 profiles,
-                usage_threshold_percent,
+                usage_threshold_percent: None,
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
@@ -2730,10 +2727,44 @@ mod tests {
         WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
-    use crate::cli::TestEnv;
+    use crate::cli::{dispatch_json_input, TestEnv};
     use crate::cli::{BoardCommand, IssueMonitorPriorityPosition};
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
+
+    #[test]
+    fn provided_json_input_keeps_envelope_validation_and_response_without_rereading_stdin() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        env.stdin = "stdin was already read".to_string();
+
+        for input in [
+            "{",
+            r#"{"schema_version":1,"operation":"search","params":{"query":"admission","project_root":"/elsewhere"}}"#,
+        ] {
+            assert_eq!(dispatch_json_input(&mut env, "gwtd", input), 2);
+            assert!(env.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&env.stderr).starts_with("gwtd: "));
+            env.stderr.clear();
+        }
+
+        env.seed_run_log(273, "run log from provided JSON");
+        assert_eq!(
+            dispatch_json_input(
+                &mut env,
+                "gwtd",
+                r#"{"schema_version":1,"operation":"actions.logs","params":{"run_id":273}}"#,
+            ),
+            0
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["operation"], "actions.logs");
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["exit_code"], 0);
+        assert_eq!(payload["output"], "run log from provided JSON\n");
+        assert_eq!(env.run_log_call_log, vec![273]);
+        assert_eq!(env.stdin, "stdin was already read");
+    }
 
     #[test]
     fn provider_reset_operations_never_accept_caller_supplied_approval() {
@@ -4717,7 +4748,6 @@ mod tests {
                     {"agent_id": "codex"},
                     {"agent_id": "claude", "model": "opus", "prefer_for": ["kind:spec"]},
                 ],
-                "usage_threshold_percent": 70,
             }),
         );
         let CliCommand::Issue(IssueCommand::MonitorProfilesSet {
@@ -4729,7 +4759,7 @@ mod tests {
             panic!("expected MonitorProfilesSet, got {parsed:?}");
         };
         assert_eq!(project_root, None);
-        assert_eq!(usage_threshold_percent, Some(70));
+        assert_eq!(usage_threshold_percent, None);
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].profile.agent_id, "codex");
         assert_eq!(profiles[0].profile.model, None);
@@ -4766,13 +4796,13 @@ mod tests {
             ),
             CliParseError::InvalidJson(_)
         ));
-        assert!(matches!(
-            err(
+        for threshold in [json!(70), json!(null), json!("lots")] {
+            let error = err(
                 "issue.monitor.profiles.set",
-                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": "lots"})
-            ),
-            CliParseError::InvalidJson(_) | CliParseError::InvalidNumber(_)
-        ));
+                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": threshold}),
+            );
+            assert!(error.to_string().contains("retired"), "{error}");
+        }
     }
 
     #[test]

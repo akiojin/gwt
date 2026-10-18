@@ -339,29 +339,45 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
             retry_after: Some(Duration::ZERO),
         };
     }
+    // A running holder can coexist with free slots. Keep FIFO constraints
+    // visible instead of implying that its release is the only wait condition.
+    let head = status
+        .queue
+        .first()
+        .map(|head| {
+            format!(
+                "; queue head {} (mode: {}, resident: {}, {}, attempt: {}){}{}",
+                head.target.as_deref().unwrap_or("unknown target"),
+                match head.mode {
+                    gwt_core::index_coordinator::HeavyQueueMode::Shared => "shared",
+                    gwt_core::index_coordinator::HeavyQueueMode::Exclusive => "exclusive",
+                },
+                if head.resident { "yes" } else { "no" },
+                head.job_status
+                    .map(|status| format!("job {}", status.as_str()))
+                    .unwrap_or_else(|| "job status unpublished".to_string()),
+                head.attempt_id.as_deref().unwrap_or("legacy"),
+                head.scheduling_reason
+                    .as_deref()
+                    .map(|reason| format!("; {reason}"))
+                    .unwrap_or_default(),
+                head.bypass_reason
+                    .as_deref()
+                    .map(|reason| format!(
+                        "; {reason}; {}",
+                        verification_lease::QUEUE_BYPASS_RECOVERY
+                    ))
+                    .unwrap_or_default(),
+            )
+        })
+        .unwrap_or_else(|| {
+            if status.held {
+                String::new()
+            } else {
+                "; queue empty".to_string()
+            }
+        });
     if !status.held {
-        let head = status
-            .queue
-            .first()
-            .map(|head| {
-                format!(
-                    "; queue head {} (resident: {}, {}, attempt: {}){}",
-                    head.target.as_deref().unwrap_or("unknown target"),
-                    if head.resident { "yes" } else { "no" },
-                    head.job_status
-                        .map(|status| format!("job {}", status.as_str()))
-                        .unwrap_or_else(|| "job status unpublished".to_string()),
-                    head.attempt_id.as_deref().unwrap_or("legacy"),
-                    head.bypass_reason
-                        .as_deref()
-                        .map(|reason| format!(
-                            "; {reason}; {}",
-                            verification_lease::QUEUE_BYPASS_RECOVERY
-                        ))
-                        .unwrap_or_default(),
-                )
-            })
-            .unwrap_or_else(|| "; queue empty".to_string());
         return HolderNotice {
             detail: format!("verification lease has no current holder{head}"),
             retry_after: None,
@@ -392,7 +408,7 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
     match status.remaining_ms {
         Some(remaining_ms) => HolderNotice {
             detail: format!(
-                "verification lease held by {kind} {target} ({holder}{priority}, {}s left{progress})",
+                "verification lease held by {kind} {target} ({holder}{priority}, {}s left{progress}){head}",
                 remaining_ms / 1000
             ),
             retry_after,
@@ -400,7 +416,7 @@ fn holder_identity_notice(status: &HeavyLeaseStatus) -> HolderNotice {
         None => HolderNotice {
             detail: format!(
                 "verification lease held by {kind} {target} ({holder}{priority}, no TTL — it releases \
-                 only when its job finishes{progress})"
+                 only when its job finishes{progress}){head}"
             ),
             retry_after,
         },
@@ -538,7 +554,7 @@ impl BoardNotice {
         }
         self.posted = true;
         let body = format!(
-            "現在の状態: verify.run は host 排他待ちです（{}s 経過、上限 {}s）。\n\n\
+            "現在の状態: verify.run は admission 待ちです（{}s 経過、上限 {}s）。\n\n\
              理由: {reason}\n\n\
              次: この tool が動いている間は結果を待ちます。deferred 後は同じ全 matrix を再投入するか、owner number を明示して issue.monitor.wait を宣言してください。watchdog は pool の空きと本人 pane の idle を確認して再開を一度通知します。待機を理由に作業を完了・blocked にしないでください。",
             started.elapsed().as_secs(),
@@ -663,7 +679,7 @@ fn admit_inner<E: CliEnv>(
                     "another verification claimant in this worktree owns the target job; \
                      gwtd artifact restoration: skipped (another verification owns the target job)"
                 } else {
-                    "verification reservation is being updated; gwtd artifact restoration: skipped (target admission pending)"
+                    "verification reservation is being updated; next_turn_reserved: unknown; gwtd artifact restoration: skipped (target admission pending)"
                 },
                 None,
             ));
@@ -687,7 +703,7 @@ fn admit_inner<E: CliEnv>(
                         return Err(deferred(
                             started,
                             max_wait,
-                            "verification reservation is being updated",
+                            "verification reservation is being updated; next_turn_reserved: unknown",
                             None,
                         ));
                     }
@@ -1112,6 +1128,39 @@ mod tests {
             notice.detail
         );
         assert!(!notice.detail.contains("TTL"), "{}", notice.detail);
+    }
+
+    #[test]
+    fn a_live_holder_does_not_hide_the_fifo_draining_reason() {
+        let notice = holder_notice(
+            &HeavyLeaseStatus {
+                held: true,
+                target: Some("foreign--verification--holder".into()),
+                remaining_ms: Some(60_000),
+                queue: vec![gwt_core::index_coordinator::HeavyQueueEntry {
+                    target: Some("project--verification--predecessor".into()),
+                    priority: JobPriority::ManualRebuild,
+                    mode: gwt_core::index_coordinator::HeavyQueueMode::Exclusive,
+                    queued_at_ms: 1,
+                    waiting_ms: 61_000,
+                    resident: true,
+                    attempt_id: Some("waiting-attempt".into()),
+                    job_status: Some(gwt_core::index_coordinator::JobStatus::Running),
+                    bypass_reason: None,
+                    scheduling_reason: Some("draining later shared requests".into()),
+                }],
+                ..HeavyLeaseStatus::default()
+            },
+            None,
+        );
+        for expected in [
+            "held by other foreign--verification--holder",
+            "queue head project--verification--predecessor",
+            "mode: exclusive",
+            "draining later shared requests",
+        ] {
+            assert!(notice.detail.contains(expected), "{}", notice.detail);
+        }
     }
 
     #[test]
@@ -1819,7 +1868,7 @@ mod tests {
         assert_eq!(admission.command_progress().timeout(), None);
         assert_eq!(
             verification_lease::short_non_cargo_timeout(command),
-            Some(Duration::from_secs(60))
+            Some(Duration::from_secs(300))
         );
         drop(admission);
         assert!(

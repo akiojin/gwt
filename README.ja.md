@@ -270,11 +270,17 @@ server (X11 / Wayland) を要求します。macOS / Windows のブラウザサ�
 されているか」を即時に確認できます。`/healthz` は `debug!` に降格されており、
 ヘルスチェックでログが埋まりません。
 
-Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。ブラウザの
-タブを閉じても agent は **停止しません**。`Ctrl-C` / `SIGTERM` を受け取ったときに、
-PTY のドレイン → サーバー停止の順で graceful shutdown を実行します。tray 常駐
-プロセスは 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を
-出して終了します。
+Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。既定のトレイ常駐
+モードでは、ブラウザのタブを閉じてもプロジェクトと実行中の agent は継続し、
+プロジェクト URL を開き直すと同じワークスペースに戻れます。プロジェクトを停止するには、そのページのヘッダーか
+Hub の開いているプロジェクト一覧にある **Close Project** を選びます。実行中の agent が
+ある場合は、対象を列挙した確認ダイアログが表示されます。**Cancel** なら実行を継続し、
+**Close Project** ならそのプロジェクトの runtime と agent を停止します。他のプロジェクトは
+継続し、閉じたプロジェクトを表示していたすべてのブラウザタブは Hub に戻ります。
+
+サーバー全体を停止するには、トレイの **Quit**、または `Ctrl-C` / `SIGTERM` を使います。
+gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
+1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を出して終了します。
 
 `gwtd` operation は stdin JSON envelope で処理され、GUI は起動しません。
 
@@ -408,8 +414,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
   アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
   Autonomous、Max active、キュー補充、許可ラベル、起動プロファイルと候補の
-  順序・優先条件を同じ欄で編集できます。Settings は Application / Project の
-  左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
+  順序・優先条件を同じ欄で編集できます。
+  起動候補の変更は確定時に自動保存され、テキスト欄はフォーカスを外すと保存されます。
+  拒否された入力は保持され、該当欄の近くにエラーを表示します。
+  Settings は Application / Project の左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
   `System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
@@ -417,6 +425,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   PM に `update.settings.set` の `auto_apply_updates` で変更を依頼できます。
   `update.settings.status` で状態を読み取れます。
   この設定は Issue Monitor の設定から除外されています。
+  `Restart now` では稼働中 agent の件数、pending claim、verification lease、
+  関連 Issue を確認してから適用します。作業中は `Apply after all agents finish`
+  が既定の選択肢となり、新規起動を保留して既存作業の終了まで待ちます。
+  代わりに `Restart now` を明示確認すると、稼働中 agent を停止して直ちに再起動します。
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は
 Agent が status、decision、handoff、request を外部化する coordination surface です。
@@ -726,7 +738,7 @@ PM 自身は実装エージェントを起動しません。対象 Issue をキ�
   手動 close が許可され、その Work の稼働 agent がいないことを確認します。
   終了履歴を記録し、branch と worktree は保持します。
 
-PM に GitHub Discussion の作成と Board 接続、`develop` / `main` の必須チェック変更、
+PM に Board Discussion 共有の有効化や単独 Discussion の作成、`develop` / `main` の必須チェック変更、
 全プロジェクト共通の Auto-apply updates 変更を依頼できます。操作対象を明確にした
 指示の記録、または OS ネイティブの承認ダイアログで許可します。**Approve once** で
 今回だけ許可するか、同じリポジトリ・操作種別の許可を記憶できます。保存した許可の確認・
@@ -887,14 +899,18 @@ Agent session の隔離と再現性のため、gwt は各プロジェクトを�
 └── .gwt/project.toml       # gwt が管理するプロジェクトメタデータ
 ```
 
-Project Picker の `Clone from GitHub...` (タブ未選択時の全画面ピッカー) と、
-トップツールバーの `Open Project ▾` split-button ドロップダウン (アクティブな
-プロジェクトがある状態でも到達可能) のどちらからでも clone を開始できます。
+Hub またはシステムトレイの `Clone from GitHub…` から clone を開始できます。
 clone modal では GitHub HTTPS / SSH URL を直接入力するか、`gh search repos`
 による repository 検索から候補を選択し、保存先の親フォルダを指定します。新しい
 プロジェクトは `<parent>/<project>/` に作成され、`<project>.git/` bare リポジトリ
 と initial worktree が配置されます。remote に `develop` が存在する場合は
 `develop` worktree を作成し、存在しない場合は remote default branch を使います。
+
+Clone を実行するとブラウザタブを確保し、成功後にそのタブでプロジェクトの URL を
+開きます。Hub はそのまま残ります。ポップアップがブロックされた場合や確保した
+タブを閉じた場合は、Hub の完了リンクから開けます。失敗時は確保したタブを閉じて
+理由を表示します。同じリポジトリが Open または Recent に登録済みなら clone を
+拒否し、**Open existing project** から既存の URL を開けます。
 
 既存の Normal Git リポジトリ（プロジェクト直下に `.git/` がある通常レイアウト）
 は検出され、要望に応じて Nested Bare + Worktree 構成へマイグレーションできます。
@@ -916,17 +932,12 @@ worktree にプロジェクトタブが切り替わります。
 
 ## GitHub Discussions でローカル Board の節目を共有する
 
-別マシンと `decision` / `blocked` / `handoff` を共有するには、PM に
-`discussion.create` の `sync_board:true` で Discussion 作成と接続を依頼できます。
-既存の Discussion に接続する場合は `board.config.set` の `github_discussion` に番号を
-指定します。接続だけ失敗した場合も、Discussion を重複作成せずに復旧できます。
-現在の Board provider が Local 以外なら、作成時は `board_provider:"local"`、
-既存への接続時は `provider:"local"` を明示して切替を依頼してください。
-対象プロジェクトの provider 上書きと接続先を同時に保存し、全体設定や他プロジェクトの
-provider 設定は維持します。明示的な切替がなければ、同期付き作成は GitHub 上に
-Discussion を作る前に拒否されます。
-どちらも現在のリポジトリが対象です。手動で接続する場合は Board provider を
-**Local** のままにして `.gwt/work/board.toml` に接続先を追加します。
+別マシンと `decision` / `blocked` / `handoff` を共有するには、PM に scoped な
+`board.config.set` で共有を有効化するよう依頼します。`category:"General"` または
+別のカテゴリー名を指定でき、Discussion 番号や手動での Discussion 作成は不要です。
+現在の Board provider が Local 以外なら `provider:"local"` を明示して切り替えます。
+既存の scoped authority を必要とし、全体設定や他プロジェクトの設定は維持します。
+手動で opt-in する場合は `.gwt/work/board.toml` を設定します。
 
 ```toml
 provider = "local"
@@ -934,24 +945,41 @@ provider = "local"
 [github_discussion]
 owner = "your-org"
 repo = "your-repo"
-number = 123
+category = "General" # 省略時の既定値
 ```
 
-各マシンで同じ既存 Discussion を指定し、GitHub Discussions を有効にして、読み書き権限を
-持つ `gh` 認証を用意してください。Board の読み書き時に、最大1分に1回バックグラウンド同期を
-起動します。明示的な同期と直近の結果の確認は、
-`{"schema_version":1,"operation":"board.sync","params":{}}` を `gwtd` の標準入力へ送ります。
-`status` / `claim` はローカルに留まり、共有種別は設定で変更できません。
-受信した投稿は既存 Board のフィードに表示されます。
-GitHub が返す投稿者の所属が `OWNER` / `MEMBER` / `COLLABORATOR` のコメントだけを
-取り込み、それ以外や不明な所属は取り込みません。受信投稿は escalation を開閉できるため、
-所有者・組織メンバー・collaborator をローカルの調整相手として信頼できるリポジトリを指定してください。
+各マシンで同じリポジトリとカテゴリーを指定し、GitHub Discussions を有効にして、
+読み書き権限を持つ `gh` 認証を用意してください。共有対象の Board root ごとに
+Discussion を1つ作り、title は owner Issue 番号と短い要約、本文には Board entry ID と
+owner Issue へのリンクを置きます。共有対象の返信はその Discussion のコメントになります。
+`status` / `claim` は返信もローカルに留まり、共有種別は設定で変更できません。
+永続履歴にも root が見つからない返信や、root が共有対象でない返信はローカルに留まります。
+中間の親が local-only や表示範囲外でも、共有対象の子孫は配送します。
+旧設定の `number` は読み込み互換として残りますが、単一の配送先を指定する用途には
+使わず、新しい投稿は話題ごとの Discussion へ配送します。既存の一括 Discussion は残します。
+作成は投稿元のマシンに限定し、新しい投稿の出自記録、または旧 root の Session 履歴で
+判定します。出自を証明できない旧 root は診断を残してローカルに留まります。opt-in 後の
+新しいローカル root は出自を自動記録します。複数マシンの同時移行での重複作成を避けるためです。
 
-同期は best-effort で、ローカルの現在の表示範囲（最大500件）を送信します。
-長期障害中に表示範囲から外れた未送信投稿は遡って配送しません。レート制限・認証失効・
-ネットワーク障害でもローカル Board は利用でき、`board.sync` で診断を確認できます。
-失敗時は5分後に共有 GitHub budget を尊重して再試行します。停止中の相手は次回同期で保存済み
-コメントを受信します。共有を停止するには `[github_discussion]` を削除してください。
+Board の読み書き時に最大1分に1回バックグラウンド同期を起動します。明示的な同期と
+診断の確認は `{"schema_version":1,"operation":"board.sync","params":{}}` を
+`gwtd` の標準入力へ送ります。受信した投稿は既存 Board のフィードに表示されます。
+GitHub が返す投稿者の所属が `OWNER` / `MEMBER` / `COLLABORATOR` の root / コメント
+だけを取り込み、それ以外や不明な所属は取り込みません。通常のコメントは安定した
+remote ID を持つ Board 返信になります。encoded 投稿は escalation を開閉できるため、
+所有者・組織メンバー・collaborator を調整相手として信頼できるリポジトリを指定してください。
+公開リポジトリでは共有する Board 本文も公開されます。
+
+同期は bounded best-effort です。追跡は最大50話題で、超過した話題はローカルに留め、
+`board.sync` に上限を表示します。各 tick で repository を1ページ、話題を最大5つずつ
+順に読み、作成・投稿は合計最大5件に制限します。repository の発見が完了するまで
+作成せず、作成応答を失ったときも entry ID を照合してから再試行します。GraphQL の
+実際の cost は既存 GitHub budget に記録し、予算不足なら同期を延期します。
+送信候補はローカルの現在の表示範囲（最大500件）です。長期障害中に範囲外へ出た
+未送信投稿は遡って配送しません。レート制限・認証失効・ネットワーク障害でも
+ローカル Board は利用でき、診断を残して5分後に共有 budget を尊重して再試行します。
+停止中の相手は後の同期で保存済み投稿を受信します。共有を停止するには
+`[github_discussion]` を削除してください。
 
 ## Board プロバイダ (Local / Slack / Teams)
 

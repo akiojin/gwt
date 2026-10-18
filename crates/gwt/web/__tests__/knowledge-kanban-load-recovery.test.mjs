@@ -69,6 +69,40 @@ function createSurface(mod, sent, preset = "issue", options = {}) {
   });
 }
 
+test("Issue #5531: resync replaces lost Knowledge owners and retains selection without retrying writes", async () => {
+  const mod = await importSurfaceModule();
+  withPatchedTimers(() => {
+    const sent = [];
+    const surface = createSurface(mod, sent);
+    const state = surface.ensureKnowledgeBridgeState("win-1", "issue");
+    state.selectedNumber = 42;
+    state.selectionGeneration = 3;
+    state.query = "retained query";
+    surface.requestKnowledgeBridge("win-1", "issue");
+    const oldRequestId = state.loadRequestId;
+    state.detailRequestId = 99;
+    state.searchInFlight = true;
+    state.inFlightSearchRequestId = 100;
+    state.revisionPending = true;
+    state.pendingPhaseUpdates.set(101, { issueNumber: 42 });
+
+    surface.resyncKnowledge(["win-1"]);
+
+    assert.equal(sent.length, 2, "resync must bypass the lost loading owner");
+    assert.equal(sent[1].kind, "load_knowledge_bridge");
+    assert.equal(sent[1].selected_number, 42);
+    assert.ok(sent[1].request_id > oldRequestId);
+    assert.equal(state.ownedLoadRequestIds.has(oldRequestId), false);
+    assert.equal(state.detailRequestId, 0);
+    assert.equal(state.searchInFlight, false);
+    assert.equal(state.revisionPending, false);
+    assert.equal(state.query, "retained query");
+    assert.equal(state.selectionGeneration, 3);
+    assert.equal(state.pendingPhaseUpdates.size, 0, "a lost phase reply cannot leave a permanent pending marker");
+    surface.clearKnowledgeBridgeState("win-1");
+  });
+});
+
 // SPEC #3170 T-948/T-949 shared fixtures: two cached rows plus an
 // authoritative detail for row A, driven through the public surface API
 // exactly like the production WebSocket receive path.

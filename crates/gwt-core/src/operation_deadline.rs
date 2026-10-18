@@ -17,6 +17,52 @@ thread_local! {
     static CURRENT_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
     #[cfg(any(test, feature = "test-support"))]
     static TEST_NOW: Cell<Option<Instant>> = const { Cell::new(None) };
+    #[cfg(any(test, feature = "test-support"))]
+    static TEST_NAMED_LOCK_CONTENTION: std::cell::RefCell<Option<NamedLockContentionObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+type NamedLockContentionObserver = (PathBuf, Box<dyn FnOnce()>);
+
+/// Observe the first actual contention on one named lock in this thread.
+/// Restores the preceding observer on drop, including during unwinding.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ScopedNamedLockContentionObserver {
+    previous: Option<NamedLockContentionObserver>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ScopedNamedLockContentionObserver {
+    pub fn set(path: &Path, on_contention: impl FnOnce() + 'static) -> Self {
+        Self {
+            previous: TEST_NAMED_LOCK_CONTENTION.with(|observer| {
+                observer.replace(Some((path.to_path_buf(), Box::new(on_contention))))
+            }),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ScopedNamedLockContentionObserver {
+    fn drop(&mut self) {
+        TEST_NAMED_LOCK_CONTENTION.with(|observer| observer.replace(self.previous.take()));
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn notify_named_lock_contention(path: &Path) {
+    let observer = TEST_NAMED_LOCK_CONTENTION.with(|observer| {
+        let mut observer = observer.borrow_mut();
+        if observer.as_ref().is_some_and(|(target, _)| target == path) {
+            observer.take()
+        } else {
+            None
+        }
+    });
+    if let Some((_, on_contention)) = observer {
+        on_contention();
+    }
 }
 
 /// Read the operation clock used both to create and to enforce a deadline.
@@ -208,7 +254,10 @@ impl NamedFileLock {
     /// Work transaction): ordinary contention is not logged, only a failed
     /// acquisition is — and that failure still names the observed holder.
     pub fn acquire_quiet(path: &Path, operation: &str) -> io::Result<Self> {
-        Self::acquire_with_observer(path, operation, false, || {})
+        Self::acquire_with_observer(path, operation, false, || {
+            #[cfg(any(test, feature = "test-support"))]
+            notify_named_lock_contention(path);
+        })
     }
 
     /// Try once. Only actual OS lock contention is returned as `WouldBlock`.

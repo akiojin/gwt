@@ -421,9 +421,7 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
     }
     let required = job_body(&workflow, "  test-rust-required:");
     assert!(required.contains("name: Test (Rust)\n"));
-    assert!(required.contains(
-        "needs: [test, test-linux-infrastructure, test-windows-verify-timings, source-sync]"
-    ));
+    assert!(required.contains("needs: [test, test-linux-infrastructure, source-sync]"));
     assert!(required.contains("if: ${{ !cancelled() }}"));
     assert!(required.contains("RUST_RESULT: ${{ needs.test.result }}"));
     assert!(required.contains("INFRA_RESULT: ${{ needs.test-linux-infrastructure.result }}"));
@@ -432,16 +430,18 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
 }
 
 #[test]
-fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
-    let workflow = read(TEST_WORKFLOW);
+fn paired_windows_timings_preserve_evidence_outside_the_pr_path() {
+    let pr_workflow = read(TEST_WORKFLOW);
+    assert!(!pr_workflow.contains("test-windows-verify-timings"));
+    assert!(!pr_workflow.contains("verify_timings"));
+    let workflow = read(NIGHTLY_WORKFLOW);
+    assert!(workflow.contains("schedule:"));
+    assert!(workflow.contains("workflow_dispatch:"));
+    assert!(!workflow.contains("pull_request:"));
     let job = job_body(&workflow, "  test-windows-verify-timings:");
-    assert!(job.contains("runs-on: ${{ needs.changes.outputs.verify_timings == 'false' && 'ubuntu-latest' || 'windows-latest' }}"));
-    assert!(job.contains("needs: [changes, source-sync]"));
-    assert!(
-        job.contains("if: ${{ !cancelled() && needs.source-sync.outputs.base_only != 'true' }}")
-    );
-    // Unknown/failed classification must measure, not silently skip.
-    assert!(job.contains("if: ${{ needs.changes.outputs.verify_timings != 'false' }}"));
+    assert!(job.contains("runs-on: windows-latest"));
+    assert!(job.contains("ref: develop"));
+    assert!(job.contains("fetch-depth: 0"));
     assert!(job.contains("cargo-nextest@0.9.146"));
     let (_, measure) = named_steps(job)
         .into_iter()
@@ -449,20 +449,19 @@ fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
         .expect("both schedules run in one step on the same host");
     assert!(measure.contains("python scripts/ci_verify_timings.py --output target/verify-timings"));
     assert!(!measure.contains("continue-on-error"));
-    assert!(measure.contains("if: ${{ needs.changes.outputs.verify_timings != 'false' }}"));
+    assert!(!measure.contains("if:"));
     let (_, upload) = named_steps(job)
         .into_iter()
         .find(|(name, _)| name == "Upload both measurements even on failure")
         .expect("preserve raw evidence when a measurement fails");
-    assert!(
-        upload.contains("if: ${{ always() && needs.changes.outputs.verify_timings != 'false' }}")
-    );
+    assert!(upload.contains("if: always()"));
     assert!(upload.contains("path: target/verify-timings/"));
     assert!(upload.contains("if-no-files-found: error"));
-    let required = job_body(&workflow, "  test-rust-required:");
-    assert!(required.contains("TIMINGS_RESULT: ${{ needs.test-windows-verify-timings.result }}"));
-    assert!(required.contains("if: ${{ !cancelled() }}"));
-    assert!(required.contains("case \"$TIMINGS_RESULT\" in success|skipped) ;; *) exit 1 ;; esac"));
+    let report = job_body(&workflow, "  report-nightly-failure:");
+    assert!(report
+        .lines()
+        .any(|line| line.contains("needs:") && line.contains("test-windows-verify-timings")));
+    assert!(report.contains("if: failure()"));
 }
 
 #[test]
@@ -599,8 +598,8 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "any failed worker must fail the required job"
     );
 
-    // Issue #5565: split the hosts without dropping or broadening any of the
-    // original 49 default filters; warm retains its separate 50th filter above.
+    // Issue #5565 split the original 49 default filters across both hosts.
+    // Issue #5560 adds the FIFO regression; warm keeps its separate filter above.
     let mut expected_filters = vec![
         "gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact",
         "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1",
@@ -646,13 +645,14 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt lib gwt cli::verification_lease:: -- --test-threads=1",
         "gwt lib gwt cli::verification_record::driver:: -- --test-threads=1",
         "gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1",
+        "gwt test cli_contracts verification_lease_cli_test::deferred_fifo_survives_status_read_contention_and_new_processes -- --exact --nocapture",
         "gwt lib gwt cli::issue::tests::monitor_wait_ -- --test-threads=1",
         "gwt lib gwt issue_monitor::tests::wait_declaration_ -- --test-threads=1",
         "gwt lib gwt issue_monitor::tests::agent_status_projects_the_wait_declaration -- --exact --test-threads=1",
         "gwt test startup_tray_performance startup_metric_and_native_command_contract -- --exact --test-threads=1 --nocapture",
         "gwt bin gwt app_runtime::tests::workspace_resume_tests::startup_restore_update_marker_1500_sessions_bounds_git_spawns -- --exact --test-threads=1",
     ];
-    assert_eq!(expected_filters.len(), 49);
+    assert_eq!(expected_filters.len(), 50);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

@@ -1,0 +1,25 @@
+{
+  "workers": 12,
+  "duration_seconds": 90.02372579999792,
+  "rounds": 18,
+  "binary": "E:\\gwt\\work\\issue-5542\\target\\issue-5542-baseline.exe",
+  "binary_sha256": "2c132912f359ae9029f91109124bbb0bd5c10ebc49c6d36e40989f6cda450670",
+  "source_sha": "490a2b310ca3e4440144faa2bc59b58a60af3ab2",
+  "workload": "isolated cold-process transport; not a real agent fleet",
+  "modes": {
+    "current": {
+      "samples": 216,
+      "failures": 1,
+      "p50_ms": 11.138800000000002,
+      "p95_ms": 45.1239,
+      "max_ms": 122.9693
+    },
+    "plain": {
+      "samples": 216,
+      "failures": 6,
+      "p50_ms": 7.5858,
+      "p95_ms": 61.3362,
+      "max_ms": 360.0901
+    }
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "scope": "12 distinct native search JSON clients, full 1622-Issue corpus, real model, warm resident worker",
+  "boundary": "Manual diagnostic evidence. Fresh canonical verification and delivery status belong to the PR Verification Run Record. Host load was observed as-is and was not fixed.",
+  "checks": {
+    "identical_distinct_query_list": true,
+    "identical_scope_issues": true,
+    "identical_harness_bytes": true,
+    "actual_embedded_after_runner_matches_worktree": true,
+    "after_binary_matches_frozen_static": true,
+    "all_fixture_checks_pass": true
+  },
+  "before": {
+    "artifact": "../comparison-baseline/baseline-search-burst.json",
+    "binary_sha256": "c42374da5699166bec520ecd94eea412176a1be9b802154eb987cf7585cfcafa",
+    "harness_sha256": "770f86af5b5e5335bd5cd107becd4fe05ac92e769ba9ded1cbb81b85f77c8bef",
+    "phases": {
+      "cold_burst": {
+        "successes": 0,
+        "count": 12,
+        "p95_ms": 29503.845000001093,
+        "pass": false
+      },
+      "real_model_prewarm": {
+        "wall_ms": 60493.98680000013
+      },
+      "warmup": {
+        "wall_ms": 3495.592699999179
+      },
+      "warmed_burst": {
+        "successes": 2,
+        "count": 12,
+        "p95_ms": 13552.07750000045,
+        "pass": false
+      },
+      "restart_cold_burst": {
+        "successes": 1,
+        "count": 12,
+        "p95_ms": 27271.1474000007,
+        "pass": false
+      }
+    },
+    "host_before": {
+      "captured_utc": "2026-10-16T04:50:31.485027+00:00",
+      "logical_cpus": 32,
+      "total_memory_kib": 133952588,
+      "free_memory_kib": 22616728,
+      "cpu_load_percent": [
+        91
+      ]
+    },
+    "host_after": {
+      "captured_utc": "2026-10-16T04:53:16.198411+00:00",
+      "logical_cpus": 32,
+      "total_memory_kib": 133952588,
+      "free_memory_kib": 22255252,
+      "cpu_load_percent": [
+        57
+      ]
+    }
+  },
+  "after": {
+    "artifact": "after-search-burst.json",
+    "binary_sha256": "5ed8e1a1c145bc28810075004612ae41225663d14c614e9d3a0d4a6d618905a0",
+    "harness_sha256": "770f86af5b5e5335bd5cd107becd4fe05ac92e769ba9ded1cbb81b85f77c8bef",
+    "phases": {
+      "cold_burst": {
+        "successes": 1,
+        "count": 12,
+        "p95_ms": 17574.854599999526,
+        "pass": false
+      },
+      "real_model_prewarm": {
+        "wall_ms": 535.4430999977922
+      },
+      "warmup": {
+        "wall_ms": 267.59519999905024
+      },
+      "warmed_burst": {
+        "successes": 12,
+        "count": 12,
+        "p95_ms": 1993.9228000002913,
+        "pass": true
+      },
+      "restart_cold_burst": {
+        "successes": 1,
+        "count": 12,
+        "p95_ms": 16862.07899999863,
+        "pass": false
+      }
+    },
+    "host_before": {
+      "captured_utc": "2026-10-16T07:33:13.304634+00:00",
+      "logical_cpus": 32,
+      "total_memory_kib": 133952588,
+      "free_memory_kib": 13920568,
+      "cpu_load_percent": [
+        51
+      ]
+    },
+    "host_after": {
+      "captured_utc": "2026-10-16T07:34:13.123670+00:00",
+      "logical_cpus": 32,
+      "total_memory_kib": 133952588,
+      "free_memory_kib": 19959020,
+      "cpu_load_percent": [
+        54
+      ]
+    }
+  }
+}

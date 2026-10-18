@@ -1,6 +1,145 @@
 use super::*;
 
 #[test]
+fn issue_5646_restart_preview_reports_twelve_agents_and_issues_without_applying() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tabs = (1..=12)
+        .map(|number| {
+            let mut tab = sample_project_tab_with_window_at(
+                &format!("tab-{number}"),
+                "agent",
+                repo.clone(),
+                WindowPreset::Agent,
+                WindowProcessStatus::Running,
+            );
+            let mut persisted = tab.workspace.persisted().clone();
+            persisted.windows[0].linked_issue_number = Some(5600 + number);
+            tab.workspace = WindowCanvasState::from_persisted(persisted);
+            tab
+        })
+        .collect();
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    assert!(runtime
+        .get_update_restart_impact_events("client", "preview-1")
+        .is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let events = recorded.lock().unwrap();
+    let dispatch = events
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::Dispatch(events) => Some(events),
+            _ => None,
+        })
+        .expect("preview reply");
+    assert!(
+        matches!(&dispatch[0].event, BackendEvent::UpdateRestartImpact {
+        request_id, blocking, issue_numbers, error: None,
+    } if request_id == "preview-1" && blocking.len() == 12 && issue_numbers == &(5601..=5612).collect::<Vec<_>>())
+    );
+    assert!(events
+        .iter()
+        .all(|event| matches!(event, UserEvent::Dispatch(_))));
+}
+
+#[test]
+fn issue_5646_explicit_wait_uses_the_existing_manual_drain_without_restarting() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let payload = temp.path().join("payload");
+    fs::write(&payload, "prepared").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "99.0.0".into(),
+        asset_url: "https://example.invalid/update".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: true,
+    })
+    .unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab",
+        "agent",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    runtime.rebuild_window_lookup();
+    let events = runtime.apply_update_when_idle_events("client");
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "waiting never requests a restart"
+    );
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo)).unwrap();
+    let drain = prefs.update_drain.expect("existing drain raised");
+    assert_eq!(drain.automatic, Some(false));
+    assert_eq!(drain.version, "99.0.0");
+    assert!(
+        !gwt_core::update::load_pending_update_manifest()
+            .unwrap()
+            .auto_apply_deferred
+    );
+    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::IssueMonitorStatus { status } if status.update_drain.is_some())));
+}
+
+#[test]
+fn issue_5646_failed_wait_keeps_apply_deferred_and_reports_the_failure() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let payload = temp.path().join("payload");
+    fs::write(&payload, "prepared").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "99.0.0".into(),
+        asset_url: "https://example.invalid/update".into(),
+        payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab",
+        "agent",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    // Reading absent prefs is valid, but their writer lock cannot be opened.
+    fs::create_dir_all(prefs_path.with_extension("lock")).unwrap();
+    assert!(gwt::load_issue_monitor_prefs(&prefs_path).is_ok());
+    let events = runtime.apply_update_when_idle_events("client");
+    assert!(
+        gwt_core::update::load_pending_update_manifest()
+            .unwrap()
+            .auto_apply_deferred
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event, BackendEvent::UpdateApplyError { stage: Some(stage), .. }
+            if stage == "Apply after agents finish"
+    ) && event.target
+        == gwt::project_transport::DispatchTarget::Client("client".into())));
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "failed waiting never restarts"
+    );
+}
+
+#[test]
 fn app_runtime_update_settings_protocol_belongs_to_update_domain() {
     assert!(serde_json::from_value::<FrontendEvent>(serde_json::json!({
         "kind": "set_issue_monitor_auto_apply_updates", "enabled": true
@@ -304,14 +443,34 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         review_model: Some("gpt-5.5-review".to_string()),
         ..gwt::issue_monitor::AutonomousTuning::default()
     };
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &prefs_path,
         &gwt::IssueMonitorPrefs {
             autonomous_tuning: autonomous_tuning.clone(),
+            last_scan_driver: Some(gwt::IssueMonitorScanDriver {
+                kind: gwt::IssueMonitorScanDriverKind::GuiFrontDoor,
+                pid: u32::MAX,
+                at: "2026-10-17T04:00:00Z".to_string(),
+            }),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
     .expect("seed issue monitor prefs");
+    // The fence's driver-clear write must preserve the profile transaction's inputs.
+    let (fenced, _authority_lease) = {
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        gwt::establish_issue_monitor_authority_fence(
+            &prefs_path,
+            &gwt::IssueMonitorAuthorityFence::current_process(),
+            |_| false,
+        )
+    }
+    .expect("establish exclusive fence");
+    assert!(fenced.last_scan_driver.is_none());
+    assert_eq!(fenced.effect_authority_epoch, 0);
+    assert!(fenced.launch_profile.is_none());
+    assert_eq!(fenced.autonomous_tuning, autonomous_tuning);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -411,19 +570,26 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         LaunchWizardAction::Submit,
         None,
     );
-    let saved_events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
-
-    assert!(saved_events.iter().any(|event| {
-        matches!(
-            &event.event,
-            BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor settings saved" && issue_number.is_none()
+    let saved_events = {
+        // Verify profile contents independently of the host's prefs lock/fsync latency.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        runtime.handle_launch_wizard_action(
+            &runtime.test_context(),
+            LaunchWizardAction::Submit,
+            None,
         )
-    }));
+    };
+
+    assert!(
+        saved_events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::IssueMonitorToast { message, issue_number, .. }
+                    if message == "Issue Monitor settings saved" && issue_number.is_none()
+            )
+        }),
+        "global profile save must commit successfully: {saved_events:#?}"
+    );
     assert!(runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -434,8 +600,9 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         "saving global Issue Monitor settings must not spawn an agent window"
     );
 
-    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
-        .expect("load issue monitor prefs");
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load issue monitor prefs");
+    assert_eq!(prefs.effect_authority_epoch, 1);
+    assert!(prefs.last_scan_driver.is_none());
     let profile = prefs.launch_profile.expect("saved launch profile");
     assert_eq!(profile.agent_id, "codex");
     assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
@@ -937,10 +1104,28 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
         &prefs_path,
         &gwt::IssueMonitorPrefs {
             effect_authority_epoch: u64::MAX,
+            last_scan_driver: Some(gwt::IssueMonitorScanDriver {
+                kind: gwt::IssueMonitorScanDriverKind::GuiFrontDoor,
+                pid: u32::MAX,
+                at: "2026-10-17T04:00:00Z".to_string(),
+            }),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
     .expect("seed max epoch");
+    // The fence's driver-clear write must preserve the overflow rejection inputs.
+    let (fenced, _authority_lease) = {
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        gwt::establish_issue_monitor_authority_fence(
+            &prefs_path,
+            &gwt::IssueMonitorAuthorityFence::current_process(),
+            |_| false,
+        )
+    }
+    .expect("establish exclusive fence");
+    assert!(fenced.last_scan_driver.is_none());
+    assert_eq!(fenced.effect_authority_epoch, u64::MAX);
+    assert!(fenced.launch_profile.is_none());
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let session = sample_ready_agent_launch_wizard_session("tab-1", &repo);
@@ -950,16 +1135,20 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
             .build(),
     ));
 
-    let events = runtime.save_issue_monitor_profile_from_launch_request(
-        session,
-        IssueMonitorProfileSaveContext {
-            client_id: "client-1".to_string(),
-            issue_number: None,
-            pool: Vec::new(),
-            sets: None,
-        },
-        request,
-    );
+    let events = {
+        // Verify the overflow rejection independently of prefs lock/fsync latency.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        runtime.save_issue_monitor_profile_from_launch_request(
+            session,
+            IssueMonitorProfileSaveContext {
+                client_id: "client-1".to_string(),
+                issue_number: None,
+                pool: Vec::new(),
+                sets: None,
+            },
+            request,
+        )
+    };
 
     assert!(!events.iter().any(|event| matches!(
         &event.event,
@@ -982,6 +1171,7 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     assert_eq!(persisted.effect_authority_epoch, u64::MAX);
     assert!(persisted.launch_profile.is_none());
+    assert!(persisted.last_scan_driver.is_none());
 }
 
 #[test]
@@ -1499,6 +1689,8 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
             .build(),
     ));
 
+    // This content assertion must not depend on fsync finishing within the GUI budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let events = runtime.save_issue_monitor_profile_from_launch_request(
         session,
         IssueMonitorProfileSaveContext {
@@ -1510,11 +1702,14 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
         request,
     );
 
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorToast { message, .. }
-            if message == "Issue Monitor settings saved"
-    )));
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, .. }
+                if message == "Issue Monitor settings saved"
+        )),
+        "profile save must commit successfully: {events:?}"
+    );
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     let pool = persisted.launch_profile_pool();
     assert_eq!(

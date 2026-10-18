@@ -1,0 +1,12 @@
+probe_pid=66944
+runtime_rows=5698 invalid_runtime=0 sysinfo_rows=494 kept=143 direct_kept=137 snapshot_only_kept=6 previous_boot=38 host_exact=42 child_exact=11 unique_exact_children=11 neither_exact=101 no_child_pid=60 missing_child_start=60 child_start_unreadable=9 host_start_unreadable=9 historically_retained=12
+boot_epoch=1792115193 exact_host_or_child_cohort=42
+cohort=kept rows=143 loaded=143
+load cohort=kept iterations=8 rows=143 success=1144 missing=0 malformed=0 other=0 checksum=41184 wall_ms=306.845 cpu_ms=312.500
+canonicalize cohort=kept iterations=8 rows=143 success=1144 fallback=0 checksum=9632 wall_ms=56.830 cpu_ms=31.250
+cohort=exact_host_or_child rows=42 loaded=42
+load cohort=exact_host_or_child iterations=8 rows=42 success=336 missing=0 malformed=0 other=0 checksum=12096 wall_ms=190.812 cpu_ms=140.625
+canonicalize cohort=exact_host_or_child iterations=8 rows=42 success=336 fallback=0 checksum=2232 wall_ms=33.233 cpu_ms=15.625
+cohort=existing_nonhistorical rows=12 loaded=12
+load cohort=existing_nonhistorical iterations=8 rows=12 success=96 missing=0 malformed=0 other=0 checksum=3456 wall_ms=47.140 cpu_ms=15.625
+canonicalize cohort=existing_nonhistorical iterations=8 rows=12 success=96 fallback=0 checksum=744 wall_ms=6.330 cpu_ms=0.000

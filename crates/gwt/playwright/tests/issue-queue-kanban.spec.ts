@@ -559,6 +559,50 @@ test("Issue #4862 a live delivered slice stays Active while its window binding i
   await expect(column(page, "queued").locator('[data-issue-number="5"]')).toHaveCount(0);
 });
 
+test("Issue #5491 judgment holds stay outside Active and counts follow live launches", async ({ page }) => {
+  const reason = "Choose the publication scope before work can continue";
+  await page.evaluate(reason => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([42, 43].map(number => ({ number, title: `Decision issue ${number}`, state: "open",
+      labels: [], related_work_refs: [{ id: `work-${number}` }] })));
+    fixture.__queueEvent({ kind: "active_work_projection", projection: { id: "stale-work", agents: [], works: [],
+      unassigned_agents: [], journal_entries: [], active_works: [42, 43].map(number => ({
+        id: `work-${number}`, active_agents: 1, agents: [], works: [],
+      })) } });
+    fixture.__queueConfirm([42], { enabled: true, state: "idle", active_count: 0, max_active_agents: 2 });
+    fixture.__queueInbox([
+      { issue: { number: 42 }, state: "needs_human", error_message: reason },
+      { issue: { number: 43 }, state: "blocked_by_claim" },
+    ]);
+  }, reason);
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0");
+  await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 0/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Idle Q1 A0/2");
+  await expect(row(page, 42).locator(".knowledge-row-badge")).toHaveText("Needs human");
+  await expect(row(page, 42).locator('[data-key="reason"]')).toHaveText(reason);
+  await row(page, 42).locator(".knowledge-row-select").click();
+  await expect(page.locator(".knowledge-detail-title")).toHaveText("Decision issue 42");
+
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([42, 43, 44].map(number => ({ number, title: `Decision issue ${number}`, state: "open",
+      labels: [], related_work_refs: number === 44 ? [] : [{ id: `work-${number}` }] })));
+    fixture.__queueStatus({ state: "active", active_count: 1 });
+    fixture.__queueInbox([
+      { issue: { number: 42 }, state: "needs_human", error_message: "Choose the publication scope before work can continue" },
+      { issue: { number: 43 }, state: "blocked_by_claim" },
+      { issue: { number: 44 }, state: "launching" },
+    ]);
+  });
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 1");
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
+  await expect(column(page, "active").locator('[data-issue-number="44"]')).toBeVisible();
+  await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1/2");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q1 A1/2");
+});
+
 test("Issue #4862 failed launches with no window show their reason outside Active", async ({ page }) => {
   await page.evaluate(() => {
     const fixture = window as any;

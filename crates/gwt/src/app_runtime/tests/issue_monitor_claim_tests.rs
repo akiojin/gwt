@@ -1030,6 +1030,8 @@ fn app_runtime_compatibility_claim_driver_defers_while_scheduled_lease_is_held()
 
 #[test]
 fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt_fence() {
+    // Assert the durable claim result, independently of filesystem speed.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
@@ -1069,6 +1071,8 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
     monitor.record_candidate(issue);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("persist excluded state");
 
+    // Assert fenced state transitions independently of host fsync latency.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     assert_eq!(
         super::super::commit_local_issue_monitor_effect_result(
             &prefs_path,
@@ -3340,6 +3344,8 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
 #[cfg(unix)]
 #[test]
 fn app_runtime_issue_monitor_reconciliation_error_survives_rebase_scan() {
+    // Assert error provenance, independently of the nominal commit budget.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3862,6 +3868,9 @@ fn app_runtime_rebase_keeps_equal_marker_disk_only_fresh_failures() {
 
 #[test]
 fn app_runtime_rebase_recovers_malformed_prefs_from_current_state() {
+    // This asserts durable recovery, not filesystem speed under load.
+    let operation_now = gwt_core::operation_deadline::now();
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(operation_now);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
@@ -5049,6 +5058,133 @@ fn issue_5415_post_ack_startup_timeout_requeues_the_exact_window_without_reusing
 }
 
 #[test]
+fn issue_5642_consumed_delivery_ack_replay_preserves_the_exact_live_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let (mut runtime, recorded, tasks, window_id, result) =
+        queued_agent_completion_fixture(temp.path());
+    let session_id = result.as_ref().unwrap().1.clone();
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = gwt_agent::Session::load(&session_path).unwrap();
+    session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    session.linked_issue_number = Some(42);
+    session.save(&runtime.sessions_dir).unwrap();
+    let delivery_id = "launch:effect-42";
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    monitor.terminal_queue_push(&[42], "operator", "2026-07-02T00:00:00Z");
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Acknowledged launch".into(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        42,
+        "claim-42",
+        "host/session",
+        "effect-42",
+        "2026-07-02T00:00:00Z",
+    ));
+    assert!(monitor.claim_launch_delivery(
+        42,
+        delivery_id,
+        &runtime.issue_monitor_materializer_id,
+        std::process::id(),
+        &window_id,
+        |_| true,
+    ));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(temp.path());
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_delivery_id = Some(delivery_id.into());
+    feedback.issue_monitor_project_root = Some(temp.path().into());
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.clone(), feedback);
+    runtime.handle_launch_complete(window_id.clone(), result);
+    drain_queued_blocking_tasks(&tasks);
+    runtime.handle_agent_launch_prepared(take_prepared_agent_launch(&recorded));
+    let incarnation = runtime.runtimes[&window_id].incarnation;
+    let pane = runtime.runtimes[&window_id].pane.clone();
+    let status_before_ack = gwt_agent::Session::load(&session_path).unwrap().status;
+
+    // The daemon committed the original ACK, but its response was lost. The
+    // GUI still has the same pending ACK ticket and replays its durable steps.
+    assert!(monitor.mark_launch_delivery_materialized(
+        42,
+        delivery_id,
+        &runtime.issue_monitor_materializer_id,
+        &window_id,
+    ));
+    assert!(monitor.mark_launch_delivery_workspace_durable(
+        42,
+        delivery_id,
+        &runtime.issue_monitor_materializer_id,
+        &window_id,
+    ));
+    assert!(monitor.complete_active_launch_delivery(42, &window_id, Some(delivery_id)));
+    assert_eq!(monitor.pending_launch_delivery_id(42), None);
+    assert_eq!(monitor.launch_delivery_id(42).as_deref(), Some(delivery_id));
+    let acknowledged = monitor.prefs();
+    gwt::save_issue_monitor_prefs(&prefs_path, &acknowledged).unwrap();
+    runtime.finish_queued_delivery_acks(&tasks);
+
+    let window_remains = runtime.tracked_window_exists(&window_id);
+    let runtime_identity = runtime
+        .runtimes
+        .get(&window_id)
+        .map(|runtime| (runtime.incarnation, Arc::ptr_eq(&runtime.pane, &pane)));
+    let active_session = runtime
+        .active_agent_sessions
+        .get(&window_id)
+        .map(|active| active.session_id.clone());
+    let session_after_ack = gwt_agent::Session::load(&session_path).unwrap();
+    let prefs_after_ack = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    // Capture the outcome before cleanup so RED cannot leave a PTY behind.
+    runtime.close_window_after_issue_monitor_finalize_events(&window_id);
+    drain_queued_blocking_tasks(&tasks);
+
+    assert!(
+        window_remains,
+        "a consumed delivery is already ACKed, not expired"
+    );
+    assert_eq!(
+        runtime_identity,
+        Some((incarnation, true)),
+        "the exact PTY remains installed"
+    );
+    assert_eq!(active_session.as_deref(), Some(session_id.as_str()));
+    assert_eq!(session_after_ack.status, status_before_ack);
+    assert_eq!(
+        prefs_after_ack.launch_confirmations, acknowledged.launch_confirmations,
+        "replay preserves the exact completed ACK"
+    );
+    assert_eq!(
+        prefs_after_ack.launched_issues,
+        acknowledged.launched_issues
+    );
+    assert_eq!(
+        prefs_after_ack.launch_bindings,
+        acknowledged.launch_bindings
+    );
+    assert_eq!(prefs_after_ack.requeue_audit, acknowledged.requeue_audit);
+    assert!(prefs_after_ack.pending_launch_deliveries.is_empty());
+}
+
+#[test]
 fn issue_5289_launch_worker_finishes_while_pm_prefs_lock_is_held() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -5370,6 +5506,151 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
 }
 
 #[test]
+fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "initial-worker-lifetime",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    let delivery_id = fixture.delivery_id.clone().expect("durable delivery");
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
+        3165,
+        LinkedIssueKind::Spec,
+        Some(delivery_id.clone()),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    // Keep the real initial worker's successful completion queued. It still
+    // owns this placeholder until the GUI consumes that exact generation.
+    // test-hygiene: allow-wall-clock-deadline observe the real worker completion; the bound only fails a stalled fixture.
+    wait_for_recorded_event_with_timeout(
+        "initial launch completion queued",
+        &fixture.recorded_events,
+        Duration::from_secs(60),
+        |events| {
+            events.iter().any(|event| {
+                matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_ok())
+            })
+        },
+    );
+    let window_id = match fixture
+        .runtime
+        .issue_monitor_launch_deliveries
+        .get_mut(&delivery_id)
+        .expect("materializing delivery")
+    {
+        super::super::IssueMonitorLaunchDeliveryState::Materializing {
+            window_id,
+            started_at,
+        } => {
+            // test-hygiene: allow-wall-clock-deadline inject an elapsed TTL without sleeping; worker completion determines replay ordering.
+            *started_at = Instant::now() - Duration::from_secs(61);
+            window_id.clone()
+        }
+        state => panic!("expected materializing delivery, got {state:?}"),
+    };
+    let generation = fixture.runtime.window_lifecycle_generations.lock().unwrap()[&window_id];
+    let inflight = fixture.runtime.inflight_launches.clone();
+    let feedback = fixture.runtime.pending_launch_feedback_contexts[&window_id]
+        .issue_monitor_delivery_id
+        .clone();
+    fixture.runtime.auto_launch_issue_monitor_delivery_events(
+        &fixture.runtime.test_context(),
+        3165,
+        LinkedIssueKind::Spec,
+        Some(delivery_id),
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    let generation_after = fixture
+        .runtime
+        .window_lifecycle_generations
+        .lock()
+        .unwrap()
+        .get(&window_id)
+        .copied();
+    let inflight_after = fixture.runtime.inflight_launches.clone();
+    let feedback_after = fixture
+        .runtime
+        .pending_launch_feedback_contexts
+        .get(&window_id)
+        .and_then(|feedback| feedback.issue_monitor_delivery_id.clone());
+    let agent_windows = fixture.runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| window.preset == WindowPreset::Agent)
+        .count();
+
+    // Wait for every spawned worker before teardown, including a duplicate on
+    // RED. No LaunchComplete is applied, so this test never creates a PTY.
+    let expected_completions =
+        1 + usize::from(generation_after != Some(generation) && !inflight_after.is_empty());
+    // test-hygiene: allow-wall-clock-deadline observe all real workers before temporary-repository teardown, including a duplicate on RED.
+    wait_for_recorded_event_with_timeout(
+        "initial launch workers returned",
+        &fixture.recorded_events,
+        Duration::from_secs(60),
+        |events| {
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::LaunchComplete { .. }
+                    )
+                })
+                .count()
+                >= expected_completions
+        },
+    );
+    let initial_worker_before_refresh = fixture
+        .runtime
+        .initial_launch_workers
+        .contains_key(&window_id);
+    let tab_id = fixture.runtime.tabs[0].id.clone();
+    fixture.runtime.refresh_project_tab_incarnation(&tab_id);
+    let initial_worker_after_refresh = fixture
+        .runtime
+        .initial_launch_workers
+        .contains_key(&window_id);
+    let (spawner, cleanup_tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .close_window_after_issue_monitor_finalize_events(&window_id);
+    drain_queued_blocking_tasks(&cleanup_tasks);
+
+    assert_eq!(
+        generation_after,
+        Some(generation),
+        "a queued initial completion still owns its original window generation"
+    );
+    assert_eq!(
+        inflight_after, inflight,
+        "the original launch remains in flight"
+    );
+    assert_eq!(feedback_after, feedback);
+    assert_eq!(agent_windows, 1);
+    assert!(initial_worker_before_refresh);
+    assert!(
+        !initial_worker_after_refresh,
+        "project incarnation refresh must retire its initial launch worker tracking"
+    );
+    assert!(fixture.runtime.initial_launch_workers.is_empty());
+}
+
+#[test]
 fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_it_stops() {
     let _env_lock = env_test_lock()
         .lock()
@@ -5462,6 +5743,9 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
         }
         state => panic!("expected materializing delivery, got {state:?}"),
     };
+    // The synthetic PTY represents an initial completion already consumed by
+    // the GUI, so retire that exact initial phase at the same transition.
+    runtime.initial_launch_workers.remove(&live_window_id);
     insert_test_pane_runtime(&mut runtime, &live_window_id);
 
     let waiting_replay = runtime.auto_launch_issue_monitor_delivery_events(
@@ -5737,6 +6021,103 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         "restart must ACK the exact saved pane: window={:?}, deliveries={:?}",
         restarted.tabs[0].workspace.persisted().windows,
         acknowledged.pending_launch_deliveries
+    );
+}
+
+#[test]
+fn issue_5642_delivery_replay_does_not_adopt_another_issue_reusing_its_window_id() {
+    assert_delivery_replay_preserves_foreign_window(true);
+}
+
+#[test]
+fn issue_5642_unmaterialized_delivery_replay_does_not_close_a_reused_window_id() {
+    assert_delivery_replay_preserves_foreign_window(false);
+}
+
+fn assert_delivery_replay_preserves_foreign_window(materialized: bool) {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let mut tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let raw_id = tab.workspace.persisted().windows[0].id.clone();
+    tab.workspace.set_linked_issue_number(&raw_id, Some(43));
+    let window_id = combined_window_id("tab-1", &raw_id);
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        max_active: 3,
+        ..Default::default()
+    });
+    let now = Utc::now().to_rfc3339();
+    monitor.terminal_queue_push(&[42], "operator", &now);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Replayed launch reservation".into(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(42, "claim-42", "host/session", "effect-42", &now));
+    let delivery_id = "launch:effect-42";
+    assert!(monitor.claim_launch_delivery(
+        42,
+        delivery_id,
+        &runtime.issue_monitor_materializer_id,
+        std::process::id(),
+        &window_id,
+        |_| true,
+    ));
+    if materialized {
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            delivery_id,
+            &runtime.issue_monitor_materializer_id,
+            &window_id,
+        ));
+    }
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    runtime.auto_launch_issue_monitor_delivery_events(
+        &runtime.test_context(),
+        42,
+        LinkedIssueKind::Issue,
+        Some(delivery_id.into()),
+        gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    );
+    runtime.finish_queued_delivery_acks(&tasks);
+
+    assert!(
+        runtime.tracked_window_exists(&window_id),
+        "replaying an old reservation must preserve another Issue's replacement pane"
+    );
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .window(&raw_id)
+            .unwrap()
+            .linked_issue_number,
+        Some(43),
+    );
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    assert_ne!(
+        monitor.launched_window_issue(&window_id),
+        Some(42),
+        "a reused ID does not prove that the pane belongs to the old launch"
     );
 }
 

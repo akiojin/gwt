@@ -2775,9 +2775,9 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         let (window_id, result) = recorded
             .iter()
             .find_map(|event| match recorded_project_payload(event) {
-                UserEvent::LaunchComplete { window_id, result } => {
-                    Some((window_id.clone(), result.as_ref().clone()))
-                }
+                UserEvent::LaunchComplete {
+                    window_id, result, ..
+                } => Some((window_id.clone(), result.as_ref().clone())),
                 _ => None,
             })
             .expect("launch completion");

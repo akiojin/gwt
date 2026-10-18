@@ -240,6 +240,24 @@ impl WorktreeManager {
         }
     }
 
+    /// Branch creation can write shared config even inside `git worktree add`.
+    /// Keep that write and explicit upstream configuration in one critical
+    /// section across branches, processes, and linked worktree entry points.
+    fn lock_branch_configuration(&self) -> Result<gwt_core::operation_deadline::NamedFileLock> {
+        let root = main_worktree_root(&self.repo_path)?;
+        let common_dir = gwt_core::repo_hash::repository_common_dir(&root).ok_or_else(|| {
+            GwtError::Git(format!(
+                "cannot resolve shared git directory: {}",
+                root.display()
+            ))
+        })?;
+        gwt_core::operation_deadline::NamedFileLock::acquire_quiet(
+            &common_dir.join("gwt-worktree-materialization.lock"),
+            "worktree branch configuration",
+        )
+        .map_err(|error| GwtError::Git(format!("lock worktree branch configuration: {error}")))
+    }
+
     /// List all worktrees for this repository.
     pub fn list(&self) -> Result<Vec<WorktreeInfo>> {
         let started = std::time::Instant::now();
@@ -638,6 +656,7 @@ impl WorktreeManager {
         base_ref: &str,
         path: &Path,
     ) -> Result<ResidentBranchMaterialization> {
+        let _configuration_lock = self.lock_branch_configuration()?;
         if path.exists() {
             return Err(GwtError::Git(format!(
                 "worktree path already exists: {}",
@@ -661,10 +680,10 @@ impl WorktreeManager {
                 ResidentBranchMaterialization::RetainedBranchHead { head: head.clone() },
             ),
         };
-        let output = gwt_core::process::run_git_logged(&args, Some(&self.repo_path))
+        let output = run_git_observing_operation_deadline(&args, &self.repo_path)
             .map_err(|e| GwtError::Git(format!("worktree add {branch}: {e}")))?;
-        if !output.status.success() {
-            return Err(GwtError::Git(command_stderr(&output)));
+        if !output.success {
+            return Err(GwtError::Git(git_output_stderr(&output)));
         }
         Ok(materialization)
     }
@@ -977,6 +996,7 @@ impl WorktreeManager {
 
     /// Create a new worktree at `path`, creating `new_branch` from `base_branch`.
     pub fn create_from_base(&self, base_branch: &str, new_branch: &str, path: &Path) -> Result<()> {
+        let _configuration_lock = self.lock_branch_configuration()?;
         if path.exists() {
             return Err(GwtError::Git(format!(
                 "worktree path already exists: {}",
@@ -985,7 +1005,7 @@ impl WorktreeManager {
         }
 
         let path_arg = path_arg_for_git(path);
-        let output = gwt_core::process::run_git_logged(
+        let output = run_git_observing_operation_deadline(
             &[
                 "worktree",
                 "add",
@@ -994,11 +1014,11 @@ impl WorktreeManager {
                 path_arg.as_str(),
                 base_branch,
             ],
-            Some(&self.repo_path),
+            &self.repo_path,
         )
         .map_err(|e| GwtError::Git(format!("worktree add -b: {e}")))?;
 
-        if !output.status.success() {
+        if !output.success {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(GwtError::Git(stderr));
         }
@@ -1088,9 +1108,10 @@ impl WorktreeManager {
         local_branch: &str,
         path: &Path,
     ) -> Result<()> {
+        let _configuration_lock = self.lock_branch_configuration()?;
         let remote_ref = normalize_remote_ref(remote_ref);
         let path_arg = path_arg_for_git(path);
-        let output = gwt_core::process::run_git_logged(
+        let output = run_git_observing_operation_deadline(
             &[
                 "worktree",
                 "add",
@@ -1099,21 +1120,21 @@ impl WorktreeManager {
                 path_arg.as_str(),
                 &remote_ref,
             ],
-            Some(&self.repo_path),
+            &self.repo_path,
         )
         .map_err(|e| GwtError::Git(format!("worktree add -b from remote: {e}")))?;
 
-        if !output.status.success() {
+        if !output.success {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(GwtError::Git(stderr));
         }
 
-        let output = gwt_core::process::run_git_logged(
+        let output = run_git_observing_operation_deadline(
             &["branch", "--set-upstream-to", &remote_ref, local_branch],
-            Some(path),
+            path,
         )
         .map_err(|e| GwtError::Git(format!("set-upstream-to {remote_ref}: {e}")))?;
-        if !output.status.success() {
+        if !output.success {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(GwtError::Git(stderr));
         }
@@ -3828,6 +3849,100 @@ prunable gitdir file points to non-existent location
             !windows_process_alive(pid),
             "descendant {pid} survived the fallback timeout tree kill"
         );
+    }
+
+    #[test]
+    fn concurrent_materialization_serializes_shared_branch_configuration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let bare = tmp.path().join("repo.git");
+        std::fs::create_dir_all(&source).unwrap();
+        init_git_repo(&source);
+        git_commit_allow_empty(&source, "initial");
+        git_checkout_new_branch(&source, "develop");
+        init_bare_git_repo(&bare);
+        git_add_remote(&source, "origin", &bare);
+        git_push_branch(&source, "develop");
+        git_add_remote(&bare, "origin", &source);
+        git_update_ref(&bare, "refs/remotes/origin/develop", &git_head(&source));
+        let linked = tmp.path().join("linked");
+        WorktreeManager::new(&bare)
+            .create_from_base("refs/heads/develop", "fixture", &linked)
+            .unwrap();
+
+        let barrier = std::sync::Barrier::new(12);
+        let results = thread::scope(|scope| {
+            let workers: Vec<_> = (0..12)
+                .map(|index| {
+                    let repo = if index % 2 == 0 { &bare } else { &linked };
+                    let path = tmp.path().join(format!("work-{index}"));
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let manager = WorktreeManager::new(repo);
+                        let branch = format!("work/concurrent-{index}");
+                        let _deadline =
+                            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                                // test-hygiene: allow-wall-clock-deadline Exercise the actual 120s launch budget (Issue #5651 AC-2).
+                                Instant::now() + Duration::from_secs(120),
+                            );
+                        barrier.wait();
+                        match index % 3 {
+                            0 => manager.create_from_remote("origin/develop", &branch, &path),
+                            1 => manager.create_from_base("origin/develop", &branch, &path),
+                            _ => manager
+                                .create_on_resident_branch(&branch, "origin/develop", &path)
+                                .map(|_| ()),
+                        }
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        let head = git_head(&source);
+        for index in 0..12 {
+            let path = tmp.path().join(format!("work-{index}"));
+            let refs = gwt_core::process::run_git_logged(
+                &[
+                    "rev-parse",
+                    "HEAD",
+                    "@{upstream}",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
+                Some(&path),
+            )
+            .unwrap();
+            assert!(refs.status.success(), "{refs:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&refs.stdout).trim(),
+                format!("{head}\n{head}\nrefs/remotes/origin/develop")
+            );
+        }
+    }
+
+    #[test]
+    fn materialization_rejects_expired_deadline_before_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        git_commit_allow_empty(tmp.path(), "initial");
+        let manager = WorktreeManager::new(tmp.path());
+        let path = tmp.path().join("work");
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now());
+        let error = manager
+            .create_from_base("HEAD", "work/expired", &path)
+            .unwrap_err();
+        assert!(error.to_string().contains("deadline expired"), "{error}");
+        assert!(!path.exists());
+        drop(_deadline);
+        assert!(manager
+            .resolve_optional_commit(tmp.path(), "refs/heads/work/expired")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

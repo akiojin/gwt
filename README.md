@@ -283,11 +283,19 @@ Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
 `debug!` to avoid drowning the stream with health probes.
 
-Lifecycle: the running `gwt` process owns the agent / PTY lifetime. Closing a
-browser tab does **not** stop running agents — only `Ctrl-C` / `SIGTERM` asks
-the server to drain PTYs and exit gracefully. The tray-resident process is one
-per OS-login user; a second `gwt` invocation prints the existing URL and exits
-instead of starting a second server.
+Lifecycle: the running `gwt` process owns the agent / PTY lifetime. In the default
+tray mode, closing a browser tab leaves the project and its running agents active;
+reopen its project URL to return to the same workspace. To stop a project, choose
+**Close Project**
+in its page header or beside it in the Hub's open-project list. If agents are
+running, a confirmation dialog lists them: **Cancel** keeps them running, while
+**Close Project** stops that project's runtime and agents. Other projects keep
+running, and every browser tab showing the closed project returns to the Hub.
+
+To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
+`SIGTERM`; gwt drains its PTYs and exits gracefully. The tray-resident process
+is one per OS-login user; a second `gwt` invocation prints the existing URL and
+exits instead of starting a second server.
 
 gwtd operations run through stdin JSON envelopes without opening a GUI window:
 
@@ -433,6 +441,8 @@ Common windows include:
   Application settings and project settings are labeled separately. Open
   `Issues` for Autonomous, Max active, queue refill and allowed labels, or
   the same Issues section to edit launch profiles and candidate order/preferences.
+  Candidate edits save automatically when committed; text fields save when focus
+  leaves the field. Rejected values stay visible with an inline error.
   Settings has grouped Application/Project navigation and names the target project.
   `System > Auto-apply updates` applies across all projects
   when at least one open project has Autonomous enabled. Legacy project
@@ -441,6 +451,11 @@ Common windows include:
   Change the preference in the GUI or ask the PM to use `update.settings.set`
   with `auto_apply_updates`; `update.settings.status` reports its state.
   It is no longer an Issue Monitor setting.
+  `Restart now` opens a confirmation showing active agent counts, pending
+  claims, verification leases, and affected Issues. When work is active,
+  `Apply after all agents finish` is the default choice; it holds new launches
+  and waits for the existing work to finish. Confirming `Restart now` instead
+  stops active agents and restarts gwt immediately.
 
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
@@ -789,7 +804,7 @@ unchanged.
   checks apply: manual close must be allowed and that Work must have no active
   agents. Closing records terminal history and retains its branch and worktree.
 
-You can ask the PM to create and bind a GitHub Discussion, adjust required checks
+You can ask the PM to enable Board Discussion sharing, create a standalone Discussion, adjust required checks
 on `develop` or `main`, or change global Auto-apply updates. These actions use a
 recorded instruction scoped to the requested action or an OS-native approval
 dialog. Choose **Approve once** or remember approval for that repository and
@@ -956,14 +971,18 @@ For isolation and repeatable agent sessions, gwt can manage each project as a
 └── .gwt/project.toml       # gwt-managed project metadata
 ```
 
-`gwt` auto-creates this layout when you choose `Clone from GitHub...` from
-either the Project Picker (shown when no tab is open) or the top toolbar's
-`Open Project ▾` split-button dropdown (always reachable from an active
-project). The clone modal accepts a GitHub HTTPS/SSH URL or lets you search
+`gwt` auto-creates this layout when you choose `Clone from GitHub…` from
+the Hub or system tray. The clone modal accepts a GitHub HTTPS/SSH URL or lets you search
 repositories through `gh search repos`, then asks for a destination parent
 folder. The new project is created at `<parent>/<project>/`, with a bare
 `<project>.git/` repository and an initial worktree on `develop` when it
 exists, otherwise on the remote default branch.
+
+Clone reserves a browser tab when you submit and opens the project's URL there
+after success, keeping the Hub available. If popups are blocked or you close
+that tab, use the completion link in the Hub. Failure closes the reserved tab
+and shows the reason. If the repository is already registered in Open or
+Recent, cloning is refused and **Open existing project** opens its existing URL.
 
 Existing Normal Git repositories (`.git/` directly under the project
 directory) are recognised so a migration to the Nested Bare + Worktree layout
@@ -983,17 +1002,13 @@ worktree without restarting the app.
 
 ## Share local Board milestones through GitHub Discussions
 
-To share `decision`, `blocked`, and `handoff` posts across machines, ask the PM to
-create a Discussion with `discussion.create` and `sync_board:true`. To connect
-an existing Discussion, use `board.config.set` with its `github_discussion`
-number; this also recovers a failed binding without creating a duplicate.
-If the effective Board provider is not Local, explicitly request
-`board_provider:"local"` on creation or `provider:"local"` on binding. The
-project's provider override and binding are saved together; global and other
-projects' provider settings are preserved. Without this explicit switch,
-synchronized creation is refused before creating a remote Discussion.
-Both operations use the current repository. Alternatively, keep the **Local**
-Board provider and add a binding to `.gwt/work/board.toml`:
+To share `decision`, `blocked`, and `handoff` posts across machines, enable
+Discussion sharing for the repository through the PM's scoped `board.config.set`
+operation, with `category:"General"` (or another category name). No Discussion
+number or manually created Discussion is needed. If the effective Board provider
+is not Local, include `provider:"local"` to switch this project explicitly.
+The operation preserves global and other projects' settings and requires the
+existing scoped authority. Alternatively, opt in with `.gwt/work/board.toml`:
 
 ```toml
 provider = "local"
@@ -1001,26 +1016,47 @@ provider = "local"
 [github_discussion]
 owner = "your-org"
 repo = "your-repo"
-number = 123
+category = "General" # optional; this is the default
 ```
 
-Use the same existing Discussion on each machine, with GitHub Discussions enabled
-and `gh` authenticated for read/write access. Board reads and posts schedule
-background synchronization at most once a minute. To synchronize explicitly and
-inspect the latest result, send `{"schema_version":1,"operation":"board.sync","params":{}}`
-to `gwtd` on stdin. `status` and `claim` stay local; the shared kinds cannot be
-changed through configuration. Imported posts appear in the existing Board feed.
-Only comments whose GitHub author association is `OWNER`, `MEMBER`, or
-`COLLABORATOR` are imported; other or unknown associations are ignored. Choose a
-repository whose owner, organization members, and collaborators you trust with
-local coordination, since imported posts can open and resolve escalations.
+Use the same repository and category on each machine, enable GitHub Discussions,
+and authenticate `gh` with read/write access. Each shared Board root becomes
+one Discussion, titled with its owner Issue number and a short summary. Its body
+contains the Board entry ID and owner Issue links. Shared replies become comments
+on that Discussion. `status` and `claim` stay local, including replies; the shared
+kinds cannot be changed through configuration. A reply whose root is missing from durable history or
+not shareable stays local. Intermediate local-only or archived parents do not
+prevent shared descendants from being delivered. Legacy `number` settings remain readable but no longer
+select a single destination; new posts use topic Discussions. Existing aggregate
+Discussions are left intact. Creation is restricted to the source machine,
+using locally recorded post origin or the legacy root's machine-local Session
+history. Legacy roots whose origin cannot be proven stay local with a diagnostic;
+new local roots posted after opt-in record their source automatically. This
+avoids duplicate topic creation when multiple machines upgrade together.
 
-Synchronization is best effort: it sends the current local window of up to 500
-posts, so older unsent posts that leave that window during a long outage are not
-backfilled. Rate limits, expired authentication, and network errors leave the
-local Board usable and are reported by `board.sync`; failures retry after five
-minutes, subject to the shared GitHub budget. An offline peer receives saved
-comments when it next synchronizes. Remove `[github_discussion]` to disable sharing.
+Board reads and posts schedule background synchronization at most once a minute.
+To synchronize explicitly and inspect diagnostics, send
+`{"schema_version":1,"operation":"board.sync","params":{}}` to `gwtd` on stdin.
+Imported posts appear in the existing Board feed. Only Discussion roots and
+comments whose GitHub author association is `OWNER`, `MEMBER`, or `COLLABORATOR`
+are imported; other or unknown associations are ignored. Plain trusted comments
+become Board replies with stable remote IDs. Choose a repository whose owner,
+organization members, and collaborators you trust with local coordination,
+since encoded imported posts can open and resolve escalations. In a public
+repository, shared Board content is public.
+
+Synchronization is bounded best effort. It tracks up to 50 topic Discussions;
+additional topics remain local and `board.sync` reports the limit. Each tick
+reads one repository page and up to five topics in rotation, and creates/posts
+at most five times. Repository discovery must finish before any creation, so a
+lost creation response is reconciled by Board entry ID before retrying. The
+existing GitHub budget records server-reported GraphQL cost and can defer work.
+Outbound candidates come from the current local window of up to 500 posts;
+older unsent posts that leave that window during a long outage are not backfilled.
+Rate limits, expired authentication, and network errors leave the local Board
+usable and are reported by `board.sync`; failures retry after five minutes,
+subject to the shared budget. An offline peer receives saved posts on a later
+synchronization. Remove `[github_discussion]` to disable sharing.
 
 ## Board providers (Local / Slack / Teams)
 

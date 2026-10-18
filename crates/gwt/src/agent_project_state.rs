@@ -3783,7 +3783,6 @@ fn validated_workspace_recovery_session_with_terminal_kind(
     })? {
         return Ok(None);
     }
-    let recovery_context = resolve_execution_recovery_context(invocation_cwd, session_id)?;
     let session = load_session_for_mutation(session_id)?;
     if session.id != session_id {
         return Err(mutation_error(format!(
@@ -3807,7 +3806,33 @@ fn validated_workspace_recovery_session_with_terminal_kind(
             "durable Session {session_id} has no execution binding"
         ))
     })?;
-    let identity = validate_host_session_identity(recovery_context.worktree(), &session)?;
+    // Validate this Session's repository, branch and exact worktree once.
+    // Resolving a recovery context first repeats all those Git checks, which
+    // makes workspace.ensure scale with subprocess latency rather than Work data.
+    let identity = validate_host_session_identity(&session.worktree_path, &session)?;
+    let invocation = canonicalize_mutation_path(invocation_cwd, "recovery invocation scope")?;
+    if invocation != identity.project_state_root {
+        if !invocation.starts_with(&identity.worktree_identity) {
+            return Err(mutation_error(format!(
+                "Session cwd mismatch for Session {session_id}: recovery must run from Project State root {} or within exact worktree {}, got {}",
+                identity.project_state_root.display(),
+                identity.worktree_identity.display(),
+                invocation.display(),
+            )));
+        }
+        // The exact root was checked above. Nested directories still need Git
+        // discovery so a nested repository cannot inherit its parent's authority.
+        if invocation != identity.worktree_identity {
+            let invocation_git_root = git_toplevel(&invocation, "recovery invocation scope")?;
+            if invocation_git_root != identity.worktree_identity {
+                return Err(mutation_error(format!(
+                    "Session worktree mismatch for Session {session_id}: recovery invocation resolves to {}, expected {}",
+                    invocation_git_root.display(),
+                    identity.worktree_identity.display(),
+                )));
+            }
+        }
+    }
     let binding_validation = terminal_kind.map_or_else(
         || {
             validate_projection_execution_binding_authority(

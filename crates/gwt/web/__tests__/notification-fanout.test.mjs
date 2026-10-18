@@ -14,6 +14,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_COALESCE_KINDS } from "../socket-receive-dispatcher.js";
+import { createUiStateStore } from "../ui-state-store.js";
+import { notificationForTransition } from "../agent-completion-notifications.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -74,7 +76,11 @@ function recordCalls(snippet) {
 // --- T-015: issue_monitor_toast fan-out (FR-011 / FR-012, Sc 2) ---
 
 test("issue_monitor_toast records into the notification center with the Issue Monitor title and issue suffix", () => {
-  const block = caseBlock(appSource, "issue_monitor_toast");
+  const receiver = caseBlock(appSource, "issue_monitor_toast");
+  assert.match(receiver, /issueMonitorNotificationModel\.update\(\(\) => \(\{ \.\.\.event \}\)\)/);
+  assert.doesNotMatch(receiver, /notificationCenter\.record/);
+  const block = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
+  assert.ok(block, "Monitor notifications must be recorded by a model subscriber");
   const calls = recordCalls(block);
   assert.equal(calls.length, 1, "exactly one history record per event");
   const call = calls[0];
@@ -89,7 +95,30 @@ test("issue_monitor_toast records into the notification center with the Issue Mo
   // FR-011: the history record must not be gated by any display path.
   const recordAt = block.indexOf("notificationCenter.record(");
   const firstIf = block.indexOf("if (");
-  assert.ok(firstIf < 0 || recordAt < firstIf, "record() runs before any display gating");
+  assert.match(block, /if \(!event\) return;/, "initial null state creates no history entry");
+  assert.ok(firstIf < recordAt, "only the initial null state gates recording");
+});
+
+test("Monitor model snapshots are immutable and repeated events each reach history once", () => {
+  const initialization = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
+  assert.ok(initialization, "Monitor notification model must exist");
+  const records = [];
+  const { model, receive } = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", `
+    ${initialization}
+    return { model: issueMonitorNotificationModel, receive(event) {
+      ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')}
+    }};
+  `)(createUiStateStore, notificationForTransition, { record: notice => records.push(notice) });
+  assert.equal(records.length, 0);
+  const event = { kind: "issue_monitor_toast", level: "error", message: "retry", issue_number: 5016 };
+  receive(event);
+  const first = model.read();
+  event.message = "changed by caller";
+  assert.equal(first.message, "retry");
+  assert.ok(Object.isFrozen(first));
+  receive(first);
+  assert.equal(records.length, 2, "identical notifications must not be coalesced");
+  assert.deepEqual(records.map(record => record.message), ["retry", "retry"]);
 });
 
 // --- T-017: completion / attention / board-mention seams (FR-011, Sc 3, Sc 7) ---

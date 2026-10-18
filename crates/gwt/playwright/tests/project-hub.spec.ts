@@ -8,6 +8,63 @@ import { withLiveGwtBackendLock } from "./_helpers/live-gwt";
 const projectA = { id: "tab-a", project_key: "0123456789abcdef", title: "Alpha", kind: "git" };
 const projectB = { id: "tab-b", project_key: "fedcba9876543210", title: "Beta", kind: "git" };
 
+test("live Clone opens the committed Project tab and offers an existing Project on duplicate", async ({ page, context }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  const sources = process.env.GWT_PLAYWRIGHT_CLONE_SOURCES;
+  const destinations = process.env.GWT_PLAYWRIGHT_CLONE_DESTINATIONS;
+  test.skip(!base || !sources || !destinations, "Requires the isolated local Clone fixture");
+  await withLiveGwtBackendLock(base!, testInfo, async () => {
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    const errors = collectBrowserErrors(page);
+    const otherHub = await context.newPage();
+    const otherErrors = collectBrowserErrors(otherHub);
+    let foreignCloneEvents = 0;
+    otherHub.on("websocket", (socket) => socket.on("framereceived", ({ payload }) => {
+      try { if (JSON.parse(String(payload)).kind.startsWith("clone_project_")) foreignCloneEvents += 1; }
+      catch { /* Non-JSON frames are not Clone replies. */ }
+    }));
+    let project: Page | undefined;
+    let duplicate: Page | undefined;
+    try {
+      await otherHub.goto(new URL("/?action=clone", base!).href);
+      await expect(otherHub.getByRole("dialog", { name: "Clone Project" })).toBeVisible();
+      await page.goto(new URL("/?action=clone", base!).href);
+      const dialog = page.getByRole("dialog", { name: "Clone Project" });
+      await expect(dialog).toBeVisible();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.locator("#clone-project-url-input").fill(`${sources}/clone-${theme}`);
+      await page.locator("#clone-project-parent-input").fill(`${destinations}/${theme}`);
+      [project] = await Promise.all([page.waitForEvent("popup"), page.locator("#clone-project-start").click()]);
+      const projectErrors = collectBrowserErrors(project);
+      await expect(project).toHaveURL(/\/p\/[a-f0-9]{16}$/, { timeout: 60_000 });
+      await expect(project.locator("#close-project-button")).toBeVisible();
+      await expect(project.locator("#app")).toBeVisible();
+      await expect(project).toHaveTitle(new RegExp(`clone-${theme}`));
+      await expect(project.locator("html")).toHaveAttribute("data-theme", theme);
+      await expect(dialog).toBeHidden();
+      await expect(page.locator("[data-hub]")).toBeVisible();
+      await expect(page.locator(".gwt-hub__notice a")).toHaveAttribute("href", new URL(project.url()).pathname);
+      await expect(otherHub.getByRole("dialog", { name: "Clone Project" })).toBeVisible();
+      await expect(otherHub.locator(".gwt-hub__notice")).toBeHidden();
+      expect(foreignCloneEvents).toBe(0);
+      await project.screenshot({ path: testInfo.outputPath("cloned-project.png") });
+
+      await page.locator('[data-hub-action="clone"]').click();
+      [duplicate] = await Promise.all([page.waitForEvent("popup"), page.locator("#clone-project-start").click()]);
+      await expect.poll(() => duplicate!.isClosed()).toBe(true);
+      await expect(dialog).toContainText(/already registered/i);
+      await expect(dialog.getByRole("link", { name: "Open existing project" })).toHaveAttribute("href", new URL(project.url()).pathname);
+      await page.screenshot({ path: testInfo.outputPath("clone-duplicate.png") });
+      expect([...errors, ...otherErrors, ...projectErrors]).toEqual([]);
+      expect(foreignCloneEvents).toBe(0);
+    } finally {
+      if (duplicate && !duplicate.isClosed()) await duplicate.close();
+      if (project && !project.isClosed()) await project.close();
+      await otherHub.close();
+    }
+  });
+});
+
 test("live isolated Hub opens a manual path and acknowledges an already-open Project", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   const projectRoot = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT;
