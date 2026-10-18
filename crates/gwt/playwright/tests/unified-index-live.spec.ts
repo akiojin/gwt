@@ -19,7 +19,7 @@ test("Issue search returns ordinary Issues and SPECs from the real unified index
     await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
     await gotoLiveGwt(page, base, { enableTestBridge: true });
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-    await page.locator('[data-surface="issues"]').click();
+    await page.locator('button[data-surface="issues"]').click();
     const issues = page.locator('.workspace-window[data-preset="settings"] [data-settings-panel="issues"]');
     await expect(issues.locator(".issue-bridge-root")).toBeVisible();
     // Both titles deliberately omit the query: a cache-backed exact-title
