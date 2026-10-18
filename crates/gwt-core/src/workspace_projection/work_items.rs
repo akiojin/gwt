@@ -237,6 +237,26 @@ impl WorkEvent {
                 .is_some_and(|parent| successor_work_id(parent) == self.work_item_id)
     }
 
+    /// A fresh authenticated activation may start a new owner's lifetime
+    /// after foreign terminal history occupied the branch's canonical ID.
+    /// Ordinary Start events never grant this owner-boundary authority.
+    pub fn is_owner_successor(&self) -> bool {
+        self.kind == WorkEventKind::Start
+            && self.id == format!("owner-successor-{}", self.work_item_id)
+            && self.agent_session_id.is_some()
+            && self.is_successor_lineage_anchor()
+            && self
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.branch.as_deref())
+                .and_then(work_owner_for_branch)
+                .zip(self.owner.as_deref())
+                .is_some_and(|(branch_owner, owner)| {
+                    branch_owner == owner
+                        || can_upgrade_work_owner(Some(&branch_owner), Some(owner))
+                })
+    }
+
     pub fn new(
         kind: WorkEventKind,
         work_item_id: impl Into<String>,
