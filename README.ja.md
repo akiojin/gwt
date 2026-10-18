@@ -1737,6 +1737,11 @@ secondary limit のローカル推定（GitHub は公開しないため、この
 `~/.gwt/github-budget/` の spawn ledger から近似）、最新の rate-limit 拒否、
 そして定期読み取りが今受ける間引き判定が含まれます。
 
+source 内訳には、継続ページも含めて `issue-cache.refresh` や
+`issue-monitor.queued-issues` などの呼び出し元名が表示されます。Monitor の
+キャッシュ更新に失敗した場合、一般一覧の取得済みページを既存の15分の期限内で再利用します。
+キュー一覧と明示的な更新は、引き続きリモートから取得します。
+
 ### リリース手順
 
 リリースは GitHub Actions の **Prepare Release** ワークフロー（Actions →

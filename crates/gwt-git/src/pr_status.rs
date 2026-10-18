@@ -3140,8 +3140,19 @@ where
 fn spawn_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
     let hub = gwt_core::process_console::global();
     let label = format!("gh {}", args.join(" "));
-    let options =
+    let mut options =
         gwt_core::process_console::SpawnOptions::new(label.clone()).current_dir(repo_path);
+    if let ["api", path, ..] = args {
+        if path.contains("/pulls?") {
+            options = options.github_caller(if path.contains("state=closed") {
+                "pr-status.closed-pulls"
+            } else if path.contains("state=open") {
+                "pr-status.open-pulls"
+            } else {
+                "pr-status.pulls"
+            });
+        }
+    }
     let output = gwt_core::process_console::spawn_logged_blocking(
         &hub,
         gwt_core::process_console::ProcessKind::Gh,

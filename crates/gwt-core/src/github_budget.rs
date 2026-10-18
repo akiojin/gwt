@@ -281,6 +281,14 @@ pub fn spawn_source<S: AsRef<str>>(args: &[S]) -> String {
     format!("{} {shape}", process_origin())
 }
 
+/// Attribute an otherwise identical command shape to a stable internal caller.
+/// Callers should use fixed labels rather than per-request identifiers so the
+/// budget breakdown remains bounded. Unlabelled and existing ledger records
+/// retain the source produced by [`spawn_source`].
+pub fn spawn_source_for_caller<S: AsRef<str>>(args: &[S], caller: &str) -> String {
+    format!("{} [{caller}]", spawn_source(args))
+}
+
 /// SPEC #4093 FR-004: the source label for a call this process makes over
 /// HTTP (the `gwt-github` client) rather than through a `gh` spawn, in the
 /// same shape as [`spawn_source`] so the two transports line up in a

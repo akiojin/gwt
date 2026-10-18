@@ -623,6 +623,34 @@ fn spawn_source_names_the_process_and_the_gh_command_shape() {
 }
 
 #[test]
+fn explicit_callers_keep_identical_requests_separate_from_legacy_sources() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = BudgetLedger::at(dir.path());
+    let args = ["api", "https://api.github.com/repos/o/r/issues?page=2"];
+    let legacy = github_budget::spawn_source(&args);
+    let options = gwt_core::process_console::SpawnOptions::new("gh api issues");
+    assert!(options.github_caller.is_none());
+    let options = options.github_caller("issue-monitor.issues");
+    let monitor = github_budget::spawn_source_for_caller(
+        &args,
+        options.github_caller.as_deref().expect("explicit caller"),
+    );
+    let refresh = github_budget::spawn_source_for_caller(&args, "issue-cache.refresh");
+    assert_eq!(monitor, format!("{legacy} [issue-monitor.issues]"));
+    assert_eq!(refresh, format!("{legacy} [issue-cache.refresh]"));
+    for source in [&monitor, &monitor, &refresh, &legacy] {
+        ledger.record_spawn_from(GitHubQuota::Rest, source, at(0));
+    }
+    let snapshot = ledger.snapshot(at(30));
+    let core = &snapshot.local["core"];
+    assert_eq!(core.calls_last_minute, 4);
+    for (source, calls) in [(&monitor, 2), (&refresh, 1), (&legacy, 1)] {
+        assert_eq!(core.sources_last_minute[source], calls);
+        assert_eq!(core.points_last_hour_by_source[source], calls);
+    }
+}
+
+#[test]
 fn budget_status_names_the_throttle_the_backoff_and_the_sources() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ledger = BudgetLedger::at(dir.path());

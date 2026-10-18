@@ -35,6 +35,19 @@ pub(crate) fn cached_list_response_with(
     now: DateTime<Utc>,
     fetch: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
+    cached_list_response_at_with(cache_dir, key, now, LIST_CACHE_TTL_SECS, fetch)
+        .map(|(_, stdout)| stdout)
+}
+
+/// Cache a list within the caller's freshness limit and return its acquisition
+/// time, so a failed full refresh cannot renew the age of reused pages.
+pub fn cached_list_response_at_with(
+    cache_dir: &Path,
+    key: &str,
+    now: DateTime<Utc>,
+    ttl_secs: i64,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<(DateTime<Utc>, String), String> {
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
     let path = cache_dir.join(format!("{:016x}.json", hasher.finish()));
@@ -43,11 +56,9 @@ pub(crate) fn cached_list_response_with(
         .and_then(|bytes| serde_json::from_slice::<CachedListResponse>(&bytes).ok())
     {
         let age = now.signed_duration_since(cached.fetched_at).num_seconds();
-        if cached.key == key
-            && (0..LIST_CACHE_TTL_SECS).contains(&age)
-            && valid_list_response(&cached.stdout)
+        if cached.key == key && (0..ttl_secs).contains(&age) && valid_list_response(&cached.stdout)
         {
-            return Ok(cached.stdout);
+            return Ok((cached.fetched_at, cached.stdout));
         }
     }
     // Expired or unreadable entries never hide a failed live read. Cache only
@@ -64,7 +75,7 @@ pub(crate) fn cached_list_response_with(
             let _ = gwt_core::atomic_file::write_atomic(&path, &bytes);
         }
     }
-    Ok(stdout)
+    Ok((now, stdout))
 }
 
 fn valid_list_response(stdout: &str) -> bool {
@@ -297,6 +308,57 @@ fn text(row: &Value, keys: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_5730_failed_refresh_pages_keep_their_original_freshness() {
+        let cache = tempfile::tempdir().unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut calls = 0;
+        // Two readers retry the same ten-page refresh every 30 seconds after
+        // downstream work fails. Nine continuation pages caused `https:` spend.
+        for tick in 0..120 {
+            let now = start + chrono::Duration::seconds(tick * 30);
+            for _reader in 0..2 {
+                for page in 1..=10 {
+                    let (fetched_at, _) = cached_list_response_at_with(
+                        cache.path(),
+                        &format!("page-{page}"),
+                        now,
+                        900,
+                        || {
+                            calls += 1;
+                            Ok("HTTP/2.0 200 OK\n\r\n[]".into())
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        fetched_at,
+                        start + chrono::Duration::seconds(tick / 30 * 900)
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            calls, 40,
+            "four acquisitions per page per hour, shared by readers"
+        );
+        println!("Issue #5730 replay: 2 readers, 120 scans/hour, 10 general pages: 2400 -> {calls} fetches; https continuations 2160 -> 36");
+
+        let failure = cached_list_response_at_with(
+            cache.path(),
+            "page-1",
+            start + chrono::Duration::seconds(3600),
+            900,
+            || Err("live failure".into()),
+        );
+        assert_eq!(
+            failure.unwrap_err(),
+            "live failure",
+            "expiry must not hide a failed refresh"
+        );
+    }
 
     #[test]
     fn issue_5603_unchanged_lists_halve_hourly_rest_consumption() {
