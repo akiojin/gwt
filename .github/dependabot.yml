@@ -21,6 +21,11 @@ updates:
       - "dependencies"
       - "automerge"
     open-pull-requests-limit: 10
+    # Issue #5724 / PR #5697: rustup cannot install this version (HTTP 404).
+    # Revisit with an available release and a matching rust-toolchain.toml pin.
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
+        versions: ["1.120.0"]
 
   - package-ecosystem: "cargo"
     directory: "/"
@@ -35,3 +40,8 @@ updates:
       - "dependencies"
       - "automerge"
     open-pull-requests-limit: 10
+    # Issue #5724 / PR #5702: 0.11 removes LowerHex from digest output.
+    # Revisit after the hash formatting call sites have been migrated together.
+    ignore:
+      - dependency-name: "sha2"
+        versions: [">=0.11, <0.12"]
