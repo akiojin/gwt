@@ -33,7 +33,7 @@ import {
 // conversation with input enabled; producing authority is recovered by the
 // backend continuation coordinator, and Work-level Continue work owns
 // successor generations.
-export function launchWizardStartMethodIntent(methodKind) {
+function launchWizardStartMethodIntent(methodKind) {
   switch (methodKind) {
     case "continue_last_session":
     case "open_session_picker":
@@ -603,26 +603,6 @@ export function createLaunchWizardSurface({
         return field;
       }
 
-      function appendCheckboxField(
-        parent,
-        label,
-        copy,
-        checked,
-        onChange,
-        wide = false,
-      ) {
-        const field = createLaunchField(label, wide);
-        const checkboxLabel = createNode("label", "launch-inline-check");
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = checked;
-        input.addEventListener("change", () => onChange(input.checked));
-        checkboxLabel.appendChild(input);
-        checkboxLabel.appendChild(createNode("span", "", copy));
-        field.appendChild(checkboxLabel);
-        parent.appendChild(field);
-        return field;
-      }
 
       // SPEC-2014 2026-05-29 amendment — operation-appropriate controls.
       // These delegate to the standalone launch-controls.js builders so the

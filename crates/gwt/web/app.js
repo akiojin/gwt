@@ -1799,11 +1799,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         return String(windowData?.dynamic_title_detail || "").trim();
       }
 
-      function windowActivityLabel(windowData) {
-        const title = windowDisplayTitle(windowData);
-        const detail = String(windowData?.dynamic_title_detail || "").trim();
-        return detail && detail !== title ? `${title} · ${detail}` : title;
-      }
 
       // SPEC-3064 Phase 3 (E7): escapeHtml moved to
       // /project-shell-surface.js with the Window List renderer (its only
@@ -2019,9 +2014,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       }
 
-      function openWorkspaceOverview() {
-        focusOrSpawnPreset("issue");
-      }
 
       // Issue #4777: fixed surfaces share the rail and optional split host.
       function openSurface(surface) {
@@ -2276,13 +2268,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       // the pointerup.
       const RESIZE_STALENESS_TIMEOUT_MS = 30_000;
 
-      function hasPendingTerminalViewportRefresh(windowId) {
-        const runtime = terminalMap.get(windowId);
-        return (
-          runtime?.viewportRefreshPending === true ||
-          terminalViewportRefreshScheduler?.hasPending?.(windowId) === true
-        );
-      }
 
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
@@ -2818,12 +2803,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       }
 
-      function compactPathLabel(value) {
-        if (!value) return "";
-        const parts = String(value).split(/[\\/]+/).filter(Boolean);
-        if (parts.length <= 2) return String(value);
-        return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
-      }
 
       function appendMeta(container, value) {
         if (!value) return;
@@ -3946,7 +3925,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           workspaceOverviewSurface.renderInto(parent, windowId, options),
         formatWorkLifecycleLabel: formatLifecycleStateLabel,
         continueWork: (workId, bounds) => continueWorkDispatcher.dispatch(workId, bounds),
-        openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
         // Lazy: the Branches & cleanup surface is constructed after this factory.
         openWorkspaceCleanup: (candidate, sourceWindowId) =>
           openWorkspaceCleanup(candidate, sourceWindowId),
@@ -4199,7 +4177,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         send,
         windowMap,
         workspaceWindowById,
-        openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
         focusBoardEntry,
         getResumeBounds: () => visibleBounds(),
         launchPending,
@@ -4748,7 +4725,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderIndexPanelInAllSettingsWindows,
         requestFullIndexStatusRefresh,
         setSettingsStatus,
-        completeAddFromPreset,
       } = createSettingsSurface({
         send,
         createNode,
@@ -5091,6 +5067,29 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
+      const issueMonitorNotificationModel = createUiStateStore(null);
+      issueMonitorNotificationModel.subscribe(event => event, event => {
+        if (!event) return;
+        const monitorNotice = notificationForTransition({
+          source: "monitor",
+          state: event?.notification_transition,
+          issueNumber: event?.issue_number,
+        });
+        // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
+        // into the notification center history FIRST and independently of
+        // any display path, so events that fire while no Issue window is
+        // open (or while the operator is away) are never lost.
+        // The optional typed transition changes wording on this one surface;
+        // inbox snapshots never generate a second notification.
+        notificationCenter.record({
+          kind: "issue-monitor",
+          level: event?.level,
+          title: monitorNotice?.title || "Issue Monitor",
+          message: event?.message,
+          issueNumber: event?.issue_number,
+        });
+      });
+
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
       const agentAttentionToaster = createAgentAttentionToaster({
         showToast: showAttentionToast,
@@ -5173,7 +5172,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,
         setSettingsStatus,
-        completeAddFromPreset,
         persistKanbanHideDone: writeKanbanHideDonePreference,
       });
 
@@ -5340,27 +5338,9 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "issue_monitor_launch_failed":
             scheduleIssueMonitorProjectionRefresh();
             break;
-          case "issue_monitor_toast": {
-            const monitorNotice = notificationForTransition({
-              source: "monitor",
-              state: event?.notification_transition,
-              issueNumber: event?.issue_number,
-            });
-            // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
-            // into the notification center history FIRST and independently of
-            // any display path, so events that fire while no Issue window is
-            // open (or while the operator is away) are never lost. The backend
-            // The optional typed transition changes wording on this one surface;
-            // inbox snapshots never generate a second notification.
-            notificationCenter.record({
-              kind: "issue-monitor",
-              level: event?.level,
-              title: monitorNotice?.title || "Issue Monitor",
-              message: event?.message,
-              issueNumber: event?.issue_number,
-            });
+          case "issue_monitor_toast":
+            issueMonitorNotificationModel.update(() => ({ ...event }));
             break;
-          }
           case "terminal_output":
             applyPmWindowReceiveEvent(event);
             break;
@@ -5817,17 +5797,12 @@ import { createUiStateStore } from "/ui-state-store.js";
               `/v1/models returned ${event.models.length} model(s).`,
               "success",
             );
-            frontendUnits.knowledgeSettingsSurface.completeAddFromPreset(
-              event.models,
-            );
             break;
           case "custom_agent_preset_list":
             // Reserved for a future "Add from preset" picker — the current
             // UI hardcodes the one preset.
             break;
           case "custom_agent_error":
-            // SPEC-3064 Phase 3 (E4): body reassigns pendingAddFromPreset,
-            // which now lives in the settings surface.
             applyCustomAgentError(event);
             break;
           // SPEC-3064 Phase 3 (E7): migration modal state and rendering live
@@ -6234,9 +6209,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the same socket transport the preset
       // buttons use, so they share the legacy invariants.
-      function isAutoMaximizedSurfacePreset(_preset) {
-        return false;
-      }
 
       function isSingletonSurfacePreset(preset) {
         const sessionPresets = new Set(["agent", "shell", "claude", "codex"]);
