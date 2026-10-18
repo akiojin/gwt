@@ -28,7 +28,7 @@ import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { setControlExplanation } from "./control-explanations.js";
 
-export function renderUpdateSettingsStatus(panel, status) {
+function renderUpdateSettingsStatus(panel, status) {
   const document = panel.ownerDocument;
   panel.replaceChildren();
   const values = document.createElement("p");
@@ -229,7 +229,7 @@ export function mountProjectManagerSettingsPanel(
   return panel;
 }
 
-export function renderIssuesSettingsPanel(panel, options) {
+function renderIssuesSettingsPanel(panel, options) {
   const { project, status, send, launchControls = [] } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
@@ -334,11 +334,62 @@ function renderCandidateSaveError(panel, event) {
   if (!event || Number(panel.dataset.pendingRequest) !== event.request_id) return;
   panel.dataset.saving = "false";
   delete panel.dataset.pendingRequest;
+  for (const [control, disabled] of panel.candidateDisabledControls || []) control.disabled = disabled;
+  panel.candidateStructuralSave = false;
   const feedback = panel.querySelector("[data-candidate-status]");
   if (feedback) {
     feedback.textContent = event.message;
     feedback.dataset.kind = "error";
     feedback.setAttribute("role", "alert");
+    const field = event.message.match(/\b(prefer_for|agent_id|model|reasoning|session_mode|runtime_target|docker_service|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
+    const row = panel.candidateSaveTarget?.closest("fieldset") || panel;
+    const rejectedTag = event.message.match(/prefer_for entry ("(?:\\.|[^"\\])*")/)?.[1];
+    const rejectedInput = rejectedTag && [...panel.querySelectorAll('[data-profile-field="prefer_for"]')]
+      .find(control => control.value.split(",").some(tag => tag.trim() === JSON.parse(rejectedTag)));
+    const input = rejectedInput || (field && row.querySelector(`[data-profile-field="${field}"]`)) || panel.candidateSaveTarget;
+    if (input?.isConnected) {
+      input.setAttribute("aria-invalid", "true");
+      input.closest(".settings-field")?.after(feedback);
+    }
+  }
+}
+
+function reconcileCandidateSave(panel, event) {
+  if (!event || Number(panel.dataset.pendingRequest) !== event.request_id) return;
+  panel.dataset.saving = "false";
+  delete panel.dataset.pendingRequest;
+  if (panel.candidateStructuralSave) {
+    panel.dataset.dirty = "false";
+    panel.candidateStructuralSave = false;
+    return true;
+  }
+  let dirty = [...panel.candidateSubmittedValues || []].some(([input, value]) =>
+    (input.type === "checkbox" ? input.checked : input.value) !== value);
+  const focused = panel.ownerDocument.activeElement;
+  for (const [index, row] of [...panel.querySelectorAll("fieldset[data-agent-id]")].entries()) {
+    const profile = event.profiles?.[index];
+    if (!profile) continue;
+    for (const input of row.querySelectorAll("[data-profile-field]")) {
+      const value = input.type === "checkbox" ? input.checked : input.value;
+      if (panel.candidateSubmittedValues?.get(input) !== value) {
+        dirty = true;
+        continue;
+      }
+      // Even a successful normalization must not move a live text cursor.
+      if (input === focused) continue;
+      const key = input.dataset.profileField;
+      if (input.type === "checkbox") input.checked = profile[key] === true;
+      else input.value = key === "prefer_for" ? (profile[key] || []).join(", ")
+        : String(profile[key] ?? (key === "session_mode" ? "Normal" : key === "runtime_target" ? "Host" : ""));
+    }
+  }
+  if (!dirty) for (const invalid of panel.querySelectorAll('[aria-invalid="true"]')) invalid.removeAttribute("aria-invalid");
+  panel.dataset.dirty = String(dirty);
+  const feedback = panel.querySelector("[data-candidate-status]");
+  if (feedback && !(dirty && feedback.dataset.kind === "error")) {
+    feedback.textContent = "Saved candidates.";
+    feedback.dataset.kind = "success";
+    feedback.setAttribute("role", "status");
   }
 }
 
@@ -359,9 +410,8 @@ export function renderAgentsSettingsPanel(panel, options) {
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.dirty = "false";
-  panel.oninput = panel.onchange = () => {
+  panel.oninput = () => {
     panel.dataset.dirty = "true";
-    panel.dataset.saving = "false";
   };
   const heading = document.createElement("h3");
   heading.className = "settings-section-heading";
@@ -408,6 +458,9 @@ export function renderAgentsSettingsPanel(panel, options) {
     else if (!choices) input.value = String(value ?? "");
     label.appendChild(input);
     parent.appendChild(label);
+    if (key !== "new") input.addEventListener("change", () => {
+      if (!input.disabled) submit(draft(), input);
+    });
     return input;
   };
   const draft = () => rows.map(({ row, profile }) => {
@@ -420,7 +473,20 @@ export function renderAgentsSettingsPanel(panel, options) {
     }
     return next;
   });
-  const submit = next => {
+  const submit = (next, input = null) => {
+    panel.candidateSaveTarget = input;
+    panel.candidateSubmittedValues = new Map([...panel.querySelectorAll("[data-profile-field]")]
+      .map(control => [control, control.type === "checkbox" ? control.checked : control.value]));
+    // Structural responses change row identities. Freeze those controls until
+    // the correlated result so input cannot attach to a different candidate.
+    panel.candidateStructuralSave = input === null;
+    panel.candidateDisabledControls = new Map();
+    if (panel.candidateStructuralSave) {
+      for (const control of panel.querySelectorAll("input, select, button")) {
+        panel.candidateDisabledControls.set(control, control.disabled);
+        control.disabled = true;
+      }
+    }
     showFeedback("Saving candidates…");
     send({ kind: "issue_monitor_profiles_set", profiles: next });
   };
@@ -469,7 +535,6 @@ export function renderAgentsSettingsPanel(panel, options) {
     const remove = button(row, `Remove ${profile.agent_id}`, "remove", () => submit(draft().filter((_, i) => i !== index)));
     remove.disabled = profiles.length <= 1;
   }
-  button(panel, "Save profiles", "save-profiles", () => submit(draft()));
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
@@ -590,31 +655,34 @@ export function createSettingsSurface({
       // commit. Delegated listeners scope to `select.settings-select`
       // so the guard covers every Settings window without per-window
       // wiring.
-      function applyAutostartStatus(event, statusMessage = "") {
-        systemSettingsState.autostartEnabled = event.enabled === true;
-        systemSettingsState.autostartPreviousEnabled =
-          systemSettingsState.autostartEnabled;
-        systemSettingsState.autostartMechanism = event.mechanism || "";
-        systemSettingsState.autostartInstallPath = event.install_path || "";
-        systemSettingsState.autostartLoaded = true;
-        systemSettingsState.autostartPending = false;
-        systemSettingsState.autostartChecking = false;
-        systemSettingsState.autostartStatusMessage = statusMessage;
-        systemSettingsState.autostartStatusKind = statusMessage ? "success" : "";
+      function applyAutostartStatus(event, statusMessage = systemSettingsModel.read().autostartPending
+        ? "Saved login launch setting." : "") {
+        systemSettingsModel.update(state => ({
+          ...state,
+          autostartEnabled: event.enabled === true,
+          autostartPreviousEnabled: event.enabled === true,
+          autostartMechanism: event.mechanism || "",
+          autostartInstallPath: event.install_path || "",
+          autostartLoaded: true,
+          autostartPending: false,
+          autostartChecking: false,
+          autostartStatusMessage: statusMessage,
+          autostartStatusKind: statusMessage ? "success" : "",
+        }));
       }
 
       function applyAutostartError(event) {
-        if (systemSettingsState.autostartPending) {
-          systemSettingsState.autostartEnabled =
-            systemSettingsState.autostartPreviousEnabled === true;
-        }
-        systemSettingsState.autostartPending = false;
-        systemSettingsState.autostartChecking = false;
-        systemSettingsState.autostartStatusMessage = event.message ||
-          (systemSettingsState.autostartLoaded
+        systemSettingsModel.update(state => ({
+          ...state,
+          autostartEnabled: state.autostartPending
+            ? state.autostartPreviousEnabled === true : state.autostartEnabled,
+          autostartPending: false,
+          autostartChecking: false,
+          autostartStatusMessage: event.message || (state.autostartLoaded
             ? "Failed to update login launch setting."
-            : "Failed to check login launch status.");
-        systemSettingsState.autostartStatusKind = "error";
+            : "Failed to check login launch status."),
+          autostartStatusKind: "error",
+        }));
       }
 
       // SPEC #1921 Phase 86 (#3813): the backend echoes the complete agent
@@ -706,13 +774,6 @@ export function createSettingsSurface({
             systemSettingsState.statusMessage = deferred.message
               || "Failed to update system settings.";
             systemSettingsState.statusKind = "error";
-          } else if (deferred.kind === "autostart_status") {
-            applyAutostartStatus(
-              deferred,
-              deferred.from_update ? "Saved login launch setting." : "",
-            );
-          } else if (deferred.kind === "autostart_error") {
-            applyAutostartError(deferred);
           }
           renderSystemPanelInAllSettingsWindows();
         },
@@ -769,6 +830,15 @@ export function createSettingsSurface({
           teamsDefaultChannel: "",
           oauthRedirectPort: 8765,
         },
+        loaded: false,
+        statusMessage: "",
+        statusKind: "",
+      };
+      const settingsWindowBodies = new Set();
+      // Autostart has one immutable source; other System settings retain
+      // their existing local adapter until their own migration slice.
+      const systemSettingsModel = createUiStateStore({
+        ...systemSettingsState,
         autostartEnabled: false,
         autostartPreviousEnabled: false,
         autostartMechanism: "",
@@ -778,13 +848,18 @@ export function createSettingsSurface({
         autostartChecking: false,
         autostartStatusMessage: "",
         autostartStatusKind: "",
-        loaded: false,
-        statusMessage: "",
-        statusKind: "",
-      };
-      const settingsWindowBodies = new Set();
-      const systemSettingsModel = createUiStateStore(systemSettingsState);
-      systemSettingsModel.subscribe(state => state, () => {
+      });
+      systemSettingsModel.subscribe(state => state, state => {
+        // Keep the model current while a native select is open; only its
+        // destructive DOM refresh waits for the existing guard to flush.
+        if (systemSettingsInteractionGuard.isActive()) {
+          // A deferred System reply still needs to be applied on release.
+          // Its flush also renders the latest Autostart snapshot.
+          if (!systemSettingsInteractionGuard.hasPendingValue()) {
+            systemSettingsInteractionGuard.defer({ kind: "autostart_render" });
+          }
+          return;
+        }
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
@@ -793,7 +868,7 @@ export function createSettingsSurface({
           const panel = body.querySelector(
             "[data-system-settings-content]",
           );
-          if (panel) renderSystemPanel(panel);
+          if (panel) renderSystemPanel(panel, state);
         }
       });
       let nextProfilesRequest = 0;
@@ -834,13 +909,9 @@ export function createSettingsSurface({
         const focusedLaunchControl = launchControls.find(control => control === document.activeElement);
         const agentsPanel = body.querySelector("[data-settings-candidates]");
         if (agentsPanel) renderCandidateSaveError(agentsPanel, current.profilesFailure);
-        if (current.profilesRequestId != null
-          && Number(agentsPanel?.dataset.pendingRequest) === current.profilesRequestId && agentsPanel?.dataset.saving === "true") {
-          agentsPanel.dataset.dirty = "false";
-          agentsPanel.dataset.saving = "false";
-          delete agentsPanel.dataset.pendingRequest;
-          body.querySelector('[data-settings-tab="issues"]')?.focus();
-        }
+        if (agentsPanel && reconcileCandidateSave(agentsPanel, {
+          request_id: current.profilesRequestId, profiles: current.profiles,
+        })) body.querySelector('[data-settings-tab="issues"]')?.focus();
         const dispatch = message => {
           // Project WebSockets own mutation authority. Never replay this
           // window's edit through a different active project's connection.
@@ -859,8 +930,8 @@ export function createSettingsSurface({
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
           const editing = panel?.contains(document.activeElement)
-            && document.activeElement?.matches("input:not([type=checkbox]), select, textarea");
-          if (editing && section === "issues") body.dataset.issuesRenderDeferred = "true";
+            && document.activeElement?.matches(section === "agents" ? "input, select, textarea" : "input:not([type=checkbox]), select, textarea");
+          if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, send: dispatch, launchControls,
             availableAgents: supportedAgentsModel.read().agents === null || customAgentsState.loading ? null : [
@@ -979,12 +1050,13 @@ export function createSettingsSurface({
         send({ kind: "get_system_settings" });
         send({ kind: "get_update_settings" });
         send({ kind: "get_board_auth_status" });
-        const shouldRequestAutostartStatus = recovering || (!systemSettingsState.autostartPending
-          && !systemSettingsState.autostartChecking);
+        const autostart = systemSettingsModel.read();
+        const shouldRequestAutostartStatus = recovering || (!autostart.autostartPending
+          && !autostart.autostartChecking);
         if (shouldRequestAutostartStatus) {
-          systemSettingsState.autostartChecking = true;
-          systemSettingsState.autostartStatusMessage = "";
-          systemSettingsState.autostartStatusKind = "";
+          systemSettingsModel.update(state => ({ ...state, autostartChecking: true,
+            autostartStatusMessage: "", autostartStatusKind: "",
+          }));
           send({ kind: "get_autostart_status" });
         }
         if (recovering || (!customAgentsState.loading && customAgentsState.agents.length === 0)) {
@@ -1003,7 +1075,6 @@ export function createSettingsSurface({
           renderSystemPanelInAllSettingsWindows();
         }
       }
-      let pendingAddFromPreset = null;
       let editingCustomAgentId = null;
 
       function createDiv(className) {
@@ -1422,43 +1493,42 @@ export function createSettingsSurface({
         return { teamId, channelId };
       }
 
-      function syncAutostartCheckbox(autostartCheckbox) {
-        autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
-        autostartCheckbox.disabled = !systemSettingsState.autostartLoaded ||
-          systemSettingsState.autostartChecking === true ||
-          systemSettingsState.autostartPending === true;
+      function syncAutostartCheckbox(autostartCheckbox, state = systemSettingsModel.read()) {
+        autostartCheckbox.checked = state.autostartEnabled === true;
+        autostartCheckbox.disabled = !state.autostartLoaded ||
+          state.autostartChecking === true || state.autostartPending === true;
       }
 
-      function renderAutostartStatus(autostartStatus) {
-        if (systemSettingsState.autostartPending) {
+      function renderAutostartStatus(autostartStatus, state = systemSettingsModel.read()) {
+        if (state.autostartPending) {
           autostartStatus.textContent = "Saving…";
           autostartStatus.dataset.kind = "info";
-        } else if (systemSettingsState.autostartChecking) {
+        } else if (state.autostartChecking) {
           autostartStatus.textContent = "Checking login launch status…";
           autostartStatus.dataset.kind = "info";
         } else {
-          const message = systemSettingsState.autostartStatusMessage || "";
-          autostartStatus.textContent = !systemSettingsState.autostartLoaded && message
+          const message = state.autostartStatusMessage || "";
+          autostartStatus.textContent = !state.autostartLoaded && message
             ? `Login launch status unavailable. ${message}`
             : message;
-          if (systemSettingsState.autostartStatusKind) {
-            autostartStatus.dataset.kind = systemSettingsState.autostartStatusKind;
+          if (state.autostartStatusKind) {
+            autostartStatus.dataset.kind = state.autostartStatusKind;
           } else {
             delete autostartStatus.dataset.kind;
           }
         }
       }
 
-      function renderSystemPanel(panel) {
+      function renderSystemPanel(panel, state = systemSettingsModel.read()) {
         // Reads used for recovery must not destroy explicit-save drafts,
         // including secrets that only exist in these input elements.
         if (panel.querySelector(".board-config-form[data-dirty='true'], .board-oauth-port-form[data-dirty='true']")) {
           const autostart = panel.querySelector("input[id$='-settings-system-autostart']");
           if (autostart) {
-            syncAutostartCheckbox(autostart);
+            syncAutostartCheckbox(autostart, state);
           }
           const autostartStatus = panel.querySelector("[data-role='autostart-settings-status']");
-          if (autostartStatus) renderAutostartStatus(autostartStatus);
+          if (autostartStatus) renderAutostartStatus(autostartStatus, state);
           renderSystemPanelStatus(panel);
           return;
         }
@@ -2051,16 +2121,14 @@ export function createSettingsSurface({
         autostartCheckbox.type = "checkbox";
         autostartCheckbox.className = "settings-checkbox";
         autostartCheckbox.id = "settings-system-autostart";
-        syncAutostartCheckbox(autostartCheckbox);
+        syncAutostartCheckbox(autostartCheckbox, state);
         autostartCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
-          systemSettingsState.autostartPreviousEnabled =
-            systemSettingsState.autostartEnabled === true;
-          systemSettingsState.autostartEnabled = next;
-          systemSettingsState.autostartPending = true;
-          systemSettingsState.autostartStatusMessage = "Saving…";
-          systemSettingsState.autostartStatusKind = "info";
-          renderSystemPanelInAllSettingsWindows();
+          systemSettingsModel.update(state => ({ ...state,
+            autostartPreviousEnabled: state.autostartEnabled === true,
+            autostartEnabled: next, autostartPending: true,
+            autostartStatusMessage: "Saving…", autostartStatusKind: "info",
+          }));
           send({ kind: "update_autostart", enabled: next });
         });
 
@@ -2076,11 +2144,11 @@ export function createSettingsSurface({
           "Starts GWT in the menu bar when you log in. The browser does not open automatically.";
         autostartSection.appendChild(autostartHelp);
 
-        if (systemSettingsState.autostartLoaded) {
+        if (state.autostartLoaded) {
           const autostartDetail = document.createElement("p");
           autostartDetail.className = "settings-help";
-          const mechanism = systemSettingsState.autostartMechanism || "Unknown";
-          const installPath = systemSettingsState.autostartInstallPath || "";
+          const mechanism = state.autostartMechanism || "Unknown";
+          const installPath = state.autostartInstallPath || "";
           autostartDetail.textContent = installPath
             ? `Autostart: ${mechanism} · ${installPath}`
             : `Autostart: ${mechanism}`;
@@ -2092,7 +2160,7 @@ export function createSettingsSurface({
         autostartStatus.dataset.role = "autostart-settings-status";
         autostartStatus.setAttribute("role", "status");
         autostartStatus.setAttribute("aria-live", "polite");
-        renderAutostartStatus(autostartStatus);
+        renderAutostartStatus(autostartStatus, state);
         autostartSection.appendChild(autostartStatus);
 
         const status = document.createElement("p");
@@ -2123,7 +2191,7 @@ export function createSettingsSurface({
       }
 
       function renderSystemPanelInAllSettingsWindows() {
-        systemSettingsModel.update(() => systemSettingsState);
+        systemSettingsModel.update(state => ({ ...state, ...systemSettingsState }));
       }
 
       function renderSettingsAgentList() {
@@ -2262,20 +2330,6 @@ export function createSettingsSurface({
         }
       }
 
-      function startAddClaudeCodeOpenaiCompatFlow() {
-        const baseUrl = window.prompt(
-          "Upstream base_url (http:// or https://)\n\nExample: http://192.168.100.166:32768",
-          "http://",
-        );
-        if (!baseUrl) return;
-        const apiKey = window.prompt(
-          "API key (forwarded as Bearer on /v1/models probe and ANTHROPIC_API_KEY at launch):",
-        );
-        if (!apiKey) return;
-        setSettingsStatus("Probing /v1/models…", "info");
-        pendingAddFromPreset = { baseUrl, apiKey };
-        send({ kind: "test_backend_connection", base_url: baseUrl, api_key: apiKey });
-      }
 
       function setSettingsStatus(message, kind) {
         customAgentsState.statusMessage = message;
@@ -2283,54 +2337,9 @@ export function createSettingsSurface({
         renderSettingsAgentList();
       }
 
-      function completeAddFromPreset(discoveredModels) {
-        if (!pendingAddFromPreset) return;
-        if (!discoveredModels || discoveredModels.length === 0) {
-          setSettingsStatus("Upstream /v1/models returned no entries.", "error");
-          pendingAddFromPreset = null;
-          return;
-        }
-        const modelList = discoveredModels.join("\n");
-        const model = window.prompt(
-          `Discovered ${discoveredModels.length} model(s). Choose default_model (copy one ID):\n\n${modelList}`,
-          discoveredModels[0],
-        );
-        if (!model) {
-          pendingAddFromPreset = null;
-          setSettingsStatus("Cancelled.", "info");
-          return;
-        }
-        const id = window.prompt("Custom agent id (alphanumeric + `-`):", "claude-code-openai");
-        if (!id) {
-          pendingAddFromPreset = null;
-          setSettingsStatus("Cancelled.", "info");
-          return;
-        }
-        const displayName = window.prompt("Display name:", "Claude Code (OpenAI-compat)");
-        if (!displayName) {
-          pendingAddFromPreset = null;
-          setSettingsStatus("Cancelled.", "info");
-          return;
-        }
-        setSettingsStatus("Saving preset…", "info");
-        send({
-          kind: "add_custom_agent_from_preset",
-          input: {
-            id,
-            display_name: displayName,
-            base_url: pendingAddFromPreset.baseUrl,
-            api_key: pendingAddFromPreset.apiKey,
-            default_model: model,
-          },
-        });
-        pendingAddFromPreset = null;
-      }
 
 
-      // SPEC-3064 Phase 3 (E4): receive() delegates for the two settings
-      // cases whose bodies reassign module-level state
-      // (editingCustomAgentId / pendingAddFromPreset) and therefore cannot
-      // stay inline in app.js once that state lives here.
+      // Apply custom-agent responses to the Settings state and status display.
       function applyCustomAgentDeleted(event) {
         customAgentsState.agents = customAgentsState.agents.filter(
           (a) => a.id !== event.agent_id,
@@ -2343,7 +2352,6 @@ export function createSettingsSurface({
 
       function applyCustomAgentError(event) {
         customAgentsState.loading = false;
-        pendingAddFromPreset = null;
         setSettingsStatus(
           `Error [${event.code}]: ${event.message}`,
           "error",
@@ -2358,6 +2366,7 @@ export function createSettingsSurface({
         customAgentsState,
         agentBackendsState,
         systemSettingsState,
+        systemSettingsModel,
         systemSettingsInteractionGuard,
         applyAgentResourceSnapshot,
         applyAutostartStatus,
@@ -2376,6 +2385,5 @@ export function createSettingsSurface({
         renderIndexPanelInAllSettingsWindows,
         requestFullIndexStatusRefresh,
         setSettingsStatus,
-        completeAddFromPreset,
       };
 }

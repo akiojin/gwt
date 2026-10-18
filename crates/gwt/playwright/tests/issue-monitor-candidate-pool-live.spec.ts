@@ -64,7 +64,6 @@ test.describe("Issue Monitor candidate pool", () => {
         return node?.dataset.id;
       }, beforeIds).then(handle => handle.jsonValue());
       const surface = page.locator(`.workspace-window[data-id="${windowId}"]`);
-      await expect(surface).toBeVisible();
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const pool = settings.locator('[data-settings-candidates]');
       const openCandidates = async () => {
@@ -79,7 +78,7 @@ test.describe("Issue Monitor candidate pool", () => {
         await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
         await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
       };
-      const saveProfiles = async (action: () => Promise<unknown>, agentIds: string[]) => {
+      const saveProfiles = async (action: () => Promise<unknown>, agentIds: string[], dirty = false) => {
         const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
         await action();
         // Only this save's fresh correlated readback can authorize the next
@@ -90,9 +89,13 @@ test.describe("Issue Monitor candidate pool", () => {
             && JSON.stringify(payload.profiles?.map((profile: any) => profile.agent_id)) === JSON.stringify(agentIds)),
         { cursor, agentIds });
         await expect(pool).toHaveAttribute("data-saving", "false");
-        await expect(pool).toHaveAttribute("data-dirty", "false");
+        await expect(pool).toHaveAttribute("data-dirty", String(dirty));
       };
       await openCandidates();
+      // A backend-created window does not select the frontend rail after
+      // reconnect; the Settings entry point above owns that focus change.
+      await expect(surface).toBeVisible();
+      await expect(pool.getByRole("button", { name: "Save profiles", exact: true })).toHaveCount(0);
       const rows = pool.locator("fieldset[data-agent-id]");
       await expect(rows).toHaveCount(1);
       await expect(pool.getByRole("button", { name: "Remove claude", exact: true })).toBeDisabled();
@@ -125,22 +128,62 @@ test.describe("Issue Monitor candidate pool", () => {
       await expect(rows.first()).toHaveAttribute("data-agent-id", "claude");
       // A rejected backend save must explain the failure in this Settings
       // panel and retain the user's draft for correction and retry.
-      await pool.getByLabel("Model codex", { exact: true }).fill("candidate-draft-model");
+      // Hold only the real correlated response while the next field is being
+      // typed, so cursor preservation is tested without timing assumptions.
+      await page.evaluate(() => {
+        const held: Array<{ socket: WebSocket; data: string }> = [];
+        const sockets = (window as any).__gwtPlaywrightSockets as WebSocket[];
+        const hold = (event: MessageEvent) => {
+          const payload = JSON.parse(event.data);
+          if (payload.kind === "issue_monitor_profiles" && Number.isInteger(payload.request_id)) {
+            event.stopImmediatePropagation();
+            held.push({ socket: event.currentTarget as WebSocket, data: event.data });
+          }
+        };
+        sockets.forEach(socket => socket.addEventListener("message", hold, true));
+        (window as any).candidateHeldResponses = held;
+        (window as any).releaseCandidateResponses = () => {
+          sockets.forEach(socket => socket.removeEventListener("message", hold, true));
+          held.forEach(({ socket, data }) => socket.dispatchEvent(new MessageEvent("message", { data })));
+        };
+      });
+      await saveProfiles(async () => {
+        await pool.getByLabel("Model codex", { exact: true }).fill("candidate-draft-model");
+        await pool.getByLabel("Model codex", { exact: true }).press("Tab");
+        await pool.getByLabel("Prefer for codex", { exact: true }).fill("type:");
+        await pool.getByLabel("Prefer for codex", { exact: true }).evaluate((input: HTMLInputElement) => input.setSelectionRange(3, 3));
+        await page.waitForFunction(() => (window as any).candidateHeldResponses.length > 0);
+        await page.evaluate(() => (window as any).releaseCandidateResponses());
+      }, ["claude", "codex"], true);
+      await expect(pool.getByLabel("Prefer for codex", { exact: true })).toBeFocused();
+      await expect(pool.getByLabel("Prefer for codex", { exact: true })).toHaveValue("type:");
+      await expect(pool.getByLabel("Prefer for codex", { exact: true })).toHaveJSProperty("selectionStart", 3);
       await pool.getByLabel("Prefer for codex", { exact: true }).fill("invalid-preference");
-      await pool.getByRole("button", { name: "Save profiles", exact: true }).click();
+      await pool.getByLabel("Prefer for codex", { exact: true }).press("Tab");
       await expect(pool.getByRole("alert")).toContainText("prefer_for");
+      await expect(pool.getByLabel("Prefer for codex", { exact: true })).toHaveAttribute("aria-invalid", "true");
+      await expect(pool.locator('.settings-field:has([data-profile-field="prefer_for"]) + [role="alert"]')).toBeVisible();
       await expect(pool).toHaveAttribute("data-saving", "false");
       await expect(pool.getByLabel("Model codex", { exact: true })).toHaveValue("candidate-draft-model");
       await expect(pool.getByLabel("Prefer for codex", { exact: true })).toHaveValue("invalid-preference");
-      await pool.getByLabel("Usage threshold (%) candidate", { exact: true }).fill("65");
-      await pool.getByLabel("Usage threshold (%) candidate", { exact: true }).press("Tab");
+      const rejectedReadCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+      await sendLiveGwtEvent(page, { kind: "get_issue_monitor_profiles" });
+      await page.waitForFunction(cursor => ((window as any).__gwtPlaywrightMessages ?? []).some(({ sequence, payload }: any) =>
+        sequence > cursor && payload.kind === "issue_monitor_profiles"
+        && payload.profiles?.some((profile: any) => profile.agent_id === "codex"
+          && profile.model === "candidate-draft-model" && (profile.prefer_for || []).length === 0)), rejectedReadCursor);
       await pool.getByLabel("Prefer for codex", { exact: true }).fill("type:fix, label:bug");
-      await saveProfiles(() => pool.getByRole("button", { name: "Save profiles", exact: true }).click(), ["claude", "codex"]);
+      await saveProfiles(() => pool.getByLabel("Prefer for codex", { exact: true }).press("Tab"), ["claude", "codex"]);
+      const fastMode = pool.getByLabel("Fast mode codex", { exact: true });
+      await fastMode.focus();
+      await saveProfiles(() => fastMode.press("Space"), ["claude", "codex"]);
+      await expect(fastMode).toBeFocused();
+      await saveProfiles(() => fastMode.press("Space"), ["claude", "codex"]);
       // Wait for the persisted status, not a sleep or merely the input's value.
       await expect.poll(() => page.evaluate(() => {
         const messages = (window as any).__gwtPlaywrightMessages ?? [];
         return messages.some(({ payload }: any) => payload.kind === "issue_monitor_status"
-          && payload.status?.usage_threshold_percent === 65
+          && !Object.hasOwn(payload.status, "usage_threshold_percent")
           && payload.status?.launch_profile_candidates?.some((candidate: any) =>
             candidate.agent_id === "codex" && candidate.prefer_for?.includes("label:bug")));
       })).toBe(true);
@@ -150,7 +193,7 @@ test.describe("Issue Monitor candidate pool", () => {
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await openCandidates();
       const reloadedPool = pool;
-      await expect(reloadedPool.getByLabel("Usage threshold (%) candidate", { exact: true })).toHaveValue("65");
+      await expect(reloadedPool.getByLabel("Usage threshold (%) candidate", { exact: true })).toHaveCount(0);
       await expect(reloadedPool.getByLabel("Prefer for codex", { exact: true })).toHaveValue("type:fix, label:bug");
       await expect(reloadedPool.getByLabel("Model claude", { exact: true })).toHaveValue("sonnet");
       await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
@@ -170,7 +213,15 @@ test.describe("Issue Monitor candidate pool", () => {
       await openCandidates();
       await expect(reloadedPool.locator(`fieldset[data-agent-id="${CUSTOM_ID}"]`)).toBeVisible();
       await saveProfiles(() => reloadedPool.getByRole("button", { name: `Remove ${CUSTOM_ID}`, exact: true }).click(), ["claude"]);
+      // Commit, then close immediately without awaiting the save response.
+      await reloadedPool.getByLabel("Model claude", { exact: true }).fill("immediate-close-model");
+      await reloadedPool.getByLabel("Model claude", { exact: true }).press("Tab");
       await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .some(({ payload }: any) => payload.kind === "workspace_state"));
+      await openCandidates();
+      await expect(pool.getByLabel("Model claude", { exact: true })).toHaveValue("immediate-close-model");
       expect(errors).toEqual([]);
     });
   });

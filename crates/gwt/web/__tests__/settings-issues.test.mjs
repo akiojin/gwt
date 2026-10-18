@@ -220,7 +220,8 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   model.value = "new model";
   model.dispatchEvent(new Event("input", { bubbles: true }));
   assert.equal(a.dataset.dirty, "true", "incoming status must not destroy unsaved profile edits");
-  a.querySelector('[data-action="save-profiles"]').click();
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(Boolean(a.querySelector('[data-action="save-profiles"]')), false);
   assert.equal(sent[0].profiles[0].model, "new model");
   assert.equal(sent[0].profiles[0].docker_service, "dev");
   assert.deepEqual(sent[0].profiles[0].prefer_for, ["type:fix"]);
@@ -233,6 +234,96 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.match(a.textContent, /Candidates/);
   assert.ok(a.querySelector('[aria-label="Prefer for codex"]'));
   assert.ok(a.querySelector('[data-action="add-candidate"]'));
+});
+
+test("candidate fields save exactly once on change, never on incomplete input", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "codex", model: "gpt-6" }],
+    send: message => sent.push(message),
+  });
+  for (const input of panel.querySelectorAll('fieldset [data-profile-field]')) {
+    if (input.type === "checkbox") input.checked = !input.checked;
+    else if (input.localName === "select") input.options[1].selected = true;
+    else input.value = "new-value";
+    const before = sent.length;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(sent.length, before, "typing does not persist partial values");
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.equal(sent.length, before + 1, input.dataset.profileField);
+    assert.equal(sent.at(-1).kind, "issue_monitor_profiles_set");
+    input.dispatchEvent(new Event("blur"));
+    assert.equal(sent.length, before + 1, "blur does not duplicate change");
+  }
+  assert.equal(sent.length, 10);
+  assert.equal(Boolean(panel.querySelector('[data-action="save-profiles"]')), false);
+});
+
+test("a correlated save reconciles untouched fields and preserves newer input", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "codex", model: "old", reasoning: "high" }],
+    send: () => { panel.dataset.pendingRequest = "7"; panel.dataset.saving = "true"; },
+  });
+  const model = panel.querySelector('[data-profile-field="model"]');
+  const reasoning = panel.querySelector('[data-profile-field="reasoning"]');
+  model.value = "saved";
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  reasoning.value = "unfinished";
+  reasoning.dispatchEvent(new Event("input", { bubbles: true }));
+  const reconcile = load("reconcileCandidateSave");
+  reconcile(panel, { request_id: 6, profiles: [{ agent_id: "codex", model: "stale" }] });
+  assert.equal(model.value, "saved", "stale ACK is ignored");
+  reconcile(panel, { request_id: 7, profiles: [{ agent_id: "codex", model: "normalized", reasoning: "high" }] });
+  assert.equal(model.value, "normalized");
+  assert.equal(reasoning.value, "unfinished");
+  assert.equal(panel.dataset.dirty, "true");
+  assert.equal(panel.dataset.saving, "false");
+  reasoning.value = "high";
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  reconcile(panel, { request_id: 7, profiles: [{ agent_id: "codex", model: "normalized", reasoning: "high" }] });
+  assert.equal(panel.dataset.dirty, "false");
+  assert.match(panel.querySelector('[role="status"]').textContent, /Saved candidates/);
+});
+
+test("a rejected autosave identifies the edited field and retains its value", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "codex", prefer_for: [] }, { agent_id: "claude", prefer_for: [] }],
+    send: () => { panel.dataset.pendingRequest = "1"; },
+  });
+  const input = panel.querySelector('[data-profile-field="prefer_for"]');
+  input.value = "invalid";
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  load("renderCandidateSaveError")(panel, { request_id: 1, message: 'prefer_for entry "invalid" must match a supported tag' });
+  assert.equal(input.value, "invalid");
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.match(input.closest("label").nextElementSibling.textContent, /prefer_for entry "invalid"/);
+  const model = panel.querySelector('[aria-label="Model claude"]');
+  model.value = "valid-model";
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  load("renderCandidateSaveError")(panel, { request_id: 1, message: 'prefer_for entry "invalid" must match a supported tag' });
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.equal(model.hasAttribute("aria-invalid"), false);
+});
+
+test("structural saves wait for their correlated response before allowing row edits", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_id: "claude", model: "sonnet" }, { agent_id: "codex", model: "gpt" }],
+    send: message => { sent.push(message); panel.dataset.pendingRequest = "1"; },
+  });
+  panel.querySelector('[aria-label="Move up codex"]').click();
+  const model = panel.querySelector('[aria-label="Model claude"]');
+  assert.equal(model.disabled, true);
+  model.dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(sent.length, 1);
+  assert.equal(load("reconcileCandidateSave")(panel, { request_id: 1, profiles: sent[0].profiles }), true,
+    "structural ACK requests an authoritative redraw");
 });
 
 test("Candidates use the known catalog, including custom agents, and explain empty or invalid choices", () => {

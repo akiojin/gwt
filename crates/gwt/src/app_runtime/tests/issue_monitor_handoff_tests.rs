@@ -212,6 +212,11 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             gwt::cli::execution_state::ExecutionSettlement::Completed,
             gwt_core::workspace_projection::WorkEventKind::Done,
         ),
+        (
+            "5696-foreign-terminal-owner",
+            gwt::cli::execution_state::ExecutionSettlement::Completed,
+            gwt_core::workspace_projection::WorkEventKind::Done,
+        ),
     ] {
         let mut fixture = monitor_relaunch_fixture_with_settlement(
             temp.path(),
@@ -327,6 +332,19 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
             gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
                 .unwrap()
                 .unwrap();
+        if case == "5696-foreign-terminal-owner" {
+            // Issue #5696 AC-2: a terminal row for another owner occupied the
+            // branch-derived canonical ID (work/issue-2359, owner 3350).
+            let old = history
+                .work_items
+                .iter_mut()
+                .find(|work| work.id == predecessor_id)
+                .unwrap();
+            old.owner = Some("3350".to_string());
+            for event in &mut old.events {
+                event.owner = Some("3350".to_string());
+            }
+        }
         if case == "3287-done-resume-chain" {
             use gwt_core::workspace_projection::{successor_work_id, WorkEventKind};
             let mut start = history
@@ -629,7 +647,11 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
 
         prepare_monitor_relaunch(
             &mut fixture,
-            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            if case == "completed-done" {
+                gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe
+            } else {
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
+            },
         );
         let (window_id, result) =
             take_monitor_launch_complete_event(case, &fixture.recorded_events);
@@ -883,6 +905,21 @@ fn app_runtime_monitor_fresh_terminal_predecessor_materializes_usable_successor_
         )
         .expect("Monitor successor workspace.update must be accepted");
         assert_eq!(update.work_id, successor_id, "{case}");
+        if case == "5696-foreign-terminal-owner" {
+            let receipt = gwt::probe_bound_authenticated_work_materialization(
+                &fixture.project_root,
+                &session_id,
+                session.execution_binding.as_ref().unwrap(),
+                gwt::AgentWorkMaterializationProbeRequest {
+                    schema_version: gwt::AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION,
+                    claimed_session_id: session_id.clone(),
+                    owner_number: fixture.execution_owner.number,
+                    observation: gwt::observe_agent_runtime(&fixture.worktree).unwrap(),
+                },
+            )
+            .expect("build.start canonical materialization preflight must accept the successor");
+            assert_eq!(receipt.work_id, successor_id);
+        }
         let after =
             gwt::cli::execution_state::diagnose_owner(&fixture.worktree, fixture.execution_owner);
         assert_ne!(after.generation_id, before.generation_id, "{case}");
@@ -1049,7 +1086,7 @@ fn invalid_successor_repair_rechecks_exact_runtime_outside_the_local_registry() 
                 .find(|work| work.id == occupied_id)
                 .unwrap(),
             container.clone(),
-            "SPEC-3165",
+            super::super::workspace::SuccessorSupersessionAuthority::ExecutionOwner("SPEC-3165"),
             &HashSet::new(),
             now,
         )
@@ -1067,6 +1104,34 @@ fn invalid_successor_repair_rechecks_exact_runtime_outside_the_local_registry() 
     assert!(
         repair().is_ok(),
         "runtime absence permits the same bounded repair"
+    );
+
+    // Issue #5696 AC-1: the real Stopped member had no binding, while a
+    // legacy Running sidecar remained after both Host and child disappeared.
+    let mut legacy = source.clone();
+    legacy.execution_binding = None;
+    legacy.status = gwt_agent::AgentStatus::Stopped;
+    legacy.save(&fixture.sessions_dir).unwrap();
+    let legacy_path =
+        gwt_agent::runtime_state_path_for_pid(&fixture.sessions_dir, u32::MAX, &legacy.id);
+    let mut stale = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    stale.child_pid = Some(u32::MAX);
+    stale.save(&legacy_path).unwrap();
+    assert!(
+        repair().is_ok(),
+        "a stopped legacy member with no remaining runtime permits recovery"
+    );
+    stale.child_pid = Some(std::process::id());
+    stale.child_started_at = Some(process_start);
+    stale.save(&legacy_path).unwrap();
+    assert!(
+        repair().is_err(),
+        "Stopped must not authorize retiring a live legacy child"
+    );
+    fs::write(&legacy_path, b"{malformed runtime").unwrap();
+    assert!(
+        repair().is_err(),
+        "unreadable legacy evidence remains protected"
     );
 }
 
@@ -3471,7 +3536,24 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     };
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    let saved_events = {
+        // Saved content must not depend on completing fsync inside the GUI budget.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        runtime.handle_launch_wizard_action(
+            &runtime.test_context(),
+            LaunchWizardAction::Submit,
+            None,
+        )
+    };
+
+    assert!(
+        saved_events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, level, .. }
+                if message == "Issue Monitor settings saved" && level == "info"
+        )),
+        "profile preview save must commit successfully: {saved_events:#?}"
+    );
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
     assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);

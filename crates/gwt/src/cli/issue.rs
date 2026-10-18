@@ -4268,7 +4268,7 @@ fn monitor_launch_is_live(
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let prefs = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
     let monitor = crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
-    Ok(monitor.launched_window_id(number).is_some())
+    Ok(monitor.active_issue_numbers().contains(&number))
 }
 
 fn publish_monitor_wait_control(
@@ -13323,6 +13323,49 @@ command = "my-agent-cli"
                 "clearing must be durable too, or the row stays protected forever"
             );
         }
+    }
+
+    #[test]
+    fn issue_5616_monitor_wait_accepts_a_runtime_only_launch_without_a_daemon() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_monitor_runtime_counts(
+            101,
+            1001,
+            std::collections::BTreeMap::from([(42, 1)]),
+            "2026-06-29T01:00:00Z",
+        );
+        assert_eq!(monitor.agent_status().active_launches, vec![42]);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save prefs");
+        let env = crate::cli::TestEnv::new(repo.clone());
+        let mut out = String::new();
+        assert_eq!(
+            run_monitor_wait(
+                &env,
+                Some(&repo),
+                Some(42),
+                Some("CI pending"),
+                Some("PR checks pass"),
+                false,
+                &mut out,
+            )
+            .expect("wait runs"),
+            0,
+            "{out}"
+        );
+        let reply: serde_json::Value = serde_json::from_str(out.trim()).expect("reply");
+        assert_eq!(reply["status"], "waiting");
+        assert_eq!(reply["transport"], "local");
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert_eq!(
+            prefs.autonomous_records[0].wait.as_ref().unwrap().reason,
+            "CI pending"
+        );
+        assert!(prefs.launched_issues.is_empty());
     }
 
     /// Issue #4286 AC-1/AC-2: without a daemon the PM's invalidation lands in

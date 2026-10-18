@@ -34,7 +34,7 @@ function initialCloneState() {
   };
 }
 
-export function createHubApp({ document: doc, window: win }) {
+function createHubApp({ document: doc, window: win }) {
   const node = (tag, className, text) => {
     const element = doc.createElement(tag);
     if (className) element.className = className;

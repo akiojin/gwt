@@ -1,5 +1,6 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
+    [string]$TestFile = 'settings-threshold-removal-live.spec.ts',
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArguments
 )
 
@@ -94,7 +95,7 @@ try {
         [Environment]::SetEnvironmentVariable($key, $testVariables[$key])
     }
     # verify.run appends --headed and its evidence reporter through this array.
-    & node "$deps/node_modules/@playwright/test/cli.js" test --config crates/gwt/playwright/playwright.config.ts --output $artifacts --workers=1 settings-threshold-removal-live.spec.ts @PlaywrightArguments
+    & node "$deps/node_modules/@playwright/test/cli.js" test --config crates/gwt/playwright/playwright.config.ts --output $artifacts --workers=1 $TestFile @PlaywrightArguments
     if ($LASTEXITCODE -ne 0) { throw "Playwright failed with exit $LASTEXITCODE" }
     Write-Output "Browser evidence: $artifacts"
 } finally {

@@ -443,14 +443,34 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         review_model: Some("gpt-5.5-review".to_string()),
         ..gwt::issue_monitor::AutonomousTuning::default()
     };
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &prefs_path,
         &gwt::IssueMonitorPrefs {
             autonomous_tuning: autonomous_tuning.clone(),
+            last_scan_driver: Some(gwt::IssueMonitorScanDriver {
+                kind: gwt::IssueMonitorScanDriverKind::GuiFrontDoor,
+                pid: u32::MAX,
+                at: "2026-10-17T04:00:00Z".to_string(),
+            }),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
     .expect("seed issue monitor prefs");
+    // The fence's driver-clear write must preserve the profile transaction's inputs.
+    let (fenced, _authority_lease) = {
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        gwt::establish_issue_monitor_authority_fence(
+            &prefs_path,
+            &gwt::IssueMonitorAuthorityFence::current_process(),
+            |_| false,
+        )
+    }
+    .expect("establish exclusive fence");
+    assert!(fenced.last_scan_driver.is_none());
+    assert_eq!(fenced.effect_authority_epoch, 0);
+    assert!(fenced.launch_profile.is_none());
+    assert_eq!(fenced.autonomous_tuning, autonomous_tuning);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -550,19 +570,26 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         LaunchWizardAction::Submit,
         None,
     );
-    let saved_events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
-
-    assert!(saved_events.iter().any(|event| {
-        matches!(
-            &event.event,
-            BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor settings saved" && issue_number.is_none()
+    let saved_events = {
+        // Verify profile contents independently of the host's prefs lock/fsync latency.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        runtime.handle_launch_wizard_action(
+            &runtime.test_context(),
+            LaunchWizardAction::Submit,
+            None,
         )
-    }));
+    };
+
+    assert!(
+        saved_events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::IssueMonitorToast { message, issue_number, .. }
+                    if message == "Issue Monitor settings saved" && issue_number.is_none()
+            )
+        }),
+        "global profile save must commit successfully: {saved_events:#?}"
+    );
     assert!(runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -573,8 +600,9 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         "saving global Issue Monitor settings must not spawn an agent window"
     );
 
-    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
-        .expect("load issue monitor prefs");
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load issue monitor prefs");
+    assert_eq!(prefs.effect_authority_epoch, 1);
+    assert!(prefs.last_scan_driver.is_none());
     let profile = prefs.launch_profile.expect("saved launch profile");
     assert_eq!(profile.agent_id, "codex");
     assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
@@ -1076,10 +1104,28 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
         &prefs_path,
         &gwt::IssueMonitorPrefs {
             effect_authority_epoch: u64::MAX,
+            last_scan_driver: Some(gwt::IssueMonitorScanDriver {
+                kind: gwt::IssueMonitorScanDriverKind::GuiFrontDoor,
+                pid: u32::MAX,
+                at: "2026-10-17T04:00:00Z".to_string(),
+            }),
             ..gwt::IssueMonitorPrefs::default()
         },
     )
     .expect("seed max epoch");
+    // The fence's driver-clear write must preserve the overflow rejection inputs.
+    let (fenced, _authority_lease) = {
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        gwt::establish_issue_monitor_authority_fence(
+            &prefs_path,
+            &gwt::IssueMonitorAuthorityFence::current_process(),
+            |_| false,
+        )
+    }
+    .expect("establish exclusive fence");
+    assert!(fenced.last_scan_driver.is_none());
+    assert_eq!(fenced.effect_authority_epoch, u64::MAX);
+    assert!(fenced.launch_profile.is_none());
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let session = sample_ready_agent_launch_wizard_session("tab-1", &repo);
@@ -1089,16 +1135,20 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
             .build(),
     ));
 
-    let events = runtime.save_issue_monitor_profile_from_launch_request(
-        session,
-        IssueMonitorProfileSaveContext {
-            client_id: "client-1".to_string(),
-            issue_number: None,
-            pool: Vec::new(),
-            sets: None,
-        },
-        request,
-    );
+    let events = {
+        // Verify the overflow rejection independently of prefs lock/fsync latency.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        runtime.save_issue_monitor_profile_from_launch_request(
+            session,
+            IssueMonitorProfileSaveContext {
+                client_id: "client-1".to_string(),
+                issue_number: None,
+                pool: Vec::new(),
+                sets: None,
+            },
+            request,
+        )
+    };
 
     assert!(!events.iter().any(|event| matches!(
         &event.event,
@@ -1121,6 +1171,7 @@ fn app_runtime_issue_monitor_profile_save_reports_authority_epoch_overflow() {
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     assert_eq!(persisted.effect_authority_epoch, u64::MAX);
     assert!(persisted.launch_profile.is_none());
+    assert!(persisted.last_scan_driver.is_none());
 }
 
 #[test]

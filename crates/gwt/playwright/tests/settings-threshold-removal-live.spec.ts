@@ -33,13 +33,17 @@ test("Settings uses refusal-based candidates and ignores the legacy threshold", 
     await expect(settings).toHaveCount(1);
     const panel = settings.locator("[data-settings-candidates]");
     await expect(panel).toBeVisible();
-    await expect(panel.locator('[data-action="save-profiles"]')).toBeVisible();
+    await expect(panel.getByLabel("Model codex", { exact: true })).toBeVisible();
     await expect(panel.getByText("Usage threshold (%)", { exact: true })).toHaveCount(0);
     await expect(panel.locator('[data-profile-field="threshold"]')).toHaveCount(0);
     await expect(panel).toContainText("next candidate when a provider rejects a launch due to a rate limit");
-    await panel.locator('[data-action="save-profiles"]').click();
+    await panel.getByLabel("Model codex", { exact: true }).fill(`threshold-free-${info.project.name}`);
+    await panel.getByLabel("Model codex", { exact: true }).press("Tab");
     await expect.poll(() => saves.length).toBe(1);
     expect(saves[0]).not.toHaveProperty("usage_threshold_percent");
+    await page.waitForFunction(requestId => ((window as any).__gwtPlaywrightMessages ?? [])
+      .some(({ payload }: any) => payload.kind === "issue_monitor_profiles" && payload.request_id === requestId),
+    saves[0].request_id);
     await expect(panel).toHaveAttribute("data-saving", "false", { timeout: 90_000 });
     await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")))
       .not.toHaveProperty("launch_usage_threshold_percent");
