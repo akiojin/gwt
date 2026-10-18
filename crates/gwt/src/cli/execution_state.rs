@@ -30123,6 +30123,10 @@ exit 1
             active.owner_number = owner.number;
             save(dir.path(), &active).unwrap();
             ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            // Owner discovery can overlap the winner's authority quarantine.
+            // Seed its durable Session fallback, including cached SPEC owner kind.
+            write_issue_cache_meta(dir.path(), owner.number, serde_json::json!(["gwt-spec"]));
+            persist_recovery_session_snapshot(dir.path(), owner, "repair-session");
             let context = GenerationTransactionContext::resolve(dir.path(), owner).unwrap();
             fs::write(
                 context.worktree_trusted_dir.join("execution-control.json"),
@@ -30156,15 +30160,29 @@ exit 1
                 results
                     .iter()
                     .filter_map(|result| result.as_ref().err())
-                    .filter(|error| error.kind() == ErrorKind::AlreadyExists)
+                    .filter(|error| {
+                        error.kind() == ErrorKind::AlreadyExists
+                            || (error.kind() == ErrorKind::WouldBlock
+                                && error
+                                    .to_string()
+                                    .starts_with("owner write lease is held by another gwt writer")
+                                && error.to_string().contains("(T-149;"))
+                    })
                     .count(),
                 1,
                 "{results:?}"
             );
-            assert!(
-                load_generation_ledger(dir.path(), owner).unwrap().is_some(),
-                "the winning repair must leave strict generation authority"
-            );
+            let winner = results
+                .iter()
+                .find_map(|result| result.as_ref().ok())
+                .unwrap();
+            assert_eq!(winner.owner, owner);
+            let ledger = load_generation_ledger(dir.path(), owner).unwrap().unwrap();
+            assert_eq!(ledger.current_generation_id, winner.generation_id);
+            let audits = load_repair_audits(&repair_audit_dir(&context).unwrap()).unwrap();
+            assert_eq!(audits.len(), 1);
+            assert_eq!(audits[0].repair_id, winner.repair_id);
+            assert_eq!(audits[0].new_generation_id, winner.generation_id);
         }
 
         #[test]
