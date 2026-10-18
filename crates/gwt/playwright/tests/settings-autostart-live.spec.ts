@@ -1,4 +1,4 @@
-/** Issue #5532 / SPEC #5390: delayed login-launch replies stay local to Settings. */
+/** Settings shared-state replies through the isolated live backend. */
 import { expect, test, type WebSocketRoute } from "@playwright/test";
 import { gotoLiveGwt, openLiveGwtProject, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
@@ -15,6 +15,80 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       .map(({ sequence, payload }: any) => ({ sequence, kind: payload.kind })));
     await info.attach("settings-backend-replies", {
       body: JSON.stringify(received), contentType: "application/json",
+    });
+  });
+
+  test("Board auth snapshots preserve guarded controls and unsaved provider drafts", async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const theme = info.project.name.endsWith("light") ? "light" : "dark";
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      const requests: any[] = [];
+      let transport: WebSocketRoute | undefined;
+      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+        const server = socket.connectToServer();
+        transport = socket;
+        socket.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          // Exercise the actual receiver without external OAuth or secret writes.
+          if (["get_board_auth_status", "board_provider_sign_out", "update_board_provider_config"].includes(payload?.kind)) {
+            requests.push(payload);
+          } else server.send(message);
+        });
+        server.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (payload?.kind === "board_auth_status") return;
+          if (payload?.kind === "system_settings") {
+            socket.send(JSON.stringify({ ...payload, board_provider: "slack" }));
+          } else socket.send(message);
+        });
+      });
+      const reply = (slack: boolean, client: string) => transport!.send(JSON.stringify({
+        kind: "board_auth_status", slack, slack_client_id: client, oauth_redirect_port: 8765,
+      }));
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await openLiveGwtProject(page, PROJECT);
+      await page.bringToFront();
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "system" } })));
+      const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const panel = settings.locator('[data-system-settings-content]');
+      await expect(panel.locator(".board-auth-status")).toBeVisible();
+      await expect.poll(() => requests.filter(request => request.kind === "get_board_auth_status").length).toBeGreaterThan(0);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      reply(true, "client-a");
+      await expect(panel.locator(".board-auth-status")).toHaveAttribute("data-signed-in", "true");
+      const language = panel.getByLabel("Output Language", { exact: true });
+      await language.focus();
+      await language.dispatchEvent("pointerdown");
+      await language.evaluate(element => element.setAttribute("data-probe", "guarded"));
+      const before = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+      reply(false, "client-b");
+      // A native-select guard keeps the node until focus leaves it.
+      await page.waitForFunction(before => ((window as any).__gwtPlaywrightMessages ?? [])
+        .some(({ sequence, payload }: any) => sequence > before && payload.kind === "board_auth_status" && payload.slack === false), before);
+      await expect(language).toHaveAttribute("data-probe", "guarded");
+      await expect(panel.locator(".board-auth-status")).toHaveAttribute("data-signed-in", "true");
+      await language.blur();
+      await expect(panel.locator(".board-auth-status")).toHaveAttribute("data-signed-in", "false");
+      await expect(panel.locator('.board-config-form input[type="text"]').first()).toHaveValue("client-b");
+      const secret = panel.locator('.board-config-form input[type="password"]');
+      await secret.fill("fixture-unsaved-secret");
+      reply(true, "client-c");
+      await expect(secret).toHaveValue("fixture-unsaved-secret");
+      await panel.locator(".board-config-form button").click();
+      await expect.poll(() => requests.filter(request => request.kind === "update_board_provider_config").length).toBe(1);
+      reply(true, "client-c");
+      await expect(secret).toHaveValue("");
+      await expect(panel.locator('.board-config-form input[type="text"]').first()).toHaveValue("client-c");
+      await panel.getByRole("button", { name: "Sign out", exact: true }).click();
+      await expect.poll(() => requests.some(request => request.kind === "board_provider_sign_out" && request.provider === "slack")).toBe(true);
+      reply(false, "client-c");
+      await expect(panel.locator(".board-auth-status")).toHaveText("Not signed in to slack");
+      await panel.locator(".board-auth-status").scrollIntoViewIfNeeded();
+      await info.attach(`board-auth-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
+      expect(errors).toEqual([]);
     });
   });
 

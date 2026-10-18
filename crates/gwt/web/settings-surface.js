@@ -666,6 +666,23 @@ export function createSettingsSurface({
       // commit. Delegated listeners scope to `select.settings-select`
       // so the guard covers every Settings window without per-window
       // wiring.
+      function applyBoardAuthStatus(event) {
+        systemSettingsModel.update(state => ({
+          ...state,
+          boardAuth: { slack: event.slack === true, teams: event.teams === true },
+          boardAuthMessage: event.message || "",
+          boardConfig: {
+            slackClientId: event.slack_client_id || "",
+            slackDefaultChannel: event.slack_default_channel || "",
+            slackHasSecret: event.slack_has_secret === true,
+            teamsClientId: event.teams_client_id || "",
+            teamsTenantId: event.teams_tenant_id || "",
+            teamsDefaultChannel: event.teams_default_channel || "",
+            oauthRedirectPort: event.oauth_redirect_port || 8765,
+          },
+        }));
+      }
+
       function applyAutostartStatus(event, statusMessage = systemSettingsModel.read().autostartPending
         ? "Saved login launch setting." : "") {
         systemSettingsModel.update(state => ({
@@ -827,6 +844,15 @@ export function createSettingsSurface({
         },
         // SPEC-2959/2963: selected Board backend (local/slack/teams).
         boardProvider: "local",
+        loaded: false,
+        statusMessage: "",
+        statusKind: "",
+      };
+      const settingsWindowBodies = new Set();
+      // Autostart and Board auth have one immutable source; other System settings retain
+      // their existing local adapter until their own migration slice.
+      const systemSettingsModel = createUiStateStore({
+        ...systemSettingsState,
         // SPEC-2963: remote provider sign-in state + last sign-in message.
         boardAuth: { slack: false, teams: false },
         boardAuthMessage: "",
@@ -841,15 +867,6 @@ export function createSettingsSurface({
           teamsDefaultChannel: "",
           oauthRedirectPort: 8765,
         },
-        loaded: false,
-        statusMessage: "",
-        statusKind: "",
-      };
-      const settingsWindowBodies = new Set();
-      // Autostart has one immutable source; other System settings retain
-      // their existing local adapter until their own migration slice.
-      const systemSettingsModel = createUiStateStore({
-        ...systemSettingsState,
         autostartEnabled: false,
         autostartPreviousEnabled: false,
         autostartMechanism: "",
@@ -865,7 +882,7 @@ export function createSettingsSurface({
         // destructive DOM refresh waits for the existing guard to flush.
         if (systemSettingsInteractionGuard.isActive()) {
           // A deferred System reply still needs to be applied on release.
-          // Its flush also renders the latest Autostart snapshot.
+          // Its flush also renders the latest shared System snapshot.
           if (!systemSettingsInteractionGuard.hasPendingValue()) {
             systemSettingsInteractionGuard.defer({ kind: "autostart_render" });
           }
@@ -1863,7 +1880,7 @@ export function createSettingsSurface({
           // SPEC-2963 FR-006: provider config form. Non-secret fields persist to
           // config.toml; the client secret is routed to the secure credential
           // store and never echoed back (placeholder shows "configured").
-          const cfg = systemSettingsState.boardConfig || {};
+          const cfg = state.boardConfig || {};
           const configForm = createDiv("settings-section board-config-form");
           configForm.dataset.provider = selectedProvider;
           configForm.addEventListener("input", () => { configForm.dataset.dirty = "true"; });
@@ -2075,7 +2092,7 @@ export function createSettingsSurface({
           oauthForm.appendChild(savePortBtn);
           boardSection.appendChild(oauthForm);
 
-          const auth = systemSettingsState.boardAuth || { slack: false, teams: false };
+          const auth = state.boardAuth || { slack: false, teams: false };
           const signedIn = auth[selectedProvider] === true;
           const authRow = createDiv("settings-section board-auth-row");
           const statusText = createNode(
@@ -2116,9 +2133,9 @@ export function createSettingsSurface({
           authRow.appendChild(refreshBtn);
           boardSection.appendChild(authRow);
 
-          if (systemSettingsState.boardAuthMessage) {
+          if (state.boardAuthMessage) {
             boardSection.appendChild(
-              createNode("p", "settings-help", systemSettingsState.boardAuthMessage),
+              createNode("p", "settings-help", state.boardAuthMessage),
             );
           }
         }
@@ -2380,6 +2397,7 @@ export function createSettingsSurface({
         systemSettingsModel,
         systemSettingsInteractionGuard,
         applyAgentResourceSnapshot,
+        applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
         applyCustomAgentDeleted,

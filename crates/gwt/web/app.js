@@ -4709,6 +4709,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         systemSettingsState,
         systemSettingsInteractionGuard,
         applyAgentResourceSnapshot,
+        applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
         applyCustomAgentDeleted,
@@ -5673,22 +5674,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyCustomAgentDeleted(event);
             break;
           case "board_auth_status":
-            // SPEC-2963: remote provider sign-in state + editable config view.
-            systemSettingsState.boardAuth = {
-              slack: event.slack === true,
-              teams: event.teams === true,
-            };
-            systemSettingsState.boardAuthMessage = event.message || "";
-            systemSettingsState.boardConfig = {
-              slackClientId: event.slack_client_id || "",
-              slackDefaultChannel: event.slack_default_channel || "",
-              slackHasSecret: event.slack_has_secret === true,
-              teamsClientId: event.teams_client_id || "",
-              teamsTenantId: event.teams_tenant_id || "",
-              teamsDefaultChannel: event.teams_default_channel || "",
-              oauthRedirectPort: event.oauth_redirect_port || 8765,
-            };
-            renderSystemPanelInAllSettingsWindows();
+            applyBoardAuthStatus(event);
             break;
           case "update_settings":
             applyGlobalUpdateSettings(event);
