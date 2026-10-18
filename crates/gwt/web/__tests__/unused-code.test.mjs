@@ -50,6 +50,27 @@ test("rewritten browser-module test imports retain only the referenced exports",
   });
 });
 
+test("typed Playwright browser imports preserve test seams without keeping orphan modules live", () => {
+  const modules = new Map([
+    ["entry.js", 'import "./helpers.js";'],
+    ["helpers.js", 'export function seam() {} export const retired = true;'],
+    ["orphan.js", 'export const retired = true;'],
+    ["__tests__/playwright/example.spec.ts", `
+      import { test } from "@playwright/test";
+      test("browser seam", async ({ page }) => page.evaluate(async () => {
+        const modulePath = "/helpers.js";
+        const { seam } = await import(modulePath);
+        const value: unknown = seam();
+        (window as any).result = value;
+        await import("/orphan.js");
+      }));
+    `],
+  ]);
+  assert.deepEqual(auditModules(modules, ["entry.js"]), {
+    unusedModules: ["orphan.js"], unusedExports: ["helpers.js:retired"],
+  });
+});
+
 test("shipped web modules have no unused modules or exports (Issue #5601)", () => {
   const modules = readWebModules(new URL("../", import.meta.url));
   // app.js is inserted by frontend-bootstrap as a module script on Project routes.

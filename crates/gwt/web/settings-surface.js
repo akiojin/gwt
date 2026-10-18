@@ -354,7 +354,7 @@ function positionIssuesLaunchControls(body) {
   }
 }
 
-function renderAgentsSettingsPanel(panel, options) {
+export function renderAgentsSettingsPanel(panel, options) {
   const { project, profiles, status, send, availableAgents = null } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();

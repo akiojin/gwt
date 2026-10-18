@@ -3,21 +3,40 @@
 // Static namespace reads/destructuring consume their named exports; unknown
 // namespace uses remain conservative. Vendor assets and the generated protocol
 // enum are outside this hand-written API check.
-import { parse } from "acorn";
+import { parse, tokenizer } from "acorn";
 import { readFileSync, readdirSync } from "node:fs";
 import { posix } from "node:path";
 
 export function readWebModules(root) {
-  return new Map(readdirSync(root, { recursive: true })
+  const modules = new Map(readdirSync(root, { recursive: true })
     .map(name => name.replaceAll("\\", "/"))
     .filter(name => /^[^/]+\.js$/.test(name) || /^__tests__\/.*\.mjs$/.test(name))
     .map(name => [name, readFileSync(new URL(name, root), "utf8")]));
+  const playwright = new URL("../playwright/tests/", root);
+  for (const name of readdirSync(playwright, { recursive: true })) {
+    if (name.endsWith(".ts")) modules.set(`__tests__/playwright/${name.replaceAll("\\", "/")}`,
+      readFileSync(new URL(name.replaceAll("\\", "/"), playwright), "utf8"));
+  }
+  return modules;
 }
 
 export function auditModules(modules, entries) {
   const records = new Map();
   for (const [file, source] of modules) {
     const exports = new Set(), imports = [], readTargets = new Set(), identifiers = new Set();
+    if (file.startsWith("__tests__/") && file.endsWith(".ts")) {
+      // Playwright evaluates browser imports inside typed callbacks. Tokenize
+      // explicit paths/bindings conservatively without adding a TS parser or
+      // allowing test consumers to make production modules reachable.
+      for (const token of tokenizer(source, { ecmaVersion: "latest", sourceType: "module" })) {
+        if (token.type.label === "name") identifiers.add(token.value);
+        if (token.type.label === "string" && /^\/[^/].*\.js$/.test(token.value)) {
+          readTargets.add(posix.normalize(token.value.slice(1)));
+        }
+      }
+      records.set(file, { exports, imports, readTargets, identifiers });
+      continue;
+    }
     const namespaces = new Map();
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     function addImport(specifier, names) {
