@@ -1,0 +1,8 @@
+{
+  "recorded_at": "2026-10-17T03:55:30.8501216Z",
+  "binary_sha256": "e0d3b1be1d725b5669e5b1b1e148fbbbf77dbec9de9a109fdc1af6ae5176be81",
+  "sha256": {
+    "crates/gwt-agent/src/session_ledger.rs": "7fcc2ea6db54a646e82010a044b4f0f42aaebb989dc4fb8504db4e75bd8785f9",
+    "crates/gwt-core/src/index/path_policy.rs": "04ae682587fb568fa84b896277f0fee9b34114195db0cf785472a0d5fb1aefbf"
+  }
+}
