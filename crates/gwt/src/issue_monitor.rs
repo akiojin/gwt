@@ -7492,7 +7492,16 @@ impl IssueMonitorState {
                 .launch_confirmations
                 .iter()
                 .filter(|(issue, confirmation)| {
-                    self.launch_bindings.get(&confirmation.window_id) == Some(*issue)
+                    match self.launch_bindings.get(&confirmation.window_id) {
+                        Some(owner) => owner == *issue,
+                        // A missing pane's ledger can be pruned before its
+                        // deadline. Keep the exact reservation's ACK anchor.
+                        None => {
+                            self.active_launches.contains(*issue)
+                                && self.launched_windows.get(*issue)
+                                    == Some(&confirmation.window_id)
+                        }
+                    }
                 })
                 .map(|(issue, confirmation)| (*issue, confirmation.clone()))
                 .collect(),
