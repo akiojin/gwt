@@ -3470,7 +3470,24 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     };
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    let saved_events = {
+        // Saved content must not depend on completing fsync inside the GUI budget.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        runtime.handle_launch_wizard_action(
+            &runtime.test_context(),
+            LaunchWizardAction::Submit,
+            None,
+        )
+    };
+
+    assert!(
+        saved_events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, level, .. }
+                if message == "Issue Monitor settings saved" && level == "info"
+        )),
+        "profile preview save must commit successfully: {saved_events:#?}"
+    );
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
     assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);
