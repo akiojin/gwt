@@ -86,7 +86,8 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await expect.poll(() => requests.some(request => request.kind === "board_provider_sign_out" && request.provider === "slack")).toBe(true);
       reply(false, "client-c");
       await expect(panel.locator(".board-auth-status")).toHaveText("Not signed in to slack");
-      await panel.locator(".board-auth-status").scrollIntoViewIfNeeded();
+      await settings.evaluate(element => element.querySelector(".board-auth-status")
+        ?.scrollIntoView({ block: "center" }));
       await info.attach(`board-auth-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
       expect(errors).toEqual([]);
     });
