@@ -28,7 +28,7 @@ import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { setControlExplanation } from "./control-explanations.js";
 
-export function renderUpdateSettingsStatus(panel, status) {
+function renderUpdateSettingsStatus(panel, status) {
   const document = panel.ownerDocument;
   panel.replaceChildren();
   const values = document.createElement("p");
@@ -229,7 +229,7 @@ export function mountProjectManagerSettingsPanel(
   return panel;
 }
 
-export function renderIssuesSettingsPanel(panel, options) {
+function renderIssuesSettingsPanel(panel, options) {
   const { project, status, send, launchControls = [] } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
@@ -1012,7 +1012,6 @@ export function createSettingsSurface({
           renderSystemPanelInAllSettingsWindows();
         }
       }
-      let pendingAddFromPreset = null;
       let editingCustomAgentId = null;
 
       function createDiv(className) {
@@ -2271,20 +2270,6 @@ export function createSettingsSurface({
         }
       }
 
-      function startAddClaudeCodeOpenaiCompatFlow() {
-        const baseUrl = window.prompt(
-          "Upstream base_url (http:// or https://)\n\nExample: http://192.168.100.166:32768",
-          "http://",
-        );
-        if (!baseUrl) return;
-        const apiKey = window.prompt(
-          "API key (forwarded as Bearer on /v1/models probe and ANTHROPIC_API_KEY at launch):",
-        );
-        if (!apiKey) return;
-        setSettingsStatus("Probing /v1/models…", "info");
-        pendingAddFromPreset = { baseUrl, apiKey };
-        send({ kind: "test_backend_connection", base_url: baseUrl, api_key: apiKey });
-      }
 
       function setSettingsStatus(message, kind) {
         customAgentsState.statusMessage = message;
@@ -2292,54 +2277,9 @@ export function createSettingsSurface({
         renderSettingsAgentList();
       }
 
-      function completeAddFromPreset(discoveredModels) {
-        if (!pendingAddFromPreset) return;
-        if (!discoveredModels || discoveredModels.length === 0) {
-          setSettingsStatus("Upstream /v1/models returned no entries.", "error");
-          pendingAddFromPreset = null;
-          return;
-        }
-        const modelList = discoveredModels.join("\n");
-        const model = window.prompt(
-          `Discovered ${discoveredModels.length} model(s). Choose default_model (copy one ID):\n\n${modelList}`,
-          discoveredModels[0],
-        );
-        if (!model) {
-          pendingAddFromPreset = null;
-          setSettingsStatus("Cancelled.", "info");
-          return;
-        }
-        const id = window.prompt("Custom agent id (alphanumeric + `-`):", "claude-code-openai");
-        if (!id) {
-          pendingAddFromPreset = null;
-          setSettingsStatus("Cancelled.", "info");
-          return;
-        }
-        const displayName = window.prompt("Display name:", "Claude Code (OpenAI-compat)");
-        if (!displayName) {
-          pendingAddFromPreset = null;
-          setSettingsStatus("Cancelled.", "info");
-          return;
-        }
-        setSettingsStatus("Saving preset…", "info");
-        send({
-          kind: "add_custom_agent_from_preset",
-          input: {
-            id,
-            display_name: displayName,
-            base_url: pendingAddFromPreset.baseUrl,
-            api_key: pendingAddFromPreset.apiKey,
-            default_model: model,
-          },
-        });
-        pendingAddFromPreset = null;
-      }
 
 
-      // SPEC-3064 Phase 3 (E4): receive() delegates for the two settings
-      // cases whose bodies reassign module-level state
-      // (editingCustomAgentId / pendingAddFromPreset) and therefore cannot
-      // stay inline in app.js once that state lives here.
+      // Apply custom-agent responses to the Settings state and status display.
       function applyCustomAgentDeleted(event) {
         customAgentsState.agents = customAgentsState.agents.filter(
           (a) => a.id !== event.agent_id,
@@ -2352,7 +2292,6 @@ export function createSettingsSurface({
 
       function applyCustomAgentError(event) {
         customAgentsState.loading = false;
-        pendingAddFromPreset = null;
         setSettingsStatus(
           `Error [${event.code}]: ${event.message}`,
           "error",
@@ -2385,6 +2324,5 @@ export function createSettingsSurface({
         renderIndexPanelInAllSettingsWindows,
         requestFullIndexStatusRefresh,
         setSettingsStatus,
-        completeAddFromPreset,
       };
 }

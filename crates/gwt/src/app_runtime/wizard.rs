@@ -4350,6 +4350,22 @@ impl AppRuntime {
             }
             return Ok((None, None));
         }
+        // Issue #5696: terminal Work cannot rebound in the same Session,
+        // including a Completed owner that has been reopened. The Resume
+        // coordinator would degrade to observation-only, so route Monitor
+        // back through the fresh-launch readiness transaction instead.
+        if session.linked_issue_number == Some(issue_number)
+            && gwt::continuation_requires_new_session(project_root, &session)
+                .map_err(|error| format!("failed to inspect Monitor resume Work: {error}"))?
+        {
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff requires a fresh Session because its Work is terminal"
+                        .to_string(),
+                );
+            }
+            return Ok((None, None));
+        }
         if !session.worktree_path.as_path().exists() {
             config.working_dir = None;
         }
