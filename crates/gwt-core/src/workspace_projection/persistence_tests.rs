@@ -14436,6 +14436,72 @@ fn current_work_preserves_owner_authority_across_missing_historical_owner() {
 }
 
 #[test]
+fn current_work_follows_authenticated_owner_successor_after_foreign_terminal_root() {
+    let project = Path::new("/repo");
+    let branch = Some("work/issue-2359");
+    let now = Utc.timestamp_opt(9_000, 0).unwrap();
+    let root_id = canonical_work_id(project, branch, None).unwrap();
+    let next_id = successor_work_id(&root_id);
+    let mut works = WorkItemsProjection::empty(now);
+    let mut start = sample_work_event(&root_id, now);
+    start.owner = Some("3350".into());
+    start.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: branch.map(str::to_string),
+        worktree_path: Some(PathBuf::from("/wt/issue-2359")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    works.apply_event(start.clone());
+    works.apply_event(WorkEvent::new(WorkEventKind::Done, &root_id, now));
+    let old = works.work_items[0].clone();
+    start.work_item_id = next_id.clone();
+    start.related_work_item_id = Some(root_id.clone());
+    start.owner = Some("SPEC-2359".into());
+    start.agent_session_id = Some("fresh-owner-session".into());
+    start.id = "ordinary-start".into();
+    let mut ordinary = works.clone();
+    ordinary.apply_event(start.clone());
+    assert_eq!(
+        current_work_id(&ordinary, project, branch, None),
+        Some(root_id.clone()),
+        "ordinary Start cannot cross a known owner boundary"
+    );
+    start.id = format!("owner-successor-{next_id}");
+    works.apply_event(start);
+    for index in 0..60 {
+        let mut update = WorkEvent::new(WorkEventKind::Update, &next_id, now);
+        update.id = format!("later-{index}");
+        works.apply_event(update);
+    }
+    works.compact_inline_events();
+    let reloaded: WorkItemsProjection =
+        serde_json::from_slice(&serde_json::to_vec(&works).unwrap()).unwrap();
+    assert_eq!(
+        current_work_id(&reloaded, project, branch, None),
+        Some(next_id.clone())
+    );
+    assert_eq!(
+        current_work_id_for_launch(&reloaded, project, branch, None, Some("SPEC-2359")).unwrap(),
+        Some(next_id.clone())
+    );
+    let mut cold = WorkItemsProjection::empty(now);
+    for event in reloaded
+        .work_items
+        .iter()
+        .flat_map(|work| work.events.iter())
+    {
+        cold.apply_event(event.clone());
+    }
+    assert_eq!(current_work_id(&cold, project, branch, None), Some(next_id));
+    assert_eq!(
+        reloaded.work_items.iter().find(|work| work.id == root_id),
+        Some(&old),
+        "foreign terminal history remains unchanged"
+    );
+}
+
+#[test]
 fn find_work_item_for_container_rejects_invalid_successor_authority() {
     let project_root = Path::new("/repo");
     let worktree = Path::new("/wt/issue-4074");
