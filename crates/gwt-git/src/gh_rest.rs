@@ -35,9 +35,12 @@ pub(crate) fn cached_list_response_with(
     now: DateTime<Utc>,
     fetch: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    let path = cache_dir.join(format!("{:016x}.json", hasher.finish()));
+    // A short common lock prevents cleanup from deleting a concurrently
+    // refreshed page. Never hold it across the live fetch.
+    if let Some(_lock) = list_cache_lock(cache_dir) {
+        reclaim_expired_list_pages(cache_dir, now, LIST_CACHE_TTL_SECS);
+    }
+    let path = cache_dir.join(list_cache_file_name(key));
     if let Some(cached) = std::fs::read(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<CachedListResponse>(&bytes).ok())
@@ -60,11 +63,63 @@ pub(crate) fn cached_list_response_with(
             stdout: stdout.clone(),
         };
         if let Ok(bytes) = serde_json::to_vec(&cached) {
-            let _ = std::fs::create_dir_all(cache_dir);
-            let _ = gwt_core::atomic_file::write_atomic(&path, &bytes);
+            if let Some(_lock) = list_cache_lock(cache_dir) {
+                let _ = gwt_core::atomic_file::write_atomic(&path, &bytes);
+            }
         }
     }
     Ok(stdout)
+}
+
+fn list_cache_file_name(key: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    format!("{:016x}.json", hasher.finish())
+}
+
+fn list_cache_lock(cache_dir: &Path) -> Option<gwt_core::operation_deadline::NamedFileLock> {
+    std::fs::create_dir_all(cache_dir).ok()?;
+    gwt_core::operation_deadline::NamedFileLock::try_acquire(
+        &cache_dir.join(".cache.lock"),
+        "REST page cache",
+    )
+    .ok()
+}
+
+/// Called only under the same lock as publication. Unrecognized files and
+/// unreadable entries stay untouched; cleanup failures never affect reads.
+fn reclaim_expired_list_pages(cache_dir: &Path, now: DateTime<Utc>, ttl_secs: i64) {
+    // Readers tolerate extra fields for compatibility; reclamation must not
+    // assume that a future format has the same expiry contract.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct KnownPage {
+        key: String,
+        fetched_at: DateTime<Utc>,
+        stdout: String,
+    }
+
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(cached) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<KnownPage>(&bytes).ok())
+        else {
+            continue;
+        };
+        if entry.file_name() == std::ffi::OsStr::new(&list_cache_file_name(&cached.key))
+            && now.signed_duration_since(cached.fetched_at).num_seconds() >= ttl_secs
+            && valid_list_response(&cached.stdout)
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn valid_list_response(stdout: &str) -> bool {
@@ -297,6 +352,109 @@ fn text(row: &Value, keys: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_cached_page(
+        cache_dir: &Path,
+        key: &str,
+        fetched_at: DateTime<Utc>,
+    ) -> std::path::PathBuf {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let path = cache_dir.join(format!("{:016x}.json", hasher.finish()));
+        let bytes = serde_json::to_vec(&CachedListResponse {
+            key: key.into(),
+            fetched_at,
+            stdout: "HTTP/2.0 200 OK\n\r\n[]".into(),
+        })
+        .unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn issue_5738_reclaims_only_expired_known_cache_pages_on_a_cache_hit() {
+        let cache = tempfile::tempdir().unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expired_at = now - chrono::Duration::seconds(LIST_CACHE_TTL_SECS);
+        let expired = write_cached_page(cache.path(), "issues?since=old-cursor", expired_at);
+        let fresh = write_cached_page(cache.path(), "issues?since=current-cursor", now);
+        let future = write_cached_page(cache.path(), "future", now + chrono::Duration::seconds(1));
+        let unrelated = cache.path().join("unrelated.json");
+        std::fs::copy(&expired, &unrelated).unwrap();
+        let mismatch = write_cached_page(cache.path(), "wrong-key", expired_at);
+        std::fs::copy(&expired, &mismatch).unwrap();
+        let malformed = cache.path().join("0000000000000000.json");
+        std::fs::write(&malformed, "not json").unwrap();
+        let unknown = write_cached_page(cache.path(), "future-schema", expired_at);
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&unknown).unwrap()).unwrap();
+        value["version"] = 2.into();
+        std::fs::write(&unknown, serde_json::to_vec(&value).unwrap()).unwrap();
+        let nested = cache.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let nested_page = write_cached_page(&nested, "nested-old-cursor", expired_at);
+        #[cfg(unix)]
+        let (_outside, symlink) = {
+            let outside = tempfile::tempdir().unwrap();
+            let target = write_cached_page(outside.path(), "symlink-old-cursor", expired_at);
+            let path = cache.path().join(target.file_name().unwrap());
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            (outside, path)
+        };
+
+        let response =
+            cached_list_response_with(cache.path(), "issues?since=current-cursor", now, || {
+                panic!("valid TTL page must remain a cache hit")
+            })
+            .unwrap();
+        assert!(response.ends_with("[]"));
+        assert!(
+            !expired.exists(),
+            "old cursor at the TTL boundary must be reclaimed"
+        );
+        for path in [
+            fresh,
+            future,
+            unrelated,
+            mismatch,
+            malformed,
+            unknown,
+            nested_page,
+        ] {
+            assert!(path.exists(), "must preserve {}", path.display());
+        }
+        #[cfg(unix)]
+        assert!(symlink.is_symlink());
+    }
+
+    #[test]
+    fn issue_5738_contended_cleanup_preserves_fetch_results_and_skips_publication() {
+        let cache = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let expired = write_cached_page(
+            cache.path(),
+            "old-cursor",
+            now - chrono::Duration::seconds(LIST_CACHE_TTL_SECS),
+        );
+        let new_page = write_cached_page(cache.path(), "new-cursor", now);
+        std::fs::remove_file(&new_page).unwrap();
+        let _lock = gwt_core::operation_deadline::NamedFileLock::try_acquire(
+            &cache.path().join(".cache.lock"),
+            "held cache publication",
+        )
+        .unwrap();
+
+        assert_eq!(
+            cached_list_response_with(cache.path(), "new-cursor", now, || Ok("[]".into())).unwrap(),
+            "[]"
+        );
+        assert!(expired.exists(), "contended cleanup must be skipped");
+        assert!(
+            !new_page.exists(),
+            "publication must honor the cleanup lock"
+        );
+    }
 
     #[test]
     fn issue_5603_unchanged_lists_halve_hourly_rest_consumption() {
