@@ -471,10 +471,12 @@ pub struct PrInventoryItem {
     pub ready_to_promote_blocker: Option<String>,
     pub lifecycle: String,
     /// `observed` (classified from this read), `held` (previous class kept
-    /// while mergeability is `UNKNOWN` and the real data is unchanged), or
-    /// `undetermined` (unknown mergeability with no usable history).
+    /// while mergeability is `UNKNOWN` and the real data is unchanged),
+    /// `undetermined` (unknown mergeability with no usable history), or
+    /// `stale-cache` (the snapshot could not be refreshed).
     #[serde(default = "lifecycle_source_observed")]
     pub lifecycle_source: String,
+    /// The PR exceeded its dwell threshold, or its inventory snapshot is stale.
     pub stale: bool,
     pub owner_issue_closed: bool,
     #[serde(default)]
@@ -1177,8 +1179,17 @@ pub fn parse_pr_inventory_json_with(
     let arr: Vec<serde_json::Value> =
         serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
     arr.iter()
+        .filter(|row| inventory_row_is_open(row))
         .map(|value| inventory_item_from_value(value, now, options))
         .collect()
+}
+
+fn inventory_row_is_open(row: &serde_json::Value) -> bool {
+    // Older snapshots did not request state. Keep them readable, but never
+    // classify an explicitly terminal PR as open.
+    row.get("state")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|state| state.eq_ignore_ascii_case("OPEN"))
 }
 
 /// The bulk list query (Issue #3891 AC-2): no `body`, no `statusCheckRollup`.
@@ -1189,9 +1200,9 @@ pub fn parse_pr_inventory_json_with(
 /// the same cycle is never reported, and the wait is at most one cycle.
 const AUTO_MERGE_STALLED_AFTER_CYCLES: u32 = 1;
 
-const INVENTORY_LIGHT_JSON_FIELDS: &str = "number,title,url,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,closingIssuesReferences";
+const INVENTORY_LIGHT_JSON_FIELDS: &str = "number,title,url,state,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,closingIssuesReferences";
 const INVENTORY_LIGHT_JSON_FIELDS_WITHOUT_CLOSING: &str =
-    "number,title,url,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision";
+    "number,title,url,state,isDraft,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergeable,mergeStateStatus,reviewDecision";
 
 /// File under the machine-local project dir that remembers the previous
 /// `pr.list` observation per PR (Issue #3868 AC-6).
@@ -1294,6 +1305,7 @@ impl PrInventoryCache {
     ) -> Result<Vec<PrInventoryItem>> {
         self.rows
             .iter()
+            .filter(|row| inventory_row_is_open(row))
             .map(|row| {
                 let mut row = row.clone();
                 let number = row.get("number").and_then(serde_json::Value::as_u64);
@@ -1343,8 +1355,7 @@ pub struct PrInventoryRead {
     /// PRs skipped as unchanged after a live bulk comparison; zero on cache reads.
     pub skipped_unchanged: usize,
     /// Issue #4074 FR-005 / #5053: delivery branches with commits and no open PR
-    /// to land them. Read from local refs, so it stays truthful even when the
-    /// PR rows came from cache.
+    /// to land them. Not observed when the open PR set is stale.
     pub unlanded_branches: Vec<UnlandedBranch>,
 }
 
@@ -1618,9 +1629,25 @@ pub fn fetch_pr_inventory_tracked(
         options,
         run_gh_command,
     )?;
+    track_pr_inventory(&mut read, repo_path, history_path, now, options);
+    Ok(read)
+}
+
+fn track_pr_inventory(
+    read: &mut PrInventoryRead,
+    repo_path: &Path,
+    history_path: &Path,
+    now: DateTime<Utc>,
+    options: &PrInventoryOptions,
+) {
+    // Issue #5735: neither lifecycle progress nor absence of an open PR can
+    // be inferred from a snapshot GitHub would not let us refresh.
+    if read.source == "stale-cache" {
+        return;
+    }
     // Issue #4074 FR-005: the stocktake is local git, so it costs no GitHub
-    // budget and is never served stale beside a cached PR list. A git failure
-    // degrades the inventory to empty rather than failing the whole read.
+    // budget. A git failure degrades the inventory to empty rather than
+    // failing the whole read.
     let open_pr_head_refs: Vec<String> = read
         .items
         .iter()
@@ -1640,7 +1667,6 @@ pub fn fetch_pr_inventory_tracked(
             history_path.display()
         );
     }
-    Ok(read)
 }
 
 /// The cache-first, budget-aware read behind `pr.list`.
@@ -1696,8 +1722,22 @@ where
     });
     if let Some(reason) = throttle {
         if cache.fetched_at.is_some() {
+            let mut items = cache.items(now, options)?;
+            for item in &mut items {
+                item.stale = true;
+                item.lifecycle = PrLifecycleClass::Undetermined.as_str().to_string();
+                item.lifecycle_source = "stale-cache".to_string();
+                item.default_action = "wait for a fresh PR inventory before acting".to_string();
+                item.default_action_executable = false;
+                item.default_action_operation = None;
+                item.blocker = Some("stale_pr_inventory".to_string());
+                item.fallback = Some(
+                    "retry pr.list with refresh:true after the GitHub budget recovers".to_string(),
+                );
+                item.escalation_due = false;
+            }
             return Ok(PrInventoryRead {
-                items: conflict_measured(repo_path, cache.items(now, options)?),
+                items,
                 source: "stale-cache",
                 fetched_at: cache.fetched_at,
                 cache_age_secs: cache_age,
@@ -2488,7 +2528,9 @@ fn parse_inventory_rows(json: &str) -> Result<Vec<serde_json::Value>> {
     let value: serde_json::Value =
         serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
     match value {
-        serde_json::Value::Array(rows) => Ok(rows),
+        serde_json::Value::Array(rows) => {
+            Ok(rows.into_iter().filter(inventory_row_is_open).collect())
+        }
         _ => Err(GwtError::Other(
             "gh pr list JSON: expected an array".to_string(),
         )),
@@ -7592,7 +7634,8 @@ mod tests {
             resources,
         });
 
-        let read = cached_read(tmp.path(), &ledger, &mut gh, exhausted_at, &options).expect("read");
+        let mut read =
+            cached_read(tmp.path(), &ledger, &mut gh, exhausted_at, &options).expect("read");
         assert!(
             gh.calls.is_empty(),
             "throttled read must not spawn gh: {:?}",
@@ -7600,11 +7643,76 @@ mod tests {
         );
         assert_eq!(read.source, "stale-cache");
         assert_eq!(read.github_calls, 0);
-        let reason = read.throttled.expect("throttle reason");
+        let reason = read.throttled.as_ref().expect("throttle reason");
         assert!(reason.contains("budget_reserve"), "{reason}");
         assert!(reason.contains("remaining=120"), "{reason}");
         assert_eq!(read.items[0].number, 3);
         assert_eq!(read.items[0].ci_status, "SUCCESS");
+        assert!(read.items[0].stale);
+        assert_eq!(read.items[0].lifecycle, "UNDETERMINED");
+        assert_eq!(read.items[0].lifecycle_source, "stale-cache");
+        assert!(!read.items[0].default_action_executable);
+        assert_eq!(read.items[0].default_action_operation, None);
+        assert_eq!(read.items[0].blocker.as_deref(), Some("stale_pr_inventory"));
+        assert!(!read.items[0].escalation_due);
+
+        // Even a pre-existing history file stays byte-identical; stale reads
+        // must not count as another observation or measure branch absence.
+        let history_path = tmp.path().join(PR_INVENTORY_HISTORY_FILE);
+        std::fs::write(&history_path, b"preserve the previous observation").unwrap();
+        track_pr_inventory(&mut read, tmp.path(), &history_path, exhausted_at, &options);
+        assert_eq!(
+            std::fs::read(&history_path).unwrap(),
+            b"preserve the previous observation"
+        );
+        assert_eq!(read.items[0].lifecycle_source, "stale-cache");
+        assert!(read.unlanded_branches.is_empty());
+
+        // A later successful read replaces the old set, including PRs that
+        // opened while the budget was unavailable.
+        gh.rows = vec![light_row(4, "2026-09-01T00:30:00Z", "CLEAN")];
+        let recovered = cached_read(
+            tmp.path(),
+            &ledger,
+            &mut gh,
+            exhausted_at + chrono::Duration::hours(1),
+            &options,
+        )
+        .expect("recovered read");
+        assert_eq!(recovered.source, "github");
+        assert_eq!(recovered.items.len(), 1);
+        assert_eq!(recovered.items[0].number, 4);
+        assert_eq!(recovered.items[0].lifecycle_source, "observed");
+        assert!(recovered.items[0].default_action_executable);
+    }
+
+    #[test]
+    fn inventory_excludes_known_terminal_rows_from_live_and_cached_sets() {
+        let mut rows = Vec::new();
+        for (number, state) in [(1, "OPEN"), (2, "MERGED"), (3, "CLOSED")] {
+            let mut row = light_row(number, "2026-09-01T00:00:00Z", "CLEAN");
+            row["state"] = serde_json::json!(state);
+            rows.push(row);
+        }
+        // Snapshots written before state was requested remain readable.
+        rows.push(light_row(4, "2026-09-01T00:00:00Z", "CLEAN"));
+        let raw = serde_json::to_string(&rows).unwrap();
+        let items = parse_pr_inventory_json(&raw, now_3891()).unwrap();
+        assert_eq!(
+            items.iter().map(|item| item.number).collect::<Vec<_>>(),
+            [1, 4]
+        );
+        let cache = PrInventoryCache {
+            rows,
+            ..PrInventoryCache::default()
+        };
+        let items = cache
+            .items(now_3891(), &PrInventoryOptions::default())
+            .unwrap();
+        assert_eq!(
+            items.iter().map(|item| item.number).collect::<Vec<_>>(),
+            [1, 4]
+        );
     }
 
     #[test]
