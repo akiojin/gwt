@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.129.2] - 2026-10-18
+
+### Bug Fixes
+
+- **settings:** Remove unused monitor usage threshold
+- **web:** Open cloned projects in their own browser tabs
+- **ci:** Support coverage on pre-shard pull request heads
+- **ci:** Validate both coverage transports
+- **issue-monitor:** Explain admission and slot accounting
+
+### Miscellaneous Tasks
+
+- **work:** Record clone auto-open pull request
+- **work:** Attach board auth delivery PR
+- **voice:** 未使用の依存宣言を削除する
+
+### Refactor
+
+- **ui:** Render board auth settings from shared state
+
+### Testing
+
+- **monitor:** Remove wall-clock gate from provider resume fixture
+- **ui:** Stabilize board auth screenshot capture
+
 ## [9.129.1] - 2026-10-18
 
 ### Bug Fixes

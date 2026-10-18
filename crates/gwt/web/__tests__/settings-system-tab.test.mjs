@@ -85,6 +85,42 @@ function createSettingsHarness() {
   return { surface, body, document, window, sent };
 }
 
+test("Board auth snapshots jointly render Settings and survive guarded System refreshes", () => {
+  const { surface, body, document } = createSettingsHarness();
+  surface.systemSettingsState.boardProvider = "slack";
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
+  const previous = surface.systemSettingsModel.read();
+  surface.applyBoardAuthStatus({ slack: true, slack_client_id: "client-a", message: "Connected" });
+  const signedIn = surface.systemSettingsModel.read();
+  assert.ok(Object.isFrozen(signedIn.boardConfig));
+  assert.equal(previous.boardAuth.slack, false, "later replies cannot mutate earlier snapshots");
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector(".board-auth-status").dataset.signedIn, "true");
+    assert.equal(host.querySelector('input[id$="-settings-board-slack-client-id"]').value, "client-a");
+  }
+  surface.systemSettingsInteractionGuard.activate();
+  surface.systemSettingsInteractionGuard.defer({ kind: "system_settings_updated", language: "ja" });
+  surface.applyBoardAuthStatus({ slack: false, slack_client_id: "client-b" });
+  assert.equal(surface.systemSettingsModel.read().boardAuth.slack, false,
+    "the shared model updates while a dropdown is open");
+  assert.equal(body.querySelector(".board-auth-status").dataset.signedIn, "true");
+  surface.systemSettingsInteractionGuard.release();
+  assert.equal(surface.systemSettingsState.language, "ja", "the queued System reply still flushes");
+  assert.equal(signedIn.boardAuth.slack, true);
+  surface.renderSystemPanelInAllSettingsWindows();
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector(".board-auth-status").dataset.signedIn, "false");
+    assert.equal(host.querySelector('input[id$="-settings-board-slack-client-id"]').value, "client-b");
+  }
+  second.remove();
+  surface.applyBoardAuthStatus({ slack: true });
+  assert.equal(second.querySelector(".board-auth-status").dataset.signedIn, "false",
+    "detached mounts are removed from the subscription");
+});
+
 test("Autostart snapshots jointly render mounted Settings and remain immutable across replies", () => {
   const { surface, body, document, window } = createSettingsHarness();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
@@ -181,8 +217,7 @@ test("Issue #5531: recovered System snapshots preserve unsaved provider and OAut
   port.value = "9876";
   port.dispatchEvent(new window.Event("input", { bubbles: true }));
   surface.resyncSettings();
-  surface.systemSettingsState.boardConfig.oauthRedirectPort = 8765;
-  surface.renderSystemPanelInAllSettingsWindows();
+  surface.applyBoardAuthStatus({ oauth_redirect_port: 8765 });
   assert.equal(body.querySelector('input[type="password"]'), secret);
   assert.equal(secret.value, "unsaved-secret");
   assert.equal(body.querySelector(".board-oauth-port-form input"), port);
@@ -768,7 +803,7 @@ test("System tab exposes remote provider config form that saves via update_board
   );
   // Dispatch must store the non-secret config view for prefill.
   assert.match(
-    appSource,
+    settingsSource,
     /slackClientId:\s*event\.slack_client_id/,
     "dispatch must prefill slack client id from board_auth_status",
   );
@@ -883,7 +918,7 @@ test("System tab exposes an editable OAuth callback port + redirect URL hint (SP
     "Save port must send update_board_oauth_port",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /oauthRedirectPort:\s*event\.oauth_redirect_port/,
     "dispatch must prefill the OAuth port from board_auth_status",
   );

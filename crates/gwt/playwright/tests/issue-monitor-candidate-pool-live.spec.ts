@@ -64,7 +64,6 @@ test.describe("Issue Monitor candidate pool", () => {
         return node?.dataset.id;
       }, beforeIds).then(handle => handle.jsonValue());
       const surface = page.locator(`.workspace-window[data-id="${windowId}"]`);
-      await expect(surface).toBeVisible();
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const pool = settings.locator('[data-settings-candidates]');
       const openCandidates = async () => {
@@ -93,6 +92,9 @@ test.describe("Issue Monitor candidate pool", () => {
         await expect(pool).toHaveAttribute("data-dirty", String(dirty));
       };
       await openCandidates();
+      // A backend-created window does not select the frontend rail after
+      // reconnect; the Settings entry point above owns that focus change.
+      await expect(surface).toBeVisible();
       await expect(pool.getByRole("button", { name: "Save profiles", exact: true })).toHaveCount(0);
       const rows = pool.locator("fieldset[data-agent-id]");
       await expect(rows).toHaveCount(1);
@@ -177,15 +179,11 @@ test.describe("Issue Monitor candidate pool", () => {
       await saveProfiles(() => fastMode.press("Space"), ["claude", "codex"]);
       await expect(fastMode).toBeFocused();
       await saveProfiles(() => fastMode.press("Space"), ["claude", "codex"]);
-      await saveProfiles(async () => {
-        await pool.getByLabel("Usage threshold (%) candidate", { exact: true }).fill("65");
-        await pool.getByLabel("Usage threshold (%) candidate", { exact: true }).press("Tab");
-      }, ["claude", "codex"]);
       // Wait for the persisted status, not a sleep or merely the input's value.
       await expect.poll(() => page.evaluate(() => {
         const messages = (window as any).__gwtPlaywrightMessages ?? [];
         return messages.some(({ payload }: any) => payload.kind === "issue_monitor_status"
-          && payload.status?.usage_threshold_percent === 65
+          && !Object.hasOwn(payload.status, "usage_threshold_percent")
           && payload.status?.launch_profile_candidates?.some((candidate: any) =>
             candidate.agent_id === "codex" && candidate.prefer_for?.includes("label:bug")));
       })).toBe(true);
@@ -195,7 +193,7 @@ test.describe("Issue Monitor candidate pool", () => {
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await openCandidates();
       const reloadedPool = pool;
-      await expect(reloadedPool.getByLabel("Usage threshold (%) candidate", { exact: true })).toHaveValue("65");
+      await expect(reloadedPool.getByLabel("Usage threshold (%) candidate", { exact: true })).toHaveCount(0);
       await expect(reloadedPool.getByLabel("Prefer for codex", { exact: true })).toHaveValue("type:fix, label:bug");
       await expect(reloadedPool.getByLabel("Model claude", { exact: true })).toHaveValue("sonnet");
       await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");

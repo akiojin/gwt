@@ -982,9 +982,9 @@ pub struct IssueMonitorPrefs {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tier_overrides: BTreeMap<u64, u8>,
 
-    /// SPEC #3914 FR-002: a candidate whose known usage is at or above this
-    /// percentage yields to the next candidate. Unknown usage never blocks.
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    /// Legacy in-memory compatibility field. Old JSON values are ignored and
+    /// the retired threshold is never written back to preferences.
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     pub launch_usage_threshold_percent: u8,
     /// Issue #3785 / SPEC #3165: provider-wide launch admission holds keyed by
     /// the canonical agent command. Values are concrete RFC3339 reset
@@ -3503,8 +3503,8 @@ pub struct IssueMonitorStatusView {
     /// force, whether or not a candidate uses that provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_quota_holds: Vec<IssueMonitorProviderQuotaHold>,
-    /// SPEC #3914 FR-009: the usage demotion threshold.
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    /// Legacy in-memory compatibility field, excluded from status payloads.
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     pub usage_threshold_percent: u8,
 }
 
@@ -3684,7 +3684,7 @@ pub struct IssueMonitorAgentStatus {
     /// head (`launch_profile_candidates[0]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_launch_profile: Option<IssueMonitorEffectiveLaunchProfile>,
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     pub usage_threshold_percent: u8,
     /// Issue #3923 AC-1: every provider hold in force, with its evidence, so
     /// the PM can see a hold on a provider the profile is not using and
@@ -4657,7 +4657,7 @@ pub struct IssueMonitorState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     tier_overrides: BTreeMap<u64, u8>,
 
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     launch_usage_threshold_percent: u8,
     /// Durable provider-wide launch admission source of truth. Keys and values
     /// are canonicalized on restore and joined monotonically across rebases.
@@ -12975,7 +12975,18 @@ impl IssueMonitorState {
                         }),
                         claim_diagnostics: self.claim_diagnostics_at(item.issue.number, now),
                         blocked_by_claim_id: item.blocked_by_claim_id.clone(),
-                        exclusion_reason: item.exclusion_reason.clone(),
+                        exclusion_reason: if item.state == MonitorInboxState::Queued {
+                            let mut reasons =
+                                item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
+                            reasons.extend(
+                                self.claim_candidate_exclusions(item.issue.number)
+                                    .into_iter()
+                                    .map(str::to_string),
+                            );
+                            (!reasons.is_empty()).then(|| reasons.join("; "))
+                        } else {
+                            item.exclusion_reason.clone()
+                        },
                         launched_window_id: self.launched_window_id(item.issue.number),
                         error_message: item
                             .error_message
@@ -16048,6 +16059,39 @@ impl IssueMonitorState {
             .collect()
     }
 
+    /// Shared by the claim planner and its row diagnostics. Delivery
+    /// annotations deliberately do not appear here: they are not holds.
+    fn claim_candidate_exclusions(&self, issue_number: u64) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if !self.terminal_queue_contains(issue_number) {
+            reasons.push("not_in_terminal_queue: use issue.monitor.queue.push");
+        }
+        if !self.queue.contains(&issue_number) {
+            reasons.push("not_in_launch_queue: use issue.monitor.launch_now");
+        }
+        if self.has_observed_monitor_runtime(issue_number) {
+            reasons.push("runtime_already_present");
+        }
+        for effect in &self.pending_effects {
+            match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: owner,
+                    ..
+                } if owner == issue_number && !reasons.contains(&"claim_pending") => {
+                    reasons.push("claim_pending");
+                }
+                IssueMonitorEffectPayload::SettleMergedIssue {
+                    issue_number: owner,
+                    ..
+                } if owner == issue_number && !reasons.contains(&"merged_settlement_pending") => {
+                    reasons.push("merged_settlement_pending");
+                }
+                _ => {}
+            }
+        }
+        reasons
+    }
+
     /// The claim slots still open, paired with the ordered queue entries a
     /// proposal may consult to fill them.
     ///
@@ -16061,18 +16105,6 @@ impl IssueMonitorState {
             return (0, Vec::new());
         }
         let pending_claims = self.pending_claim_issue_numbers();
-        // Issue #3917: a delivered Issue whose settlement (close / comment) is
-        // still in flight must not be relaunched by the same scan.
-        let settling = self
-            .pending_effects
-            .iter()
-            .filter_map(|effect| match effect.payload {
-                IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } => {
-                    Some(issue_number)
-                }
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
         let available = max_active
             .saturating_sub(self.occupied_slot_count())
             .saturating_sub(pending_claims.len());
@@ -16083,12 +16115,7 @@ impl IssueMonitorState {
             .queue
             .iter()
             .copied()
-            .filter(|issue_number| {
-                self.terminal_queue_contains(*issue_number)
-                    && !self.has_observed_monitor_runtime(*issue_number)
-                    && !pending_claims.contains(issue_number)
-                    && !settling.contains(issue_number)
-            })
+            .filter(|issue_number| self.claim_candidate_exclusions(*issue_number).is_empty())
             .collect();
         (available, candidates)
     }
@@ -25535,12 +25562,19 @@ mod tests {
     #[test]
     fn legacy_prefs_without_launch_profiles_read_as_a_single_candidate_pool() {
         let prefs: IssueMonitorPrefs = serde_json::from_str(
-            r#"{"enabled":false,"max_active_agents":1,"priority_order":[],"launch_profile":{"agent_id":"codex"}}"#,
+            r#"{"enabled":false,"max_active_agents":1,"priority_order":[],"launch_profile":{"agent_id":"codex"},"launch_usage_threshold_percent":65}"#,
         )
         .expect("legacy prefs with one saved profile");
 
         assert!(prefs.launch_profiles.is_empty());
         assert_eq!(prefs.launch_usage_threshold_percent, 80);
+        assert!(
+            serde_json::to_value(&prefs)
+                .expect("serialize legacy prefs")
+                .get("launch_usage_threshold_percent")
+                .is_none(),
+            "the retired threshold is accepted and discarded on save"
+        );
         let pool = prefs.launch_profile_pool();
         assert_eq!(pool.len(), 1);
         assert_eq!(pool[0].agent_id, "codex");
@@ -26854,7 +26888,10 @@ mod tests {
             status.launch_profile_summary
         );
         assert!(status.launch_profile_summary.contains(" | "));
-        assert_eq!(status.usage_threshold_percent, 65);
+        assert!(serde_json::to_value(&status)
+            .expect("GUI status")
+            .get("usage_threshold_percent")
+            .is_none());
         assert_eq!(status.launch_profile_candidates.len(), 2);
         assert_eq!(status.launch_profile_candidates[0].index, 0);
         assert_eq!(status.launch_profile_candidates[0].agent_id, "codex");
@@ -26881,7 +26918,7 @@ mod tests {
         );
 
         let agent = serde_json::to_value(monitor.agent_status_at(now)).expect("agent status");
-        assert_eq!(agent["usage_threshold_percent"], 65);
+        assert!(agent.get("usage_threshold_percent").is_none());
         assert_eq!(
             agent["launch_profile_candidates"].as_array().map(Vec::len),
             Some(2)
@@ -41786,6 +41823,51 @@ mod tests {
             .expect("undelivered row");
         assert!(!undelivered.recoverable_merged);
         assert_eq!(undelivered.completion_reason, None);
+
+        // Issue #5002 AC-1/4: delivery is only an annotation. Explain the
+        // actual planner exclusion even with free capacity and remaining work.
+        monitor.config.enabled = true;
+        monitor.terminal_queues.clear();
+        monitor
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == 42)
+            .unwrap()
+            .issue
+            .readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+        let before = monitor.prefs();
+        assert_eq!(monitor.claim_probe_plan(1), (1, vec![]));
+        let status = monitor.agent_status();
+        let delivered = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert_eq!(delivered.state, MonitorInboxState::Queued);
+        assert!(delivered.recoverable_merged);
+        assert!(delivered
+            .exclusion_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not_in_terminal_queue"));
+        assert_eq!(
+            monitor.prefs(),
+            before,
+            "diagnostics must not mutate admission"
+        );
+
+        monitor.terminal_queue_push(&[42], "operator", "2026-09-01T01:00:00Z");
+        assert_eq!(monitor.claim_probe_plan(1), (1, vec![42]));
+        assert_eq!(
+            monitor
+                .agent_status()
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .unwrap()
+                .exclusion_reason,
+            None
+        );
     }
 
     /// Issue #4477 AC-2/AC-4: with auto-close off the delivery is annotated and

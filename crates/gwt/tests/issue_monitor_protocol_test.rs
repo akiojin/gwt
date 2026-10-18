@@ -299,7 +299,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         value["status"]["launch_profile_candidates"],
         serde_json::json!([])
     );
-    assert_eq!(value["status"]["usage_threshold_percent"], 80);
+    assert!(value["status"].get("usage_threshold_percent").is_none());
     assert_eq!(value["status"]["enabled"], true);
     assert_eq!(value["status"]["queue_len"], 2);
     assert_eq!(value["status"]["active_count"], 1);

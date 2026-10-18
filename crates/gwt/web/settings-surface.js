@@ -406,7 +406,7 @@ function positionIssuesLaunchControls(body) {
 }
 
 export function renderAgentsSettingsPanel(panel, options) {
-  const { project, profiles, status, send, availableAgents = null } = options;
+  const { project, profiles, send, availableAgents = null } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.dirty = "false";
@@ -419,7 +419,7 @@ export function renderAgentsSettingsPanel(panel, options) {
   panel.appendChild(heading);
   const help = document.createElement("p");
   help.className = "settings-help";
-  help.textContent = `${project?.project_root || "Open a project"} · Candidates are tried in order. Changes apply to future launches.`;
+  help.textContent = `${project?.project_root || "Open a project"} · Candidates are tried in order. Switch to the next candidate when a provider rejects a launch due to a rate limit. Changes apply to future launches.`;
   panel.appendChild(help);
   if (!profiles) {
     help.textContent += " Loading launch profiles…";
@@ -475,13 +475,6 @@ export function renderAgentsSettingsPanel(panel, options) {
   });
   const submit = (next, input = null) => {
     panel.candidateSaveTarget = input;
-    const value = Number(threshold.value);
-    if (!Number.isInteger(value) || value < 1 || value > 100) {
-      showFeedback("Usage threshold must be a whole number between 1 and 100.", true);
-      threshold.setAttribute("aria-invalid", "true");
-      threshold.closest(".settings-field")?.after(feedback);
-      return;
-    }
     panel.candidateSubmittedValues = new Map([...panel.querySelectorAll("[data-profile-field]")]
       .map(control => [control, control.type === "checkbox" ? control.checked : control.value]));
     // Structural responses change row identities. Freeze those controls until
@@ -495,7 +488,7 @@ export function renderAgentsSettingsPanel(panel, options) {
       }
     }
     showFeedback("Saving candidates…");
-    send({ kind: "issue_monitor_profiles_set", profiles: next, usage_threshold_percent: value });
+    send({ kind: "issue_monitor_profiles_set", profiles: next });
   };
   const button = (parent, title, action, callback) => {
     const node = document.createElement("button");
@@ -512,10 +505,6 @@ export function renderAgentsSettingsPanel(panel, options) {
   poolHeading.className = "settings-section-heading";
   poolHeading.textContent = "Candidates";
   panel.appendChild(poolHeading);
-  const threshold = field(panel, "Usage threshold (%)", "threshold", status?.usage_threshold_percent ?? 80, "number");
-  threshold.min = "1";
-  threshold.max = "100";
-  threshold.step = "1";
   for (const [index, profile] of profiles.entries()) {
     const row = document.createElement("fieldset");
     row.className = "settings-section";
@@ -666,6 +655,23 @@ export function createSettingsSurface({
       // commit. Delegated listeners scope to `select.settings-select`
       // so the guard covers every Settings window without per-window
       // wiring.
+      function applyBoardAuthStatus(event) {
+        systemSettingsModel.update(state => ({
+          ...state,
+          boardAuth: { slack: event.slack === true, teams: event.teams === true },
+          boardAuthMessage: event.message || "",
+          boardConfig: {
+            slackClientId: event.slack_client_id || "",
+            slackDefaultChannel: event.slack_default_channel || "",
+            slackHasSecret: event.slack_has_secret === true,
+            teamsClientId: event.teams_client_id || "",
+            teamsTenantId: event.teams_tenant_id || "",
+            teamsDefaultChannel: event.teams_default_channel || "",
+            oauthRedirectPort: event.oauth_redirect_port || 8765,
+          },
+        }));
+      }
+
       function applyAutostartStatus(event, statusMessage = systemSettingsModel.read().autostartPending
         ? "Saved login launch setting." : "") {
         systemSettingsModel.update(state => ({
@@ -827,6 +833,15 @@ export function createSettingsSurface({
         },
         // SPEC-2959/2963: selected Board backend (local/slack/teams).
         boardProvider: "local",
+        loaded: false,
+        statusMessage: "",
+        statusKind: "",
+      };
+      const settingsWindowBodies = new Set();
+      // Autostart and Board auth have one immutable source; other System settings retain
+      // their existing local adapter until their own migration slice.
+      const systemSettingsModel = createUiStateStore({
+        ...systemSettingsState,
         // SPEC-2963: remote provider sign-in state + last sign-in message.
         boardAuth: { slack: false, teams: false },
         boardAuthMessage: "",
@@ -841,15 +856,6 @@ export function createSettingsSurface({
           teamsDefaultChannel: "",
           oauthRedirectPort: 8765,
         },
-        loaded: false,
-        statusMessage: "",
-        statusKind: "",
-      };
-      const settingsWindowBodies = new Set();
-      // Autostart has one immutable source; other System settings retain
-      // their existing local adapter until their own migration slice.
-      const systemSettingsModel = createUiStateStore({
-        ...systemSettingsState,
         autostartEnabled: false,
         autostartPreviousEnabled: false,
         autostartMechanism: "",
@@ -865,7 +871,7 @@ export function createSettingsSurface({
         // destructive DOM refresh waits for the existing guard to flush.
         if (systemSettingsInteractionGuard.isActive()) {
           // A deferred System reply still needs to be applied on release.
-          // Its flush also renders the latest Autostart snapshot.
+          // Its flush also renders the latest shared System snapshot.
           if (!systemSettingsInteractionGuard.hasPendingValue()) {
             systemSettingsInteractionGuard.defer({ kind: "autostart_render" });
           }
@@ -1863,7 +1869,7 @@ export function createSettingsSurface({
           // SPEC-2963 FR-006: provider config form. Non-secret fields persist to
           // config.toml; the client secret is routed to the secure credential
           // store and never echoed back (placeholder shows "configured").
-          const cfg = systemSettingsState.boardConfig || {};
+          const cfg = state.boardConfig || {};
           const configForm = createDiv("settings-section board-config-form");
           configForm.dataset.provider = selectedProvider;
           configForm.addEventListener("input", () => { configForm.dataset.dirty = "true"; });
@@ -2075,7 +2081,7 @@ export function createSettingsSurface({
           oauthForm.appendChild(savePortBtn);
           boardSection.appendChild(oauthForm);
 
-          const auth = systemSettingsState.boardAuth || { slack: false, teams: false };
+          const auth = state.boardAuth || { slack: false, teams: false };
           const signedIn = auth[selectedProvider] === true;
           const authRow = createDiv("settings-section board-auth-row");
           const statusText = createNode(
@@ -2116,9 +2122,9 @@ export function createSettingsSurface({
           authRow.appendChild(refreshBtn);
           boardSection.appendChild(authRow);
 
-          if (systemSettingsState.boardAuthMessage) {
+          if (state.boardAuthMessage) {
             boardSection.appendChild(
-              createNode("p", "settings-help", systemSettingsState.boardAuthMessage),
+              createNode("p", "settings-help", state.boardAuthMessage),
             );
           }
         }
@@ -2380,6 +2386,7 @@ export function createSettingsSurface({
         systemSettingsModel,
         systemSettingsInteractionGuard,
         applyAgentResourceSnapshot,
+        applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
         applyCustomAgentDeleted,
