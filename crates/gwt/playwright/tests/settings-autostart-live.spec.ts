@@ -73,6 +73,11 @@ test.describe("Autostart Settings (isolated live backend)", () => {
       await expect(status).toHaveText("Saved system settings.");
       const jobs = panel.getByLabel("Build parallelism per agent (jobs)", { exact: true });
       await jobs.fill("4");
+      await jobs.evaluate(element => element.setAttribute("data-focused-resource", "original"));
+      await jobs.press("Enter");
+      await expect(status).toHaveText("Saving…");
+      await expect(jobs).toBeFocused();
+      await expect(jobs).toHaveAttribute("data-focused-resource", "original");
       await trust.click();
       await expect(trust).toBeChecked();
       await expect(trust).toBeFocused();

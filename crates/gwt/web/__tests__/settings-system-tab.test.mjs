@@ -135,10 +135,14 @@ test("System local resource edits use current model values and preserve wire val
   surface.systemSettingsInteractionGuard.activate();
   jobs.value = "4";
   jobs.dispatchEvent(new window.Event("change"));
+  assert.equal(body.querySelector("[data-role='system-settings-status']").textContent, "Saving…",
+    "safe status feedback remains visible while destructive rendering is guarded");
   assert.deepEqual(sent.at(-1), { kind: "update_system_settings", language: "ja", agent_resource: {
     enabled: true, preset: "custom", priority: "idle", cpu_limit_percent: 35, build_jobs: 4,
   } });
   assert.equal(previous.agentResource.buildJobs, 2);
+  surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Denied while focused" });
+  assert.equal(body.querySelector("[data-role='system-settings-status']").textContent, "Denied while focused");
   surface.systemSettingsInteractionGuard.release();
   assert.ok(body.querySelector('[id$="-settings-system-codex-hooks"]') === trust,
     "flushing a local input change must retain its neighboring click target");

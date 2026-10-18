@@ -2175,14 +2175,17 @@ export function createSettingsSurface({
       function renderSystemPanelInAllSettingsWindows(state = systemSettingsModel.read()) {
         // State commits immediately; only destructive DOM swaps wait for a
         // native select/input interaction to finish. Flush reads the latest version.
-        if (systemSettingsInteractionGuard.defer(true)) return;
+        const deferred = systemSettingsInteractionGuard.defer(true);
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
             continue;
           }
           const panel = body.querySelector("[data-system-settings-content]");
-          if (panel) renderSystemPanel(panel, state);
+          if (panel) {
+            if (deferred) renderSystemPanelStatus(panel, state);
+            else renderSystemPanel(panel, state);
+          }
         }
       }
 

@@ -15,10 +15,10 @@ test("System Settings receivers update the shared model and reject bypass render
   const surface = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
   const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
     modules: new Map([['crates/gwt/web/settings-surface.js', surface]]),
-  }).filter(finding => finding.root === 'receive' && /^\/system_settings(?:_updated|_error)?$/.test(finding.context));
+  }).filter(finding => finding.root === 'receive' && /^\/system_settings(?:\|system_settings_updated|_updated|_error)?$/.test(finding.context));
   assert.deepEqual(findings(app), []);
-  const bypass = app.replace('case "system_settings":',
-    'case "system_settings": document.body.textContent = event.language;');
+  const bypass = app.replace('case "system_settings_updated":',
+    'case "system_settings_updated": document.body.textContent = event.language;');
   assert.notEqual(bypass, app);
   assert.ok(findings(bypass).length > 0);
 });

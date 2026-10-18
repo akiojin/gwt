@@ -37,7 +37,8 @@ test("System replies commit immediately and defer destructive rendering only", (
   assert.match(settingsSource, /function applySystemSettingsEvent\(event\) \{\s*systemSettingsModel\.update\(/);
   assert.match(settingsSource, /systemSettingsModel\.subscribe\(state => state, state => \{\s*renderSystemPanelInAllSettingsWindows\(state\)/);
   assert.match(settingsSource, /onFlush: \(\) => renderSystemPanelInAllSettingsWindows\(\)/);
-  assert.match(settingsSource, /if \(systemSettingsInteractionGuard\.defer\(true\)\) return;/);
+  assert.match(settingsSource, /const deferred = systemSettingsInteractionGuard\.defer\(true\);/);
+  assert.match(settingsSource, /if \(deferred\) renderSystemPanelStatus\(panel, state\);\s*else renderSystemPanel\(panel, state\);/);
 });
 
 test("document-level pointerdown activates the guard for settings-select", () => {
