@@ -38683,9 +38683,22 @@ mod tests {
         assert!(monitor
             .stuck_autonomous_issues("2026-06-29T02:00:00Z")
             .is_empty());
+        // Issue #5630 AC-4: even a fresh snapshot with stale pane output
+        // cannot reclaim a launch protected by the declared wait.
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T02:00:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:10:00Z"),
+            None,
+        ));
         assert!(monitor
             .recover_stuck_autonomous("2026-06-29T02:00:00Z")
             .is_empty());
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
         assert_eq!(
             monitor.attempt_count(42),
             0,
@@ -38725,6 +38738,25 @@ mod tests {
             vec![42],
             "past the cap the stale heartbeat counts again"
         );
+        monitor.record_window_snapshot(silent_pane_snapshot(
+            "2026-06-29T03:11:00Z",
+            WindowState::Running,
+            Some("2026-06-29T00:10:00Z"),
+            None,
+        ));
+        assert!(matches!(
+            monitor
+                .recover_stuck_autonomous("2026-06-29T03:11:00Z")
+                .as_slice(),
+            [(42, AutonomousFailureOutcome::Retry { attempt: 1 })]
+        ));
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        let closes = monitor.take_pending_idle_pane_closes();
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0].window_id, "tab-1::agent-1");
     }
 
     #[test]
