@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Issue #3287: isolated checkout Clone acceptance. Build gwt/gwtd first.
+# Issue #3287: isolated checkout acceptance. Build gwt/gwtd first.
 set -euo pipefail
+
+# Keep hook/caller repository state out of every fixture Git command.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_NAMESPACE GIT_COMMON_DIR
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CHECKOUT_GWT="$REPO_ROOT/target/debug/gwt"
@@ -81,6 +86,28 @@ for CHECK_THEME in dark light; do
   printf '%s\n' '{"settings":{"auto_start":false}}' > "$CHECK_CLONE_STATE/pm.json"
   printf '%s\n' '{"enabled":false,"max_active_agents":1,"priority_order":[]}' > "$CHECK_CLONE_STATE/issue-monitor.json"
 done
+
+# The isolation suite needs an independent Project B, with no resident agents.
+if [ "${GWT_PLAYWRIGHT_LIVE_SPEC:-}" = crates/gwt/playwright/tests/project-per-browser-tab.spec.ts ]; then
+  CHECK_SECOND_ROOT="$CHECK_HOME/project-b"
+  mkdir -p "$CHECK_SECOND_ROOT"
+  # A .git marker keeps this fixture on the supported workspace route,
+  # without a normal-repository migration or non-repository onboarding.
+  git init --quiet --initial-branch=develop \
+    --separate-git-dir "$CHECK_HOME/project-b.git" "$CHECK_SECOND_ROOT"
+  CHECK_SECOND_HASH="$(
+    cd "$CHECK_SECOND_ROOT" && printf '%s\n' '{"schema_version":1,"operation":"issue.monitor.status","params":{}}' \
+      | "$CHECKOUT_GWTD" | jq -er 'select(.ok == true) | .project_store.hash'
+  )"
+  CHECK_SECOND_STATE="$CHECK_HOME/.gwt/projects/$CHECK_SECOND_HASH/project-state"
+  mkdir -p "$CHECK_SECOND_STATE"
+  printf '%s\n' '{"settings":{"auto_start":false}}' > "$CHECK_SECOND_STATE/pm.json"
+  printf '%s\n' '{"enabled":false,"max_active_agents":1,"priority_order":[]}' > "$CHECK_SECOND_STATE/issue-monitor.json"
+  jq --arg root "$CHECK_SECOND_ROOT" \
+    '.tabs += [{id:"isolation-b",title:"Isolation B",project_root:$root,kind:"git"}]' \
+    "$CHECK_HOME/.gwt/session.json" > "$CHECK_HOME/session-with-b.json"
+  mv "$CHECK_HOME/session-with-b.json" "$CHECK_HOME/.gwt/session.json"
+fi
 
 # browser-check-hook-authority-begin
 CHECKOUT_LOCAL_HOOK_PATTERN='(^|[/\\])target[/\\]([^/\\]+[/\\])*(debug|release)[/\\]gwtd(\.exe)?([^[:alnum:]_.-]|$)'
