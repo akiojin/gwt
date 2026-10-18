@@ -10,6 +10,19 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("System Settings receivers update the shared model and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', surface]]),
+  }).filter(finding => finding.root === 'receive' && /^\/system_settings(?:_updated|_error)?$/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "system_settings":',
+    'case "system_settings": document.body.textContent = event.language;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
 test("Board auth receiver commits shared state and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const surface = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');

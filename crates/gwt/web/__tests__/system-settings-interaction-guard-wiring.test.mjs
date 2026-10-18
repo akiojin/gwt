@@ -19,7 +19,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 // SPEC-3064 Phase 3 (E4): the guard instance (and the System panel state it
 // re-renders) moved into the extracted settings surface; app.js keeps the
-// document-level listener wiring and the receive() defer call sites via
+// document-level listener wiring; the subscribed render owns deferral via
 // destructured same-name consts.
 const settingsSource = readFileSync(resolve(here, "../settings-surface.js"), "utf8");
 
@@ -31,28 +31,13 @@ test("settings surface instantiates systemSettingsInteractionGuard via the facto
   );
 });
 
-test("system_settings handler defers via guard before mutating state", () => {
-  assert.match(
-    appSource,
-    /case\s+"system_settings":[\s\S]{0,800}?systemSettingsInteractionGuard\.defer\([\s\S]{0,360}?\)\s*\)\s*\{\s*break;\s*\}[\s\S]{0,400}?systemSettingsState\.language\s*=\s*event\.language/,
-    "expected guard.defer() short-circuit before language mutation in system_settings case",
-  );
-});
-
-test("system_settings_updated handler defers via guard before mutating state", () => {
-  assert.match(
-    appSource,
-    /case\s+"system_settings_updated":[\s\S]{0,800}?systemSettingsInteractionGuard\.defer\([\s\S]{0,360}?\)\s*\)\s*\{\s*break;\s*\}/,
-    "expected guard.defer() short-circuit in system_settings_updated case",
-  );
-});
-
-test("system_settings_error handler defers via guard before mutating state", () => {
-  assert.match(
-    appSource,
-    /case\s+"system_settings_error":[\s\S]{0,800}?systemSettingsInteractionGuard\.defer\([\s\S]{0,200}?\)\s*\)\s*\{\s*break;\s*\}/,
-    "expected guard.defer() short-circuit in system_settings_error case",
-  );
+test("System replies commit immediately and defer destructive rendering only", () => {
+  assert.match(appSource, /case "system_settings":\s*case "system_settings_updated":\s*applySystemSettingsEvent\(event\);/);
+  assert.match(appSource, /case "system_settings_error":\s*applyGlobalUpdateSettings\(event\);\s*applySystemSettingsEvent\(event\);/);
+  assert.match(settingsSource, /function applySystemSettingsEvent\(event\) \{\s*systemSettingsModel\.update\(/);
+  assert.match(settingsSource, /systemSettingsModel\.subscribe\(state => state, state => \{\s*renderSystemPanelInAllSettingsWindows\(state\)/);
+  assert.match(settingsSource, /onFlush: \(\) => renderSystemPanelInAllSettingsWindows\(\)/);
+  assert.match(settingsSource, /if \(systemSettingsInteractionGuard\.defer\(true\)\) return;/);
 });
 
 test("document-level pointerdown activates the guard for settings-select", () => {
