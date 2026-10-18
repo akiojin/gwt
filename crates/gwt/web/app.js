@@ -5760,37 +5760,11 @@ import { createUiStateStore } from "/ui-state-store.js";
             systemSettingsState.statusKind = "error";
             renderSystemPanelInAllSettingsWindows();
             break;
-          case "autostart_status": {
-            const wasPending = systemSettingsState.autostartPending === true;
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "autostart_status",
-                enabled: event.enabled,
-                mechanism: event.mechanism,
-                install_path: event.install_path,
-                from_update: wasPending,
-              })
-            ) {
-              break;
-            }
-            applyAutostartStatus(
-              event,
-              wasPending ? "Saved login launch setting." : "",
-            );
-            renderSystemPanelInAllSettingsWindows();
+          case "autostart_status":
+            applyAutostartStatus(event);
             break;
-          }
           case "autostart_error":
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "autostart_error",
-                message: event.message,
-              })
-            ) {
-              break;
-            }
             applyAutostartError(event);
-            renderSystemPanelInAllSettingsWindows();
             break;
           case "backend_connection_result":
             frontendUnits.knowledgeSettingsSurface.setSettingsStatus(

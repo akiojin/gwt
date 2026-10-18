@@ -6323,9 +6323,8 @@ fn current_canonical_work_item<'a>(
         // A durable detachment receipt may remove even the container added by
         // supersession. The exact authenticated audit still proves terminal
         // lineage; reading it must not restore the detached mutable refs.
-        let detached_supersession_container = successor.events.iter().find_map(|event| {
+        let supersession_container = successor.events.iter().find_map(|event| {
             (successor.is_terminal()
-                && successor.execution_containers.is_empty()
                 && event.is_successor_supersession()
                 && event.work_item_id == successor.id
                 && event.related_work_item_id.as_deref() == Some(current.id.as_str()))
@@ -6333,6 +6332,8 @@ fn current_canonical_work_item<'a>(
             .flatten()
             .filter(|container| container_matches(container))
         });
+        let detached_supersession_container =
+            supersession_container.filter(|_| successor.execution_containers.is_empty());
         // Historical terminal rows may lack owner metadata. Keep the last
         // known owner across that gap, and only publish a later Work once its
         // owner agrees. An ownerless tail must not gain adoption authority.
@@ -6346,6 +6347,10 @@ fn current_canonical_work_item<'a>(
                     .is_some_and(container_matches)
         });
         let owner_matches = owner_successor
+            // The registered PM may retire foreign historical occupancy.
+            // Only the exact terminal audit can bridge that owner boundary;
+            // the next lifetime still needs its own owner provenance.
+            || supersession_container.is_some()
             || match (owner_anchor, successor.owner.as_deref()) {
                 (Some(anchor), Some(owner)) => {
                     anchor == owner

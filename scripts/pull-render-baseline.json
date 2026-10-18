@@ -5,8 +5,6 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"/agent_backend_deleted\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/agent_backend_list\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/agent_backend_saved\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/autostart_error\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/autostart_status\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/backend_connection_result\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/branch_entries\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/continue_work_outcome\"]",

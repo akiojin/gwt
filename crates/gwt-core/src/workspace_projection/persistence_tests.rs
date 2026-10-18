@@ -14185,6 +14185,7 @@ fn audited_successor_supersession_survives_shared_intake_and_compaction() {
     projection.apply_event(WorkEvent::new(WorkEventKind::Done, &predecessor_id, now));
     start.id = "invalid-start".to_string();
     start.work_item_id = occupied_id.clone();
+    start.owner = Some("Issue #3350".to_string());
     start.related_work_item_id = Some(predecessor_id.clone());
     projection.apply_event(start.clone());
     projection
@@ -14203,8 +14204,10 @@ fn audited_successor_supersession_survives_shared_intake_and_compaction() {
     audit.id = format!("superseded-{occupied_id}");
     audit.related_work_item_id = Some(predecessor_id);
     audit.execution_container = start.execution_container.clone();
-    start.id = "new-successor".to_string();
     start.work_item_id = successor_id.clone();
+    start.id = format!("owner-successor-{successor_id}");
+    start.owner = Some("Issue #4074".to_string());
+    start.agent_session_id = Some("fresh-owner-session".to_string());
     start.related_work_item_id = Some(occupied_id.clone());
     start.updated_at = now + chrono::Duration::seconds(2);
     let temp = tempfile::tempdir().unwrap();

@@ -1411,6 +1411,8 @@ mod tests {
 
     #[test]
     fn blocking_spawns_preserve_scoped_tracing_dispatch() {
+        // Keep interest dynamic when a subscriber-free sibling first registers a callsite.
+        let _interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let trace = CapturedTrace::default();
         let subscriber = tracing_subscriber::fmt()
             .without_time()
@@ -1422,9 +1424,16 @@ mod tests {
             .build()
             .unwrap();
         tracing::subscriber::with_default(subscriber, || {
+            // In a fresh test process, a subscriber-free sibling registers the
+            // shared callsites first while this scoped subscriber is alive.
+            std::thread::spawn(assert_blocking_spawns_succeed)
+                .join()
+                .unwrap();
+            assert!(trace.contents().is_empty());
             runtime.block_on(async { assert_blocking_spawns_succeed() });
         });
         assert!(trace.contents().contains("runtime boundary echo"));
+        assert!(trace.contents().contains("runtime boundary deadline echo"));
     }
 
     #[test]
@@ -1969,6 +1978,8 @@ mod tests {
     fn silent_success_timeout_and_spawn_failure_emit_no_hub_or_ui_events() {
         use tracing_subscriber::prelude::*;
 
+        // The silent DEBUG callsites are shared with subscriber-free spawn tests too.
+        let _interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let supplied_hub = ProcessConsoleHub::new();
         let candidate_global = ProcessConsoleHub::new();
         let installed_global = super::super::hub::set_global(candidate_global.clone());
@@ -1991,6 +2002,21 @@ mod tests {
             .expect("test runtime");
 
         tracing::subscriber::with_default(subscriber, || {
+            std::thread::spawn(|| {
+                let (program, args) = echo_command();
+                let output = spawn_logged_blocking(
+                    &ProcessConsoleHub::new(),
+                    ProcessKind::IndexRunner,
+                    &program,
+                    &args,
+                    SpawnOptions::new("cold silent callsites").forward_output(false),
+                )
+                .unwrap();
+                assert!(output.success());
+            })
+            .join()
+            .unwrap();
+            assert!(trace.contents().is_empty());
             runtime.block_on(async {
                 let (success_program, success_args) = echo_command();
                 spawn_logged(
@@ -2058,7 +2084,16 @@ mod tests {
             "Debug-only silent lifecycle must not reach UiForwarder"
         );
         let trace = trace.contents();
-        assert!(trace.contains("silent process"));
+        for message in [
+            "silent process start",
+            "silent process end",
+            "silent process launch failed",
+        ] {
+            assert!(
+                trace.contains(message),
+                "missing lifecycle event: {message}"
+            );
+        }
         for sensitive in [
             "ghp_abcdef0123456789",
             r"C:\secret",
