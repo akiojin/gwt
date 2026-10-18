@@ -32,7 +32,7 @@ export function wheelDeltaToScrollLines(
   return Math.sign(rawLines) * Math.max(1, Math.ceil(Math.abs(rawLines)));
 }
 
-export function shouldOverrideTerminalWheel(event, { window, isWindowsHost: hostCheck } = {}) {
+function shouldOverrideTerminalWheel(event, { window, isWindowsHost: hostCheck } = {}) {
   if (!event || event.ctrlKey || event.metaKey) {
     return false;
   }

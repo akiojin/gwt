@@ -2672,6 +2672,11 @@ fn validate_workspace_state_transaction_mutations(
     allow_successor_supersession: bool,
 ) -> Result<()> {
     for event in events {
+        if event.is_owner_successor() && !allow_successor_supersession {
+            return Err(GwtError::Other(
+                "owner successor Start requires authenticated fresh activation".to_string(),
+            ));
+        }
         if allow_successor_supersession && event.is_successor_supersession() {
             continue;
         }
@@ -6279,7 +6284,7 @@ fn current_canonical_work_item<'a>(
     };
     let validate_launch_owner = |item: &WorkItem| -> Result<()> {
         if let (Some(expected), Some(actual)) = (launch_owner, item.owner.as_deref()) {
-            if !owners_match(expected, actual) {
+            if !item.is_terminal() && !owners_match(expected, actual) {
                 return Err(GwtError::Other(format!(
                     "Work {} owner mismatch: expected {expected}, actual {actual}",
                     item.id
@@ -6289,7 +6294,7 @@ fn current_canonical_work_item<'a>(
         Ok(())
     };
     validate_launch_owner(current)?;
-    let mut owner_anchor = launch_owner.or(current.owner.as_deref());
+    let mut owner_anchor = current.owner.as_deref().or(launch_owner);
     let mut authoritative = current;
     // Follow identities and provenance, never recency: late predecessor
     // heartbeats remain part of its history and cannot make it current again.
@@ -6318,9 +6323,8 @@ fn current_canonical_work_item<'a>(
         // A durable detachment receipt may remove even the container added by
         // supersession. The exact authenticated audit still proves terminal
         // lineage; reading it must not restore the detached mutable refs.
-        let detached_supersession_container = successor.events.iter().find_map(|event| {
+        let supersession_container = successor.events.iter().find_map(|event| {
             (successor.is_terminal()
-                && successor.execution_containers.is_empty()
                 && event.is_successor_supersession()
                 && event.work_item_id == successor.id
                 && event.related_work_item_id.as_deref() == Some(current.id.as_str()))
@@ -6328,29 +6332,45 @@ fn current_canonical_work_item<'a>(
             .flatten()
             .filter(|container| container_matches(container))
         });
+        let detached_supersession_container =
+            supersession_container.filter(|_| successor.execution_containers.is_empty());
         // Historical terminal rows may lack owner metadata. Keep the last
         // known owner across that gap, and only publish a later Work once its
         // owner agrees. An ownerless tail must not gain adoption authority.
-        let owner_matches = match (owner_anchor, successor.owner.as_deref()) {
-            (Some(anchor), Some(owner)) => {
-                anchor == owner
-                    || can_upgrade_work_owner(Some(anchor), Some(owner))
-                    || can_upgrade_work_owner(Some(owner), Some(anchor))
-            }
-            (Some(_), None) => successor.is_terminal() || launch_owner.is_some(),
-            (None, None) => true,
-            (None, Some(owner)) => successor
-                .execution_containers
-                .iter()
-                .chain(detached_supersession_container)
-                .any(|container| {
-                    container
-                        .branch
-                        .as_deref()
-                        .and_then(work_owner_for_branch)
-                        .is_some_and(|branch_owner| owners_match(&branch_owner, owner))
-                }),
-        };
+        let owner_successor = successor.events.iter().any(|event| {
+            event.is_owner_successor()
+                && event.related_work_item_id.as_deref() == Some(current.id.as_str())
+                && event.owner == successor.owner
+                && event
+                    .execution_container
+                    .as_ref()
+                    .is_some_and(container_matches)
+        });
+        let owner_matches = owner_successor
+            // The registered PM may retire foreign historical occupancy.
+            // Only the exact terminal audit can bridge that owner boundary;
+            // the next lifetime still needs its own owner provenance.
+            || supersession_container.is_some()
+            || match (owner_anchor, successor.owner.as_deref()) {
+                (Some(anchor), Some(owner)) => {
+                    anchor == owner
+                        || can_upgrade_work_owner(Some(anchor), Some(owner))
+                        || can_upgrade_work_owner(Some(owner), Some(anchor))
+                }
+                (Some(_), None) => successor.is_terminal() || launch_owner.is_some(),
+                (None, None) => true,
+                (None, Some(owner)) => successor
+                    .execution_containers
+                    .iter()
+                    .chain(detached_supersession_container)
+                    .any(|container| {
+                        container
+                            .branch
+                            .as_deref()
+                            .and_then(work_owner_for_branch)
+                            .is_some_and(|branch_owner| owners_match(&branch_owner, owner))
+                    }),
+            };
         if candidates.next().is_some()
             || !successor.related_work_item_ids.contains(&current.id)
             || !successor.events.iter().any(|event| {

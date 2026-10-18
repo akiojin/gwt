@@ -99,12 +99,6 @@ export function createProviderUsageSurface({
         }
       }
 
-      function usageFmtResetAt(iso) {
-        if (!iso) return "";
-        const d = new Date(iso);
-        if (Number.isNaN(d.getTime())) return "";
-        return d.toLocaleString();
-      }
 
       function usageFmtTokens(n) {
         if (n == null) return "—";
@@ -139,78 +133,12 @@ export function createProviderUsageSurface({
         return wrap;
       }
 
-      function renderUsageAccountRow(account) {
-        const row = document.createElement("div");
-        row.className = "op-usage-account";
-        row.dataset.provider = account.provider;
-        const head = document.createElement("div");
-        head.className = "op-usage-account__head";
-        const name = document.createElement("span");
-        name.className = "op-usage-account__name";
-        name.textContent = USAGE_PROVIDER_NAME[account.provider] || account.provider;
-        head.appendChild(name);
-        if (account.plan) {
-          const plan = document.createElement("span");
-          plan.className = "op-usage-account__plan";
-          plan.textContent = account.plan;
-          head.appendChild(plan);
-        }
-        const reason = usageStateReason(account.state);
-        if (reason) {
-          const isDisabled = (account.state && account.state.kind) === "disabled";
-          const r = document.createElement(isDisabled ? "button" : "span");
-          r.className = "op-usage-account__reason";
-          r.textContent = reason;
-          if (isDisabled) {
-            r.type = "button";
-            r.classList.add("op-usage-account__reason--action");
-            r.addEventListener("click", (e) => {
-              e.stopPropagation();
-              if (typeof window.__gwtHideUsageHover === "function") {
-                window.__gwtHideUsageHover();
-              }
-              document.dispatchEvent(
-                new CustomEvent("settings:open", { detail: { target: "usage" } }),
-              );
-            });
-          }
-          head.appendChild(r);
-        }
-        row.appendChild(head);
-        for (const w of account.windows || []) {
-          const line = document.createElement("div");
-          line.className = "op-usage-window";
-          const label = document.createElement("span");
-          label.className = "op-usage-window__label";
-          applyUsageWindowLabel(label, w);
-          const pct = document.createElement("span");
-          pct.className = "op-usage-window__pct";
-          pct.textContent = `${Math.round(w.used_percent)}%`;
-          line.appendChild(label);
-          line.appendChild(buildUsageBar(w.used_percent, account.limit_reached));
-          line.appendChild(pct);
-          if (w.resets_at) {
-            const reset = document.createElement("span");
-            reset.className = "op-usage-window__reset";
-            reset.textContent = `↻ ${usageFmtResetAt(w.resets_at)}`;
-            line.appendChild(reset);
-          }
-          row.appendChild(line);
-        }
-        return row;
-      }
 
       function consumptionTotal(b) {
         if (!b) return 0;
         return (b.input || 0) + (b.output || 0) + (b.cached || 0);
       }
 
-      function fmtConsumptionBreakdown(b) {
-        if (!b) return "—";
-        return `in ${usageFmtTokens(b.input || 0)} · out ${usageFmtTokens(
-          b.output || 0,
-        )} · cached ${usageFmtTokens(b.cached || 0)}`;
-      }
 
       function renderConsumptionChart(days) {
         const chart = document.createElement("div");

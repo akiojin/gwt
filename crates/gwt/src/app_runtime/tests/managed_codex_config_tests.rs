@@ -360,7 +360,7 @@ fn github_repository_search_parser_maps_gh_json_fields() {
 }
 
 #[test]
-fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
+fn clone_project_done_opens_workspace_home_and_replies_to_its_client() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let workspace_home = temp.path().join("sample");
@@ -381,7 +381,7 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
 
     assert!(
         runtime
-            .handle_clone_project_done(&workspace_home)
+            .handle_clone_project_done("clone-client", &workspace_home)
             .is_empty(),
         "the clone completion is prepared off-thread"
     );
@@ -400,12 +400,13 @@ fn clone_project_done_opens_workspace_home_and_broadcasts_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            target: DispatchTarget::Hub,
+            target: DispatchTarget::Client(client_id),
             event: BackendEvent::CloneProjectDone {
                 workspace_home: emitted_workspace_home,
+                ..
             },
             ..
-        } if emitted_workspace_home == &workspace_home.display().to_string()
+        } if client_id == "clone-client" && emitted_workspace_home == &workspace_home.display().to_string()
     )));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -582,7 +583,7 @@ fn clone_project_start_validation_uses_clone_project_error_event() {
         event,
         OutboundEvent {
             target: DispatchTarget::Client(client_id),
-            event: BackendEvent::CloneProjectError { message },
+            event: BackendEvent::CloneProjectError { message, .. },
             ..
         } if client_id == "client-1" && message.contains("repository URL")
     )));
@@ -593,6 +594,77 @@ fn clone_project_start_validation_uses_clone_project_error_event() {
             ..
         }
     )));
+}
+
+#[test]
+fn clone_project_start_refuses_registered_origin_before_clone_side_effects() {
+    for registration in ["open", "cached_recent", "uncached_recent"] {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("registered");
+        fs::create_dir_all(&repo).expect("registered repo");
+        init_repo(&repo);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/registered.git",
+            ],
+        );
+        let key = gwt_core::paths::resolve_project_scope(&repo).hash;
+        let tabs = if registration == "open" {
+            vec![sample_project_tab(
+                "registered",
+                "Registered",
+                repo.clone(),
+                ProjectKind::Git,
+                &[],
+            )]
+        } else {
+            Vec::new()
+        };
+        let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), tabs, None);
+        let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = blocking_tasks;
+        if registration != "open" {
+            runtime.recent_projects = vec![gwt::RecentProjectEntry {
+                path: repo.clone(),
+                title: "Registered".to_string(),
+                kind: ProjectKind::Git,
+            }];
+            if registration == "cached_recent" {
+                runtime.remember_recent_project_key(repo, key.clone());
+            }
+        }
+        let before_recent = runtime.recent_projects.clone();
+        let before_tabs = runtime.tabs.len();
+        // A missing parent makes a regression fail locally before any network clone.
+        let parent = temp.path().join("missing-destination-parent");
+        let started = runtime.clone_project_start_events(
+            "clone-client",
+            "git@github.com:EXAMPLE/Registered.git",
+            parent.to_str().expect("parent path"),
+        );
+        assert!(started
+            .iter()
+            .all(|event| event.target == DispatchTarget::Client("clone-client".to_string())));
+        drain_queued_blocking_tasks(&queued_tasks);
+        let recorded = recorded_events.lock().expect("recorded events");
+        assert!(recorded.iter().any(|event| matches!(event,
+            UserEvent::CloneProjectError { client_id, message, existing_project_key }
+                if client_id == "clone-client" && message.contains("already registered")
+                    && existing_project_key.as_deref() == Some(key.as_str())
+        )), "{registration}: registered origin must be refused before clone validation: {recorded:?}");
+        assert!(
+            !parent.exists(),
+            "duplicate refusal must not create clone directories"
+        );
+        assert_eq!(runtime.tabs.len(), before_tabs);
+        assert_eq!(runtime.recent_projects, before_recent);
+        assert!(runtime.pending_project_navigation.is_none());
+    }
 }
 
 #[test]

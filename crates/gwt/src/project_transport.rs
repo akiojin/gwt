@@ -2967,7 +2967,8 @@ mod tests {
         }
         assert!(std::panic::catch_unwind(|| OutboundEvent::broadcast(
             BackendEvent::CloneProjectError {
-                message: "project error".into()
+                message: "project error".into(),
+                existing_project_key: None,
             }
         ))
         .is_err());

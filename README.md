@@ -433,6 +433,8 @@ Common windows include:
   Application settings and project settings are labeled separately. Open
   `Issues` for Autonomous, Max active, queue refill and allowed labels, or
   the same Issues section to edit launch profiles and candidate order/preferences.
+  Candidate edits save automatically when committed; text fields save when focus
+  leaves the field. Rejected values stay visible with an inline error.
   Settings has grouped Application/Project navigation and names the target project.
   `System > Auto-apply updates` applies across all projects
   when at least one open project has Autonomous enabled. Legacy project
@@ -961,14 +963,18 @@ For isolation and repeatable agent sessions, gwt can manage each project as a
 └── .gwt/project.toml       # gwt-managed project metadata
 ```
 
-`gwt` auto-creates this layout when you choose `Clone from GitHub...` from
-either the Project Picker (shown when no tab is open) or the top toolbar's
-`Open Project ▾` split-button dropdown (always reachable from an active
-project). The clone modal accepts a GitHub HTTPS/SSH URL or lets you search
+`gwt` auto-creates this layout when you choose `Clone from GitHub…` from
+the Hub or system tray. The clone modal accepts a GitHub HTTPS/SSH URL or lets you search
 repositories through `gh search repos`, then asks for a destination parent
 folder. The new project is created at `<parent>/<project>/`, with a bare
 `<project>.git/` repository and an initial worktree on `develop` when it
 exists, otherwise on the remote default branch.
+
+Clone reserves a browser tab when you submit and opens the project's URL there
+after success, keeping the Hub available. If popups are blocked or you close
+that tab, use the completion link in the Hub. Failure closes the reserved tab
+and shows the reason. If the repository is already registered in Open or
+Recent, cloning is refused and **Open existing project** opens its existing URL.
 
 Existing Normal Git repositories (`.git/` directly under the project
 directory) are recognised so a migration to the Nested Bare + Worktree layout

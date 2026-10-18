@@ -3315,12 +3315,14 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
     // The verification driver is pinned outside Cargo's artifacts on Windows,
     // so restoring the operational executable is safe there too (Issue #5480).
     if !commands.iter().any(|command| {
-        split_command_line(command).is_ok_and(|args| {
-            args.first().map(String::as_str) == Some("cargo")
-                && (args.get(1).map(String::as_str) == Some("test")
-                    || (args.get(1).map(String::as_str) == Some("nextest")
-                        && args.get(2).map(String::as_str) == Some("run")))
-        })
+        split_command_line(command)
+            .and_then(take_env_assignments)
+            .is_ok_and(|(_, args)| {
+                args.first().map(String::as_str) == Some("cargo")
+                    && (args.get(1).map(String::as_str) == Some("test")
+                        || (args.get(1).map(String::as_str) == Some("nextest")
+                            && args.get(2).map(String::as_str) == Some("run")))
+            })
     }) {
         return None;
     }
@@ -3328,7 +3330,7 @@ fn gwtd_artifact_restoration(worktree: &Path, commands: &[String]) -> Option<&'s
 }
 
 fn gwtd_artifact_restore_command(worktree: &Path) -> Option<&'static str> {
-    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd")
+    is_gwt_checkout(worktree).then_some("cargo build -p gwt --bin gwtd --target-dir target")
 }
 
 /// Identify this repository without comparing another project's HEAD to gwt's.
@@ -3394,11 +3396,8 @@ fn restore_gwtd_after_deferral_cancellable(
     let Some(command) = gwtd_artifact_restore_command(worktree) else {
         return "gwtd artifact restoration: skipped (not an eligible gwt workspace)".to_string();
     };
-    // Restore this checkout's operational path, even when Cargo's environment
-    // or user configuration points ordinary builds at another target directory.
-    let command = format!("{command} --target-dir target");
     match execute_command_with_artifact_guard_cancellable(
-        worktree, &command, true, None, host, None, artifacts, check,
+        worktree, command, true, None, host, None, artifacts, check,
     ) {
         Ok((0, _, _, _)) => format!("gwtd artifact restoration: restored (`{command}`)"),
         Ok((code, _, output, _)) => format!(
@@ -4870,7 +4869,7 @@ where
             .then(headed_e2e::Capture::new)
             .transpose()
             .map_err(|error| format!("failed to prepare headed E2E reporter: {error}"))?;
-        let args = split_command_line(command)?;
+        let (_, args) = take_env_assignments(split_command_line(command)?)?;
         let nextest_capture = (args.starts_with(&["cargo".into(), "nextest".into(), "run".into()])
             && args
                 .windows(2)
@@ -7504,6 +7503,7 @@ pub(crate) mod tests {
                 ".github/workflows/test.yml",
                 ".github/workflows/lint.yml",
                 ".github/workflows/coverage.yml",
+                ".github/workflows/coverage-ci.yml",
             ] {
                 let destination = worktree.join(path);
                 fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -8222,6 +8222,91 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn inherited_known_node_gate_timeout_reclaims_its_tree_after_five_minutes() {
+        use std::time::{Duration, Instant};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _node_options = gwt_core::test_support::ScopedEnvVar::unset("NODE_OPTIONS");
+        let command = r#"node --test "scripts/coverage-summary.test.mjs""#;
+        let timeout = command_timeout(command, None).expect("known Node gate must be bounded");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut process = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        process
+            .args([
+                "--exact",
+                "cli::verification_record::tests::verification_timeout_fixture",
+                "--nocapture",
+            ])
+            .env("GWT_VERIFY_TIMEOUT_FIXTURE", root);
+        let started = Instant::now();
+        let mut clock_calls = 0;
+        let result = execute_inherited_command(
+            &mut process,
+            root,
+            command,
+            Some(timeout),
+            None,
+            None,
+            || {
+                clock_calls += 1;
+                if clock_calls == 1 {
+                    return started;
+                }
+                if clock_calls == 2 {
+                    // test-hygiene: allow-wall-clock-deadline Bounds OS child readiness; the execution deadline uses the injected clock.
+                    let safety = Instant::now() + Duration::from_secs(30);
+                    while !root.join("ready").exists() {
+                        // test-hygiene: allow-wall-clock-deadline This safety assertion guards OS startup, not the injected 299/301s budget.
+                        assert!(Instant::now() < safety, "the fixture did not start");
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    return started + Duration::from_secs(299);
+                }
+                let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+                    .unwrap()
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap();
+                assert!(
+                    crate::process::is_process_alive(grandchild),
+                    "owned child tree did not survive the 299s deadline check"
+                );
+                started + Duration::from_secs(301)
+            },
+        )
+        .unwrap();
+        let grandchild = fs::read_to_string(root.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bounds real process reaping after timeout; the 300s budget uses the injected clock.
+        let safety = Instant::now() + Duration::from_secs(30);
+        // test-hygiene: allow-wall-clock-deadline This OS reap watchdog prevents a hung test; cleanup is asserted separately below.
+        while crate::process::is_process_alive(grandchild) && Instant::now() < safety {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            clock_calls, 3,
+            "known Node gate must survive 299s and reach the 301s sample: {}",
+            result.2
+        );
+        assert_eq!(result.0, 124, "{}", result.2);
+        assert_eq!(result.1, None, "owned timeout is not external interruption");
+        assert!(result.2.contains("timed out after 300s"), "{}", result.2);
+        assert!(result.2.contains("partial-stdout"), "{}", result.2);
+        assert!(result.2.contains("partial-stderr"), "{}", result.2);
+        assert!(!crate::process::is_process_alive(grandchild));
+        assert!(
+            !root.join("fixture-deadline-elapsed").exists(),
+            "owned child tree escaped timeout reclamation"
+        );
+    }
+
+    #[test]
     fn inherited_short_command_completion_reclaims_descendants() {
         use std::time::{Duration, Instant};
 
@@ -8814,7 +8899,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             gwtd_artifact_restoration(dir.path(), &commands),
-            Some("cargo build -p gwt --bin gwtd")
+            Some("cargo build -p gwt --bin gwtd --target-dir target")
+        );
+        assert_eq!(
+            gwtd_artifact_restoration(
+                dir.path(),
+                &[r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --lib"#.to_string()]
+            ),
+            Some("cargo build -p gwt --bin gwtd --target-dir target")
         );
         assert_eq!(
             gwtd_artifact_restoration(dir.path(), &["cargo nextest list".to_string()]),
@@ -8827,11 +8919,17 @@ mod tests {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _target_dir = ScopedEnvVar::unset("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().unwrap();
+        let _target_dir = ScopedEnvVar::set("CARGO_TARGET_DIR", dir.path().join("ambient-target"));
         let package = dir.path().join("crates/gwt");
         fs::create_dir_all(package.join("src/bin")).unwrap();
         fs::create_dir_all(package.join("tests")).unwrap();
+        fs::create_dir_all(dir.path().join(".config")).unwrap();
+        fs::write(
+            dir.path().join(".config/nextest.toml"),
+            "[profile.gwt-verify]\nretries = 0\n",
+        )
+        .unwrap();
         fs::write(
             dir.path().join("Cargo.toml"),
             "[workspace]\nmembers = [\"crates/gwt\"]\nresolver = \"2\"\n",
@@ -8867,15 +8965,15 @@ fn default_integration_test_builds_a_guarded_binary() {
             dir.path(),
             "sess-artifact-default",
             &[
-                "cargo clippy -p gwt --all-features --all-targets -- -D warnings".to_string(),
-                "cargo test -p gwt --test artifact_state".to_string(),
+                "cargo clippy -p gwt --all-features --all-targets --target-dir target -- -D warnings".to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo test -p gwt --test artifact_state --target-dir target"#.to_string(),
+                r#"RUSTFLAGS="-D warnings" cargo nextest run -p gwt --test artifact_state --target-dir target --profile gwt-verify --retries 0"#.to_string(),
             ],
         )
         .unwrap();
 
         assert!(record.all_passed, "{transcript}");
-        assert_eq!(record.commands.len(), 3, "{transcript}");
-        assert_eq!(record.commands[2].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(record.commands.len(), 4, "{transcript}");
         let output = gwt_core::process::hidden_command(
             dir.path()
                 .join("target/debug")
@@ -8885,9 +8983,16 @@ fn default_integration_test_builds_a_guarded_binary() {
         .unwrap();
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
-            String::from_utf8(output.stdout).unwrap().trim(),
-            "operational",
-            "verification must leave the executable without the test-only feature"
+            (
+                String::from_utf8(output.stdout).unwrap().trim(),
+                record.commands[2].nextest.as_ref().map(|evidence| evidence.total_tests)
+            ),
+            ("operational", Some(1)),
+            "verification must restore the fixed artifact path and retain prefixed Nextest evidence"
+        );
+        assert_eq!(
+            record.commands[3].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
         );
     }
 
@@ -8924,7 +9029,10 @@ fn default_integration_test_builds_a_guarded_binary() {
 
         assert_eq!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
-        assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(
+            record.commands[1].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
         assert_ne!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
         let persisted = load(dir.path()).unwrap().unwrap();
@@ -8983,7 +9091,10 @@ fn default_integration_test_builds_a_guarded_binary() {
 
         assert_ne!(record.commands[0].exit_code, 0, "{transcript}");
         assert_eq!(record.commands.len(), 2, "{transcript}");
-        assert_eq!(record.commands[1].command, "cargo build -p gwt --bin gwtd");
+        assert_eq!(
+            record.commands[1].command,
+            "cargo build -p gwt --bin gwtd --target-dir target"
+        );
         assert_eq!(record.commands[1].exit_code, 0, "{transcript}");
         assert!(!record.all_passed, "{transcript}");
         assert_eq!(record.skipped_after_failure, vec!["git --version"]);

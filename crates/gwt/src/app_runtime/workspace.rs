@@ -337,6 +337,7 @@ pub(super) fn apply_workspace_launch_for_current_work(
     let mut resolved = std::borrow::Cow::Borrowed(work_items);
     let mut events = Vec::new();
     let mut predecessor_id = None;
+    let mut owner_successor = false;
     loop {
         transition.work_id = current_work_id_for_launch(
             &resolved,
@@ -354,6 +355,15 @@ pub(super) fn apply_workspace_launch_for_current_work(
             let owner_matches = current.owner == owner
                 || (current.owner.is_none() && transition.canonical_owner.is_some())
                 || can_upgrade_work_owner(current.owner.as_deref(), owner.as_deref());
+            let fresh_owner_lifetime = !owner_matches
+                && current.is_terminal()
+                && allow_successor_supersession
+                && transition.canonical_owner.is_some()
+                && session
+                    .branch_name
+                    .strip_prefix("work/issue-")
+                    .and_then(|number| number.parse::<u64>().ok())
+                    == transition.canonical_owner.map(|owner| owner.number);
             // The authenticated launch proves this Session's local path. Work's
             // branch identity spans hosts, including history with no saved path.
             let container_matches = current.execution_containers.iter().all(|container| {
@@ -363,7 +373,7 @@ pub(super) fn apply_workspace_launch_for_current_work(
                     container.worktree_path.as_deref(),
                 ) == canonical_id
             });
-            if !owner_matches || !container_matches {
+            if (!owner_matches && !fresh_owner_lifetime) || !container_matches {
                 return Err(gwt_core::error::GwtError::Other(format!(
                     "cannot launch successor of Work {}: owner or execution container mismatch",
                     current.id
@@ -434,7 +444,9 @@ pub(super) fn apply_workspace_launch_for_current_work(
                                     pr_url: None,
                                     pr_state: None,
                                 },
-                                owner.as_deref().expect("authenticated launch owner"),
+                                SuccessorSupersessionAuthority::ExecutionOwner(
+                                    owner.as_deref().expect("authenticated launch owner"),
+                                ),
                                 transition.live_session_ids,
                                 transition.now,
                             )?;
@@ -454,6 +466,7 @@ pub(super) fn apply_workspace_launch_for_current_work(
                     }
                 }
                 predecessor_id = Some(current.id.clone());
+                owner_successor = fresh_owner_lifetime;
                 transition.work_id = Some(successor_id);
             }
         }
@@ -463,9 +476,19 @@ pub(super) fn apply_workspace_launch_for_current_work(
     if let Some(predecessor_id) = predecessor_id {
         event.kind = WorkEventKind::Start;
         event.related_work_item_id = Some(predecessor_id);
+        if owner_successor {
+            event.id = format!("owner-successor-{}", event.work_item_id);
+        }
     }
     events.push(event);
     Ok(events)
+}
+
+/// Authority to retire invalid occupancy without changing historical owners.
+#[derive(Clone, Copy)]
+pub(super) enum SuccessorSupersessionAuthority<'a> {
+    ExecutionOwner(&'a str),
+    RegisteredPm,
 }
 
 /// Build the same bounded repair for authenticated fresh activation and an
@@ -475,7 +498,7 @@ pub(super) fn invalid_successor_supersession_event(
     predecessor: &gwt_core::workspace_projection::WorkItem,
     occupied: &gwt_core::workspace_projection::WorkItem,
     container: gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
-    owner: &str,
+    authority: SuccessorSupersessionAuthority<'_>,
     live_session_ids: &std::collections::HashSet<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
@@ -504,12 +527,13 @@ pub(super) fn invalid_successor_supersession_event(
             "a member Session is live; use pane.close on its window first",
         ));
     }
-    let owner_matches = |actual: Option<&str>| {
-        actual.is_none_or(|actual| {
+    let owner_matches = |actual: Option<&str>| match authority {
+        SuccessorSupersessionAuthority::RegisteredPm => true,
+        SuccessorSupersessionAuthority::ExecutionOwner(owner) => actual.is_none_or(|actual| {
             actual == owner
                 || can_upgrade_work_owner(Some(actual), Some(owner))
                 || can_upgrade_work_owner(Some(owner), Some(actual))
-        })
+        }),
     };
     if !owner_matches(predecessor.owner.as_deref())
         || !owner_matches(occupied.owner.as_deref())
@@ -519,7 +543,7 @@ pub(super) fn invalid_successor_supersession_event(
             .any(|event| !owner_matches(event.owner.as_deref()))
     {
         return Err(refuse(
-            "known owner conflict; repair requires matching owner authority",
+            "known owner conflict; repair requires registered PM authority",
         ));
     }
     let canonical_id = canonical_work_id(
@@ -632,8 +656,20 @@ pub(super) fn validate_superseded_member_runtimes(
                     if session.id != session_id {
                         return Err(refuse());
                     }
-                    gwt_agent::SessionExecutionIdentity::from_session(&session)
-                        .map_err(|_| refuse())?
+                    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                        .map_err(|_| refuse())?;
+                    if identity.is_none() {
+                        // A stale legacy sidecar is not evidence of a live
+                        // writer. Reuse the exact runtime census, including
+                        // its uncertainty checks; Stopped alone grants nothing.
+                        let observed =
+                            gwt::session_inventory::observe_session(&session, sessions_dir);
+                        if !observed.sessions.is_empty() || !observed.uncertainties.is_empty() {
+                            return Err(refuse());
+                        }
+                        continue;
+                    }
+                    identity
                 }
                 gwt_agent::SessionPathState::Missing => None,
                 gwt_agent::SessionPathState::Error(error) => return Err(error.into()),

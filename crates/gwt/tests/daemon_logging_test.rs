@@ -9,7 +9,7 @@ use std::{
 };
 
 use gwt_core::{
-    daemon::{RuntimeScope, RuntimeTarget},
+    daemon::{ClientFrame, DaemonEndpoint, DaemonFrame, RuntimeScope, RuntimeTarget},
     logging::current_log_file,
     process::hidden_command,
 };
@@ -34,7 +34,7 @@ fn issue_5644_daemon_start_persists_scan_stage_and_total_timings() {
     let scope = RuntimeScope::from_project_root(&project, RuntimeTarget::Host).unwrap();
     let prefs_path = home
         .join(".gwt/projects")
-        .join(scope.repo_hash)
+        .join(&scope.repo_hash)
         .join("project-state/issue-monitor.json");
     fs::create_dir_all(prefs_path.parent().unwrap()).unwrap();
     let prefs = gwt::IssueMonitorPrefs {
@@ -113,4 +113,35 @@ fn issue_5644_daemon_start_persists_scan_stage_and_total_timings() {
         );
         thread::sleep(Duration::from_millis(100));
     }
+
+    // Issue #5688: the first timer tick used to nest a synchronous Git runtime
+    // inside the daemon runtime. A running PID alone does not prove that its
+    // Monitor worker survived; request the same atomic projection as the CLI.
+    let endpoint: DaemonEndpoint = serde_json::from_slice(
+        &fs::read(scope.endpoint_path(&home.join(".gwt"))).expect("daemon endpoint"),
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let response = runtime.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound a real daemon IPC hang; the status projection determines the verdict.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut client = gwt::cli::daemon::client::DaemonClient::connect(&endpoint)
+                .await
+                .expect("daemon accepts status after its first scan");
+            client.send_frame(&ClientFrame::Status).await.unwrap();
+            client.read_frame::<DaemonFrame>().await.unwrap()
+        })
+        .await
+        .expect("daemon status is bounded")
+    });
+    let DaemonFrame::Status(status) = response else {
+        panic!("expected status, got {response:?}");
+    };
+    assert!(
+        status.issue_monitor.is_some(),
+        "Monitor worker publishes status"
+    );
 }

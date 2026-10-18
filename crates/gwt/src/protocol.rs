@@ -946,6 +946,8 @@ pub enum FrontendEvent {
     GetIssueMonitorProfiles,
     IssueMonitorProfilesSet {
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
+        /// Legacy clients may still send this retired setting; ignore it.
+        #[serde(skip)]
         usage_threshold_percent: Option<u8>,
         request_id: Option<u64>,
     },
@@ -2448,10 +2450,13 @@ pub enum BackendEvent {
         message: String,
     },
     CloneProjectDone {
+        project_key: String,
         workspace_home: String,
     },
     CloneProjectError {
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        existing_project_key: Option<String>,
     },
     LaunchWizardOpenError {
         title: String,
@@ -5106,6 +5111,7 @@ mod tests {
 
         let error = BackendEvent::CloneProjectError {
             message: "target already exists".to_string(),
+            existing_project_key: None,
         };
         let value = serde_json::to_value(error).expect("serialize clone error");
         assert_eq!(

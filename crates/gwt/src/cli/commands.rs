@@ -237,13 +237,11 @@ pub enum IssueCommand {
         /// clear (`false`) the non-destructive update drain.
         update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     },
-    /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
-    /// the usage threshold.
+    /// SPEC #3914 FR-011: read the launch candidate pool and provider holds.
     MonitorProfiles {
         project_root: Option<std::path::PathBuf>,
     },
-    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent)
-    /// and optionally the usage threshold.
+    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent).
     MonitorProfilesSet {
         project_root: Option<std::path::PathBuf>,
         /// Issue #4079 AC-3: sparse elements, so an omitted field inherits the

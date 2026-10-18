@@ -408,8 +408,10 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
   アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
   Autonomous、Max active、キュー補充、許可ラベル、起動プロファイルと候補の
-  順序・優先条件を同じ欄で編集できます。Settings は Application / Project の
-  左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
+  順序・優先条件を同じ欄で編集できます。
+  起動候補の変更は確定時に自動保存され、テキスト欄はフォーカスを外すと保存されます。
+  拒否された入力は保持され、該当欄の近くにエラーを表示します。
+  Settings は Application / Project の左ナビと右の内容ペインに分かれ、編集対象の名前を表示します。
   `System > Auto-apply updates` は全プロジェクト共通で、開いて
   いるプロジェクトの少なくとも1つで Autonomous が有効なときに適用します。
   旧プロジェクトの値は一度だけ移行し、どれか1つが ON なら全体を ON にします。
@@ -891,14 +893,18 @@ Agent session の隔離と再現性のため、gwt は各プロジェクトを�
 └── .gwt/project.toml       # gwt が管理するプロジェクトメタデータ
 ```
 
-Project Picker の `Clone from GitHub...` (タブ未選択時の全画面ピッカー) と、
-トップツールバーの `Open Project ▾` split-button ドロップダウン (アクティブな
-プロジェクトがある状態でも到達可能) のどちらからでも clone を開始できます。
+Hub またはシステムトレイの `Clone from GitHub…` から clone を開始できます。
 clone modal では GitHub HTTPS / SSH URL を直接入力するか、`gh search repos`
 による repository 検索から候補を選択し、保存先の親フォルダを指定します。新しい
 プロジェクトは `<parent>/<project>/` に作成され、`<project>.git/` bare リポジトリ
 と initial worktree が配置されます。remote に `develop` が存在する場合は
 `develop` worktree を作成し、存在しない場合は remote default branch を使います。
+
+Clone を実行するとブラウザタブを確保し、成功後にそのタブでプロジェクトの URL を
+開きます。Hub はそのまま残ります。ポップアップがブロックされた場合や確保した
+タブを閉じた場合は、Hub の完了リンクから開けます。失敗時は確保したタブを閉じて
+理由を表示します。同じリポジトリが Open または Recent に登録済みなら clone を
+拒否し、**Open existing project** から既存の URL を開けます。
 
 既存の Normal Git リポジトリ（プロジェクト直下に `.git/` がある通常レイアウト）
 は検出され、要望に応じて Nested Bare + Worktree 構成へマイグレーションできます。
