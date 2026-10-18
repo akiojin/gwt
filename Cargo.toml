@@ -105,7 +105,7 @@ futures-util = "0.3"
 base64 = "0.23"
 
 # Hashing
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Home directory
 dirs = "7"
