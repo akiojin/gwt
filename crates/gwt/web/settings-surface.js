@@ -666,31 +666,34 @@ export function createSettingsSurface({
       // commit. Delegated listeners scope to `select.settings-select`
       // so the guard covers every Settings window without per-window
       // wiring.
-      function applyAutostartStatus(event, statusMessage = "") {
-        systemSettingsState.autostartEnabled = event.enabled === true;
-        systemSettingsState.autostartPreviousEnabled =
-          systemSettingsState.autostartEnabled;
-        systemSettingsState.autostartMechanism = event.mechanism || "";
-        systemSettingsState.autostartInstallPath = event.install_path || "";
-        systemSettingsState.autostartLoaded = true;
-        systemSettingsState.autostartPending = false;
-        systemSettingsState.autostartChecking = false;
-        systemSettingsState.autostartStatusMessage = statusMessage;
-        systemSettingsState.autostartStatusKind = statusMessage ? "success" : "";
+      function applyAutostartStatus(event, statusMessage = systemSettingsModel.read().autostartPending
+        ? "Saved login launch setting." : "") {
+        systemSettingsModel.update(state => ({
+          ...state,
+          autostartEnabled: event.enabled === true,
+          autostartPreviousEnabled: event.enabled === true,
+          autostartMechanism: event.mechanism || "",
+          autostartInstallPath: event.install_path || "",
+          autostartLoaded: true,
+          autostartPending: false,
+          autostartChecking: false,
+          autostartStatusMessage: statusMessage,
+          autostartStatusKind: statusMessage ? "success" : "",
+        }));
       }
 
       function applyAutostartError(event) {
-        if (systemSettingsState.autostartPending) {
-          systemSettingsState.autostartEnabled =
-            systemSettingsState.autostartPreviousEnabled === true;
-        }
-        systemSettingsState.autostartPending = false;
-        systemSettingsState.autostartChecking = false;
-        systemSettingsState.autostartStatusMessage = event.message ||
-          (systemSettingsState.autostartLoaded
+        systemSettingsModel.update(state => ({
+          ...state,
+          autostartEnabled: state.autostartPending
+            ? state.autostartPreviousEnabled === true : state.autostartEnabled,
+          autostartPending: false,
+          autostartChecking: false,
+          autostartStatusMessage: event.message || (state.autostartLoaded
             ? "Failed to update login launch setting."
-            : "Failed to check login launch status.");
-        systemSettingsState.autostartStatusKind = "error";
+            : "Failed to check login launch status."),
+          autostartStatusKind: "error",
+        }));
       }
 
       // SPEC #1921 Phase 86 (#3813): the backend echoes the complete agent
@@ -782,13 +785,6 @@ export function createSettingsSurface({
             systemSettingsState.statusMessage = deferred.message
               || "Failed to update system settings.";
             systemSettingsState.statusKind = "error";
-          } else if (deferred.kind === "autostart_status") {
-            applyAutostartStatus(
-              deferred,
-              deferred.from_update ? "Saved login launch setting." : "",
-            );
-          } else if (deferred.kind === "autostart_error") {
-            applyAutostartError(deferred);
           }
           renderSystemPanelInAllSettingsWindows();
         },
@@ -845,6 +841,15 @@ export function createSettingsSurface({
           teamsDefaultChannel: "",
           oauthRedirectPort: 8765,
         },
+        loaded: false,
+        statusMessage: "",
+        statusKind: "",
+      };
+      const settingsWindowBodies = new Set();
+      // Autostart has one immutable source; other System settings retain
+      // their existing local adapter until their own migration slice.
+      const systemSettingsModel = createUiStateStore({
+        ...systemSettingsState,
         autostartEnabled: false,
         autostartPreviousEnabled: false,
         autostartMechanism: "",
@@ -854,13 +859,18 @@ export function createSettingsSurface({
         autostartChecking: false,
         autostartStatusMessage: "",
         autostartStatusKind: "",
-        loaded: false,
-        statusMessage: "",
-        statusKind: "",
-      };
-      const settingsWindowBodies = new Set();
-      const systemSettingsModel = createUiStateStore(systemSettingsState);
-      systemSettingsModel.subscribe(state => state, () => {
+      });
+      systemSettingsModel.subscribe(state => state, state => {
+        // Keep the model current while a native select is open; only its
+        // destructive DOM refresh waits for the existing guard to flush.
+        if (systemSettingsInteractionGuard.isActive()) {
+          // A deferred System reply still needs to be applied on release.
+          // Its flush also renders the latest Autostart snapshot.
+          if (!systemSettingsInteractionGuard.hasPendingValue()) {
+            systemSettingsInteractionGuard.defer({ kind: "autostart_render" });
+          }
+          return;
+        }
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
@@ -869,7 +879,7 @@ export function createSettingsSurface({
           const panel = body.querySelector(
             "[data-system-settings-content]",
           );
-          if (panel) renderSystemPanel(panel);
+          if (panel) renderSystemPanel(panel, state);
         }
       });
       let nextProfilesRequest = 0;
@@ -1051,12 +1061,13 @@ export function createSettingsSurface({
         send({ kind: "get_system_settings" });
         send({ kind: "get_update_settings" });
         send({ kind: "get_board_auth_status" });
-        const shouldRequestAutostartStatus = recovering || (!systemSettingsState.autostartPending
-          && !systemSettingsState.autostartChecking);
+        const autostart = systemSettingsModel.read();
+        const shouldRequestAutostartStatus = recovering || (!autostart.autostartPending
+          && !autostart.autostartChecking);
         if (shouldRequestAutostartStatus) {
-          systemSettingsState.autostartChecking = true;
-          systemSettingsState.autostartStatusMessage = "";
-          systemSettingsState.autostartStatusKind = "";
+          systemSettingsModel.update(state => ({ ...state, autostartChecking: true,
+            autostartStatusMessage: "", autostartStatusKind: "",
+          }));
           send({ kind: "get_autostart_status" });
         }
         if (recovering || (!customAgentsState.loading && customAgentsState.agents.length === 0)) {
@@ -1493,43 +1504,42 @@ export function createSettingsSurface({
         return { teamId, channelId };
       }
 
-      function syncAutostartCheckbox(autostartCheckbox) {
-        autostartCheckbox.checked = systemSettingsState.autostartEnabled === true;
-        autostartCheckbox.disabled = !systemSettingsState.autostartLoaded ||
-          systemSettingsState.autostartChecking === true ||
-          systemSettingsState.autostartPending === true;
+      function syncAutostartCheckbox(autostartCheckbox, state = systemSettingsModel.read()) {
+        autostartCheckbox.checked = state.autostartEnabled === true;
+        autostartCheckbox.disabled = !state.autostartLoaded ||
+          state.autostartChecking === true || state.autostartPending === true;
       }
 
-      function renderAutostartStatus(autostartStatus) {
-        if (systemSettingsState.autostartPending) {
+      function renderAutostartStatus(autostartStatus, state = systemSettingsModel.read()) {
+        if (state.autostartPending) {
           autostartStatus.textContent = "Saving…";
           autostartStatus.dataset.kind = "info";
-        } else if (systemSettingsState.autostartChecking) {
+        } else if (state.autostartChecking) {
           autostartStatus.textContent = "Checking login launch status…";
           autostartStatus.dataset.kind = "info";
         } else {
-          const message = systemSettingsState.autostartStatusMessage || "";
-          autostartStatus.textContent = !systemSettingsState.autostartLoaded && message
+          const message = state.autostartStatusMessage || "";
+          autostartStatus.textContent = !state.autostartLoaded && message
             ? `Login launch status unavailable. ${message}`
             : message;
-          if (systemSettingsState.autostartStatusKind) {
-            autostartStatus.dataset.kind = systemSettingsState.autostartStatusKind;
+          if (state.autostartStatusKind) {
+            autostartStatus.dataset.kind = state.autostartStatusKind;
           } else {
             delete autostartStatus.dataset.kind;
           }
         }
       }
 
-      function renderSystemPanel(panel) {
+      function renderSystemPanel(panel, state = systemSettingsModel.read()) {
         // Reads used for recovery must not destroy explicit-save drafts,
         // including secrets that only exist in these input elements.
         if (panel.querySelector(".board-config-form[data-dirty='true'], .board-oauth-port-form[data-dirty='true']")) {
           const autostart = panel.querySelector("input[id$='-settings-system-autostart']");
           if (autostart) {
-            syncAutostartCheckbox(autostart);
+            syncAutostartCheckbox(autostart, state);
           }
           const autostartStatus = panel.querySelector("[data-role='autostart-settings-status']");
-          if (autostartStatus) renderAutostartStatus(autostartStatus);
+          if (autostartStatus) renderAutostartStatus(autostartStatus, state);
           renderSystemPanelStatus(panel);
           return;
         }
@@ -2122,16 +2132,14 @@ export function createSettingsSurface({
         autostartCheckbox.type = "checkbox";
         autostartCheckbox.className = "settings-checkbox";
         autostartCheckbox.id = "settings-system-autostart";
-        syncAutostartCheckbox(autostartCheckbox);
+        syncAutostartCheckbox(autostartCheckbox, state);
         autostartCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
-          systemSettingsState.autostartPreviousEnabled =
-            systemSettingsState.autostartEnabled === true;
-          systemSettingsState.autostartEnabled = next;
-          systemSettingsState.autostartPending = true;
-          systemSettingsState.autostartStatusMessage = "Saving…";
-          systemSettingsState.autostartStatusKind = "info";
-          renderSystemPanelInAllSettingsWindows();
+          systemSettingsModel.update(state => ({ ...state,
+            autostartPreviousEnabled: state.autostartEnabled === true,
+            autostartEnabled: next, autostartPending: true,
+            autostartStatusMessage: "Saving…", autostartStatusKind: "info",
+          }));
           send({ kind: "update_autostart", enabled: next });
         });
 
@@ -2147,11 +2155,11 @@ export function createSettingsSurface({
           "Starts GWT in the menu bar when you log in. The browser does not open automatically.";
         autostartSection.appendChild(autostartHelp);
 
-        if (systemSettingsState.autostartLoaded) {
+        if (state.autostartLoaded) {
           const autostartDetail = document.createElement("p");
           autostartDetail.className = "settings-help";
-          const mechanism = systemSettingsState.autostartMechanism || "Unknown";
-          const installPath = systemSettingsState.autostartInstallPath || "";
+          const mechanism = state.autostartMechanism || "Unknown";
+          const installPath = state.autostartInstallPath || "";
           autostartDetail.textContent = installPath
             ? `Autostart: ${mechanism} · ${installPath}`
             : `Autostart: ${mechanism}`;
@@ -2163,7 +2171,7 @@ export function createSettingsSurface({
         autostartStatus.dataset.role = "autostart-settings-status";
         autostartStatus.setAttribute("role", "status");
         autostartStatus.setAttribute("aria-live", "polite");
-        renderAutostartStatus(autostartStatus);
+        renderAutostartStatus(autostartStatus, state);
         autostartSection.appendChild(autostartStatus);
 
         const status = document.createElement("p");
@@ -2194,7 +2202,7 @@ export function createSettingsSurface({
       }
 
       function renderSystemPanelInAllSettingsWindows() {
-        systemSettingsModel.update(() => systemSettingsState);
+        systemSettingsModel.update(state => ({ ...state, ...systemSettingsState }));
       }
 
       function renderSettingsAgentList() {
@@ -2369,6 +2377,7 @@ export function createSettingsSurface({
         customAgentsState,
         agentBackendsState,
         systemSettingsState,
+        systemSettingsModel,
         systemSettingsInteractionGuard,
         applyAgentResourceSnapshot,
         applyAutostartStatus,

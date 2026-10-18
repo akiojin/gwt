@@ -1,6 +1,6 @@
 /** Issue #5532 / SPEC #5390: delayed login-launch replies stay local to Settings. */
 import { expect, test, type WebSocketRoute } from "@playwright/test";
-import { gotoLiveGwt, openLiveGwtProject, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { gotoLiveGwt, openLiveGwtProject, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const PROJECT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd();
@@ -65,10 +65,12 @@ test.describe("Autostart Settings (isolated live backend)", () => {
         before, { timeout: 30_000 });
       };
       const close = async () => {
-        await settings.getByRole("button", { name: "Close window", exact: true }).click();
-        const confirmation = page.locator("#window-close-confirm-modal");
-        await expect(confirmation).toBeVisible();
-        await confirmation.getByRole("button", { name: "Close window", exact: true }).click();
+        const id = await settings.getAttribute("data-id");
+        expect(id).toBeTruthy();
+        // A fixed host recreates its selected surface when its window closes.
+        // Leave Settings first so this lifecycle probe actually unmounts it.
+        await page.locator('.op-rail__item[data-surface="agents"]').click();
+        await sendLiveGwtEvent(page, { kind: "close_window", id });
         // Closing is a backend round trip, not a latency assertion for this Issue.
         await expect(settings).toHaveCount(0, { timeout: 30_000 });
       };
