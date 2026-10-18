@@ -402,7 +402,7 @@ impl ProjectSessionCensus {
 /// Observe one Session before cross-Session process deduplication. Recovery
 /// callers hold its Session lease and must also check every uncertainty.
 /// A live host without recorded identity remains uncertain for recovery.
-pub(crate) fn observe_session(session: &Session, sessions_dir: &Path) -> SessionInventory {
+pub fn observe_session(session: &Session, sessions_dir: &Path) -> SessionInventory {
     observe_sessions_filtered(
         session
             .project_state_root
