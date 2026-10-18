@@ -98,7 +98,7 @@ loader の所有権移譲を含む `815fcff09d93fb3e88229445cf2239ed5bf98369` �
 
 次に実Git履歴の batch API を単独で計測した。749 refs、589 unique commits、873,959 matrix descriptors、8,514 unique payload OIDsで、descriptor cache完成時のlive heap 194,950,932 Bが、input-order matrix複製後350,509,140 B、payload読込後407,967,244 B、返却値複製後594,173,124 Bとなった。約399MBの段階増加はGUIの段差と量的に整合するが、同じGUI内のallocation stackを採取した結果ではない。公開APIと完全matrix selectorを維持し、同じcommitの最後の入力出現でVecを移譲し、返却時もpath/OIDのStringをmoveする最小修正を選んだ。全refのchunk分割はOID一度readの契約に影響し、公開fieldをArcへ変える案は不要なAPI変更になるため採用しない。
 
-この749 refsのcommit一覧を固定し、旧・新を同じ入力readerで取り直した。計測器は実 `blob.rs` のコピーへphase captureを加え、System allocatorへ委譲した成功要求を集計する。selectorは全OIDを選択し、callerのfingerprint構築、worktree scan、fold、永続化、GUI RSSは含まない。
+この749 refsのcommit一覧を固定し、旧・新を同じ入力readerで取り直した。[入力](git-batch-allocation/frozen-input.json)、[旧](git-batch-allocation/old.jsonl)、[新](git-batch-allocation/new.jsonl)、[比較](git-batch-allocation/comparison.json)、[再現ソース](git-batch-allocation/probes.zip)、[実行説明](git-batch-allocation/README.md)。計測器は実 `blob.rs` のコピーへphase captureを加え、System allocatorへ委譲した成功要求を集計する。selectorは全OIDを選択し、callerのfingerprint構築、worktree scan、fold、永続化、GUI RSSは含まない。
 
 | Git batch の計測値 | 旧複製方式 | 所有権移譲後 |
 | --- | ---: | ---: |
@@ -115,5 +115,7 @@ loader の所有権移譲を含む `815fcff09d93fb3e88229445cf2239ed5bf98369` �
 peakは約51.06%減り、返却後の保持量はほぼ同じだった。必要な重複入力alias分のdescriptor複製は残す。raw tree cacheへの追加変更は、この2点のmoveで十分な削減が得られたため行わない。実行順とhost負荷を固定しておらず、約0.45秒の時間差を速度改善とはしない。この測定もGUI全体の4時間予算の代わりにはしない。
 
 所有 Issue は未証明の条件を残して OPEN を維持する。配信スライスは source metadata の保持量と複製ピークの削減、およびその回帰・計測証跡である。schema migration は不要で、rollback はこの変更の revert。実 fleet の追加観測は既存 Issue #5561 で追跡する。
+
+2026-10-19 の再開時に fetch した `origin/develop` (`f16d1243095672d50fdd7e4b4681d0832ce68a6c`) は、修正3コミット `109b7c5b7` / `815fcff09` / `5767b7cfa` を含んでいない。未配信ソースは AC 達成の証拠とせず、まず保持量削減の独立配信と互換性を検証する。AC-1 は上記の範囲付き allocation 計測、AC-3 は区間・単位・失敗を明記した増加率を証拠とする。AC-2 は実モデル Agent 10〜12窓・同条件4時間での観測が引き続き必要で、短時間の headed 回帰が成功してもチェックしない。
 
 User Verification Result: n/a (autonomous)
