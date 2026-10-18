@@ -2297,6 +2297,7 @@ enum UserEvent {
     },
     LaunchComplete {
         window_id: String,
+        window_generation: Option<u64>,
         result: Box<AgentLaunchResult>,
     },
     AgentLaunchPrepared(Box<crate::app_runtime::PreparedAgentLaunch>),
@@ -4753,6 +4754,7 @@ mod tests {
             pending_fresh_execution_finalizations: HashMap::new(),
 
             inflight_launches: HashMap::new(),
+            initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
@@ -11756,8 +11758,8 @@ fn main() -> std::io::Result<()> {
                     },
                 )]);
             }
-            Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
-                let events = app.handle_launch_complete(window_id, *result);
+            Event::UserEvent(UserEvent::LaunchComplete { window_id, window_generation, result }) => {
+                let events = app.handle_launch_complete_for_generation(window_id, window_generation, *result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::FreshExecutionFinalized(completion)) => {

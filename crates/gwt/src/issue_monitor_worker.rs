@@ -649,8 +649,12 @@ pub(crate) fn read_execution_observations_from_inventory(
             // with no gate-admitted recovery only repeats the same loop.
             // Preserve real settlements and process liveness; this diagnosis
             // does not write the ECR or claim that unfinished work was delivered.
-            let recovery_exhausted = (diagnosis.ecr_status == Some(ExecutionControlStatus::Active)
-                || diagnosis.ecr_settled_by_host_reaper)
+            // A live or uncertain process already vetoes recovery. Work identity
+            // validation can invoke Git, so defer that recovery-only diagnosis
+            // until no process holds this Issue's worktree.
+            let recovery_exhausted = !process_held
+                && (diagnosis.ecr_status == Some(ExecutionControlStatus::Active)
+                    || diagnosis.ecr_settled_by_host_reaper)
                 && worktree
                     .zip(diagnosis.holder_session_id.as_deref())
                     .is_some_and(|(worktree, session_id)| {
@@ -4531,13 +4535,21 @@ mod tests {
         )
         .save(&runtime_path)
         .unwrap();
+        let git_spawns_before = gwt_core::process::thread_git_spawn_count();
+        let live_observations = read_execution_observations(worktree.path(), &[owner.number]);
         assert_eq!(
-            read_execution_observations(worktree.path(), &[owner.number])
+            gwt_core::process::thread_git_spawn_count() - git_spawns_before,
+            1,
+            "an exact live process must skip recovery-gate Git validation; only worktree listing is needed"
+        );
+        assert_eq!(
+            live_observations
                 .get(&owner.number)
                 .map(|observation| observation.settlement),
             Some(IssueMonitorExecutionSettlement::Unknown),
             "an exact live process must not permit recovery even without a pane"
         );
+        assert!(live_observations[&owner.number].process_held);
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
             enabled: true,
             ..IssueMonitorConfig::default()

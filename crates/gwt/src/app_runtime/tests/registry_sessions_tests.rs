@@ -1308,19 +1308,25 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
-    runtime.issue_monitor_scheduled_tick_events_at("2026-08-17T08:59:59Z");
+    runtime.issue_monitor_scheduled_tick_events_at("2026-08-17T08:56:59Z");
     tasks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .pop()
         .expect("queued registration-pending worker")();
+    let pending = gwt::load_issue_monitor_prefs(&prefs_path).expect("prefs before deadline");
     assert_eq!(
-        gwt::load_issue_monitor_prefs(&prefs_path)
-            .unwrap()
-            .launched_issues
-            .len(),
+        pending.launched_issues.len(),
         1,
-        "a scheduled disappearance must wait for registration"
+        "a missing ACKed pane retains its slot before the 120-second deadline"
+    );
+    assert_eq!(
+        pending
+            .launch_confirmations
+            .get(&42)
+            .map(|ack| ack.confirmed_at.as_str()),
+        Some("2026-08-17T08:55:00Z"),
+        "the pre-deadline scan must preserve the original ACK timestamp"
     );
 
     // Each fallback scan reconstructs its observer from persisted preferences.
@@ -1345,31 +1351,18 @@ fn a_launch_whose_agent_window_vanished_releases_its_slot_on_the_scheduled_tick(
             .expect("queued scheduled worker")();
         gwt::load_issue_monitor_prefs(&prefs_path).expect("reload")
     };
-    let first = observe_absence("2026-08-17T09:00:00Z");
-    assert_eq!(
-        first.launched_issues.len(),
-        1,
-        "the first absence after the registration grace retains the slot"
-    );
-    assert_eq!(
-        first
-            .missing_window_observations
-            .get(&42)
-            .map(|(_, observed_at)| observed_at.as_str()),
-        Some("2026-08-17T09:00:00Z"),
-        "the first qualified absence is persisted for the next observer"
-    );
-    let replay = observe_absence("2026-08-17T09:00:00Z");
-    assert_eq!(replay.launched_issues.len(), 1, "a replay retains the slot");
-    assert_eq!(
-        replay.missing_window_observations,
-        first.missing_window_observations
-    );
-    let persisted = observe_absence("2026-08-17T09:00:01Z");
+    let persisted = observe_absence("2026-08-17T08:57:00Z");
     assert!(
         persisted.launched_issues.is_empty(),
         "a window the canvas no longer has cannot keep holding a slot"
     );
+    let requeue = persisted
+        .requeue_audit
+        .iter()
+        .find(|entry| entry.issue_number == 42)
+        .expect("the deadline automatically requeues the missing pane's Issue");
+    assert_eq!(requeue.released_at, "2026-08-17T08:57:00Z");
+    assert!(requeue.reason.contains("deadline 120s"));
 }
 
 /// Issue #4328: a queued scan's canvas predates a legitimate launch ACK.
