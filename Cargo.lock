@@ -1383,7 +1383,6 @@ name = "gwt-clipboard"
 version = "9.128.0"
 dependencies = [
  "gwt-core",
- "tempfile",
  "thiserror 2.0.21",
 ]
 
