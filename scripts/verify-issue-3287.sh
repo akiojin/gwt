@@ -2,6 +2,11 @@
 # Issue #3287: isolated checkout acceptance. Build gwt/gwtd first.
 set -euo pipefail
 
+# Keep hook/caller repository state out of every fixture Git command.
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_NAMESPACE GIT_COMMON_DIR
+
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 CHECKOUT_GWT="$REPO_ROOT/target/debug/gwt"
 CHECKOUT_GWTD="$REPO_ROOT/target/debug/gwtd"
