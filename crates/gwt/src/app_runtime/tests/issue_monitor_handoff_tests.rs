@@ -1086,7 +1086,7 @@ fn invalid_successor_repair_rechecks_exact_runtime_outside_the_local_registry() 
                 .find(|work| work.id == occupied_id)
                 .unwrap(),
             container.clone(),
-            "SPEC-3165",
+            super::super::workspace::SuccessorSupersessionAuthority::ExecutionOwner("SPEC-3165"),
             &HashSet::new(),
             now,
         )

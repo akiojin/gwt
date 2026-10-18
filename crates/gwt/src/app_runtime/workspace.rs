@@ -444,7 +444,9 @@ pub(super) fn apply_workspace_launch_for_current_work(
                                     pr_url: None,
                                     pr_state: None,
                                 },
-                                owner.as_deref().expect("authenticated launch owner"),
+                                SuccessorSupersessionAuthority::ExecutionOwner(
+                                    owner.as_deref().expect("authenticated launch owner"),
+                                ),
                                 transition.live_session_ids,
                                 transition.now,
                             )?;
@@ -482,6 +484,13 @@ pub(super) fn apply_workspace_launch_for_current_work(
     Ok(events)
 }
 
+/// Authority to retire invalid occupancy without changing historical owners.
+#[derive(Clone, Copy)]
+pub(super) enum SuccessorSupersessionAuthority<'a> {
+    ExecutionOwner(&'a str),
+    RegisteredPm,
+}
+
 /// Build the same bounded repair for authenticated fresh activation and an
 /// explicit registered-PM close. Never attach the new Session to old history.
 pub(super) fn invalid_successor_supersession_event(
@@ -489,7 +498,7 @@ pub(super) fn invalid_successor_supersession_event(
     predecessor: &gwt_core::workspace_projection::WorkItem,
     occupied: &gwt_core::workspace_projection::WorkItem,
     container: gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
-    owner: &str,
+    authority: SuccessorSupersessionAuthority<'_>,
     live_session_ids: &std::collections::HashSet<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
@@ -518,12 +527,13 @@ pub(super) fn invalid_successor_supersession_event(
             "a member Session is live; use pane.close on its window first",
         ));
     }
-    let owner_matches = |actual: Option<&str>| {
-        actual.is_none_or(|actual| {
+    let owner_matches = |actual: Option<&str>| match authority {
+        SuccessorSupersessionAuthority::RegisteredPm => true,
+        SuccessorSupersessionAuthority::ExecutionOwner(owner) => actual.is_none_or(|actual| {
             actual == owner
                 || can_upgrade_work_owner(Some(actual), Some(owner))
                 || can_upgrade_work_owner(Some(owner), Some(actual))
-        })
+        }),
     };
     if !owner_matches(predecessor.owner.as_deref())
         || !owner_matches(occupied.owner.as_deref())
@@ -533,7 +543,7 @@ pub(super) fn invalid_successor_supersession_event(
             .any(|event| !owner_matches(event.owner.as_deref()))
     {
         return Err(refuse(
-            "known owner conflict; repair requires matching owner authority",
+            "known owner conflict; repair requires registered PM authority",
         ));
     }
     let canonical_id = canonical_work_id(
