@@ -36,6 +36,20 @@ test("Board auth receiver commits shared state and rejects bypass rendering", ()
   assert.ok(findings(bypass).length > 0);
 });
 
+test("Agent Backend receivers commit model data and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const settings = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', settings]]),
+  }).filter(finding => finding.root === 'receive'
+    && /\/agent_backend_(list|saved|deleted|error)(\||$)/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "agent_backend_list":',
+    'case "agent_backend_list": document.body.textContent = event.agent;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
 test("Custom Agent receivers only commit model data and reject bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const settings = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');

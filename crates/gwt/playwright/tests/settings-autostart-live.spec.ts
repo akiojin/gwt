@@ -18,6 +18,66 @@ test.describe("Autostart Settings (isolated live backend)", () => {
     });
   });
 
+  test("Agent Backend snapshots preserve per-agent lists, updates, errors and reopen", async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const theme = info.project.name.endsWith("light") ? "light" : "dark";
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      const requests: any[] = [];
+      let transport: WebSocketRoute | undefined;
+      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+        transport = socket;
+        const server = socket.connectToServer();
+        socket.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (payload?.kind === "list_agent_backends") requests.push(payload);
+          else server.send(message);
+        });
+        server.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (!/^agent_backend_(list|saved|deleted|error)$/.test(payload?.kind ?? "")) socket.send(message);
+        });
+      });
+      const reply = (payload: object) => transport!.send(JSON.stringify(payload));
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await openLiveGwtProject(page, PROJECT);
+      await page.bringToFront();
+      const open = () => page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agent-backends" } })));
+      await open();
+      const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const panel = settings.locator('[data-settings-panel="agent-backends"]');
+      await expect.poll(() => requests.some(request => request.agent === "claudeCode") && requests.some(request => request.agent === "codex")).toBe(true);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const profile = { id: "fixture-backend", display_name: "Fixture backend", base_url: "https://example.invalid", model: "fixture-model" };
+      reply({ kind: "agent_backend_list", agent: "claudeCode", backends: [profile] });
+      reply({ kind: "agent_backend_list", agent: "codex", backends: [{ ...profile, id: "codex-fixture", display_name: "Codex fixture" }] });
+      await expect(panel).toContainText("Fixture backend");
+      await expect(panel).toContainText("Codex fixture");
+      reply({ kind: "agent_backend_saved", agent: "claudeCode", profile: { ...profile, display_name: "Updated backend" } });
+      await expect(panel).toContainText("Updated backend");
+      await expect(panel.locator('[data-agent="claudeCode"] .agent-backend-row')).toHaveCount(1);
+      reply({ kind: "agent_backend_deleted", agent: "claudeCode", id: profile.id });
+      await expect(panel).toContainText("No Claude Code backend profiles saved.");
+      await expect(panel).toContainText("Codex fixture");
+      reply({ kind: "agent_backend_error", message: "Fixture backend unavailable" });
+      await expect(settings.locator('[data-settings-panel="custom-agents"]')).toContainText("Fixture backend unavailable");
+      const id = await settings.getAttribute("data-id");
+      expect(id).toBeTruthy();
+      await page.locator('.op-rail__item[data-surface="agents"]').click();
+      await sendLiveGwtEvent(page, { kind: "close_window", id });
+      await expect(settings).toHaveCount(0, { timeout: 30_000 });
+      const reads = requests.length;
+      await open();
+      await expect.poll(() => requests.length).toBeGreaterThan(reads);
+      await expect(panel).toContainText("Codex fixture");
+      await expect(panel).toContainText("No Claude Code backend profiles saved.");
+      await info.attach(`agent-backends-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
+      expect(errors).toEqual([]);
+    });
+  });
+
   test("Custom Agent snapshots render replies and preserve environment save and delete contracts", async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];

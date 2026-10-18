@@ -4692,7 +4692,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       // SPEC-3064 Phase 3 (E4): the Settings windows surface (tabbed
-      // Settings body, customAgentsModel / agentBackendsState /
+      // Settings body, customAgentsModel / agentBackendsModel /
       // systemSettingsModel, Teams channel converters, add-from-preset
       // flow, autostart appliers, and the system-settings interaction
       // guard) moved to /settings-surface.js. app.js keeps the receive()
@@ -4704,7 +4704,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
         applyIssueMonitorProfilesError,
-        agentBackendsState,
+        applyAgentBackendsReceiveEvent,
         systemSettingsInteractionGuard,
         applySystemSettingsEvent,
         applyBoardAuthStatus,
@@ -5608,46 +5608,10 @@ import { createUiStateStore } from "/ui-state-store.js";
           // are ephemeral mutations; `agent_backend_error` carries a stable
           // CustomAgentErrorCode tag.
           case "agent_backend_list":
-            if (event.agent) {
-              const key = event.agent;
-              agentBackendsState.backends[key] = event.backends || [];
-              agentBackendsState.loadingAgent = null;
-              frontendUnits.knowledgeSettingsSurface.renderAgentBackendsPanelInAllSettingsWindows();
-            }
-            break;
           case "agent_backend_saved":
-            if (event.agent && event.profile) {
-              const key = event.agent;
-              const list = agentBackendsState.backends[key] || [];
-              const idx = list.findIndex((p) => p.id === event.profile.id);
-              if (idx >= 0) list[idx] = event.profile;
-              else list.push(event.profile);
-              agentBackendsState.backends[key] = list;
-              setSettingsStatus(
-                `Saved backend "${event.profile.id}" for ${key}.`,
-                "success",
-              );
-              frontendUnits.knowledgeSettingsSurface.renderAgentBackendsPanelInAllSettingsWindows();
-            }
-            break;
           case "agent_backend_deleted":
-            if (event.agent && event.id) {
-              const key = event.agent;
-              agentBackendsState.backends[key] = (
-                agentBackendsState.backends[key] || []
-              ).filter((p) => p.id !== event.id);
-              setSettingsStatus(
-                `Deleted backend "${event.id}" for ${key}.`,
-                "success",
-              );
-              frontendUnits.knowledgeSettingsSurface.renderAgentBackendsPanelInAllSettingsWindows();
-            }
-            break;
           case "agent_backend_error":
-            setSettingsStatus(
-              event.message || "Agent backend error.",
-              "error",
-            );
+            applyAgentBackendsReceiveEvent(event);
             break;
           case "board_auth_status":
             applyBoardAuthStatus(event);
