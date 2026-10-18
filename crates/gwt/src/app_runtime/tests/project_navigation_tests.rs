@@ -852,7 +852,9 @@ fn project_prepare_clone_completion_uses_the_shared_async_open_contract() {
     let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = blocking_tasks;
 
-    assert!(runtime.handle_clone_project_done(&cloned).is_empty());
+    assert!(runtime
+        .handle_clone_project_done("clone-client", &cloned)
+        .is_empty());
     assert_eq!(
         queued_tasks.lock().expect("task queue").len(),
         1,
@@ -869,9 +871,23 @@ fn project_prepare_clone_completion_uses_the_shared_async_open_contract() {
     let events = runtime.handle_project_navigation_prepared(prepared);
 
     assert_eq!(runtime.tabs.len(), 2);
+    assert!(
+        events.iter().any(
+            |event| matches!(event.event, BackendEvent::CloneProjectDone { .. })
+                && event.target == DispatchTarget::Client("clone-client".to_string())
+        ),
+        "clone completion must be private to its initiating client: {events:?}"
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(event.event, BackendEvent::ProjectOpened { .. })
+                && event.target == DispatchTarget::Client("clone-client".to_string())
+        ),
+        "clone project-open completion must not navigate unrelated Hub clients: {events:?}"
+    );
     assert!(events.iter().any(|event| matches!(
         &event.event,
-        BackendEvent::CloneProjectDone { workspace_home }
+        BackendEvent::CloneProjectDone { workspace_home, .. }
             if workspace_home == &cloned.display().to_string()
     )));
     let active_tab = runtime
@@ -885,6 +901,73 @@ fn project_prepare_clone_completion_uses_the_shared_async_open_contract() {
         active_tab.project_key, canonical_key,
         "the consumer must keep RepoHash as the only project identity"
     );
+    let done = events
+        .iter()
+        .find(|event| matches!(event.event, BackendEvent::CloneProjectDone { .. }))
+        .expect("clone completion");
+    let payload = serde_json::to_value(&done.event).expect("serialize completion");
+    assert_eq!(
+        payload["project_key"].as_str(),
+        Some(canonical_key.as_str())
+    );
+}
+
+#[test]
+fn project_prepare_clone_failure_replies_to_the_initiating_client() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+
+    assert!(runtime
+        .handle_clone_project_done("clone-client", &temp.path().join("missing-clone"))
+        .is_empty());
+    let events = commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
+
+    assert!(
+        events.iter().any(
+            |event| matches!(event.event, BackendEvent::CloneProjectError { .. })
+                && event.target == DispatchTarget::Client("clone-client".to_string())
+        ),
+        "clone open failure must be private to its initiating client: {events:?}"
+    );
+    assert!(runtime.tabs.is_empty());
+}
+
+#[test]
+fn project_prepare_clone_supersession_replies_to_client_and_preserves_newer_navigation() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let cloned = temp.path().join("cloned");
+    let newer = temp.path().join("newer");
+    fs::create_dir_all(&cloned).expect("cloned project");
+    fs::create_dir_all(&newer).expect("newer project");
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let (blocking_tasks, queued_tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = blocking_tasks;
+
+    runtime.handle_clone_project_done("clone-client", &cloned);
+    drain_queued_blocking_tasks(&queued_tasks);
+    let cloned_prepared = take_project_navigation_completion(&recorded_events);
+    runtime.open_project_path_events(newer.clone());
+    let newer_request = runtime.pending_project_navigation.clone();
+    let events = runtime.handle_project_navigation_prepared(cloned_prepared);
+
+    assert!(
+        events.iter().any(|event| matches!(&event.event,
+            BackendEvent::CloneProjectError { message, existing_project_key: None }
+                if message == "superseded by a newer project navigation"
+        ) && event.target
+            == DispatchTarget::Client("clone-client".to_string())),
+        "a superseded clone must settle its initiating client: {events:?}"
+    );
+    assert_eq!(runtime.pending_project_navigation, newer_request);
+    assert!(runtime.tabs.is_empty(), "the stale clone must not commit");
+
+    commit_pending_project_navigation(&mut runtime, &queued_tasks, &recorded_events);
+    assert_eq!(runtime.tabs.len(), 1);
+    assert!(same_worktree_path(&runtime.tabs[0].project_root, &newer));
 }
 
 #[test]
