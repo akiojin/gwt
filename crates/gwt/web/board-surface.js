@@ -1,15 +1,15 @@
-export function boardMentionKind(mention) {
+function boardMentionKind(mention) {
   return String(mention?.target_kind || mention?.targetKind || "").toLowerCase();
 }
 
-export function boardMentionLabel(mention) {
+function boardMentionLabel(mention) {
   const label = String(mention?.label || "").trim();
   if (label) return label;
   const target = String(mention?.target || "").trim();
   return target || "Unknown";
 }
 
-export function boardMentionTypedKey(mention) {
+function boardMentionTypedKey(mention) {
   const kind = boardMentionKind(mention);
   const target = String(mention?.target || "").trim();
   return kind && target ? `${kind}:${target}` : "";
@@ -53,7 +53,7 @@ export function boardEntryAudienceLabels(entry, selfKeys = []) {
   return ["Broadcast"];
 }
 
-export function normalizedBoardWorkspaceAudience(entry) {
+function normalizedBoardWorkspaceAudience(entry) {
   const audience = Array.isArray(entry?.audience) ? entry.audience : [];
   const normalized = [];
   for (const value of audience) {
@@ -144,9 +144,6 @@ export function entryVisibleForWorkspace(entry, currentWorkspaceId) {
     .some((workspaceId) => audience.includes(workspaceId));
 }
 
-export function boardEntryVisibleForWorkspace(entry, workspaceId) {
-  return entryVisibleForWorkspace(entry, workspaceId);
-}
 
 export function visibleBoardEntries(state, selfKeys = []) {
   const entries = state?.entries || [];
