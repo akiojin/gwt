@@ -147,6 +147,45 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   assert.match(reopened.querySelector('[data-role="settings-scroll"]').textContent, /other/);
 });
 
+test("Agent Backend replies commit immutable per-agent catalogs for all Settings mounts", () => {
+  const { surface, body, document, sent } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
+  assert.equal(typeof surface.agentBackendsModel?.read, "function", "backend catalog must expose immutable snapshots");
+  const initial = surface.agentBackendsModel.read();
+  const profile = { id: "fixture", display_name: "Fixture backend", base_url: "https://example.invalid", model: "fixture-model" };
+  surface.applyAgentBackendsReceiveEvent({ kind: "agent_backend_list", agent: "claudeCode", backends: [profile] });
+  const loaded = surface.agentBackendsModel.read();
+  profile.display_name = "mutated outside the model";
+  assert.equal(loaded.backends.claudeCode[0].display_name, "Fixture backend");
+  assert.deepEqual(initial.backends.claudeCode, []);
+  surface.applyAgentBackendsReceiveEvent({ kind: "agent_backend_list", agent: "codex", backends: [{ id: "codex-fixture" }] });
+  surface.applyAgentBackendsReceiveEvent({ kind: "agent_backend_saved", agent: "claudeCode", profile: { ...profile, display_name: "Updated backend" } });
+  assert.equal(surface.agentBackendsModel.read().backends.claudeCode.length, 1);
+  assert.equal(loaded.backends.claudeCode[0].display_name, "Fixture backend", "upsert must preserve previous snapshots");
+  for (const host of [body, second]) {
+    const panel = host.querySelector('[data-settings-panel="agent-backends"]');
+    assert.match(panel.textContent, /Updated backend/);
+    assert.match(panel.textContent, /codex-fixture/);
+  }
+  const detachedText = second.textContent;
+  second.remove();
+  surface.applyAgentBackendsReceiveEvent({ kind: "agent_backend_deleted", agent: "claudeCode", id: "fixture" });
+  assert.equal(second.textContent, detachedText, "detached mounts no longer render");
+  assert.equal(surface.agentBackendsModel.read().backends.codex.length, 1, "delete preserves the other agent");
+  surface.applyAgentBackendsReceiveEvent({ kind: "agent_backend_error", message: "Backend unavailable" });
+  assert.equal(surface.customAgentsModel.read().statusMessage, "Backend unavailable", "errors keep the existing shared status channel");
+  surface.resyncSettings();
+  assert.ok(sent.some(message => message.kind === "list_agent_backends" && message.agent === "codex"));
+  const reopened = document.createElement("main");
+  document.body.appendChild(reopened);
+  surface.renderSettingsWindow(reopened, { id: "settings-reopened", title: "Settings" });
+  assert.match(reopened.querySelector('[data-settings-panel="agent-backends"]').textContent, /codex-fixture/);
+  assert.match(body.querySelector('[data-settings-panel="agent-backends"]').textContent, /No Claude Code backend profiles/);
+});
+
 test("System replies advance one immutable snapshot for all mounts, including while guarded", () => {
   const { surface, body, document } = createSettingsHarness();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });

@@ -1,7 +1,7 @@
 // SPEC-3064 Phase 3 (E4) — Settings windows surface extracted from app.js.
 // Owns the Settings window body (tabbed System / Custom Agents / Agent
 // Backends / Usage & Limits surface), the customAgentsModel /
-// agentBackendsState / systemSettingsModel stores, the Teams channel link
+// agentBackendsModel / systemSettingsModel stores, the Teams channel link
 // converters, the add-from-preset flow, the autostart appliers, and the
 // systemSettingsInteractionGuard that defers destructive System panel
 // re-renders while a native <select> dropdown is open. Pure movement from
@@ -780,15 +780,12 @@ export function createSettingsSurface({
       });
       // SPEC-1921 2026-05-18 amendment / FR-099: Settings > Agent Backends
       // per-built-in backend profile state. `backends` is keyed by
-      // BuiltinAgentId string ("claudeCode" / "codex"). Mirrors
-      // customAgentsModel shape so dispatch + status messages can share
-      // helpers like setSettingsStatus.
-      const agentBackendsState = {
+      // BuiltinAgentId string ("claudeCode" / "codex"). Status messages keep
+      // using the shared Custom Agents status channel.
+      const agentBackendsModel = createUiStateStore({
         backends: { claudeCode: [], codex: [] },
         loadingAgent: null,
-        statusMessage: "",
-        statusKind: "",
-      };
+      });
       // SPEC-1933 US-4: System tab state. `language` is the raw stored value
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsModel = createUiStateStore({
@@ -835,6 +832,9 @@ export function createSettingsSurface({
       // Renderer cache only: the model remains the sole source of settings values.
       const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
+      agentBackendsModel.subscribe(state => state, state => {
+        renderAgentBackendsPanelInAllSettingsWindows(state);
+      });
       systemSettingsModel.subscribe(state => state, state => {
         renderSystemPanelInAllSettingsWindows(state);
       });
@@ -1308,7 +1308,7 @@ export function createSettingsSurface({
       // `Custom Agents` tab (T308 follow-up). Today the panel exposes a
       // read-only mirror that confirms FR-101 silent migration produced
       // the expected `[builtinAgents.claudeCode.backends.*]` rows.
-      function renderAgentBackendsPanel(panel) {
+      function renderAgentBackendsPanel(panel, state = agentBackendsModel.read()) {
         while (panel.firstChild) panel.removeChild(panel.firstChild);
 
         for (const agent of ["claudeCode", "codex"]) {
@@ -1324,16 +1324,16 @@ export function createSettingsSurface({
           const list = createDiv("agent-backends-list");
           list.dataset.role = "agent-backends-list";
           list.dataset.agent = agent;
-          renderAgentBackendsList(list, agent);
+          renderAgentBackendsList(list, agent, state);
           section.appendChild(list);
 
           panel.appendChild(section);
         }
       }
 
-      function renderAgentBackendsList(container, agent) {
+      function renderAgentBackendsList(container, agent, state = agentBackendsModel.read()) {
         while (container.firstChild) container.removeChild(container.firstChild);
-        const profiles = agentBackendsState.backends[agent] || [];
+        const profiles = state.backends[agent] || [];
         if (profiles.length === 0) {
           const empty = document.createElement("p");
           empty.className = "settings-help";
@@ -1361,7 +1361,7 @@ export function createSettingsSurface({
         }
       }
 
-      function renderAgentBackendsPanelInAllSettingsWindows() {
+      function renderAgentBackendsPanelInAllSettingsWindows(state = agentBackendsModel.read()) {
         for (const settingsBody of Array.from(settingsWindowBodies)) {
           if (!settingsBody.isConnected) {
             settingsWindowBodies.delete(settingsBody);
@@ -1370,7 +1370,7 @@ export function createSettingsSurface({
           const panel = settingsBody.querySelector(
             "[data-settings-panel='agent-backends']",
           );
-          if (panel) renderAgentBackendsPanel(panel);
+          if (panel) renderAgentBackendsPanel(panel, state);
         }
       }
 
@@ -2344,6 +2344,31 @@ export function createSettingsSurface({
         }));
       }
 
+      function applyAgentBackendsReceiveEvent(event) {
+        const key = event.agent;
+        if (event.kind === "agent_backend_list" && key) {
+          agentBackendsModel.update(state => ({ ...state,
+            backends: { ...state.backends, [key]: event.backends || [] }, loadingAgent: null,
+          }));
+        } else if (event.kind === "agent_backend_saved" && key && event.profile) {
+          agentBackendsModel.update(state => {
+            const profiles = [...(state.backends[key] || [])];
+            const index = profiles.findIndex(profile => profile.id === event.profile.id);
+            if (index >= 0) profiles[index] = event.profile;
+            else profiles.push(event.profile);
+            return { ...state, backends: { ...state.backends, [key]: profiles } };
+          });
+          setSettingsStatus(`Saved backend "${event.profile.id}" for ${key}.`, "success");
+        } else if (event.kind === "agent_backend_deleted" && key && event.id) {
+          agentBackendsModel.update(state => ({ ...state, backends: { ...state.backends,
+            [key]: (state.backends[key] || []).filter(profile => profile.id !== event.id),
+          } }));
+          setSettingsStatus(`Deleted backend "${event.id}" for ${key}.`, "success");
+        } else if (event.kind === "agent_backend_error") {
+          setSettingsStatus(event.message || "Agent backend error.", "error");
+        }
+      }
+
       function applyCustomAgentsReceiveEvent(event) {
         if (event.kind === "custom_agent_deleted" && editingCustomAgentId === event.agent_id) {
           editingCustomAgentId = null;
@@ -2382,7 +2407,8 @@ export function createSettingsSurface({
         applyIssueMonitorProfiles,
         applyIssueMonitorProfilesError,
         customAgentsModel,
-        agentBackendsState,
+        agentBackendsModel,
+        applyAgentBackendsReceiveEvent,
         systemSettingsModel,
         systemSettingsInteractionGuard,
         applySystemSettingsEvent,
