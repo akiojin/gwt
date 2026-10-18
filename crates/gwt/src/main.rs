@@ -2432,13 +2432,17 @@ enum UserEvent {
         recovery: gwt_core::migration::RecoveryState,
     },
     CloneProjectProgress {
+        client_id: String,
         message: String,
     },
     CloneProjectDone {
+        client_id: String,
         workspace_home: PathBuf,
     },
     CloneProjectError {
+        client_id: String,
         message: String,
+        existing_project_key: Option<String>,
     },
     /// Graceful GUI shutdown (tray Quit, SIGINT/SIGTERM, the migration
     /// modal's Quit, or an update apply). `reason` names who asked for logs
@@ -12201,21 +12205,33 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_migration_error(&context, phase, message, recovery);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::CloneProjectProgress { message }) => {
-                clients.dispatch(vec![OutboundEvent::hub(
+            Event::UserEvent(UserEvent::CloneProjectProgress { client_id, message }) => {
+                clients.dispatch(vec![OutboundEvent::reply(
+                    client_id,
                     BackendEvent::CloneProjectProgress { message },
                 )]);
             }
-            Event::UserEvent(UserEvent::CloneProjectDone { workspace_home }) => {
-                let events = app.handle_clone_project_done(&workspace_home);
+            Event::UserEvent(UserEvent::CloneProjectDone {
+                client_id,
+                workspace_home,
+            }) => {
+                let events = app.handle_clone_project_done(&client_id, &workspace_home);
                 board_projection_watchers.sync(app, proxy.clone());
                 workspace_projection_watchers.sync(app, proxy.clone());
                 board_daemon_subscribers.sync(app, proxy.clone());
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::CloneProjectError { message }) => {
-                clients.dispatch(vec![OutboundEvent::hub(
-                    BackendEvent::CloneProjectError { message },
+            Event::UserEvent(UserEvent::CloneProjectError {
+                client_id,
+                message,
+                existing_project_key,
+            }) => {
+                clients.dispatch(vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::CloneProjectError {
+                        message,
+                        existing_project_key,
+                    },
                 )]);
             }
             // SPEC #2920 Phase 4: the tray menu event handler is now

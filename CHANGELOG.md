@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.129.1] - 2026-10-18
+
+### Bug Fixes
+
+- **launch:** Recover owner-conflicting invalid successors
+
+### Miscellaneous Tasks
+
+- **work:** Record merged Monitor notification delivery
+- **work:** Record autostart PR delivery checkpoint
+- **work:** Record autostart delivery continuation
+- **work:** Attach inherited autostart PR to successor work
+
+### Refactor
+
+- **ui:** Render autostart settings from shared state
+
+### Testing
+
+- **core:** Stabilize scoped tracing capture with cold callsites
+
 ## [9.129.0] - 2026-10-18
 
 ### Bug Fixes
