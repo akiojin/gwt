@@ -12975,7 +12975,18 @@ impl IssueMonitorState {
                         }),
                         claim_diagnostics: self.claim_diagnostics_at(item.issue.number, now),
                         blocked_by_claim_id: item.blocked_by_claim_id.clone(),
-                        exclusion_reason: item.exclusion_reason.clone(),
+                        exclusion_reason: if item.state == MonitorInboxState::Queued {
+                            let mut reasons =
+                                item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
+                            reasons.extend(
+                                self.claim_candidate_exclusions(item.issue.number)
+                                    .into_iter()
+                                    .map(str::to_string),
+                            );
+                            (!reasons.is_empty()).then(|| reasons.join("; "))
+                        } else {
+                            item.exclusion_reason.clone()
+                        },
                         launched_window_id: self.launched_window_id(item.issue.number),
                         error_message: item
                             .error_message
@@ -16048,6 +16059,39 @@ impl IssueMonitorState {
             .collect()
     }
 
+    /// Shared by the claim planner and its row diagnostics. Delivery
+    /// annotations deliberately do not appear here: they are not holds.
+    fn claim_candidate_exclusions(&self, issue_number: u64) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if !self.terminal_queue_contains(issue_number) {
+            reasons.push("not_in_terminal_queue: use issue.monitor.queue.push");
+        }
+        if !self.queue.contains(&issue_number) {
+            reasons.push("not_in_launch_queue: use issue.monitor.launch_now");
+        }
+        if self.has_observed_monitor_runtime(issue_number) {
+            reasons.push("runtime_already_present");
+        }
+        for effect in &self.pending_effects {
+            match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: owner,
+                    ..
+                } if owner == issue_number && !reasons.contains(&"claim_pending") => {
+                    reasons.push("claim_pending");
+                }
+                IssueMonitorEffectPayload::SettleMergedIssue {
+                    issue_number: owner,
+                    ..
+                } if owner == issue_number && !reasons.contains(&"merged_settlement_pending") => {
+                    reasons.push("merged_settlement_pending");
+                }
+                _ => {}
+            }
+        }
+        reasons
+    }
+
     /// The claim slots still open, paired with the ordered queue entries a
     /// proposal may consult to fill them.
     ///
@@ -16061,18 +16105,6 @@ impl IssueMonitorState {
             return (0, Vec::new());
         }
         let pending_claims = self.pending_claim_issue_numbers();
-        // Issue #3917: a delivered Issue whose settlement (close / comment) is
-        // still in flight must not be relaunched by the same scan.
-        let settling = self
-            .pending_effects
-            .iter()
-            .filter_map(|effect| match effect.payload {
-                IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } => {
-                    Some(issue_number)
-                }
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
         let available = max_active
             .saturating_sub(self.occupied_slot_count())
             .saturating_sub(pending_claims.len());
@@ -16083,12 +16115,7 @@ impl IssueMonitorState {
             .queue
             .iter()
             .copied()
-            .filter(|issue_number| {
-                self.terminal_queue_contains(*issue_number)
-                    && !self.has_observed_monitor_runtime(*issue_number)
-                    && !pending_claims.contains(issue_number)
-                    && !settling.contains(issue_number)
-            })
+            .filter(|issue_number| self.claim_candidate_exclusions(*issue_number).is_empty())
             .collect();
         (available, candidates)
     }
@@ -41786,6 +41813,51 @@ mod tests {
             .expect("undelivered row");
         assert!(!undelivered.recoverable_merged);
         assert_eq!(undelivered.completion_reason, None);
+
+        // Issue #5002 AC-1/4: delivery is only an annotation. Explain the
+        // actual planner exclusion even with free capacity and remaining work.
+        monitor.config.enabled = true;
+        monitor.terminal_queues.clear();
+        monitor
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == 42)
+            .unwrap()
+            .issue
+            .readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+        let before = monitor.prefs();
+        assert_eq!(monitor.claim_probe_plan(1), (1, vec![]));
+        let status = monitor.agent_status();
+        let delivered = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert_eq!(delivered.state, MonitorInboxState::Queued);
+        assert!(delivered.recoverable_merged);
+        assert!(delivered
+            .exclusion_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not_in_terminal_queue"));
+        assert_eq!(
+            monitor.prefs(),
+            before,
+            "diagnostics must not mutate admission"
+        );
+
+        monitor.terminal_queue_push(&[42], "operator", "2026-09-01T01:00:00Z");
+        assert_eq!(monitor.claim_probe_plan(1), (1, vec![42]));
+        assert_eq!(
+            monitor
+                .agent_status()
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .unwrap()
+                .exclusion_reason,
+            None
+        );
     }
 
     /// Issue #4477 AC-2/AC-4: with auto-close off the delivery is annotated and
