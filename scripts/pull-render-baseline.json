@@ -12,7 +12,6 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"/recovery_center_board_entry\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/recovery_center_state\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/remote_start_work_branches\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/runtime_health\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/runtime_hook_event\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/terminal_status\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/update_apply_error\"]",

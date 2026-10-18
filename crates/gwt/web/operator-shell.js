@@ -513,6 +513,12 @@ const RUNTIME_HEALTH_CPU_UNITS =
   "Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%.";
 let runtimeHealthHideTimer = null;
 
+export function subscribeRuntimeHealth(doc, model, options = {}) {
+  return model.subscribe(snapshot => snapshot, snapshot => {
+    if (snapshot) applyRuntimeHealth(doc, snapshot, options);
+  });
+}
+
 export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
   const cell = doc.getElementById("op-strip-runtime-health");
   const value = doc.getElementById("op-strip-runtime-health-value");

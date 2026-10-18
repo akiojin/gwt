@@ -10,7 +10,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyTelemetryCounts,
         applyIssueMonitorStatus,
         applyProviderUsage,
-        applyRuntimeHealth,
+        subscribeRuntimeHealth,
       } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
@@ -187,6 +187,10 @@ import { createUiStateStore } from "/ui-state-store.js";
           palette: null,
         };
       }
+      const runtimeHealthModel = createUiStateStore(null);
+      subscribeRuntimeHealth(document, runtimeHealthModel, {
+        focusWindow: (windowId) => requestWindowFrame(windowId),
+      });
       window.__operatorShell = {
         themeManager: __op.themeManager,
         hotkey: __op.hotkey,
@@ -194,10 +198,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
         applyIssueMonitorStatus: (status) => applyIssueMonitorStatus(document, status),
         applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
-        applyRuntimeHealth: (snapshot) =>
-          applyRuntimeHealth(document, snapshot, {
-            focusWindow: (windowId) => requestWindowFrame(windowId),
-          }),
+        applyRuntimeHealth: (snapshot) => runtimeHealthModel.update(() => snapshot || {}),
       };
 
       const uiTraceProfiler = createUiTraceProfiler();
@@ -5303,7 +5304,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "runtime_health":
-            window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
+            runtimeHealthModel.update(() => event.snapshot || {});
             break;
           case "pm_reports": {
             applyPmWindowReceiveEvent(event);
