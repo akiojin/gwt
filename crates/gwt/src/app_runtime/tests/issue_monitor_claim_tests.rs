@@ -5532,6 +5532,7 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
     );
     // Keep the real initial worker's successful completion queued. It still
     // owns this placeholder until the GUI consumes that exact generation.
+    // test-hygiene: allow-wall-clock-deadline observe the real worker completion; the bound only fails a stalled fixture.
     wait_for_recorded_event_with_timeout(
         "initial launch completion queued",
         &fixture.recorded_events,
@@ -5552,6 +5553,7 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
             window_id,
             started_at,
         } => {
+            // test-hygiene: allow-wall-clock-deadline inject an elapsed TTL without sleeping; worker completion determines replay ordering.
             *started_at = Instant::now() - Duration::from_secs(61);
             window_id.clone()
         }
@@ -5594,6 +5596,7 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
     // RED. No LaunchComplete is applied, so this test never creates a PTY.
     let expected_completions =
         1 + usize::from(generation_after != Some(generation) && !inflight_after.is_empty());
+    // test-hygiene: allow-wall-clock-deadline observe all real workers before temporary-repository teardown, including a duplicate on RED.
     wait_for_recorded_event_with_timeout(
         "initial launch workers returned",
         &fixture.recorded_events,
