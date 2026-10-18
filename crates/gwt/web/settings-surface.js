@@ -334,11 +334,62 @@ function renderCandidateSaveError(panel, event) {
   if (!event || Number(panel.dataset.pendingRequest) !== event.request_id) return;
   panel.dataset.saving = "false";
   delete panel.dataset.pendingRequest;
+  for (const [control, disabled] of panel.candidateDisabledControls || []) control.disabled = disabled;
+  panel.candidateStructuralSave = false;
   const feedback = panel.querySelector("[data-candidate-status]");
   if (feedback) {
     feedback.textContent = event.message;
     feedback.dataset.kind = "error";
     feedback.setAttribute("role", "alert");
+    const field = event.message.match(/\b(prefer_for|agent_id|model|reasoning|session_mode|runtime_target|docker_service|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
+    const row = panel.candidateSaveTarget?.closest("fieldset") || panel;
+    const rejectedTag = event.message.match(/prefer_for entry ("(?:\\.|[^"\\])*")/)?.[1];
+    const rejectedInput = rejectedTag && [...panel.querySelectorAll('[data-profile-field="prefer_for"]')]
+      .find(control => control.value.split(",").some(tag => tag.trim() === JSON.parse(rejectedTag)));
+    const input = rejectedInput || (field && row.querySelector(`[data-profile-field="${field}"]`)) || panel.candidateSaveTarget;
+    if (input?.isConnected) {
+      input.setAttribute("aria-invalid", "true");
+      input.closest(".settings-field")?.after(feedback);
+    }
+  }
+}
+
+function reconcileCandidateSave(panel, event) {
+  if (!event || Number(panel.dataset.pendingRequest) !== event.request_id) return;
+  panel.dataset.saving = "false";
+  delete panel.dataset.pendingRequest;
+  if (panel.candidateStructuralSave) {
+    panel.dataset.dirty = "false";
+    panel.candidateStructuralSave = false;
+    return true;
+  }
+  let dirty = [...panel.candidateSubmittedValues || []].some(([input, value]) =>
+    (input.type === "checkbox" ? input.checked : input.value) !== value);
+  const focused = panel.ownerDocument.activeElement;
+  for (const [index, row] of [...panel.querySelectorAll("fieldset[data-agent-id]")].entries()) {
+    const profile = event.profiles?.[index];
+    if (!profile) continue;
+    for (const input of row.querySelectorAll("[data-profile-field]")) {
+      const value = input.type === "checkbox" ? input.checked : input.value;
+      if (panel.candidateSubmittedValues?.get(input) !== value) {
+        dirty = true;
+        continue;
+      }
+      // Even a successful normalization must not move a live text cursor.
+      if (input === focused) continue;
+      const key = input.dataset.profileField;
+      if (input.type === "checkbox") input.checked = profile[key] === true;
+      else input.value = key === "prefer_for" ? (profile[key] || []).join(", ")
+        : String(profile[key] ?? (key === "session_mode" ? "Normal" : key === "runtime_target" ? "Host" : ""));
+    }
+  }
+  if (!dirty) for (const invalid of panel.querySelectorAll('[aria-invalid="true"]')) invalid.removeAttribute("aria-invalid");
+  panel.dataset.dirty = String(dirty);
+  const feedback = panel.querySelector("[data-candidate-status]");
+  if (feedback && !(dirty && feedback.dataset.kind === "error")) {
+    feedback.textContent = "Saved candidates.";
+    feedback.dataset.kind = "success";
+    feedback.setAttribute("role", "status");
   }
 }
 
@@ -359,9 +410,8 @@ export function renderAgentsSettingsPanel(panel, options) {
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.dirty = "false";
-  panel.oninput = panel.onchange = () => {
+  panel.oninput = () => {
     panel.dataset.dirty = "true";
-    panel.dataset.saving = "false";
   };
   const heading = document.createElement("h3");
   heading.className = "settings-section-heading";
@@ -408,6 +458,9 @@ export function renderAgentsSettingsPanel(panel, options) {
     else if (!choices) input.value = String(value ?? "");
     label.appendChild(input);
     parent.appendChild(label);
+    if (key !== "new") input.addEventListener("change", () => {
+      if (!input.disabled) submit(draft(), input);
+    });
     return input;
   };
   const draft = () => rows.map(({ row, profile }) => {
@@ -420,11 +473,26 @@ export function renderAgentsSettingsPanel(panel, options) {
     }
     return next;
   });
-  const submit = next => {
+  const submit = (next, input = null) => {
+    panel.candidateSaveTarget = input;
     const value = Number(threshold.value);
     if (!Number.isInteger(value) || value < 1 || value > 100) {
       showFeedback("Usage threshold must be a whole number between 1 and 100.", true);
+      threshold.setAttribute("aria-invalid", "true");
+      threshold.closest(".settings-field")?.after(feedback);
       return;
+    }
+    panel.candidateSubmittedValues = new Map([...panel.querySelectorAll("[data-profile-field]")]
+      .map(control => [control, control.type === "checkbox" ? control.checked : control.value]));
+    // Structural responses change row identities. Freeze those controls until
+    // the correlated result so input cannot attach to a different candidate.
+    panel.candidateStructuralSave = input === null;
+    panel.candidateDisabledControls = new Map();
+    if (panel.candidateStructuralSave) {
+      for (const control of panel.querySelectorAll("input, select, button")) {
+        panel.candidateDisabledControls.set(control, control.disabled);
+        control.disabled = true;
+      }
     }
     showFeedback("Saving candidates…");
     send({ kind: "issue_monitor_profiles_set", profiles: next, usage_threshold_percent: value });
@@ -478,7 +546,6 @@ export function renderAgentsSettingsPanel(panel, options) {
     const remove = button(row, `Remove ${profile.agent_id}`, "remove", () => submit(draft().filter((_, i) => i !== index)));
     remove.disabled = profiles.length <= 1;
   }
-  button(panel, "Save profiles", "save-profiles", () => submit(draft()));
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
@@ -843,13 +910,9 @@ export function createSettingsSurface({
         const focusedLaunchControl = launchControls.find(control => control === document.activeElement);
         const agentsPanel = body.querySelector("[data-settings-candidates]");
         if (agentsPanel) renderCandidateSaveError(agentsPanel, current.profilesFailure);
-        if (current.profilesRequestId != null
-          && Number(agentsPanel?.dataset.pendingRequest) === current.profilesRequestId && agentsPanel?.dataset.saving === "true") {
-          agentsPanel.dataset.dirty = "false";
-          agentsPanel.dataset.saving = "false";
-          delete agentsPanel.dataset.pendingRequest;
-          body.querySelector('[data-settings-tab="issues"]')?.focus();
-        }
+        if (agentsPanel && reconcileCandidateSave(agentsPanel, {
+          request_id: current.profilesRequestId, profiles: current.profiles,
+        })) body.querySelector('[data-settings-tab="issues"]')?.focus();
         const dispatch = message => {
           // Project WebSockets own mutation authority. Never replay this
           // window's edit through a different active project's connection.
@@ -868,8 +931,8 @@ export function createSettingsSurface({
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
           const editing = panel?.contains(document.activeElement)
-            && document.activeElement?.matches("input:not([type=checkbox]), select, textarea");
-          if (editing && section === "issues") body.dataset.issuesRenderDeferred = "true";
+            && document.activeElement?.matches(section === "agents" ? "input, select, textarea" : "input:not([type=checkbox]), select, textarea");
+          if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, send: dispatch, launchControls,
             availableAgents: supportedAgentsModel.read().agents === null || customAgentsState.loading ? null : [
