@@ -60,7 +60,7 @@ const focusTrapMap = new WeakMap();
  * of behavior callbacks. The function is a pure rendering primitive so
  * smoke tests can drive it without launching `app.js`.
  */
-export function renderWorkspaceResumePicker({
+function renderWorkspaceResumePicker({
   modalEl,
   dialogEl,
   state,

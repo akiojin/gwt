@@ -529,7 +529,7 @@ test("Launch Wizard の共通 reasoning control は Effort として set_reasoni
 test("legacy conversation methods reopen the conversation while saved settings remain a new Launch", () => {
   assert.match(
     wizardSource,
-    /export function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "resume"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
+    /function launchWizardStartMethodIntent[\s\S]*?continue_last_session[\s\S]*?open_session_picker[\s\S]*?return "resume"[\s\S]*?focus_running_session[\s\S]*?return "focus"[\s\S]*?return "launch"/,
     "wizard start methods must classify history, focus, and new-launch intents independently",
   );
   assert.match(

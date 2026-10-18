@@ -3808,7 +3808,7 @@ fn embedded_web_completed_work_resume_surfaces_open_input_capable_sessions() {
         "expected the Work Resume picker to exclude fresh-start metadata and open sessions as plain input-capable resumes",
     );
     assert!(
-        wizard.contains("export function launchWizardStartMethodIntent")
+        wizard.contains("function launchWizardStartMethodIntent")
             && wizard.contains("button.dataset.executionIntent = startMethodIntent")
             && !wizard.contains("History only"),
         "expected legacy conversation methods in the Launch Wizard to reopen conversations without an observation-only notice",
