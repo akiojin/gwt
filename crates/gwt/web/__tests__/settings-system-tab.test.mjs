@@ -85,11 +85,62 @@ function createSettingsHarness() {
   return { surface, body, document, window, sent };
 }
 
+test("Autostart snapshots jointly render mounted Settings and remain immutable across replies", () => {
+  const { surface, body, document, window } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
+  const snapshot = surface.systemSettingsModel.read();
+  assert.ok(Object.isFrozen(snapshot));
+  surface.applyAutostartStatus({ enabled: false });
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector('input[id$="-settings-system-autostart"]').disabled, false);
+  }
+  const checkbox = body.querySelector('input[id$="-settings-system-autostart"]');
+  checkbox.checked = true;
+  checkbox.dispatchEvent(new window.Event("change"));
+  const pending = surface.systemSettingsModel.read();
+  assert.equal(pending.autostartPending, true);
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector('input[id$="-settings-system-autostart"]').checked, true);
+    assert.equal(host.querySelector('[data-role="autostart-settings-status"]').textContent, "Saving…");
+  }
+  surface.applyAutostartError({ message: "Could not save" });
+  assert.equal(pending.autostartPending, true, "later replies cannot mutate an earlier snapshot");
+  assert.equal(snapshot.autostartChecking, true);
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector('input[id$="-settings-system-autostart"]').checked, false);
+    assert.equal(host.querySelector('[data-role="autostart-settings-status"]').textContent, "Could not save");
+  }
+  second.remove();
+  surface.systemSettingsInteractionGuard.activate();
+  surface.applyAutostartStatus({ enabled: true }, "Saved login launch setting.");
+  assert.equal(surface.systemSettingsModel.read().autostartEnabled, true,
+    "the model advances even while destructive rendering waits");
+  assert.equal(body.querySelector('input[id$="-settings-system-autostart"]').checked, false);
+  surface.systemSettingsInteractionGuard.release();
+  assert.equal(body.querySelector('input[id$="-settings-system-autostart"]').checked, true);
+  assert.equal(body.querySelector('[data-role="autostart-settings-status"]').textContent, "Saved login launch setting.");
+  surface.systemSettingsInteractionGuard.activate();
+  surface.systemSettingsInteractionGuard.defer({ kind: "system_settings_updated",
+    language: "ja", codex_trust_managed_hooks: false, board_provider: "teams",
+  });
+  surface.renderSystemPanelInAllSettingsWindows();
+  surface.applyAutostartStatus({ enabled: false });
+  surface.systemSettingsInteractionGuard.release();
+  assert.equal(surface.systemSettingsState.language, "ja",
+    "a subscribed refresh must not replace another System reply waiting in the shared guard");
+  assert.equal(surface.systemSettingsState.codexTrustManagedHooks, false);
+  assert.equal(surface.systemSettingsState.boardProvider, "teams");
+  assert.equal(body.querySelector('input[id$="-settings-system-autostart"]').checked, false);
+});
+
 test("Issue #5531: mounted Settings recovers all lost reads without replaying writes or replacing input", () => {
   const { surface, body, document, sent } = createSettingsHarness();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   assert.equal(sent.filter(message => message.kind === "get_autostart_status").length, 1);
-  assert.equal(surface.systemSettingsState.autostartChecking, true);
+  assert.equal(surface.systemSettingsModel.read().autostartChecking, true);
   assert.equal(body.querySelector('[data-role="autostart-settings-status"]').textContent,
     "Checking login launch status…");
   const secondBody = document.createElement("main");
@@ -169,9 +220,8 @@ test("Issue #5531: dirty provider drafts keep autostart pending and error state 
   assert.equal(sent.filter(message => message.kind === "get_autostart_status").length, 1);
   assert.equal(sent.some(message => message.kind === "update_autostart"), false,
     "recovery probes status without retrying the pending mutation");
-  assert.equal(surface.systemSettingsState.autostartPending, true);
+  assert.equal(surface.systemSettingsModel.read().autostartPending, true);
   surface.applyAutostartError({ message: "Login launch could not be saved." });
-  surface.renderSystemPanelInAllSettingsWindows();
   assert.equal(autostart.checked, false, "a failed write restores the authoritative checkbox value");
   assert.equal(autostart.disabled, false, "the error releases the pending checkbox");
   assert.equal(pendingDisabled, true, "the checkbox is disabled while its write is pending");
@@ -183,7 +233,6 @@ test("Issue #5531: dirty provider drafts keep autostart pending and error state 
   assert.equal(autostart.disabled, true, "a recovery query disables the known checkbox until its reply");
   assert.equal(status.textContent, "Checking login launch status…");
   surface.applyAutostartStatus({ enabled: true });
-  surface.renderSystemPanelInAllSettingsWindows();
   assert.equal(autostart.checked, true);
   assert.equal(autostart.disabled, false);
   assert.equal(status.textContent, "");
@@ -861,7 +910,7 @@ test("System tab exposes Launch GWT at login autostart control", () => {
   );
   assert.match(
     settingsSource,
-    /systemSettingsState\.autostartEnabled\s*=\s*systemSettingsState\.autostartPreviousEnabled\s*===\s*true/,
+    /autostartEnabled:\s*state\.autostartPending\s*\?\s*state\.autostartPreviousEnabled\s*===\s*true/,
     "expected autostart update errors to restore the last confirmed value",
   );
   assert.match(
@@ -883,6 +932,7 @@ test("autostart checking and failures stay local and preserve the last confirmed
     autostartLoaded: false, autostartPending: false, autostartChecking: true,
     statusMessage: "Saved system settings.", statusKind: "success",
   };
+  const model = createUiStateStore(state);
   const messages = [];
   const createDiv = className => {
     const element = document.createElement("div");
@@ -895,16 +945,15 @@ test("autostart checking and failures stay local and preserve the last confirmed
     renderSource.indexOf('panel.appendChild(section)'),
   );
   const { render, applyAutostartStatus, applyAutostartError } = Function(
-    "document", "systemSettingsState", "createDiv", "send", `
-      const renderSystemPanelInAllSettingsWindows = () => {};
+    "document", "systemSettingsModel", "createDiv", "send", `
       ${extractFunctionSource(settingsSource, "applyAutostartStatus")}
       ${extractFunctionSource(settingsSource, "applyAutostartError")}
       ${extractFunctionSource(settingsSource, "syncAutostartCheckbox")}
       ${extractFunctionSource(settingsSource, "renderAutostartStatus")}
-      function render() { ${autostartSource}; return autostartSection; }
+      function render() { const state = systemSettingsModel.read(); ${autostartSource}; return autostartSection; }
       return { render, applyAutostartStatus, applyAutostartError };
     `,
-  )(document, state, createDiv, message => messages.push(message));
+  )(document, model, createDiv, message => messages.push(message));
   const toggle = section => section.querySelector('input[type="checkbox"]');
   let section = render();
   assert.equal(toggle(section).disabled, true, "unknown autostart cannot be changed");
@@ -917,10 +966,9 @@ test("autostart checking and failures stay local and preserve the last confirmed
   assert.doesNotMatch(section.textContent, /Checking login launch status/);
 
   applyAutostartStatus({ enabled: true, mechanism: "fixture", install_path: "/fixture/gwt" });
-  state.autostartPreviousEnabled = false;
-  state.autostartChecking = true;
+  model.update(state => ({ ...state, autostartPreviousEnabled: false, autostartChecking: true }));
   applyAutostartError({ message: "Refresh query unavailable." });
-  assert.equal(state.autostartEnabled, true, "refresh failure preserves the last confirmed value");
+  assert.equal(model.read().autostartEnabled, true, "refresh failure preserves the last confirmed value");
   section = render();
   assert.equal(toggle(section).disabled, false);
   assert.equal(toggle(section).checked, true);
@@ -938,11 +986,11 @@ test("autostart checking and failures stay local and preserve the last confirmed
   assert.equal(state.statusMessage, "Saved system settings.");
   assert.equal(state.statusKind, "success");
   const requestSource = extractFunctionSource(settingsSource, "requestSettingsSnapshots");
-  assert.match(requestSource, /const shouldRequestAutostartStatus = recovering \|\| \(!systemSettingsState\.autostartPending\s*&& !systemSettingsState\.autostartChecking\)/,
+  assert.match(requestSource, /const shouldRequestAutostartStatus = recovering \|\| \(!autostart\.autostartPending\s*&& !autostart\.autostartChecking\)/,
     "reopening Settings must preserve an in-flight query or update");
-  assert.match(requestSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*systemSettingsState\.autostartChecking = true/,
+  assert.match(requestSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*systemSettingsModel\.update\([\s\S]{0,100}autostartChecking: true/,
     "only a new query starts checking");
-  assert.match(requestSource, /if \(shouldRequestAutostartStatus\)\s*\{[^}]*send\(\{ kind: "get_autostart_status" \}\)/,
+  assert.match(requestSource, /if \(shouldRequestAutostartStatus\)\s*\{[\s\S]*?send\(\{ kind: "get_autostart_status" \}\)/,
     "use the same decision when sending the query");
 });
 
