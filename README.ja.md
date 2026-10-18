@@ -270,11 +270,17 @@ server (X11 / Wayland) を要求します。macOS / Windows のブラウザサ�
 されているか」を即時に確認できます。`/healthz` は `debug!` に降格されており、
 ヘルスチェックでログが埋まりません。
 
-Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。ブラウザの
-タブを閉じても agent は **停止しません**。`Ctrl-C` / `SIGTERM` を受け取ったときに、
-PTY のドレイン → サーバー停止の順で graceful shutdown を実行します。tray 常駐
-プロセスは 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を
-出して終了します。
+Lifecycle: 起動中の `gwt` プロセスが agent / PTY の寿命を所有します。既定のトレイ常駐
+モードでは、ブラウザのタブを閉じてもプロジェクトと実行中の agent は継続し、
+プロジェクト URL を開き直すと同じワークスペースに戻れます。プロジェクトを停止するには、そのページのヘッダーか
+Hub の開いているプロジェクト一覧にある **Close Project** を選びます。実行中の agent が
+ある場合は、対象を列挙した確認ダイアログが表示されます。**Cancel** なら実行を継続し、
+**Close Project** ならそのプロジェクトの runtime と agent を停止します。他のプロジェクトは
+継続し、閉じたプロジェクトを表示していたすべてのブラウザタブは Hub に戻ります。
+
+サーバー全体を停止するには、トレイの **Quit**、または `Ctrl-C` / `SIGTERM` を使います。
+gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
+1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を出して終了します。
 
 `gwtd` operation は stdin JSON envelope で処理され、GUI は起動しません。
 

@@ -16,7 +16,7 @@
 //!   `record_issue_branch_link_with_cache_dir`, ...) and the codex managed
 //!   hook discovery / trust registration helpers
 //! - The launch / spawn / close-work method surface
-//!   ([`AppRuntime::handle_launch_complete`], [`AppRuntime::start_window`],
+//!   ([`AppRuntime::handle_launch_complete_for_generation`], [`AppRuntime::start_window`],
 //!   [`AppRuntime::spawn_agent_window_async`], [`AppRuntime::close_work`],
 //!   [`AppRuntime::mark_agent_session_stopped`], ...)
 //!
@@ -3117,6 +3117,7 @@ fn queue_stale_prepared_cleanup(
 pub(super) fn dispatch_agent_launch_success<F>(
     proxy: AppEventProxy,
     window_id: String,
+    window_generation: Option<u64>,
     completion: AgentLaunchCompletion,
     spawn_project_index_bootstrap: F,
 ) where
@@ -3125,6 +3126,7 @@ pub(super) fn dispatch_agent_launch_success<F>(
     let project_index_root = completion.4.clone();
     proxy.send(UserEvent::LaunchComplete {
         window_id,
+        window_generation,
         result: Box::new(Ok(completion)),
     });
     spawn_project_index_bootstrap(proxy, project_index_root);
@@ -5064,11 +5066,72 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_launch_complete(
         &mut self,
         window_id: String,
         result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
+        let window_generation = self
+            .window_lifecycle_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&window_id)
+            .copied();
+        self.handle_launch_complete_for_generation(window_id, window_generation, result)
+    }
+
+    pub(super) fn has_pending_agent_launch_worker(&mut self, window_id: &str) -> bool {
+        if self
+            .pending_launch_completions
+            .get(window_id)
+            .is_some_and(|pending| pending.current.load(Ordering::Acquire))
+        {
+            return true;
+        }
+        let Some(worker) = self.initial_launch_workers.get_mut(window_id) else {
+            return false;
+        };
+        let Some(handle) = worker.as_ref() else {
+            return true; // A normally returned worker has queued its completion.
+        };
+        if !handle.is_finished() {
+            return true;
+        }
+        let returned = worker
+            .take()
+            .expect("finished launch worker")
+            .join()
+            .is_ok();
+        if !returned {
+            self.initial_launch_workers.remove(window_id);
+        }
+        returned
+    }
+
+    pub(crate) fn handle_launch_complete_for_generation(
+        &mut self,
+        window_id: String,
+        window_generation: Option<u64>,
+        result: AgentLaunchResult,
+    ) -> Vec<OutboundEvent> {
+        // The pre-PTY worker can finish after close and ID reuse. Fence it
+        // before capturing the current occupant's feedback or Session state.
+        let current_generation = self
+            .window_lifecycle_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&window_id)
+            .copied();
+        if current_generation != window_generation {
+            self.cleanup_stale_project_completion(&UserEvent::LaunchComplete {
+                window_id,
+                window_generation,
+                result: Box::new(result),
+            });
+            return Vec::new();
+        }
+        self.initial_launch_workers.remove(&window_id);
         // Issue #3851: an Err result is produced before this handler spawns a
         // PTY. If this window already owns a live agent runtime, the result is
         // necessarily from an older preparation attempt and must not consume
@@ -6648,6 +6711,12 @@ impl AppRuntime {
         }
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
+        let window_generation = self
+            .window_lifecycle_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&window_id)
+            .copied();
 
         let initial_status = initial_agent_window_status(&config);
         self.window_pty_statuses
@@ -6704,12 +6773,14 @@ impl AppRuntime {
                 .insert(window_id.clone(), continuation);
         }
 
-        thread::spawn(move || {
+        let worker_window_id = window_id.clone();
+        let worker = thread::spawn(move || {
             Self::spawn_agent_window_async_with_claim(
                 proxy,
                 sessions_dir,
                 project_root,
                 window_id,
+                window_generation,
                 config,
                 profile_config_path,
                 agent_capability_issuer,
@@ -6717,6 +6788,8 @@ impl AppRuntime {
                 issue_monitor_trust_candidate,
             );
         });
+        self.initial_launch_workers
+            .insert(worker_window_id, Some(worker));
 
         Ok(events)
     }
@@ -6740,6 +6813,7 @@ impl AppRuntime {
             Err(error) => {
                 proxy.send(UserEvent::LaunchComplete {
                     window_id,
+                    window_generation: None,
                     result: Box::new(Err(error.into())),
                 });
                 return;
@@ -6750,6 +6824,7 @@ impl AppRuntime {
             sessions_dir,
             project_root,
             window_id,
+            None,
             config,
             profile_config_path,
             agent_capability_issuer,
@@ -6764,6 +6839,7 @@ impl AppRuntime {
         sessions_dir: PathBuf,
         project_root: String,
         window_id: String,
+        window_generation: Option<u64>,
         mut config: gwt_agent::LaunchConfig,
         profile_config_path: PathBuf,
         agent_capability_issuer: Option<AgentCapabilityIssuer>,
@@ -7302,6 +7378,7 @@ impl AppRuntime {
                 dispatch_agent_launch_success(
                     proxy,
                     window_id,
+                    window_generation,
                     (
                         process_launch,
                         session_id,
@@ -7339,6 +7416,7 @@ impl AppRuntime {
                 }
                 proxy.send(UserEvent::LaunchComplete {
                     window_id,
+                    window_generation,
                     result: Box::new(Err(error)),
                 });
             }

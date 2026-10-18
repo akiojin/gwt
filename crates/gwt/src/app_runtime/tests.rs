@@ -894,6 +894,140 @@ fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSess
     }
 }
 
+// Issue #3287 T-103: replay must select payloads as well as the reply client.
+#[test]
+fn project_event_isolation_full_sync_filters_each_project_payload() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tabs = ["a", "b"].map(|tab_id| {
+        let root = temp.path().join(tab_id);
+        fs::create_dir_all(&root).unwrap();
+        let mut tab = sample_project_tab_with_window_at(
+            tab_id,
+            "agent",
+            root,
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        tab.migration_pending = true;
+        tab
+    });
+    let mut runtime = sample_runtime(temp.path(), tabs.into(), Some("a"));
+    for tab_id in ["a", "b"] {
+        let id = combined_window_id(tab_id, "agent");
+        insert_test_pane_runtime(&mut runtime, &id);
+        runtime.runtimes[&id]
+            .pane
+            .lock()
+            .unwrap()
+            .process_bytes(format!("snapshot-project-{tab_id}").as_bytes());
+        runtime
+            .window_details
+            .insert(id.clone(), format!("detail-{tab_id}"));
+        let mut session = sample_active_agent_session(tab_id, &id);
+        session.session_id = format!("session-{tab_id}");
+        runtime.active_agent_sessions.insert(id, session);
+    }
+
+    for tab_id in ["a", "b"] {
+        let context = runtime.project_context(tab_id).unwrap();
+        let client = format!("client-{tab_id}");
+        let id = combined_window_id(tab_id, "agent");
+        let events = runtime.handle_frontend_event_in_scope(
+            client.clone(),
+            FrontendEvent::FrontendReady,
+            &super::ClientScope::Project(context.project_key),
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.target == DispatchTarget::Client(client.clone())));
+        let statuses: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::TerminalStatus { id, detail, .. } => {
+                    Some((id.clone(), detail.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![(id.clone(), Some(format!("detail-{tab_id}")))]
+        );
+        let snapshots: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::TerminalSnapshot { id, data_base64 } => Some((id, data_base64)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].0, &id);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(snapshots[0].1)
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains(&format!("snapshot-project-{tab_id}")));
+        let projection = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+                _ => None,
+            })
+            .expect("project projection");
+        assert_eq!(projection.agents.len(), 1);
+        assert_eq!(projection.agents[0].session_id, format!("session-{tab_id}"));
+        let migrations: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                BackendEvent::MigrationDetected { tab_id, .. } => Some(tab_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(migrations, vec![tab_id]);
+    }
+}
+
+#[test]
+fn project_event_isolation_inactive_runtime_events_keep_the_window_owner() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let tabs = ["a", "b"].map(|tab_id| {
+        sample_project_tab_with_window_at(
+            tab_id,
+            "agent",
+            temp.path().join(tab_id),
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        )
+    });
+    let mut runtime = sample_runtime(temp.path(), tabs.into(), Some("a"));
+    let id = combined_window_id("b", "agent");
+    let context = runtime.project_context("b").unwrap();
+    runtime
+        .active_agent_sessions
+        .insert(id.clone(), sample_active_agent_session("b", &id));
+    insert_test_pane_runtime(&mut runtime, &id);
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let mut events =
+        runtime.handle_runtime_output_event(id.clone(), incarnation, b"B output".to_vec(), 1);
+    events.extend(runtime.handle_runtime_status(
+        id.clone(),
+        WindowProcessStatus::Error,
+        Some("B error".into()),
+    ));
+    let mut hook = runtime_hook_coordination_event("session-1");
+    hook.project_root = Some(temp.path().join("b").display().to_string());
+    events.extend(runtime.handle_runtime_hook_event(hook));
+    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalOutput { id: owner, .. } if owner == &id)));
+    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::TerminalStatus { id: owner, .. } if owner == &id)));
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.event, BackendEvent::RuntimeHookEvent { .. })));
+    assert!(events
+        .iter()
+        .all(|event| event.target == DispatchTarget::Project(context.project_key.clone())));
+}
+
 fn save_assigned_workspace_projection_for_test(
     repo: &Path,
     session: &ActiveAgentSession,
@@ -1425,6 +1559,7 @@ fn sample_runtime_with_events(
 
         pending_workspace_resume_contexts: HashMap::new(),
         inflight_launches: HashMap::new(),
+        initial_launch_workers: HashMap::new(),
         project_open_started: None,
         pending_startup_pm_tabs: Vec::new(),
         deferred_issue_monitor_launches: None,
@@ -1558,6 +1693,9 @@ fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
     runtime
         .runtime_hook_agent_failures_in_flight
         .insert(window_id.to_string(), identity);
+    runtime
+        .initial_launch_workers
+        .insert(window_id.to_string(), None);
     runtime
         .launch_error_terminal_details
         .insert(window_id.to_string(), "x".repeat(64 * 1024));
@@ -7098,8 +7236,9 @@ fn take_monitor_launch_complete_event(
             )
         })
         .expect("launch complete event");
-    let UserEvent::LaunchComplete { window_id, result } =
-        into_recorded_project_payload(events.remove(index))
+    let UserEvent::LaunchComplete {
+        window_id, result, ..
+    } = into_recorded_project_payload(events.remove(index))
     else {
         unreachable!("matched launch complete above")
     };

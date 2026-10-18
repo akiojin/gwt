@@ -1873,6 +1873,9 @@ pub struct AppRuntime {
     /// pending window instead of spawning a duplicate. Entries clear on
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
+    /// Initial launch threads owned by the current window generation. A normal
+    /// return leaves `None` until its queued completion reaches the GUI.
+    pub(crate) initial_launch_workers: HashMap<String, Option<std::thread::JoinHandle<()>>>,
     /// Issue #4145 AC-1: the navigation request id and start instant of the
     /// project open in flight. Opening spans a synchronous reserve, a
     /// blocking-pool prepare and an event-loop commit, and
@@ -4821,6 +4824,7 @@ impl AppRuntime {
             launch_wizard_cache,
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
+            initial_launch_workers: HashMap::new(),
             project_open_started: None,
             pending_startup_pm_tabs: Vec::new(),
             deferred_issue_monitor_launches: None,
@@ -14497,6 +14501,7 @@ impl AppRuntime {
         self.invalidate_workspace_projection_patch(tab_id);
         let window_id = combined_window_id(tab_id, raw_id);
         self.invalidate_launch_delivery_ack(&window_id);
+        self.initial_launch_workers.remove(&window_id);
         self.pending_launch_completions.remove(&window_id);
         self.window_lookup.insert(
             window_id.clone(),

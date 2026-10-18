@@ -1,0 +1,15 @@
+probe_pid=30356 api=gwt_agent::session_ledger::load_sessions_shared
+pass=0 scope=cold_process_cache returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=44.425667800 cpu_seconds=4.328125000
+pass=1 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.042902000 cpu_seconds=0.046875000
+pass=2 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.034690000 cpu_seconds=0.031250000
+pass=3 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.035220600 cpu_seconds=0.046875000
+pass=4 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.034085600 cpu_seconds=0.031250000
+pass=5 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.033968700 cpu_seconds=0.031250000
+pass=6 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.032611000 cpu_seconds=0.031250000
+pass=7 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.033547900 cpu_seconds=0.031250000
+pass=8 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.037354900 cpu_seconds=0.015625000
+pass=9 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.035372400 cpu_seconds=0.031250000
+pass=10 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.061787500 cpu_seconds=0.031250000
+pass=11 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.045464000 cpu_seconds=0.015625000
+pass=12 scope=warm returned=2877 sorted_ids_hash=ce715b5baaa99097 wall_seconds=0.029595400 cpu_seconds=0.015625000
+warm_sweeps=12 total_wall_seconds=0.456600000 total_cpu_seconds=0.359375000 mean_wall_ms=38.050000 mean_cpu_ms=29.947917 identical_sorted_ids=true

@@ -10,6 +10,30 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Runtime health receiver updates shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => finding.root === 'receive' && finding.context === '/runtime_health');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "runtime_health":',
+    'case "runtime_health": document.body.textContent = event.snapshot.state;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("System Settings receivers update the shared model and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const surface = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', surface]]),
+  }).filter(finding => finding.root === 'receive' && /^\/system_settings(?:\|system_settings_updated|_updated|_error)?$/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "system_settings_updated":',
+    'case "system_settings_updated": document.body.textContent = event.language;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
 test("Board auth receiver commits shared state and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const surface = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
@@ -19,6 +43,34 @@ test("Board auth receiver commits shared state and rejects bypass rendering", ()
   assert.deepEqual(findings(app), [], 'Board auth replies update the shared model without drawing');
   const bypass = app.replace('case "board_auth_status":',
     'case "board_auth_status": document.body.textContent = event.message;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Agent Backend receivers commit model data and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const settings = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', settings]]),
+  }).filter(finding => finding.root === 'receive'
+    && /\/agent_backend_(list|saved|deleted|error)(\||$)/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "agent_backend_list":',
+    'case "agent_backend_list": document.body.textContent = event.agent;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Custom Agent receivers only commit model data and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const settings = readFileSync(new URL('../settings-surface.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/settings-surface.js', settings]]),
+  }).filter(finding => finding.root === 'receive'
+    && /\/(custom_agent_(list|saved|deleted|error)|backend_connection_result)(\||$)/.test(finding.context));
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('applyCustomAgentsReceiveEvent(event);',
+    'applyCustomAgentsReceiveEvent(event); document.body.textContent = event.message;');
   assert.notEqual(bypass, app);
   assert.ok(findings(bypass).length > 0);
 });

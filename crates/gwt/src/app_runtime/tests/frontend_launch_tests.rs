@@ -111,6 +111,7 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
     dispatch_agent_launch_success(
         proxy,
         "tab-1::agent-1".to_string(),
+        None,
         completion,
         |proxy, project_root| {
             proxy.send(UserEvent::ProjectIndexStatus {
@@ -993,7 +994,9 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
             .position(|event| matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_err()))
             .expect("failed completion");
         match into_recorded_project_payload(events.remove(index)) {
-            UserEvent::LaunchComplete { window_id, result } => (window_id, result),
+            UserEvent::LaunchComplete {
+                window_id, result, ..
+            } => (window_id, result),
             _ => unreachable!("matched above"),
         }
     };

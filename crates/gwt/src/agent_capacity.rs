@@ -856,13 +856,29 @@ impl RuntimeProbe {
             &gwt_core::paths::gwt_sessions_dir(),
             &mut self.system,
         );
-        let gui = self
+        let gui_pids = self
             .system
             .processes()
             .values()
             .filter(|process| {
                 is_gui_process(process.exe().unwrap_or_else(|| Path::new(process.name())))
             })
+            .map(sysinfo::Process::pid)
+            .collect::<Vec<_>>();
+        #[cfg(windows)]
+        {
+            // Session liveness needs fresh identities for every process; CPU
+            // counters are consumed only for GUI roots. On Windows, sampling
+            // every unrelated process repeats GetSystemTimes for each one.
+            self.system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&gui_pids),
+                true,
+                sysinfo::ProcessRefreshKind::nothing().with_cpu(),
+            );
+        }
+        let gui = gui_pids
+            .iter()
+            .filter_map(|pid| self.system.process(*pid))
             .collect::<Vec<_>>();
         let current_gui = gui
             .iter()
@@ -1738,6 +1754,28 @@ mod tests {
         for name in ["gwtd", "gwt-helper", "codex", "cargo"] {
             assert!(!is_gui_process(Path::new(name)));
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn machine_sampling_does_not_initialize_non_gui_cpu_counters() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let mut probe = RuntimeProbe::default();
+        probe.sample_machine(&MachineCapacitySnapshot::default(), epoch_seconds());
+        let current = probe
+            .system
+            .process(sysinfo::Pid::from_u32(std::process::id()))
+            .expect("fresh census includes the test process");
+        assert!(!is_gui_process(current.exe().unwrap()));
+        assert_eq!(
+            current.accumulated_cpu_time(),
+            0,
+            "capacity consumes GUI CPU only; other processes need identity, not CPU sampling"
+        );
     }
 
     #[test]

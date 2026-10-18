@@ -127,7 +127,49 @@ struct LaunchDeliveryAckInput {
 }
 
 fn acknowledge_delivery(input: LaunchDeliveryAckInput) -> IssueMonitorLaunchDeliveryAcknowledged {
-    let result = acknowledge_delivery_inner(&input);
+    let result = acknowledge_delivery_inner(&input).and_then(|result| {
+        let identity = &input.identity;
+        if result.is_some()
+            || !identity.current.load(Ordering::Acquire)
+            || identity.handoff_id.is_some()
+            || identity.delivery_id.is_none()
+        {
+            return Ok(result);
+        }
+        // An ACK can consume the delivery before its response times out. The
+        // missing pending row alone cannot distinguish that from expiration.
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            &identity.monitor_project_root,
+        ))
+        .map_err(|error| {
+            (
+                IssueMonitorControlPublishError::OutcomeUnknown(format!(
+                    "launch delivery ACK readback failed: {error}"
+                )),
+                "read-launch-delivery-ack",
+            )
+        })?;
+        let already_applied = prefs
+            .launch_confirmations
+            .get(&identity.issue_number)
+            .is_some_and(|ack| {
+                ack.window_id == identity.window_id
+                    && ack.delivery_id == identity.delivery_id
+                    && ack.claim_id.as_ref().is_some_and(|claim| {
+                        prefs.launched_claims.get(&identity.issue_number) == Some(claim)
+                    })
+            })
+            && prefs.launch_bindings.get(&identity.window_id) == Some(&identity.issue_number)
+            && prefs.launched_issues.iter().any(|launched| {
+                launched.issue_number == identity.issue_number
+                    && launched.window_id == identity.window_id
+            })
+            && !prefs.pending_launch_deliveries.iter().any(|delivery| {
+                delivery.issue_number == identity.issue_number
+                    && Some(&delivery.delivery_id) == identity.delivery_id.as_ref()
+            });
+        Ok(already_applied.then(LaunchDeliveryAckResult::default))
+    });
     let result = result.map(|result| {
         let semantic_receipt_settled = input.identity.current.load(Ordering::Acquire)
             && input

@@ -1,7 +1,7 @@
 // SPEC-3064 Phase 3 (E4) — Settings windows surface extracted from app.js.
 // Owns the Settings window body (tabbed System / Custom Agents / Agent
-// Backends / Usage & Limits surface), the customAgentsState /
-// agentBackendsState / systemSettingsState stores, the Teams channel link
+// Backends / Usage & Limits surface), the customAgentsModel /
+// agentBackendsModel / systemSettingsModel stores, the Teams channel link
 // converters, the add-from-preset flow, the autostart appliers, and the
 // systemSettingsInteractionGuard that defers destructive System panel
 // re-renders while a native <select> dropdown is open. Pure movement from
@@ -705,27 +705,35 @@ export function createSettingsSurface({
       // SPEC #1921 Phase 86 (#3813): the backend echoes the complete agent
       // resource policy on every system_settings / system_settings_updated
       // event; it is authoritative over any optimistic local edit.
-      function applyAgentResourceSnapshot(snapshot) {
-        if (!snapshot || typeof snapshot !== "object") {
-          return;
-        }
-        systemSettingsState.agentResource = {
+      function normalizeAgentResource(snapshot, previous) {
+        if (!snapshot || typeof snapshot !== "object") return previous;
+        return {
           enabled: snapshot.enabled !== false,
-          preset:
-            typeof snapshot.preset === "string" && snapshot.preset
-              ? snapshot.preset
-              : "automatic",
-          priority:
-            typeof snapshot.priority === "string" && snapshot.priority
-              ? snapshot.priority
-              : "below-normal",
-          cpuLimitPercent: Number.isInteger(snapshot.cpu_limit_percent)
-            ? snapshot.cpu_limit_percent
-            : null,
-          buildJobs: Number.isInteger(snapshot.build_jobs)
-            ? snapshot.build_jobs
-            : null,
+          preset: typeof snapshot.preset === "string" && snapshot.preset ? snapshot.preset : "automatic",
+          priority: typeof snapshot.priority === "string" && snapshot.priority ? snapshot.priority : "below-normal",
+          cpuLimitPercent: Number.isInteger(snapshot.cpu_limit_percent) ? snapshot.cpu_limit_percent : null,
+          buildJobs: Number.isInteger(snapshot.build_jobs) ? snapshot.build_jobs : null,
         };
+      }
+
+      function applySystemSettingsEvent(event) {
+        systemSettingsModel.update(state => {
+          if (event.kind === "system_settings_error") {
+            return { ...state, statusMessage: event.message || "Failed to update system settings.", statusKind: "error" };
+          }
+          const updated = event.kind === "system_settings_updated";
+          const clearStatus = !state.statusMessage || state.statusKind === "info";
+          return {
+            ...state,
+            language: event.language || (updated ? state.language : "auto"),
+            codexTrustManagedHooks: event.codex_trust_managed_hooks !== false,
+            boardProvider: event.board_provider || state.boardProvider || "local",
+            agentResource: normalizeAgentResource(event.agent_resource, state.agentResource),
+            loaded: state.loaded || !updated,
+            statusMessage: updated ? "Saved system settings." : clearStatus ? "" : state.statusMessage,
+            statusKind: updated ? "success" : clearStatus ? "" : state.statusKind,
+          };
+        });
       }
 
       // Empty input = automatic (null). A non-integer or value below 1 is
@@ -743,7 +751,7 @@ export function createSettingsSurface({
       }
 
       function agentResourceWirePayload() {
-        const resource = systemSettingsState.agentResource;
+        const resource = systemSettingsModel.read().agentResource;
         return {
           enabled: resource.enabled !== false,
           preset: resource.preset || "automatic",
@@ -758,68 +766,29 @@ export function createSettingsSurface({
       }
 
       const systemSettingsInteractionGuard = createInteractionGuard({
-        onFlush: (deferred) => {
-          if (!deferred || typeof deferred !== "object") {
-            return;
-          }
-          if (deferred.kind === "system_settings") {
-            systemSettingsState.language = deferred.language || "auto";
-            systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              deferred.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(deferred.agent_resource);
-            systemSettingsState.loaded = true;
-            if (
-              !systemSettingsState.statusMessage
-              || systemSettingsState.statusKind === "info"
-            ) {
-              systemSettingsState.statusMessage = "";
-              systemSettingsState.statusKind = "";
-            }
-          } else if (deferred.kind === "system_settings_updated") {
-            systemSettingsState.language = deferred.language
-              || systemSettingsState.language;
-            systemSettingsState.codexTrustManagedHooks =
-              deferred.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              deferred.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(deferred.agent_resource);
-            systemSettingsState.statusMessage = "Saved system settings.";
-            systemSettingsState.statusKind = "success";
-          } else if (deferred.kind === "system_settings_error") {
-            systemSettingsState.statusMessage = deferred.message
-              || "Failed to update system settings.";
-            systemSettingsState.statusKind = "error";
-          }
-          renderSystemPanelInAllSettingsWindows();
-        },
+        onFlush: () => renderSystemPanelInAllSettingsWindows(),
       });
 
 
       // All DOM nodes are built via createElement + textContent to avoid
       // innerHTML with mixed trust. Secrets in env tables are redacted by
       // the backend before reaching this layer (see redact_secrets_in_agent).
-      const customAgentsState = {
-        agents: [],
-        loading: false,
+      const customAgentsModel = createUiStateStore({
+        catalog: { agents: [], loading: false },
         statusMessage: "",
         statusKind: "",
-      };
+      });
       // SPEC-1921 2026-05-18 amendment / FR-099: Settings > Agent Backends
       // per-built-in backend profile state. `backends` is keyed by
-      // BuiltinAgentId string ("claudeCode" / "codex"). Mirrors
-      // customAgentsState shape so dispatch + status messages can share
-      // helpers like setSettingsStatus.
-      const agentBackendsState = {
+      // BuiltinAgentId string ("claudeCode" / "codex"). Status messages keep
+      // using the shared Custom Agents status channel.
+      const agentBackendsModel = createUiStateStore({
         backends: { claudeCode: [], codex: [] },
         loadingAgent: null,
-        statusMessage: "",
-        statusKind: "",
-      };
+      });
       // SPEC-1933 US-4: System tab state. `language` is the raw stored value
       // (auto/en/ja); the backend `system_settings` reply seeds it.
-      const systemSettingsState = {
+      const systemSettingsModel = createUiStateStore({
         language: "auto",
         codexTrustManagedHooks: true,
         // SPEC #1921 Phase 86 (#3813): agent process-tree resource policy.
@@ -836,12 +805,6 @@ export function createSettingsSurface({
         loaded: false,
         statusMessage: "",
         statusKind: "",
-      };
-      const settingsWindowBodies = new Set();
-      // Autostart and Board auth have one immutable source; other System settings retain
-      // their existing local adapter until their own migration slice.
-      const systemSettingsModel = createUiStateStore({
-        ...systemSettingsState,
         // SPEC-2963: remote provider sign-in state + last sign-in message.
         boardAuth: { slack: false, teams: false },
         boardAuthMessage: "",
@@ -866,27 +829,14 @@ export function createSettingsSurface({
         autostartStatusMessage: "",
         autostartStatusKind: "",
       });
+      // Renderer cache only: the model remains the sole source of settings values.
+      const renderedSystemPanels = new WeakMap();
+      const settingsWindowBodies = new Set();
+      agentBackendsModel.subscribe(state => state, state => {
+        renderAgentBackendsPanelInAllSettingsWindows(state);
+      });
       systemSettingsModel.subscribe(state => state, state => {
-        // Keep the model current while a native select is open; only its
-        // destructive DOM refresh waits for the existing guard to flush.
-        if (systemSettingsInteractionGuard.isActive()) {
-          // A deferred System reply still needs to be applied on release.
-          // Its flush also renders the latest shared System snapshot.
-          if (!systemSettingsInteractionGuard.hasPendingValue()) {
-            systemSettingsInteractionGuard.defer({ kind: "autostart_render" });
-          }
-          return;
-        }
-        for (const body of Array.from(settingsWindowBodies)) {
-          if (!body.isConnected) {
-            settingsWindowBodies.delete(body);
-            continue;
-          }
-          const panel = body.querySelector(
-            "[data-system-settings-content]",
-          );
-          if (panel) renderSystemPanel(panel, state);
-        }
+        renderSystemPanelInAllSettingsWindows(state);
       });
       let nextProfilesRequest = 0;
       const issueSettingsModel = createUiStateStore({});
@@ -951,9 +901,9 @@ export function createSettingsSurface({
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, send: dispatch, launchControls,
-            availableAgents: supportedAgentsModel.read().agents === null || customAgentsState.loading ? null : [
+            availableAgents: supportedAgentsModel.read().agents === null || customAgentsModel.read().catalog.loading ? null : [
               ...supportedAgentsModel.read().agents,
-              ...customAgentsState.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
+              ...customAgentsModel.read().catalog.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
             ],
           });
         }
@@ -1053,6 +1003,16 @@ export function createSettingsSurface({
         for (const body of settingsWindowBodies) renderProjectSettings(body);
       });
 
+      customAgentsModel.subscribe(state => state, state => {
+        renderSettingsAgentList(state);
+      });
+      customAgentsModel.subscribe(state => state.catalog, catalog => {
+        // Read recovery must not replace candidate inputs while awaiting a reply.
+        if (catalog.loading) return;
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderProjectSettings(body);
+      });
+
       function requestSupportedAgentRefresh() {
         purgeDetachedSettingsBodies();
         if (settingsWindowBodies.size) send({ kind: "list_supported_agents" });
@@ -1076,8 +1036,12 @@ export function createSettingsSurface({
           }));
           send({ kind: "get_autostart_status" });
         }
-        if (recovering || (!customAgentsState.loading && customAgentsState.agents.length === 0)) {
-          customAgentsState.loading = true;
+        const customAgents = customAgentsModel.read().catalog;
+        if (recovering || (!customAgents.loading && customAgents.agents.length === 0)) {
+          // Keep a known catalog and any unsaved environment editor while reads recover.
+          customAgentsModel.update(state => state.catalog.loading || state.catalog.agents.length > 0 ? state : ({ ...state,
+            catalog: { ...state.catalog, loading: true },
+          }));
           send({ kind: "list_custom_agents" });
         }
         for (const agent of ["claudeCode", "codex"]) {
@@ -1344,7 +1308,7 @@ export function createSettingsSurface({
       // `Custom Agents` tab (T308 follow-up). Today the panel exposes a
       // read-only mirror that confirms FR-101 silent migration produced
       // the expected `[builtinAgents.claudeCode.backends.*]` rows.
-      function renderAgentBackendsPanel(panel) {
+      function renderAgentBackendsPanel(panel, state = agentBackendsModel.read()) {
         while (panel.firstChild) panel.removeChild(panel.firstChild);
 
         for (const agent of ["claudeCode", "codex"]) {
@@ -1360,16 +1324,16 @@ export function createSettingsSurface({
           const list = createDiv("agent-backends-list");
           list.dataset.role = "agent-backends-list";
           list.dataset.agent = agent;
-          renderAgentBackendsList(list, agent);
+          renderAgentBackendsList(list, agent, state);
           section.appendChild(list);
 
           panel.appendChild(section);
         }
       }
 
-      function renderAgentBackendsList(container, agent) {
+      function renderAgentBackendsList(container, agent, state = agentBackendsModel.read()) {
         while (container.firstChild) container.removeChild(container.firstChild);
-        const profiles = agentBackendsState.backends[agent] || [];
+        const profiles = state.backends[agent] || [];
         if (profiles.length === 0) {
           const empty = document.createElement("p");
           empty.className = "settings-help";
@@ -1397,7 +1361,7 @@ export function createSettingsSurface({
         }
       }
 
-      function renderAgentBackendsPanelInAllSettingsWindows() {
+      function renderAgentBackendsPanelInAllSettingsWindows(state = agentBackendsModel.read()) {
         for (const settingsBody of Array.from(settingsWindowBodies)) {
           if (!settingsBody.isConnected) {
             settingsWindowBodies.delete(settingsBody);
@@ -1406,7 +1370,7 @@ export function createSettingsSurface({
           const panel = settingsBody.querySelector(
             "[data-settings-panel='agent-backends']",
           );
-          if (panel) renderAgentBackendsPanel(panel);
+          if (panel) renderAgentBackendsPanel(panel, state);
         }
       }
 
@@ -1546,7 +1510,35 @@ export function createSettingsSurface({
           }
           const autostartStatus = panel.querySelector("[data-role='autostart-settings-status']");
           if (autostartStatus) renderAutostartStatus(autostartStatus, state);
-          renderSystemPanelStatus(panel);
+          renderSystemPanelStatus(panel, state);
+          return;
+        }
+        const previous = renderedSystemPanels.get(panel);
+        if (previous && ["boardProvider", "boardAuth", "boardAuthMessage", "boardConfig",
+          "autostartLoaded", "autostartMechanism", "autostartInstallPath"]
+          .every(key => Object.is(previous[key], state[key]))) {
+          // Scalar changes must not detach the next pointer target when a
+          // numeric input's focusout flushes the interaction guard.
+          const resource = state.agentResource;
+          const control = suffix => panel.querySelector(`[id$='-settings-${suffix}']`);
+          for (const [suffix, value] of [
+            ["system-language", state.language || "auto"],
+            ["system-agent-preset", resource.preset || "automatic"],
+            ["system-agent-priority", resource.priority || "below-normal"],
+            ["system-agent-cpu-limit", resource.cpuLimitPercent ?? ""],
+            ["system-agent-build-jobs", resource.buildJobs ?? ""],
+          ]) control(suffix).value = String(value);
+          control("system-codex-hooks").checked = state.codexTrustManagedHooks !== false;
+          control("system-agent-resource-enabled").checked = resource.enabled !== false;
+          for (const suffix of ["system-agent-preset", "system-agent-priority",
+            "system-agent-cpu-limit", "system-agent-build-jobs"]) {
+            control(suffix).disabled = resource.enabled === false;
+          }
+          panel.querySelector("[data-role='agent-resource-custom']").hidden = resource.preset !== "custom";
+          syncAutostartCheckbox(control("system-autostart"), state);
+          renderAutostartStatus(panel.querySelector("[data-role='autostart-settings-status']"), state);
+          renderSystemPanelStatus(panel, state);
+          renderedSystemPanels.set(panel, state);
           return;
         }
         while (panel.firstChild) panel.removeChild(panel.firstChild);
@@ -1572,13 +1564,11 @@ export function createSettingsSurface({
           option.textContent = opt.text;
           select.appendChild(option);
         }
-        select.value = systemSettingsState.language || "auto";
+        select.value = state.language || "auto";
         select.addEventListener("change", (e) => {
           const next = e.target.value;
-          systemSettingsState.language = next;
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
-          renderSystemPanelStatus(panel);
+          systemSettingsModel.update(state => ({ ...state, language: next,
+            statusMessage: "Saving…", statusKind: "info" }));
           send({ kind: "update_system_settings", language: next });
         });
         section.appendChild(select);
@@ -1599,16 +1589,14 @@ export function createSettingsSurface({
         trustCheckbox.type = "checkbox";
         trustCheckbox.className = "settings-checkbox";
         trustCheckbox.id = "settings-system-codex-hooks";
-        trustCheckbox.checked = systemSettingsState.codexTrustManagedHooks !== false;
+        trustCheckbox.checked = state.codexTrustManagedHooks !== false;
         trustCheckbox.addEventListener("change", (e) => {
           const next = e.target.checked === true;
-          systemSettingsState.codexTrustManagedHooks = next;
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
-          renderSystemPanelStatus(panel);
+          systemSettingsModel.update(state => ({ ...state, codexTrustManagedHooks: next,
+            statusMessage: "Saving…", statusKind: "info" }));
           send({
             kind: "update_system_settings",
-            language: systemSettingsState.language || "auto",
+            language: systemSettingsModel.read().language || "auto",
             codex_trust_managed_hooks: next,
           });
         });
@@ -1629,23 +1617,21 @@ export function createSettingsSurface({
         // Every control sends the complete policy object so the backend can
         // validate it as a unit and echo the authoritative result.
         const resourceSection = createDiv("settings-section");
-        const agentResource = systemSettingsState.agentResource;
+        const agentResource = state.agentResource;
         const resourceEnabled = agentResource.enabled !== false;
-        const sendAgentResourceUpdate = () => {
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
-          renderSystemPanelStatus(panel);
+        const sendAgentResourceUpdate = patch => {
+          systemSettingsModel.update(state => ({ ...state,
+            agentResource: { ...state.agentResource, ...patch },
+            statusMessage: "Saving…", statusKind: "info" }));
           send({
             kind: "update_system_settings",
-            language: systemSettingsState.language || "auto",
+            language: systemSettingsModel.read().language || "auto",
             agent_resource: agentResourceWirePayload(),
           });
         };
         const rejectAgentResourceInput = (message, input, previous) => {
           input.value = Number.isInteger(previous) ? String(previous) : "";
-          systemSettingsState.statusMessage = message;
-          systemSettingsState.statusKind = "error";
-          renderSystemPanelStatus(panel);
+          systemSettingsModel.update(state => ({ ...state, statusMessage: message, statusKind: "error" }));
         };
 
         const resourceLabel = document.createElement("label");
@@ -1657,8 +1643,7 @@ export function createSettingsSurface({
         resourceCheckbox.id = "settings-system-agent-resource-enabled";
         resourceCheckbox.checked = resourceEnabled;
         resourceCheckbox.addEventListener("change", (e) => {
-          systemSettingsState.agentResource.enabled = e.target.checked === true;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ enabled: e.target.checked === true });
         });
         const resourceText = document.createElement("span");
         resourceText.textContent = "Isolate agent process trees";
@@ -1698,8 +1683,7 @@ export function createSettingsSurface({
         presetSelect.value = agentResource.preset || "automatic";
         presetSelect.disabled = !resourceEnabled;
         presetSelect.addEventListener("change", (e) => {
-          systemSettingsState.agentResource.preset = e.target.value;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ preset: e.target.value });
         });
         resourceSection.appendChild(presetSelect);
 
@@ -1736,8 +1720,7 @@ export function createSettingsSurface({
         prioritySelect.value = agentResource.priority || "below-normal";
         prioritySelect.disabled = !resourceEnabled;
         prioritySelect.addEventListener("change", (e) => {
-          systemSettingsState.agentResource.priority = e.target.value;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ priority: e.target.value });
         });
         customSection.appendChild(prioritySelect);
 
@@ -1764,12 +1747,11 @@ export function createSettingsSurface({
             rejectAgentResourceInput(
               "CPU limit must be a whole number between 1 and 100, or empty for automatic.",
               e.target,
-              systemSettingsState.agentResource.cpuLimitPercent,
+              systemSettingsModel.read().agentResource.cpuLimitPercent,
             );
             return;
           }
-          systemSettingsState.agentResource.cpuLimitPercent = next;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ cpuLimitPercent: next });
         });
         customSection.appendChild(cpuInput);
 
@@ -1795,12 +1777,11 @@ export function createSettingsSurface({
             rejectAgentResourceInput(
               "Build parallelism must be a whole number of at least 1, or empty for automatic.",
               e.target,
-              systemSettingsState.agentResource.buildJobs,
+              systemSettingsModel.read().agentResource.buildJobs,
             );
             return;
           }
-          systemSettingsState.agentResource.buildJobs = next;
-          sendAgentResourceUpdate();
+          sendAgentResourceUpdate({ buildJobs: next });
         });
         customSection.appendChild(jobsInput);
 
@@ -1838,20 +1819,17 @@ export function createSettingsSurface({
           option.textContent = opt.text;
           boardSelect.appendChild(option);
         }
-        boardSelect.value = systemSettingsState.boardProvider || "local";
+        boardSelect.value = state.boardProvider || "local";
         boardSelect.addEventListener("change", (e) => {
           const next = e.target.value;
           for (const form of panel.querySelectorAll("[data-dirty]")) delete form.dataset.dirty;
-          systemSettingsState.boardProvider = next;
-          systemSettingsState.statusMessage = "Saving…";
-          systemSettingsState.statusKind = "info";
-          renderSystemPanelStatus(panel);
+          systemSettingsModel.update(state => ({ ...state, boardProvider: next,
+            statusMessage: "Saving…", statusKind: "info" }));
           send({
             kind: "update_system_settings",
-            language: systemSettingsState.language || "auto",
+            language: systemSettingsModel.read().language || "auto",
             board_provider: next,
           });
-          renderSystemPanelInAllSettingsWindows();
         });
         boardSection.appendChild(boardSelect);
 
@@ -1864,7 +1842,7 @@ export function createSettingsSurface({
 
         // SPEC-2963 FR-011/FR-012: sign-in affordance + auth status for the
         // selected remote provider. Local needs no sign-in.
-        const selectedProvider = systemSettingsState.boardProvider || "local";
+        const selectedProvider = state.boardProvider || "local";
         if (selectedProvider === "slack" || selectedProvider === "teams") {
           // SPEC-2963 FR-006: provider config form. Non-secret fields persist to
           // config.toml; the client secret is routed to the secure credential
@@ -1988,10 +1966,9 @@ export function createSettingsSurface({
                   !parsedTeamsChannel.teamId ||
                   !parsedTeamsChannel.channelId
                 ) {
-                  systemSettingsState.statusMessage =
-                    "Paste a valid Teams channel link with groupId and /channel/...";
-                  systemSettingsState.statusKind = "error";
-                  renderSystemPanelStatus(panel);
+                  systemSettingsModel.update(state => ({ ...state,
+                    statusMessage: "Paste a valid Teams channel link with groupId and /channel/...",
+                    statusKind: "error" }));
                   return;
                 }
                 nextTeamsDefaultChannel = composeTeamsDefaultChannel(
@@ -2191,28 +2168,41 @@ export function createSettingsSurface({
         panel.appendChild(autostartSection);
         panel.appendChild(status);
         scopeSettingsControlIds(panel);
-        renderSystemPanelStatus(panel);
+        renderSystemPanelStatus(panel, state);
+        renderedSystemPanels.set(panel, state);
       }
 
-      function renderSystemPanelStatus(panel) {
+      function renderSystemPanelStatus(panel, state = systemSettingsModel.read()) {
         const status = panel.querySelector(
           "[data-role='system-settings-status']",
         );
         if (!status) return;
-        status.textContent = systemSettingsState.statusMessage || "";
-        if (systemSettingsState.statusKind) {
-          status.dataset.kind = systemSettingsState.statusKind;
+        status.textContent = state.statusMessage || "";
+        if (state.statusKind) {
+          status.dataset.kind = state.statusKind;
         } else {
           delete status.dataset.kind;
         }
       }
 
-      function renderSystemPanelInAllSettingsWindows() {
-        systemSettingsModel.update(state => ({ ...state, ...systemSettingsState }));
+      function renderSystemPanelInAllSettingsWindows(state = systemSettingsModel.read()) {
+        // State commits immediately; only destructive DOM swaps wait for a
+        // native select/input interaction to finish. Flush reads the latest version.
+        const deferred = systemSettingsInteractionGuard.defer(true);
+        for (const body of Array.from(settingsWindowBodies)) {
+          if (!body.isConnected) {
+            settingsWindowBodies.delete(body);
+            continue;
+          }
+          const panel = body.querySelector("[data-system-settings-content]");
+          if (panel) {
+            if (deferred) renderSystemPanelStatus(panel, state);
+            else renderSystemPanel(panel, state);
+          }
+        }
       }
 
-      function renderSettingsAgentList() {
-        issueSettingsModel.update(state => ({ ...state }));
+      function renderSettingsAgentList(state = customAgentsModel.read()) {
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
@@ -2246,26 +2236,26 @@ export function createSettingsSurface({
           });
           scroll.appendChild(addBtn);
 
-          if (customAgentsState.statusMessage) {
+          if (state.statusMessage) {
             const section = createDiv("mock-section");
             const label = createDiv("mock-label");
             label.textContent = "Status";
             label.style.color =
-              customAgentsState.statusKind === "error"
+              state.statusKind === "error"
                 ? "#ff6b6b"
-                : customAgentsState.statusKind === "success"
+                : state.statusKind === "success"
                   ? "#7abf7a"
                   : "#999";
             section.appendChild(label);
             const row = createDiv("mock-row");
             const text = document.createElement("span");
-            text.textContent = customAgentsState.statusMessage;
+            text.textContent = state.statusMessage;
             row.appendChild(text);
             section.appendChild(row);
             scroll.appendChild(section);
           }
 
-          if (customAgentsState.loading && customAgentsState.agents.length === 0) {
+          if (state.catalog.loading && state.catalog.agents.length === 0) {
             const section = createDiv("mock-section");
             const row = createDiv("mock-row");
             const text = document.createElement("span");
@@ -2276,7 +2266,7 @@ export function createSettingsSurface({
             continue;
           }
 
-          if (customAgentsState.agents.length === 0) {
+          if (state.catalog.agents.length === 0) {
             const section = createDiv("mock-section");
             const row = createDiv("mock-row");
             const text = document.createElement("span");
@@ -2287,7 +2277,7 @@ export function createSettingsSurface({
             continue;
           }
 
-          for (const agent of customAgentsState.agents) {
+          for (const agent of state.catalog.agents) {
             const section = createDiv("mock-section");
             const label = createDiv("mock-label");
             label.textContent = agent.display_name || agent.id;
@@ -2349,30 +2339,66 @@ export function createSettingsSurface({
 
 
       function setSettingsStatus(message, kind) {
-        customAgentsState.statusMessage = message;
-        customAgentsState.statusKind = kind;
-        renderSettingsAgentList();
+        customAgentsModel.update(state => ({
+          ...state, statusMessage: message, statusKind: kind,
+        }));
       }
 
+      function applyAgentBackendsReceiveEvent(event) {
+        const key = event.agent;
+        if (event.kind === "agent_backend_list" && key) {
+          agentBackendsModel.update(state => ({ ...state,
+            backends: { ...state.backends, [key]: event.backends || [] }, loadingAgent: null,
+          }));
+        } else if (event.kind === "agent_backend_saved" && key && event.profile) {
+          agentBackendsModel.update(state => {
+            const profiles = [...(state.backends[key] || [])];
+            const index = profiles.findIndex(profile => profile.id === event.profile.id);
+            if (index >= 0) profiles[index] = event.profile;
+            else profiles.push(event.profile);
+            return { ...state, backends: { ...state.backends, [key]: profiles } };
+          });
+          setSettingsStatus(`Saved backend "${event.profile.id}" for ${key}.`, "success");
+        } else if (event.kind === "agent_backend_deleted" && key && event.id) {
+          agentBackendsModel.update(state => ({ ...state, backends: { ...state.backends,
+            [key]: (state.backends[key] || []).filter(profile => profile.id !== event.id),
+          } }));
+          setSettingsStatus(`Deleted backend "${event.id}" for ${key}.`, "success");
+        } else if (event.kind === "agent_backend_error") {
+          setSettingsStatus(event.message || "Agent backend error.", "error");
+        }
+      }
 
-
-      // Apply custom-agent responses to the Settings state and status display.
-      function applyCustomAgentDeleted(event) {
-        customAgentsState.agents = customAgentsState.agents.filter(
-          (a) => a.id !== event.agent_id,
-        );
-        if (editingCustomAgentId === event.agent_id) {
+      function applyCustomAgentsReceiveEvent(event) {
+        if (event.kind === "custom_agent_deleted" && editingCustomAgentId === event.agent_id) {
           editingCustomAgentId = null;
         }
-        setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
-      }
-
-      function applyCustomAgentError(event) {
-        customAgentsState.loading = false;
-        setSettingsStatus(
-          `Error [${event.code}]: ${event.message}`,
-          "error",
-        );
+        customAgentsModel.update(state => {
+          switch (event.kind) {
+            case "custom_agent_list":
+              return { ...state, catalog: { agents: event.agents || [], loading: false } };
+            case "custom_agent_saved": {
+              const agents = [...state.catalog.agents];
+              if (event.agent) {
+                const index = agents.findIndex(agent => agent.id === event.agent.id);
+                if (index >= 0) agents[index] = event.agent;
+                else agents.push(event.agent);
+              }
+              return { ...state, catalog: { agents, loading: false },
+                statusMessage: `Saved custom agent "${event.agent ? event.agent.id : "?"}".`, statusKind: "success" };
+            }
+            case "custom_agent_deleted":
+              return { ...state, catalog: { ...state.catalog,
+                  agents: state.catalog.agents.filter(agent => agent.id !== event.agent_id) },
+                statusMessage: `Deleted custom agent "${event.agent_id}".`, statusKind: "success" };
+            case "custom_agent_error":
+              return { ...state, catalog: { ...state.catalog, loading: false },
+                statusMessage: `Error [${event.code}]: ${event.message}`, statusKind: "error" };
+            case "backend_connection_result":
+              return { ...state, statusMessage: `/v1/models returned ${event.models.length} model(s).`, statusKind: "success" };
+            default: return state;
+          }
+        });
       }
 
       return {
@@ -2380,17 +2406,16 @@ export function createSettingsSurface({
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
         applyIssueMonitorProfilesError,
-        customAgentsState,
-        agentBackendsState,
-        systemSettingsState,
+        customAgentsModel,
+        agentBackendsModel,
+        applyAgentBackendsReceiveEvent,
         systemSettingsModel,
         systemSettingsInteractionGuard,
-        applyAgentResourceSnapshot,
+        applySystemSettingsEvent,
         applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
-        applyCustomAgentDeleted,
-        applyCustomAgentError,
+        applyCustomAgentsReceiveEvent,
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,

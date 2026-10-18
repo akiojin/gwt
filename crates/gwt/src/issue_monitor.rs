@@ -7492,7 +7492,16 @@ impl IssueMonitorState {
                 .launch_confirmations
                 .iter()
                 .filter(|(issue, confirmation)| {
-                    self.launch_bindings.get(&confirmation.window_id) == Some(*issue)
+                    match self.launch_bindings.get(&confirmation.window_id) {
+                        Some(owner) => owner == *issue,
+                        // A missing pane's ledger can be pruned before its
+                        // deadline. Keep the exact reservation's ACK anchor.
+                        None => {
+                            self.active_launches.contains(*issue)
+                                && self.launched_windows.get(*issue)
+                                    == Some(&confirmation.window_id)
+                        }
+                    }
                 })
                 .map(|(issue, confirmation)| (*issue, confirmation.clone()))
                 .collect(),
@@ -11928,7 +11937,8 @@ impl IssueMonitorState {
 
     /// Release windowless launches after their creation deadline. Compatibility
     /// rows use their claim anchor; legacy bare-id rows start their clock here.
-    /// Created windows retain the existing claim-TTL recovery contract.
+    /// ACKed panes proven absent use the same deadline; existing panes retain
+    /// their registration and claim-TTL recovery contracts.
     pub fn expire_stale_unbound_launches(&mut self, now: &str) -> Vec<u64> {
         self.expire_stale_unbound_launches_with(now, crate::process::is_host_process_alive)
     }
@@ -11946,15 +11956,18 @@ impl IssueMonitorState {
         is_process_alive: impl Fn(u32) -> bool,
     ) -> Vec<u64> {
         let ttl = self.config.claim_ttl_secs as i64;
-        let unbound: Vec<u64> = self
-            .active_launches
-            .iter()
-            .filter(|issue_number| !self.launched_windows.contains_key(issue_number))
-            .copied()
-            .collect();
+        let launches = self.active_launches.clone();
         let mut expired = Vec::new();
-        for issue_number in unbound {
+        for issue_number in launches {
             if self.process_held_issues.contains(&issue_number) {
+                continue;
+            }
+            if self.launched_windows.contains_key(&issue_number) {
+                if let Some(reason) = self.acknowledged_missing_pane_timeout_at(issue_number, now) {
+                    self.release_confirmed_claim_for_issue(issue_number);
+                    self.requeue_released_launch(issue_number, &reason, now);
+                    expired.push(issue_number);
+                }
                 continue;
             }
             if let Some(diagnostic) = self.windowless_launch_stall_at(issue_number, now) {
@@ -12044,6 +12057,33 @@ impl IssueMonitorState {
             }
         }
         expired
+    }
+
+    /// An ACK is not evidence of a running pane when a newer owning-tab canvas
+    /// proves it absent. Keep the normal registration grace for existing panes
+    /// and fail closed on missing observation or live/uncertain process evidence.
+    fn acknowledged_missing_pane_timeout_at(&self, issue_number: u64, now: &str) -> Option<String> {
+        if self.issue_is_closed(issue_number)
+            || self.merged_issues.contains(&issue_number)
+            || self.failed_issues.contains_key(&issue_number)
+            || self.has_monitor_runtime_census(issue_number)
+            || self.observed_live_issue_pane(issue_number, now).is_some()
+            || self.runtime_consistency_at(issue_number, now).consistency
+                != Some(IssueMonitorRuntimeConsistency::Missing)
+        {
+            return None;
+        }
+        let confirmation = self
+            .launch_confirmations
+            .get(&issue_number)
+            .filter(|ack| self.launched_windows.get(&issue_number) == Some(&ack.window_id))?;
+        let elapsed = rfc3339_elapsed_secs(&confirmation.confirmed_at, now)?;
+        (elapsed >= WINDOWLESS_LAUNCH_TIMEOUT_SECS).then(|| {
+            format!(
+                "Launch timed out: acknowledged window {} is missing after {elapsed}s (deadline {WINDOWLESS_LAUNCH_TIMEOUT_SECS}s)",
+                confirmation.window_id,
+            )
+        })
     }
 
     /// Read-only inbox projection; readiness warnings never change scheduling state.
@@ -23765,6 +23805,99 @@ mod tests {
             cache.launched_window_issue("project-b::agent-1"),
             Some(42),
             "cache provenance cannot authorize foreign-prefix pruning"
+        );
+    }
+
+    #[test]
+    fn issue_5642_acknowledged_missing_pane_expires_at_creation_deadline() {
+        let mut monitor = launched_cohort(&[(42, "tab-1::agent-1")]);
+        monitor.complete_active_launch_at(42, "tab-1::agent-2", IDLE_NOW);
+        let stale = monitor.prefs();
+        let before = "2026-09-07T04:01:59Z";
+        monitor.record_window_snapshot(pane_snapshot(before, Vec::new()));
+        assert!(monitor.expire_stale_unbound_launches(before).is_empty());
+
+        let deadline = "2026-09-07T04:02:00Z";
+        monitor.record_window_snapshot(pane_snapshot(deadline, Vec::new()));
+        assert_eq!(monitor.expire_stale_unbound_launches(deadline), vec![42]);
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(monitor.queue.contains(&42));
+        assert_eq!(monitor.launched_window_id(42), None);
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-2"), None);
+        assert!(monitor
+            .inbox_item(42)
+            .unwrap()
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("Launch timed out"));
+        assert_eq!(monitor.attempt_count(42), 0);
+
+        monitor.rebase_daemon_driver_prefs(&stale);
+        let mut restored = IssueMonitorState::with_prefs(monitor.config.clone(), monitor.prefs());
+        restored.record_candidate(issue(42));
+        assert_eq!(
+            restored.active_count(),
+            0,
+            "stale rebases cannot revive the slot"
+        );
+        assert_eq!(restored.launched_window_id(42), None);
+        assert!(restored.queue.contains(&42));
+    }
+
+    #[test]
+    fn issue_5642_missing_pane_deadline_preserves_live_or_unproven_launches() {
+        let mut monitor = launched_cohort(&[(42, "tab-1::agent-1")]);
+        monitor.complete_active_launch_at(42, "tab-1::agent-2", IDLE_NOW);
+        let deadline = "2026-09-07T04:02:00Z";
+        assert!(
+            monitor.expire_stale_unbound_launches(deadline).is_empty(),
+            "no canvas observation proves nothing"
+        );
+        monitor.record_window_snapshot(pane_snapshot(IDLE_NOW, Vec::new()));
+        assert!(
+            monitor.expire_stale_unbound_launches(deadline).is_empty(),
+            "a canvas predating the ACK cannot prove absence"
+        );
+
+        monitor.record_window_snapshot(pane_snapshot(deadline, Vec::new()));
+        monitor.set_process_held_issues(BTreeSet::from([42]));
+        assert!(
+            monitor.expire_stale_unbound_launches(deadline).is_empty(),
+            "live or uncertain execution processes veto expiration"
+        );
+        monitor.set_process_held_issues(BTreeSet::new());
+        monitor.record_window_snapshot(pane_snapshot(
+            deadline,
+            vec![live_pane_observation(
+                "tab-1::agent-2",
+                42,
+                WindowState::Stopped,
+            )],
+        ));
+        assert!(
+            monitor.expire_stale_unbound_launches(deadline).is_empty(),
+            "a created terminal pane retains registration grace"
+        );
+        monitor.record_window_snapshot(pane_snapshot(
+            deadline,
+            vec![live_pane_observation(
+                "tab-1::survivor",
+                42,
+                WindowState::Running,
+            )],
+        ));
+        assert!(
+            monitor.expire_stale_unbound_launches(deadline).is_empty(),
+            "a surviving implementation pane vetoes expiration"
+        );
+        assert_eq!(
+            monitor.launched_window_id(42).as_deref(),
+            Some("tab-1::agent-2")
         );
     }
 

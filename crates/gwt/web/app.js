@@ -10,7 +10,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyTelemetryCounts,
         applyIssueMonitorStatus,
         applyProviderUsage,
-        applyRuntimeHealth,
+        subscribeRuntimeHealth,
       } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
@@ -187,6 +187,10 @@ import { createUiStateStore } from "/ui-state-store.js";
           palette: null,
         };
       }
+      const runtimeHealthModel = createUiStateStore(null);
+      subscribeRuntimeHealth(document, runtimeHealthModel, {
+        focusWindow: (windowId) => requestWindowFrame(windowId),
+      });
       window.__operatorShell = {
         themeManager: __op.themeManager,
         hotkey: __op.hotkey,
@@ -194,10 +198,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
         applyIssueMonitorStatus: (status) => applyIssueMonitorStatus(document, status),
         applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
-        applyRuntimeHealth: (snapshot) =>
-          applyRuntimeHealth(document, snapshot, {
-            focusWindow: (windowId) => requestWindowFrame(windowId),
-          }),
+        applyRuntimeHealth: (snapshot) => runtimeHealthModel.update(() => snapshot || {}),
       };
 
       const uiTraceProfiler = createUiTraceProfiler();
@@ -4692,8 +4693,8 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       // SPEC-3064 Phase 3 (E4): the Settings windows surface (tabbed
-      // Settings body, customAgentsState / agentBackendsState /
-      // systemSettingsState, Teams channel converters, add-from-preset
+      // Settings body, customAgentsModel / agentBackendsModel /
+      // systemSettingsModel, Teams channel converters, add-from-preset
       // flow, autostart appliers, and the system-settings interaction
       // guard) moved to /settings-surface.js. app.js keeps the receive()
       // case arms, the frontendUnits registry entries, and the delegated
@@ -4704,16 +4705,13 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
         applyIssueMonitorProfilesError,
-        customAgentsState,
-        agentBackendsState,
-        systemSettingsState,
+        applyAgentBackendsReceiveEvent,
         systemSettingsInteractionGuard,
-        applyAgentResourceSnapshot,
+        applySystemSettingsEvent,
         applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
-        applyCustomAgentDeleted,
-        applyCustomAgentError,
+        applyCustomAgentsReceiveEvent,
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
@@ -4722,7 +4720,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderSettingsAgentList,
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,
-        renderSystemPanelInAllSettingsWindows,
         renderIndexPanelInAllSettingsWindows,
         requestFullIndexStatusRefresh,
         setSettingsStatus,
@@ -5307,7 +5304,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "runtime_health":
-            window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
+            runtimeHealthModel.update(() => event.snapshot || {});
             break;
           case "pm_reports": {
             applyPmWindowReceiveEvent(event);
@@ -5594,9 +5591,11 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "custom_agent_list":
-            customAgentsState.agents = event.agents || [];
-            customAgentsState.loading = false;
-            frontendUnits.knowledgeSettingsSurface.renderSettingsAgentList();
+          case "custom_agent_saved":
+          case "custom_agent_deleted":
+          case "custom_agent_error":
+          case "backend_connection_result":
+            applyCustomAgentsReceiveEvent(event);
             break;
           case "supported_agent_list":
             applySupportedAgentList(event);
@@ -5610,68 +5609,10 @@ import { createUiStateStore } from "/ui-state-store.js";
           // are ephemeral mutations; `agent_backend_error` carries a stable
           // CustomAgentErrorCode tag.
           case "agent_backend_list":
-            if (event.agent) {
-              const key = event.agent;
-              agentBackendsState.backends[key] = event.backends || [];
-              agentBackendsState.loadingAgent = null;
-              frontendUnits.knowledgeSettingsSurface.renderAgentBackendsPanelInAllSettingsWindows();
-            }
-            break;
           case "agent_backend_saved":
-            if (event.agent && event.profile) {
-              const key = event.agent;
-              const list = agentBackendsState.backends[key] || [];
-              const idx = list.findIndex((p) => p.id === event.profile.id);
-              if (idx >= 0) list[idx] = event.profile;
-              else list.push(event.profile);
-              agentBackendsState.backends[key] = list;
-              setSettingsStatus(
-                `Saved backend "${event.profile.id}" for ${key}.`,
-                "success",
-              );
-              frontendUnits.knowledgeSettingsSurface.renderAgentBackendsPanelInAllSettingsWindows();
-            }
-            break;
           case "agent_backend_deleted":
-            if (event.agent && event.id) {
-              const key = event.agent;
-              agentBackendsState.backends[key] = (
-                agentBackendsState.backends[key] || []
-              ).filter((p) => p.id !== event.id);
-              setSettingsStatus(
-                `Deleted backend "${event.id}" for ${key}.`,
-                "success",
-              );
-              frontendUnits.knowledgeSettingsSurface.renderAgentBackendsPanelInAllSettingsWindows();
-            }
-            break;
           case "agent_backend_error":
-            setSettingsStatus(
-              event.message || "Agent backend error.",
-              "error",
-            );
-            break;
-          case "custom_agent_saved":
-            if (event.agent) {
-              const idx = customAgentsState.agents.findIndex(
-                (a) => a.id === event.agent.id,
-              );
-              if (idx >= 0) {
-                customAgentsState.agents[idx] = event.agent;
-              } else {
-                customAgentsState.agents.push(event.agent);
-              }
-            }
-            customAgentsState.loading = false;
-            setSettingsStatus(
-              `Saved custom agent "${event.agent ? event.agent.id : "?"}".`,
-              "success",
-            );
-            break;
-          case "custom_agent_deleted":
-            // SPEC-3064 Phase 3 (E4): body reassigns editingCustomAgentId,
-            // which now lives in the settings surface.
-            applyCustomAgentDeleted(event);
+            applyAgentBackendsReceiveEvent(event);
             break;
           case "board_auth_status":
             applyBoardAuthStatus(event);
@@ -5680,71 +5621,12 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyGlobalUpdateSettings(event);
             break;
           case "system_settings":
-            // SPEC-1933 US-4: backend echoed the on-disk language value.
-            // Issue #2698 PR 4 — defer when user is mid-dropdown.
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "system_settings",
-                language: event.language,
-                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
-                board_provider: event.board_provider,
-                agent_resource: event.agent_resource,
-              })
-            ) {
-              break;
-            }
-            systemSettingsState.language = event.language || "auto";
-            systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              event.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(event.agent_resource);
-            systemSettingsState.loaded = true;
-            // Don't clobber an in-flight "Saving…" status; only seed when no
-            // pending feedback is shown.
-            if (!systemSettingsState.statusMessage || systemSettingsState.statusKind === "info") {
-              systemSettingsState.statusMessage = "";
-              systemSettingsState.statusKind = "";
-            }
-            renderSystemPanelInAllSettingsWindows();
-            break;
           case "system_settings_updated":
-            // Issue #2698 PR 4 — defer when user is mid-dropdown.
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "system_settings_updated",
-                language: event.language,
-                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
-                board_provider: event.board_provider,
-                agent_resource: event.agent_resource,
-              })
-            ) {
-              break;
-            }
-            systemSettingsState.language = event.language || systemSettingsState.language;
-            systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              event.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(event.agent_resource);
-            systemSettingsState.statusMessage = "Saved system settings.";
-            systemSettingsState.statusKind = "success";
-            renderSystemPanelInAllSettingsWindows();
+            applySystemSettingsEvent(event);
             break;
           case "system_settings_error":
             applyGlobalUpdateSettings(event);
-            // Issue #2698 PR 4 — defer when user is mid-dropdown.
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "system_settings_error",
-                message: event.message,
-              })
-            ) {
-              break;
-            }
-            systemSettingsState.statusMessage = event.message || "Failed to update system settings.";
-            systemSettingsState.statusKind = "error";
-            renderSystemPanelInAllSettingsWindows();
+            applySystemSettingsEvent(event);
             break;
           case "autostart_status":
             applyAutostartStatus(event);
@@ -5752,18 +5634,9 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "autostart_error":
             applyAutostartError(event);
             break;
-          case "backend_connection_result":
-            frontendUnits.knowledgeSettingsSurface.setSettingsStatus(
-              `/v1/models returned ${event.models.length} model(s).`,
-              "success",
-            );
-            break;
           case "custom_agent_preset_list":
             // Reserved for a future "Add from preset" picker — the current
             // UI hardcodes the one preset.
-            break;
-          case "custom_agent_error":
-            applyCustomAgentError(event);
             break;
           // SPEC-3064 Phase 3 (E7): migration modal state and rendering live
           // in the project shell surface.

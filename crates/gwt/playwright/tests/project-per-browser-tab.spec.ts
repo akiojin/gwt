@@ -96,17 +96,48 @@ test.describe("Project-per-Browser-Tab (live)", () => {
             frame.kind === "workspace_state" && frame.scope === keys[index])).toBe(true);
           await expectTheme(current, theme);
           expect(current.url()).toBe(liveGwtProjectUrl(base!, keys[index]));
+          await current.locator('.op-rail__surface[data-surface="agents"]').click();
         }
 
         // A/B isolation and A/A mirror.
         const aWindow = await createLiveShell(page);
         created.push({ page, id: aWindow });
-        await expect(mirror.locator(`.workspace-window[data-id="${aWindow}"]`)).toBeVisible();
+        await mirror.getByRole("tab", { name: "All agents", exact: true }).click();
+        await expect(mirror.locator(`.agent-tile[data-agent-id="${aWindow}"]`)).toBeVisible();
         await expect(other.locator(`.workspace-window[data-id="${aWindow}"]`)).toHaveCount(0);
         const bWindow = await createLiveShell(other);
         created.push({ page: other, id: bWindow });
+        await page.getByRole("tab", { name: "All agents", exact: true }).click();
+        await other.getByRole("tab", { name: "All agents", exact: true }).click();
         await expect(page.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
         await expect(mirror.locator(`.workspace-window[data-id="${bWindow}"]`)).toHaveCount(0);
+
+        // T-103: actual PTY output/status must follow the window owner, and
+        // both A clients must receive it. Split the marker in the command so
+        // echoed input alone cannot satisfy the output assertion.
+        const output = (index: number, id: string, kind = "terminal_output") => frames[index]
+          .filter((frame) => frame.kind === kind && frame.payload.id === id)
+          .map((frame) => Buffer.from(frame.payload.data_base64, "base64").toString()).join("");
+        for (const [current, id, suffix] of [[page, aWindow, "A"], [other, bWindow, "B"]] as const) {
+          await expect.poll(() => frames[current === page ? 0 : 1].some((frame) =>
+            frame.kind === "terminal_status" && frame.payload.id === id)).toBe(true);
+          await expect.poll(() => current.evaluate((id) =>
+            (window as any).__gwtTerminalTestApi.bufferText(id).trim(), id), { timeout: 30_000 })
+            .toMatch(/[^\n]+[>$#%]$/);
+          await sendLiveGwtEvent(current, { kind: "terminal_input", id,
+            data: `node -p "'GWT_SCOPE_' + '${suffix}'"\r` });
+        }
+        await expect.poll(() => output(0, aWindow)).toContain("GWT_SCOPE_A");
+        await expect.poll(() => output(2, aWindow)).toContain("GWT_SCOPE_A");
+        await expect.poll(() => output(1, bWindow)).toContain("GWT_SCOPE_B");
+        const terminalKinds = ["terminal_output", "terminal_status", "terminal_snapshot", "terminal_preview"];
+        const expectTerminalIsolation = () => {
+          for (const [index, foreignId] of [[0, bWindow], [1, aWindow], [2, bWindow]] as const) {
+            expect(frames[index].filter((frame) => terminalKinds.includes(frame.kind))
+              .map((frame) => frame.payload.id)).not.toContain(foreignId);
+          }
+        };
+        expectTerminalIsolation();
         for (const [index, received] of frames.entries()) {
           const snapshots = received.filter((frame) => frame.kind === "workspace_state");
           expect(snapshots.every((frame) => frame.scope === keys[index]
@@ -132,7 +163,10 @@ test.describe("Project-per-Browser-Tab (live)", () => {
         await expect.poll(() => frames[0].filter((frame) => frame.kind === "workspace_state").at(-1)?.scope)
           .toBe(projectA.project_key);
         expect(fullSyncs().slice(1)).toEqual(before.slice(1));
-        await expect(page.locator(`.workspace-window[data-id="${aWindow}"]`)).toBeVisible();
+        await page.getByRole("tab", { name: "All agents", exact: true }).click();
+        await expect(page.locator(`.agent-tile[data-agent-id="${aWindow}"]`)).toBeVisible();
+        await expect.poll(() => output(0, aWindow, "terminal_snapshot")).toContain("GWT_SCOPE_A");
+        expectTerminalIsolation();
 
         // URL stability: workspace actions keep the URL; another Project and
         // Hub links open Projects in new browser tabs.
