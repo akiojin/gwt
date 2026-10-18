@@ -4048,7 +4048,7 @@ fn run_monitor_tier_set<E: CliEnv>(
 
 /// SPEC #3914 FR-011: the pool projection shared by `issue.monitor.profiles`
 /// and the `profiles.set` reply: every candidate with its pool index, summary
-/// and current hold, plus the provider holds and the usage threshold.
+/// and current hold, plus the provider holds.
 fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::Value {
     let monitor =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
@@ -4077,7 +4077,6 @@ fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::
         "launch_profiles": launch_profiles,
         "launch_profile_summary": status.launch_profile_summary,
         "provider_quota_holds": status.provider_quota_holds,
-        "usage_threshold_percent": status.usage_threshold_percent,
     })
 }
 
@@ -4110,12 +4109,12 @@ fn is_valid_prefer_for_tag(tag: &str) -> bool {
 }
 
 /// SPEC #3914 FR-011 / AC-8: the pool must be non-empty, unique per provider,
-/// limited to known agents, carry well-formed routing tags, and the threshold
-/// must be within 1..=100. Shared by the daemon control and the local
+/// limited to known agents, and carry well-formed routing tags.
+/// Shared by the daemon control and the local
 /// fallback so the two can never accept different pools.
 pub fn validate_monitor_profiles_set(
     profiles: &[crate::IssueMonitorLaunchProfile],
-    usage_threshold_percent: Option<u8>,
+    _usage_threshold_percent: Option<u8>,
 ) -> io::Result<()> {
     if profiles.is_empty() {
         return Err(io::Error::new(
@@ -4156,12 +4155,6 @@ pub fn validate_monitor_profiles_set(
             ));
         }
     }
-    if usage_threshold_percent.is_some_and(|percent| !(1..=100).contains(&percent)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "usage_threshold_percent must be between 1 and 100",
-        ));
-    }
     Ok(())
 }
 
@@ -4177,9 +4170,6 @@ fn apply_monitor_profiles_set(
         .advance_effect_authority_epoch()
         .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     prefs.set_launch_profile_pool(profiles.to_vec());
-    if let Some(percent) = usage_threshold_percent {
-        prefs.launch_usage_threshold_percent = percent;
-    }
     Ok(())
 }
 
@@ -4210,7 +4200,6 @@ fn run_monitor_profiles_set<E: CliEnv>(
         serde_json::json!({
             "profiles_set": {
                 "profiles": profiles,
-                "usage_threshold_percent": usage_threshold_percent,
             }
         }),
         std::process::id(),
@@ -10507,7 +10496,6 @@ mod tests {
                 "has_launch_profile": false,
                 "launch_profile_summary": "configure before auto start",
                 "launch_profile_candidates": [],
-                "usage_threshold_percent": 80,
                 // SPEC-3431 FR-024: the offline fallback serializes the same
                 // projection as the daemon branch, so a caller sees one shape
                 // regardless of whether the daemon happens to be publishing.
@@ -11729,7 +11717,11 @@ mod tests {
         assert_eq!(prefs.launch_profile.as_ref(), Some(&pool[0]));
         assert_eq!(pool[0].model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(pool[1].prefer_for, vec!["kind:spec".to_string()]);
-        assert_eq!(prefs.launch_usage_threshold_percent, 70);
+        assert_eq!(prefs.launch_usage_threshold_percent, 80);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&prefs_path).expect("read saved prefs"))
+                .expect("saved prefs json");
+        assert!(saved.get("launch_usage_threshold_percent").is_none());
         assert_eq!(
             prefs.effect_authority_epoch, 1,
             "a pool change revokes prepared effects like the GUI save does"
@@ -11751,7 +11743,7 @@ mod tests {
         .expect("profiles read");
         assert_eq!(code, 0);
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("profiles json");
-        assert_eq!(payload["usage_threshold_percent"], 70);
+        assert!(payload.get("usage_threshold_percent").is_none());
         assert_eq!(payload["launch_profiles"].as_array().map(Vec::len), Some(2));
         assert_eq!(payload["launch_profiles"][0]["index"], 0);
         assert_eq!(payload["launch_profiles"][0]["agent_id"], "codex");
@@ -11933,12 +11925,6 @@ command = "my-agent-cli"
                 "unknown tag prefix",
                 vec![pool_patch("codex", &["repo:gwt"])],
                 None,
-            ),
-            ("threshold zero", vec![pool_patch("codex", &[])], Some(0)),
-            (
-                "threshold over 100",
-                vec![pool_patch("codex", &[])],
-                Some(101),
             ),
         ];
         for (case, profiles, usage_threshold_percent) in rejected {

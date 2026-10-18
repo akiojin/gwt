@@ -406,7 +406,7 @@ function positionIssuesLaunchControls(body) {
 }
 
 export function renderAgentsSettingsPanel(panel, options) {
-  const { project, profiles, status, send, availableAgents = null } = options;
+  const { project, profiles, send, availableAgents = null } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.dirty = "false";
@@ -419,7 +419,7 @@ export function renderAgentsSettingsPanel(panel, options) {
   panel.appendChild(heading);
   const help = document.createElement("p");
   help.className = "settings-help";
-  help.textContent = `${project?.project_root || "Open a project"} · Candidates are tried in order. Changes apply to future launches.`;
+  help.textContent = `${project?.project_root || "Open a project"} · Candidates are tried in order. Switch to the next candidate when a provider rejects a launch due to a rate limit. Changes apply to future launches.`;
   panel.appendChild(help);
   if (!profiles) {
     help.textContent += " Loading launch profiles…";
@@ -475,13 +475,6 @@ export function renderAgentsSettingsPanel(panel, options) {
   });
   const submit = (next, input = null) => {
     panel.candidateSaveTarget = input;
-    const value = Number(threshold.value);
-    if (!Number.isInteger(value) || value < 1 || value > 100) {
-      showFeedback("Usage threshold must be a whole number between 1 and 100.", true);
-      threshold.setAttribute("aria-invalid", "true");
-      threshold.closest(".settings-field")?.after(feedback);
-      return;
-    }
     panel.candidateSubmittedValues = new Map([...panel.querySelectorAll("[data-profile-field]")]
       .map(control => [control, control.type === "checkbox" ? control.checked : control.value]));
     // Structural responses change row identities. Freeze those controls until
@@ -495,7 +488,7 @@ export function renderAgentsSettingsPanel(panel, options) {
       }
     }
     showFeedback("Saving candidates…");
-    send({ kind: "issue_monitor_profiles_set", profiles: next, usage_threshold_percent: value });
+    send({ kind: "issue_monitor_profiles_set", profiles: next });
   };
   const button = (parent, title, action, callback) => {
     const node = document.createElement("button");
@@ -512,10 +505,6 @@ export function renderAgentsSettingsPanel(panel, options) {
   poolHeading.className = "settings-section-heading";
   poolHeading.textContent = "Candidates";
   panel.appendChild(poolHeading);
-  const threshold = field(panel, "Usage threshold (%)", "threshold", status?.usage_threshold_percent ?? 80, "number");
-  threshold.min = "1";
-  threshold.max = "100";
-  threshold.step = "1";
   for (const [index, profile] of profiles.entries()) {
     const row = document.createElement("fieldset");
     row.className = "settings-section";

@@ -980,6 +980,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             project_root: optional_path(params, "project_root")?,
         }),
         "issue.monitor.profiles.set" | "issue.monitor.profiles-set" => {
+            if lookup(params, "usage_threshold_percent").is_some() {
+                return Err(CliParseError::InvalidJson(
+                    "usage_threshold_percent is retired because usage percentages no longer control launch selection; omit this parameter"
+                        .to_string(),
+                ));
+            }
             let Some(profiles) = lookup(params, "profiles") else {
                 return Err(CliParseError::MissingFlag("profiles"));
             };
@@ -994,19 +1000,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                     "profiles must be an array of launch profiles with agent_id: {error}"
                 ))
             })?;
-            let usage_threshold_percent = optional_u64(params, "usage_threshold_percent")?
-                .map(|value| {
-                    u8::try_from(value).map_err(|_| {
-                        CliParseError::InvalidJson(
-                            "usage_threshold_percent must be between 1 and 100".to_string(),
-                        )
-                    })
-                })
-                .transpose()?;
             CliCommand::Issue(IssueCommand::MonitorProfilesSet {
                 project_root: optional_path(params, "project_root")?,
                 profiles,
-                usage_threshold_percent,
+                usage_threshold_percent: None,
             })
         }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
@@ -4751,7 +4748,6 @@ mod tests {
                     {"agent_id": "codex"},
                     {"agent_id": "claude", "model": "opus", "prefer_for": ["kind:spec"]},
                 ],
-                "usage_threshold_percent": 70,
             }),
         );
         let CliCommand::Issue(IssueCommand::MonitorProfilesSet {
@@ -4763,7 +4759,7 @@ mod tests {
             panic!("expected MonitorProfilesSet, got {parsed:?}");
         };
         assert_eq!(project_root, None);
-        assert_eq!(usage_threshold_percent, Some(70));
+        assert_eq!(usage_threshold_percent, None);
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].profile.agent_id, "codex");
         assert_eq!(profiles[0].profile.model, None);
@@ -4800,13 +4796,13 @@ mod tests {
             ),
             CliParseError::InvalidJson(_)
         ));
-        assert!(matches!(
-            err(
+        for threshold in [json!(70), json!(null), json!("lots")] {
+            let error = err(
                 "issue.monitor.profiles.set",
-                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": "lots"})
-            ),
-            CliParseError::InvalidJson(_) | CliParseError::InvalidNumber(_)
-        ));
+                json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": threshold}),
+            );
+            assert!(error.to_string().contains("retired"), "{error}");
+        }
     }
 
     #[test]

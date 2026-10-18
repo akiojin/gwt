@@ -545,8 +545,9 @@ body cannot hold `plan` / `tasks` sections.
   on its first rate-limit refusal, including the last candidate, and the
   refused Issue relaunches on the next candidate at once. No usage reading or
   threshold moves launches ahead of a refusal — an account shown at 100% can
-  still be serving — and `usage_threshold_percent` is accepted and stored
-  but no longer affects selection. `effective_launch_profile` says a switch is
+  still be serving. The retired `usage_threshold_percent` parameter is rejected
+  by JSON operations; legacy frontend inputs and saved values are ignored and
+  never persisted. `effective_launch_profile` says a switch is
   in force and why: `refused_provider`, `refused_at`, the `refusal` wording,
   and the candidate launches use instead. Holds never admit timed probes or
   use usage readings to infer recovery. When all candidates are held and at

@@ -212,7 +212,7 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
     { agent_id: "claude", model: "opus", reasoning: "medium", prefer_for: [] },
   ];
   const render = load("renderAgentsSettingsPanel");
-  render(a, { project: { project_root: "/A", name: "A" }, profiles, send: m => sent.push(m) });
+  render(a, { project: { project_root: "/A", name: "A" }, profiles, status: { usage_threshold_percent: 73 }, send: m => sent.push(m) });
   render(b, { project: { project_root: "/B", name: "B" }, profiles: [{ agent_id: "codex", model: "B model" }], send: () => assert.fail("wrong project") });
   const model = a.querySelector('[aria-label="Model codex"]');
   assert.equal(model.value, "gpt-6");
@@ -225,6 +225,9 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.equal(sent[0].profiles[0].model, "new model");
   assert.equal(sent[0].profiles[0].docker_service, "dev");
   assert.deepEqual(sent[0].profiles[0].prefer_for, ["type:fix"]);
+  assert.equal(Object.hasOwn(sent[0], "usage_threshold_percent"), false);
+  assert.equal(a.querySelector('[data-profile-field="threshold"]'), null);
+  assert.match(a.textContent, /next candidate when a provider rejects a launch due to a rate limit/);
   assert.equal(b.querySelector('[aria-label="Model codex"]').value, "B model");
   a.querySelector('[aria-label="Move down codex"]').click();
   assert.deepEqual(sent.at(-1).profiles.map(p => p.agent_id), ["claude", "codex"]);
@@ -240,10 +243,10 @@ test("candidate fields save exactly once on change, never on incomplete input", 
     profiles: [{ agent_id: "codex", model: "gpt-6" }],
     send: message => sent.push(message),
   });
-  for (const input of panel.querySelectorAll('fieldset [data-profile-field], [data-profile-field="threshold"]')) {
+  for (const input of panel.querySelectorAll('fieldset [data-profile-field]')) {
     if (input.type === "checkbox") input.checked = !input.checked;
     else if (input.localName === "select") input.options[1].selected = true;
-    else input.value = input.dataset.profileField === "threshold" ? "65" : "new-value";
+    else input.value = "new-value";
     const before = sent.length;
     input.dispatchEvent(new Event("input", { bubbles: true }));
     assert.equal(sent.length, before, "typing does not persist partial values");
@@ -253,7 +256,7 @@ test("candidate fields save exactly once on change, never on incomplete input", 
     input.dispatchEvent(new Event("blur"));
     assert.equal(sent.length, before + 1, "blur does not duplicate change");
   }
-  assert.equal(sent.length, 11);
+  assert.equal(sent.length, 10);
   assert.equal(Boolean(panel.querySelector('[data-action="save-profiles"]')), false);
 });
 
@@ -280,14 +283,9 @@ test("a correlated save reconciles untouched fields and preserves newer input", 
   assert.equal(panel.dataset.saving, "false");
   reasoning.value = "high";
   model.dispatchEvent(new Event("change", { bubbles: true }));
-  const threshold = panel.querySelector('[data-profile-field="threshold"]');
-  threshold.value = "0";
-  threshold.dispatchEvent(new Event("change", { bubbles: true }));
   reconcile(panel, { request_id: 7, profiles: [{ agent_id: "codex", model: "normalized", reasoning: "high" }] });
-  assert.equal(threshold.value, "0");
-  assert.equal(threshold.getAttribute("aria-invalid"), "true");
-  assert.equal(panel.dataset.dirty, "true");
-  assert.match(panel.querySelector('[role="alert"]').textContent, /Usage threshold/);
+  assert.equal(panel.dataset.dirty, "false");
+  assert.match(panel.querySelector('[role="status"]').textContent, /Saved candidates/);
 });
 
 test("a rejected autosave identifies the edited field and retains its value", () => {
