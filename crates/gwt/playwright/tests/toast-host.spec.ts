@@ -13,6 +13,52 @@
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { gotoLiveGwt } from "./_helpers/live-gwt";
+
+test("Monitor notifications preserve repeats and typed wording through shared state (isolated checkout)", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await gotoLiveGwt(page, base!);
+  expect(await (await page.request.get(new URL("/app.js", base!).href)).text())
+    .toContain("issueMonitorNotificationModel.update(() => ({ ...event }))");
+  const bell = page.locator("#op-notifications-button");
+  const badge = bell.locator(".op-rail__badge");
+  const drawer = page.locator("#notification-center");
+  const rows = drawer.locator(".notification-center__item");
+  await bell.click();
+  await drawer.getByRole("button", { name: "Clear all", exact: true }).click();
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  // Deterministic receive events exercise binary-served app wiring, without
+  // triggering real autonomous launches or changing the backend protocol.
+  await page.evaluate(() => {
+    const notice = { kind: "issue_monitor_toast", level: "warn", message: "Repeated notice", issue_number: 5016 };
+    for (const payload of [notice, notice, { ...notice, notification_transition: "needs_human", level: "error", message: "Decision needed" }]) {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+    }
+  });
+  await expect(badge).toHaveText("3");
+  await expect(badge).toHaveAttribute("data-has-error", "true");
+  await bell.click();
+  await expect(rows).toHaveCount(3);
+  await expect(rows.first()).toContainText("Needs human #5016");
+  await expect(rows.first()).toHaveAttribute("data-level", "error");
+  await expect(rows.filter({ hasText: "Repeated notice" })).toHaveCount(2);
+  await expect(rows.last()).toContainText("Issue Monitor #5016");
+  await expect(badge).toBeHidden();
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const screenshot = testInfo.outputPath(`monitor-notifications-${theme}.png`);
+  await page.screenshot({ path: screenshot, fullPage: true });
+  await testInfo.attach(`monitor-notifications-${theme}`, { path: screenshot, contentType: "image/png" });
+  await drawer.getByRole("button", { name: "Clear all", exact: true }).click();
+  await expect(rows).toHaveCount(0);
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  await expect(drawer).toBeHidden();
+  expect(errors).toEqual([]);
+});
 
 test.describe("toast-host alerts region (real browser, SPEC #3206 P1)", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
