@@ -1,6 +1,37 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.129.0] - 2026-10-18
+
+### Bug Fixes
+
+- **verify:** Pin recovery target and capture prefixed nextest
+- **web:** Preserve Playwright consumers in unused export audit
+- **deps:** Update ammonia to 4.2.4
+- **execution:** Restore fresh generations across terminal work history
+- **ci:** Activation拒否fixtureとsanitizer依存を修復する
+
+### Features
+
+- **settings:** Save candidate profiles on committed changes
+
+### Miscellaneous Tasks
+
+- **work:** Settle restoration follow-up PR
+- **work:** Record issue 5480 delivery continuation
+- **work:** Record Monitor notification delivery PR
+
+### Refactor
+
+- **web:** Remove unused frontend APIs and stale UI code
+- **ui:** Render Monitor notifications from shared state
+
+### Testing
+
+- **settings:** Align project profile checks with autosave
+- **monitor:** Profile保存fixtureの壁時計依存を解消する
+- 設定プレビューと並行修復fixtureの負荷依存を解消する
+
 ## [9.128.1] - 2026-10-17
 
 ### Bug Fixes
