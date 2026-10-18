@@ -4692,7 +4692,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       // SPEC-3064 Phase 3 (E4): the Settings windows surface (tabbed
-      // Settings body, customAgentsState / agentBackendsState /
+      // Settings body, customAgentsModel / agentBackendsState /
       // systemSettingsModel, Teams channel converters, add-from-preset
       // flow, autostart appliers, and the system-settings interaction
       // guard) moved to /settings-surface.js. app.js keeps the receive()
@@ -4704,15 +4704,13 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
         applyIssueMonitorProfilesError,
-        customAgentsState,
         agentBackendsState,
         systemSettingsInteractionGuard,
         applySystemSettingsEvent,
         applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
-        applyCustomAgentDeleted,
-        applyCustomAgentError,
+        applyCustomAgentsReceiveEvent,
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
@@ -5592,9 +5590,11 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "custom_agent_list":
-            customAgentsState.agents = event.agents || [];
-            customAgentsState.loading = false;
-            frontendUnits.knowledgeSettingsSurface.renderSettingsAgentList();
+          case "custom_agent_saved":
+          case "custom_agent_deleted":
+          case "custom_agent_error":
+          case "backend_connection_result":
+            applyCustomAgentsReceiveEvent(event);
             break;
           case "supported_agent_list":
             applySupportedAgentList(event);
@@ -5649,28 +5649,6 @@ import { createUiStateStore } from "/ui-state-store.js";
               "error",
             );
             break;
-          case "custom_agent_saved":
-            if (event.agent) {
-              const idx = customAgentsState.agents.findIndex(
-                (a) => a.id === event.agent.id,
-              );
-              if (idx >= 0) {
-                customAgentsState.agents[idx] = event.agent;
-              } else {
-                customAgentsState.agents.push(event.agent);
-              }
-            }
-            customAgentsState.loading = false;
-            setSettingsStatus(
-              `Saved custom agent "${event.agent ? event.agent.id : "?"}".`,
-              "success",
-            );
-            break;
-          case "custom_agent_deleted":
-            // SPEC-3064 Phase 3 (E4): body reassigns editingCustomAgentId,
-            // which now lives in the settings surface.
-            applyCustomAgentDeleted(event);
-            break;
           case "board_auth_status":
             applyBoardAuthStatus(event);
             break;
@@ -5691,18 +5669,9 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "autostart_error":
             applyAutostartError(event);
             break;
-          case "backend_connection_result":
-            frontendUnits.knowledgeSettingsSurface.setSettingsStatus(
-              `/v1/models returned ${event.models.length} model(s).`,
-              "success",
-            );
-            break;
           case "custom_agent_preset_list":
             // Reserved for a future "Add from preset" picker — the current
             // UI hardcodes the one preset.
-            break;
-          case "custom_agent_error":
-            applyCustomAgentError(event);
             break;
           // SPEC-3064 Phase 3 (E7): migration modal state and rendering live
           // in the project shell surface.

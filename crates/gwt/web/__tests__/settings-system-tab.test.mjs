@@ -17,6 +17,7 @@ import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
 import { createInteractionGuard } from "../interaction-guard.js";
 import { setControlExplanation } from "../control-explanations.js";
+import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -63,7 +64,7 @@ function createSettingsHarness() {
     "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
       .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {},
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
   );
   const surface = factory({
     send: message => sent.push(message),
@@ -84,6 +85,67 @@ function createSettingsHarness() {
   const body = document.querySelector("main");
   return { surface, body, document, window, sent };
 }
+
+test("Custom Agent replies commit immutable snapshots shared by all mounts and candidates", () => {
+  const { surface, body, document, sent } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
+  surface.applySupportedAgentList({ agents: [{ id: "codex", name: "Codex" }] });
+  surface.applyIssueMonitorProfiles({ project_root: "/projects/A", profiles: [] });
+  const initial = surface.customAgentsModel.read();
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "unavailable", message: "Catalog unavailable" });
+  assert.ok(body.querySelector('[data-settings-candidates] option[value="codex"]'),
+    "a failed first custom-agent read must unblock the known built-in catalog");
+  const agent = { id: "fixture-cli", display_name: "Fixture CLI", command: "fixture", env: { TOKEN: "***REDACTED***" } };
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [agent] });
+  const loaded = surface.customAgentsModel.read();
+  agent.env.TOKEN = "mutated";
+  assert.equal(initial.catalog.loading, true);
+  assert.deepEqual(initial.catalog.agents, []);
+  assert.equal(loaded.catalog.agents[0].env.TOKEN, "***REDACTED***");
+  assert.equal(loaded.catalog.loading, false);
+  for (const host of [body, second]) {
+    assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /Fixture CLI/);
+    assert.ok(host.querySelector('[data-settings-candidates] option[value="fixture-cli"]'));
+  }
+  body.querySelector('[aria-label="Edit agent environment"]').click();
+  const draft = body.querySelector('[aria-label="Environment value"]');
+  draft.value = "unsaved-draft";
+  const reads = sent.filter(message => message.kind === "list_custom_agents").length;
+  surface.resyncSettings();
+  surface.resyncSettings();
+  assert.ok(body.querySelector('[aria-label="Environment value"]') === draft,
+    "recovery reads preserve the existing environment input");
+  assert.equal(draft.value, "unsaved-draft");
+  assert.equal(sent.filter(message => message.kind === "list_custom_agents").length, reads + 2);
+  assert.equal(sent.filter(message => message.kind === "update_custom_agent").length, 0);
+  body.querySelector('[aria-label="Cancel environment editing"]').click();
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { ...agent, display_name: "Updated CLI", env: {} } });
+  assert.equal(loaded.catalog.agents[0].display_name, "Fixture CLI", "past snapshot stays immutable");
+  assert.equal(surface.customAgentsModel.read().catalog.agents.length, 1, "save replaces the existing agent");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { id: "other", command: "other" } });
+  assert.equal(surface.customAgentsModel.read().catalog.agents.length, 2, "save inserts a new agent");
+  surface.applyCustomAgentsReceiveEvent({ kind: "backend_connection_result", models: ["fixture-model"] });
+  for (const host of [body, second]) {
+    assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /Updated CLI/);
+    assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /returned 1 model/);
+  }
+  const detachedText = second.textContent;
+  second.remove();
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_deleted", agent_id: "fixture-cli" });
+  assert.equal(second.textContent, detachedText, "detached mount is no longer rendered");
+  assert.equal(body.querySelector('[data-settings-candidates] option[value="fixture-cli"]'), null);
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "invalid", message: "Fixture rejected" });
+  assert.equal(surface.customAgentsModel.read().catalog.loading, false);
+  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /Error \[invalid\]: Fixture rejected/);
+  const reopened = document.createElement("main");
+  document.body.appendChild(reopened);
+  surface.renderSettingsWindow(reopened, { id: "settings-reopened", title: "Settings" });
+  assert.match(reopened.querySelector('[data-role="settings-scroll"]').textContent, /Fixture rejected/);
+  assert.match(reopened.querySelector('[data-role="settings-scroll"]').textContent, /other/);
+});
 
 test("System replies advance one immutable snapshot for all mounts, including while guarded", () => {
   const { surface, body, document } = createSettingsHarness();
@@ -260,7 +322,7 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
   secondBody.remove();
   const draft = body.querySelector('[aria-label="Allowed labels"]');
   draft.value = "keep-my-draft";
-  assert.equal(surface.customAgentsState.loading, true);
+  assert.equal(surface.customAgentsModel.read().catalog.loading, true);
   sent.length = 0;
   surface.resyncSettings();
   assert.deepEqual(sent, [

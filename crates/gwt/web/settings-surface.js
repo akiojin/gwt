@@ -1,6 +1,6 @@
 // SPEC-3064 Phase 3 (E4) — Settings windows surface extracted from app.js.
 // Owns the Settings window body (tabbed System / Custom Agents / Agent
-// Backends / Usage & Limits surface), the customAgentsState /
+// Backends / Usage & Limits surface), the customAgentsModel /
 // agentBackendsState / systemSettingsModel stores, the Teams channel link
 // converters, the add-from-preset flow, the autostart appliers, and the
 // systemSettingsInteractionGuard that defers destructive System panel
@@ -773,16 +773,15 @@ export function createSettingsSurface({
       // All DOM nodes are built via createElement + textContent to avoid
       // innerHTML with mixed trust. Secrets in env tables are redacted by
       // the backend before reaching this layer (see redact_secrets_in_agent).
-      const customAgentsState = {
-        agents: [],
-        loading: false,
+      const customAgentsModel = createUiStateStore({
+        catalog: { agents: [], loading: false },
         statusMessage: "",
         statusKind: "",
-      };
+      });
       // SPEC-1921 2026-05-18 amendment / FR-099: Settings > Agent Backends
       // per-built-in backend profile state. `backends` is keyed by
       // BuiltinAgentId string ("claudeCode" / "codex"). Mirrors
-      // customAgentsState shape so dispatch + status messages can share
+      // customAgentsModel shape so dispatch + status messages can share
       // helpers like setSettingsStatus.
       const agentBackendsState = {
         backends: { claudeCode: [], codex: [] },
@@ -902,9 +901,9 @@ export function createSettingsSurface({
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, send: dispatch, launchControls,
-            availableAgents: supportedAgentsModel.read().agents === null || customAgentsState.loading ? null : [
+            availableAgents: supportedAgentsModel.read().agents === null || customAgentsModel.read().catalog.loading ? null : [
               ...supportedAgentsModel.read().agents,
-              ...customAgentsState.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
+              ...customAgentsModel.read().catalog.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
             ],
           });
         }
@@ -1004,6 +1003,16 @@ export function createSettingsSurface({
         for (const body of settingsWindowBodies) renderProjectSettings(body);
       });
 
+      customAgentsModel.subscribe(state => state, state => {
+        renderSettingsAgentList(state);
+      });
+      customAgentsModel.subscribe(state => state.catalog, catalog => {
+        // Read recovery must not replace candidate inputs while awaiting a reply.
+        if (catalog.loading) return;
+        purgeDetachedSettingsBodies();
+        for (const body of settingsWindowBodies) renderProjectSettings(body);
+      });
+
       function requestSupportedAgentRefresh() {
         purgeDetachedSettingsBodies();
         if (settingsWindowBodies.size) send({ kind: "list_supported_agents" });
@@ -1027,8 +1036,12 @@ export function createSettingsSurface({
           }));
           send({ kind: "get_autostart_status" });
         }
-        if (recovering || (!customAgentsState.loading && customAgentsState.agents.length === 0)) {
-          customAgentsState.loading = true;
+        const customAgents = customAgentsModel.read().catalog;
+        if (recovering || (!customAgents.loading && customAgents.agents.length === 0)) {
+          // Keep a known catalog and any unsaved environment editor while reads recover.
+          customAgentsModel.update(state => state.catalog.loading || state.catalog.agents.length > 0 ? state : ({ ...state,
+            catalog: { ...state.catalog, loading: true },
+          }));
           send({ kind: "list_custom_agents" });
         }
         for (const agent of ["claudeCode", "codex"]) {
@@ -2189,8 +2202,7 @@ export function createSettingsSurface({
         }
       }
 
-      function renderSettingsAgentList() {
-        issueSettingsModel.update(state => ({ ...state }));
+      function renderSettingsAgentList(state = customAgentsModel.read()) {
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
@@ -2224,26 +2236,26 @@ export function createSettingsSurface({
           });
           scroll.appendChild(addBtn);
 
-          if (customAgentsState.statusMessage) {
+          if (state.statusMessage) {
             const section = createDiv("mock-section");
             const label = createDiv("mock-label");
             label.textContent = "Status";
             label.style.color =
-              customAgentsState.statusKind === "error"
+              state.statusKind === "error"
                 ? "#ff6b6b"
-                : customAgentsState.statusKind === "success"
+                : state.statusKind === "success"
                   ? "#7abf7a"
                   : "#999";
             section.appendChild(label);
             const row = createDiv("mock-row");
             const text = document.createElement("span");
-            text.textContent = customAgentsState.statusMessage;
+            text.textContent = state.statusMessage;
             row.appendChild(text);
             section.appendChild(row);
             scroll.appendChild(section);
           }
 
-          if (customAgentsState.loading && customAgentsState.agents.length === 0) {
+          if (state.catalog.loading && state.catalog.agents.length === 0) {
             const section = createDiv("mock-section");
             const row = createDiv("mock-row");
             const text = document.createElement("span");
@@ -2254,7 +2266,7 @@ export function createSettingsSurface({
             continue;
           }
 
-          if (customAgentsState.agents.length === 0) {
+          if (state.catalog.agents.length === 0) {
             const section = createDiv("mock-section");
             const row = createDiv("mock-row");
             const text = document.createElement("span");
@@ -2265,7 +2277,7 @@ export function createSettingsSurface({
             continue;
           }
 
-          for (const agent of customAgentsState.agents) {
+          for (const agent of state.catalog.agents) {
             const section = createDiv("mock-section");
             const label = createDiv("mock-label");
             label.textContent = agent.display_name || agent.id;
@@ -2327,30 +2339,41 @@ export function createSettingsSurface({
 
 
       function setSettingsStatus(message, kind) {
-        customAgentsState.statusMessage = message;
-        customAgentsState.statusKind = kind;
-        renderSettingsAgentList();
+        customAgentsModel.update(state => ({
+          ...state, statusMessage: message, statusKind: kind,
+        }));
       }
 
-
-
-      // Apply custom-agent responses to the Settings state and status display.
-      function applyCustomAgentDeleted(event) {
-        customAgentsState.agents = customAgentsState.agents.filter(
-          (a) => a.id !== event.agent_id,
-        );
-        if (editingCustomAgentId === event.agent_id) {
+      function applyCustomAgentsReceiveEvent(event) {
+        if (event.kind === "custom_agent_deleted" && editingCustomAgentId === event.agent_id) {
           editingCustomAgentId = null;
         }
-        setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
-      }
-
-      function applyCustomAgentError(event) {
-        customAgentsState.loading = false;
-        setSettingsStatus(
-          `Error [${event.code}]: ${event.message}`,
-          "error",
-        );
+        customAgentsModel.update(state => {
+          switch (event.kind) {
+            case "custom_agent_list":
+              return { ...state, catalog: { agents: event.agents || [], loading: false } };
+            case "custom_agent_saved": {
+              const agents = [...state.catalog.agents];
+              if (event.agent) {
+                const index = agents.findIndex(agent => agent.id === event.agent.id);
+                if (index >= 0) agents[index] = event.agent;
+                else agents.push(event.agent);
+              }
+              return { ...state, catalog: { agents, loading: false },
+                statusMessage: `Saved custom agent "${event.agent ? event.agent.id : "?"}".`, statusKind: "success" };
+            }
+            case "custom_agent_deleted":
+              return { ...state, catalog: { ...state.catalog,
+                  agents: state.catalog.agents.filter(agent => agent.id !== event.agent_id) },
+                statusMessage: `Deleted custom agent "${event.agent_id}".`, statusKind: "success" };
+            case "custom_agent_error":
+              return { ...state, catalog: { ...state.catalog, loading: false },
+                statusMessage: `Error [${event.code}]: ${event.message}`, statusKind: "error" };
+            case "backend_connection_result":
+              return { ...state, statusMessage: `/v1/models returned ${event.models.length} model(s).`, statusKind: "success" };
+            default: return state;
+          }
+        });
       }
 
       return {
@@ -2358,7 +2381,7 @@ export function createSettingsSurface({
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
         applyIssueMonitorProfilesError,
-        customAgentsState,
+        customAgentsModel,
         agentBackendsState,
         systemSettingsModel,
         systemSettingsInteractionGuard,
@@ -2366,8 +2389,7 @@ export function createSettingsSurface({
         applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
-        applyCustomAgentDeleted,
-        applyCustomAgentError,
+        applyCustomAgentsReceiveEvent,
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
