@@ -219,7 +219,6 @@ crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|sibling_gui_fallba
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline|letscan_deadline=Instant::now()+Duration::from_secs(5)|1
 crates/gwt/src/app_runtime/tests/issue_monitor_handoff_tests.rs|app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/issue_monitor_handoff_tests.rs|app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launching|wait_for_recorded_event(,&recorded_events,|events||1
-crates/gwt/src/app_runtime/tests/issue_monitor_handoff_tests.rs|app_runtime_monitor_resume_if_safe_resumes_only_present_provider_conversation|assert!(started.elapsed()<Duration::from_millis(500),,started.elapsed())|1
 crates/gwt/src/app_runtime/tests/issue_monitor_scan_tests.rs|issue_monitor_prefs_snapshot_is_readable_while_its_writer_lock_is_held|letresult=read_rx.recv_timeout(Duration::from_secs(1))|1
 crates/gwt/src/app_runtime/tests/issue_monitor_scan_tests.rs|scheduled_scan_returns_while_generation_recovery_is_running|letresult=completed_rx.recv_timeout(Duration::from_secs(1))|1
 crates/gwt/src/app_runtime/tests/issue_monitor_scan_tests.rs|scheduled_scan_returns_while_generation_recovery_is_running|release_rx.lock().unwrap().recv_timeout(Duration::from_secs(30)).expect()|1
