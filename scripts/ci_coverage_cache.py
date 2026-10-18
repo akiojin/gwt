@@ -21,6 +21,7 @@ import time
 TARGET = "target/llvm-cov-target"
 SIDECAR = "target/coverage-cache-source.json"
 INPUTS = "target/coverage-cache-inputs.json"
+EMBEDDED = (".claude/skills", ".claude/commands")
 ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, NotImplementedError, subprocess.SubprocessError)
 
 
@@ -72,7 +73,7 @@ def ancestors(name):
 def snapshot(root):
     head = git(root, "rev-parse", "HEAD").decode().strip()
     clean = not git(root, "status", "--porcelain=v1", "-z", "--untracked-files=normal")
-    embedded = ("--", ".claude/skills", ".claude/commands")
+    embedded = ("--", *EMBEDDED)
     clean = clean and not git(root, "ls-files", "--others", "--exclude-standard", "-z", *embedded)
     clean = clean and not git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", *embedded)
     files, directories = {}, {}
@@ -154,6 +155,12 @@ def restore(root):
         old, current = load(root, root / SIDECAR), snapshot(root)
         if not current["clean"]:
             raise ValueError("source is not clean")
+        # Stable include_dir tracks existing files, not new directory entries.
+        for prefix in EMBEDDED:
+            previous = {name for name in old["files"] if name.startswith(prefix + "/")}
+            present = {name for name in current["files"] if name.startswith(prefix + "/")}
+            if previous != present:
+                raise ValueError("embedded input membership changed")
         dirty, plan = set(), []
         for name in set(old["files"]) | set(current["files"]):
             previous, present = old["files"].get(name), current["files"].get(name)

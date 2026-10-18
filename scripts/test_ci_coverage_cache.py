@@ -180,6 +180,13 @@ pub fn compile(&mut self)->std::io::Result<()>{Ok(())}}
         self.cli("restore", restored=False)
         self.assertFalse((self.root / "target/llvm-cov-target").exists())
         self.assertTrue((self.root / "target/unrelated/keep").exists())
+        self.write("target/llvm-cov-target/stale", "stale embedded inventory")
+        self.cli("capture")
+        self.write(".claude/skills/demo/added.md", "new embedded input")
+        self.commit()
+        self.cli("restore")
+        self.assertFalse((self.root / "target/llvm-cov-target").exists())
+        self.assertTrue((self.root / "target/unrelated/keep").exists())
 
     def test_capture_refuses_changed_head_and_ignored_embedded_input(self):
         self.cli("restore")
