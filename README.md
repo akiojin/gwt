@@ -283,11 +283,19 @@ Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
 `debug!` to avoid drowning the stream with health probes.
 
-Lifecycle: the running `gwt` process owns the agent / PTY lifetime. Closing a
-browser tab does **not** stop running agents — only `Ctrl-C` / `SIGTERM` asks
-the server to drain PTYs and exit gracefully. The tray-resident process is one
-per OS-login user; a second `gwt` invocation prints the existing URL and exits
-instead of starting a second server.
+Lifecycle: the running `gwt` process owns the agent / PTY lifetime. In the default
+tray mode, closing a browser tab leaves the project and its running agents active;
+reopen its project URL to return to the same workspace. To stop a project, choose
+**Close Project**
+in its page header or beside it in the Hub's open-project list. If agents are
+running, a confirmation dialog lists them: **Cancel** keeps them running, while
+**Close Project** stops that project's runtime and agents. Other projects keep
+running, and every browser tab showing the closed project returns to the Hub.
+
+To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
+`SIGTERM`; gwt drains its PTYs and exits gracefully. The tray-resident process
+is one per OS-login user; a second `gwt` invocation prints the existing URL and
+exits instead of starting a second server.
 
 gwtd operations run through stdin JSON envelopes without opening a GUI window:
 
