@@ -433,6 +433,8 @@ Common windows include:
   Application settings and project settings are labeled separately. Open
   `Issues` for Autonomous, Max active, queue refill and allowed labels, or
   the same Issues section to edit launch profiles and candidate order/preferences.
+  Candidate edits save automatically when committed; text fields save when focus
+  leaves the field. Rejected values stay visible with an inline error.
   Settings has grouped Application/Project navigation and names the target project.
   `System > Auto-apply updates` applies across all projects
   when at least one open project has Autonomous enabled. Legacy project
