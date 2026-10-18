@@ -1,6 +1,48 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.129.3] - 2026-10-18
+
+### Bug Fixes
+
+- **ui:** Preserve guarded system status feedback
+- **test:** Synchronize runtime hook lock profiling fixture
+- **issue-monitor:** Pane 不在の起動と再利用 ID の誤紐付けを防ぐ
+- **issue-monitor:** Skip recovery identity checks for live holders
+- **issue-monitor:** Retain panes after applied ACK replay
+- **issue-monitor:** Preserve active launch preparation
+- **issue-monitor:** Preserve ack deadlines across scheduled scans
+
+### Documentation
+
+- **projects:** Explain explicit project shutdown
+
+### Miscellaneous Tasks
+
+- **work:** Link system settings delivery
+- **work:** Link custom agents delivery
+- **work:** Link agent backends delivery
+- **work:** Runtime healthのPRを関連付け
+
+### Performance
+
+- **gui:** Reduce idle work across twelve agent panes
+
+### Refactor
+
+- **ui:** Render system settings from shared state
+- **ui:** Render custom agents from shared state
+- **ui:** Render agent backends from shared state
+- **ui:** Runtime healthを共有状態から描画
+- **clipboard:** Remove unused tempfile dependency
+
+### Testing
+
+- **scope:** プロジェクト間イベント分離の回帰を補完する
+- **browser-check:** Git環境を分離して検証fixtureを保護する
+- **issue-monitor:** Classify launch worker timing contracts
+- **index:** Borrow expected path in Unix policy regression
+
 ## [9.129.2] - 2026-10-18
 
 ### Bug Fixes
