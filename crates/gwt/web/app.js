@@ -5091,6 +5091,29 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
+      const issueMonitorNotificationModel = createUiStateStore(null);
+      issueMonitorNotificationModel.subscribe(event => event, event => {
+        if (!event) return;
+        const monitorNotice = notificationForTransition({
+          source: "monitor",
+          state: event?.notification_transition,
+          issueNumber: event?.issue_number,
+        });
+        // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
+        // into the notification center history FIRST and independently of
+        // any display path, so events that fire while no Issue window is
+        // open (or while the operator is away) are never lost.
+        // The optional typed transition changes wording on this one surface;
+        // inbox snapshots never generate a second notification.
+        notificationCenter.record({
+          kind: "issue-monitor",
+          level: event?.level,
+          title: monitorNotice?.title || "Issue Monitor",
+          message: event?.message,
+          issueNumber: event?.issue_number,
+        });
+      });
+
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
       const agentAttentionToaster = createAgentAttentionToaster({
         showToast: showAttentionToast,
@@ -5340,27 +5363,9 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "issue_monitor_launch_failed":
             scheduleIssueMonitorProjectionRefresh();
             break;
-          case "issue_monitor_toast": {
-            const monitorNotice = notificationForTransition({
-              source: "monitor",
-              state: event?.notification_transition,
-              issueNumber: event?.issue_number,
-            });
-            // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
-            // into the notification center history FIRST and independently of
-            // any display path, so events that fire while no Issue window is
-            // open (or while the operator is away) are never lost. The backend
-            // The optional typed transition changes wording on this one surface;
-            // inbox snapshots never generate a second notification.
-            notificationCenter.record({
-              kind: "issue-monitor",
-              level: event?.level,
-              title: monitorNotice?.title || "Issue Monitor",
-              message: event?.message,
-              issueNumber: event?.issue_number,
-            });
+          case "issue_monitor_toast":
+            issueMonitorNotificationModel.update(() => ({ ...event }));
             break;
-          }
           case "terminal_output":
             applyPmWindowReceiveEvent(event);
             break;

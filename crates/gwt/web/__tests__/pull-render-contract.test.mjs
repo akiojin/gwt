@@ -10,6 +10,17 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Monitor notification receiver only commits model data and rejects direct history rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const monitorFindings = source => scanModule(source, 'crates/gwt/web/app.js')
+    .filter(finding => finding.root === 'receive' && finding.context === '/issue_monitor_toast');
+  assert.deepEqual(monitorFindings(app), []);
+  const bypass = app.replace('issueMonitorNotificationModel.update(() => ({ ...event }));',
+    'notificationCenter.record(event);');
+  assert.notEqual(bypass, app);
+  assert.ok(monitorFindings(bypass).length > 0);
+});
+
 test("receiver extraction survives strings, templates, and nested breaks", () => {
   const findings = scanModule(`function receive(event) {
     switch (event.kind) {
