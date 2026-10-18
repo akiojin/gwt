@@ -5,10 +5,8 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"/agent_backend_deleted\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/agent_backend_list\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/agent_backend_saved\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/backend_connection_result\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/branch_entries\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/continue_work_outcome\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/custom_agent_list\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/hub_state\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/launch_progress\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/project_agent_aggregate\"]",
@@ -108,12 +106,6 @@
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/picker_started|picker_selected|picker_cancelled|picker_error|picker_busy\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/project_open_error\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/project_opened\"]",
-  "[\"crates/gwt/web/settings-surface.js\",\"receive\",\"/agent_backend_deleted\"]",
-  "[\"crates/gwt/web/settings-surface.js\",\"receive\",\"/agent_backend_error\"]",
-  "[\"crates/gwt/web/settings-surface.js\",\"receive\",\"/agent_backend_saved\"]",
-  "[\"crates/gwt/web/settings-surface.js\",\"receive\",\"/custom_agent_deleted\"]",
-  "[\"crates/gwt/web/settings-surface.js\",\"receive\",\"/custom_agent_error\"]",
-  "[\"crates/gwt/web/settings-surface.js\",\"receive\",\"/custom_agent_saved\"]",
   "[\"crates/gwt/web/terminal-attachments.js\",\"receive\",\"/attachment_progress\"]",
   "[\"crates/gwt/web/terminal-attachments.js\",\"receive\",\"/launch_progress\"]"
 ]

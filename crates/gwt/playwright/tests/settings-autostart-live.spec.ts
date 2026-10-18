@@ -18,6 +18,78 @@ test.describe("Autostart Settings (isolated live backend)", () => {
     });
   });
 
+  test("Custom Agent snapshots render replies and preserve environment save and delete contracts", async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const theme = info.project.name.endsWith("light") ? "light" : "dark";
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      const requests: any[] = [];
+      let transport: WebSocketRoute | undefined;
+      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+        transport = socket;
+        const server = socket.connectToServer();
+        socket.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          // Exercise the receiver and controls without persisting fixture agents.
+          if (["list_custom_agents", "update_custom_agent", "delete_custom_agent"].includes(payload?.kind)) requests.push(payload);
+          else server.send(message);
+        });
+        server.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (!/^custom_agent_(list|saved|deleted|error)$/.test(payload?.kind ?? "")) socket.send(message);
+        });
+      });
+      const reply = (payload: object) => transport!.send(JSON.stringify(payload));
+      const agent = { id: "fixture-cli", display_name: "Fixture CLI", command: "fixture-command",
+        default_args: ["--fixture"], mode_args: { normal: [], continue: ["--continue"], resume: ["--resume"] },
+        skip_permissions_args: [], env: { FIXTURE_TOKEN: "***REDACTED***" } };
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await openLiveGwtProject(page, PROJECT);
+      await page.bringToFront();
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "custom-agents" } })));
+      const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const panel = settings.locator('[data-settings-panel="custom-agents"]');
+      await expect.poll(() => requests.some(request => request.kind === "list_custom_agents")).toBe(true);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await expect(panel).toContainText("Loading custom agents…");
+      reply({ kind: "custom_agent_list", agents: [agent] });
+      await expect(panel).toContainText("Fixture CLI");
+      await panel.getByLabel("Edit agent environment", { exact: true }).click();
+      await expect(panel.getByLabel("Environment value", { exact: true })).toHaveValue("***REDACTED***");
+      await panel.getByLabel("Environment value", { exact: true }).fill("fixture-updated-value");
+      await panel.getByLabel("Save environment changes", { exact: true }).click();
+      await expect(panel).toContainText("Saving custom agent…");
+      await expect.poll(() => requests.filter(request => request.kind === "update_custom_agent").length).toBe(1);
+      expect(requests.find(request => request.kind === "update_custom_agent").agent).toEqual({ ...agent, env: { FIXTURE_TOKEN: "fixture-updated-value" } });
+      reply({ kind: "custom_agent_saved", agent: { ...agent, display_name: "Updated CLI" } });
+      await expect(panel).toContainText("Updated CLI");
+      await expect(panel).toContainText('Saved custom agent "fixture-cli".');
+      reply({ kind: "backend_connection_result", models: ["fixture-model"] });
+      await expect(panel).toContainText("/v1/models returned 1 model(s).");
+      reply({ kind: "custom_agent_error", code: "invalid", message: "Fixture rejected" });
+      await expect(panel).toContainText("Error [invalid]: Fixture rejected");
+      page.once("dialog", dialog => dialog.accept());
+      await panel.getByLabel("Delete agent", { exact: true }).click();
+      await expect.poll(() => requests.some(request => request.kind === "delete_custom_agent" && request.agent_id === agent.id)).toBe(true);
+      reply({ kind: "custom_agent_deleted", agent_id: agent.id });
+      await expect(panel).toContainText("No custom agents configured yet.");
+      await expect(panel).toContainText('Deleted custom agent "fixture-cli".');
+      const id = await settings.getAttribute("data-id");
+      expect(id).toBeTruthy();
+      await page.locator('.op-rail__item[data-surface="agents"]').click();
+      await sendLiveGwtEvent(page, { kind: "close_window", id });
+      await expect(settings).toHaveCount(0, { timeout: 30_000 });
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "custom-agents" } })));
+      reply({ kind: "custom_agent_list", agents: [agent] });
+      await expect(panel).toContainText("Fixture CLI");
+      expect(requests.filter(request => ["update_custom_agent", "delete_custom_agent"].includes(request.kind))).toHaveLength(2);
+      await info.attach(`custom-agents-${theme}`, { body: await settings.screenshot(), contentType: "image/png" });
+      expect(errors).toEqual([]);
+    });
+  });
+
   test("System snapshots preserve guarded controls, drafts and resource update contracts", async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
