@@ -4693,7 +4693,7 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // SPEC-3064 Phase 3 (E4): the Settings windows surface (tabbed
       // Settings body, customAgentsState / agentBackendsState /
-      // systemSettingsState, Teams channel converters, add-from-preset
+      // systemSettingsModel, Teams channel converters, add-from-preset
       // flow, autostart appliers, and the system-settings interaction
       // guard) moved to /settings-surface.js. app.js keeps the receive()
       // case arms, the frontendUnits registry entries, and the delegated
@@ -4706,9 +4706,8 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyIssueMonitorProfilesError,
         customAgentsState,
         agentBackendsState,
-        systemSettingsState,
         systemSettingsInteractionGuard,
-        applyAgentResourceSnapshot,
+        applySystemSettingsEvent,
         applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
@@ -4722,7 +4721,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderSettingsAgentList,
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,
-        renderSystemPanelInAllSettingsWindows,
         renderIndexPanelInAllSettingsWindows,
         requestFullIndexStatusRefresh,
         setSettingsStatus,
@@ -5680,71 +5678,12 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyGlobalUpdateSettings(event);
             break;
           case "system_settings":
-            // SPEC-1933 US-4: backend echoed the on-disk language value.
-            // Issue #2698 PR 4 — defer when user is mid-dropdown.
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "system_settings",
-                language: event.language,
-                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
-                board_provider: event.board_provider,
-                agent_resource: event.agent_resource,
-              })
-            ) {
-              break;
-            }
-            systemSettingsState.language = event.language || "auto";
-            systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              event.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(event.agent_resource);
-            systemSettingsState.loaded = true;
-            // Don't clobber an in-flight "Saving…" status; only seed when no
-            // pending feedback is shown.
-            if (!systemSettingsState.statusMessage || systemSettingsState.statusKind === "info") {
-              systemSettingsState.statusMessage = "";
-              systemSettingsState.statusKind = "";
-            }
-            renderSystemPanelInAllSettingsWindows();
-            break;
           case "system_settings_updated":
-            // Issue #2698 PR 4 — defer when user is mid-dropdown.
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "system_settings_updated",
-                language: event.language,
-                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
-                board_provider: event.board_provider,
-                agent_resource: event.agent_resource,
-              })
-            ) {
-              break;
-            }
-            systemSettingsState.language = event.language || systemSettingsState.language;
-            systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              event.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(event.agent_resource);
-            systemSettingsState.statusMessage = "Saved system settings.";
-            systemSettingsState.statusKind = "success";
-            renderSystemPanelInAllSettingsWindows();
+            applySystemSettingsEvent(event);
             break;
           case "system_settings_error":
             applyGlobalUpdateSettings(event);
-            // Issue #2698 PR 4 — defer when user is mid-dropdown.
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "system_settings_error",
-                message: event.message,
-              })
-            ) {
-              break;
-            }
-            systemSettingsState.statusMessage = event.message || "Failed to update system settings.";
-            systemSettingsState.statusKind = "error";
-            renderSystemPanelInAllSettingsWindows();
+            applySystemSettingsEvent(event);
             break;
           case "autostart_status":
             applyAutostartStatus(event);
