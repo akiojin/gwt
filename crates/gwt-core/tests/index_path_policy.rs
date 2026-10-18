@@ -138,3 +138,64 @@ fn index_path_policy_denies_common_generated_directories() {
         );
     }
 }
+
+#[test]
+fn builtin_path_batch_preserves_order_and_single_path_policy() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/keep.rs"), "keep").unwrap();
+    let paths = [
+        "src/keep.rs",
+        "target/debug/app",
+        ".gwt/config",
+        "src/missing.rs",
+        "src/fixture.SNAP",
+    ]
+    .map(|name| root.join(name))
+    .to_vec();
+    let policy = default_index_path_policy();
+    let expected: Vec<_> = paths
+        .iter()
+        .filter(|path| !policy.is_builtin_denied_path(root, path))
+        .cloned()
+        .collect();
+    assert_eq!(policy.filter_builtin_denied_paths(root, paths), expected);
+    assert_eq!(
+        expected,
+        [root.join("src/keep.rs"), root.join("src/missing.rs")]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn builtin_path_batch_resolves_changed_root_and_file_symlinks() {
+    use std::os::unix::fs::symlink;
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    for root in [&first, &second] {
+        fs::create_dir_all(root.join(".gwt")).unwrap();
+        fs::write(root.join(".gwt/config"), "deny").unwrap();
+        fs::write(root.join("keep.rs"), "keep").unwrap();
+    }
+    let root = dir.path().join("root");
+    let file = first.join("link.rs");
+    symlink(&first, &root).unwrap();
+    symlink(first.join("keep.rs"), &file).unwrap();
+    let policy = default_index_path_policy();
+    assert_eq!(
+        policy.filter_builtin_denied_paths(&root, vec![file.clone()]),
+        [file.clone()]
+    );
+    fs::remove_file(&file).unwrap();
+    symlink(first.join(".gwt/config"), &file).unwrap();
+    assert!(policy
+        .filter_builtin_denied_paths(&root, vec![file])
+        .is_empty());
+    fs::remove_file(&root).unwrap();
+    symlink(&second, &root).unwrap();
+    assert!(policy
+        .filter_builtin_denied_paths(&root, vec![second.join(".gwt/config")])
+        .is_empty());
+}

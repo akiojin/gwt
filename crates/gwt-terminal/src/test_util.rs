@@ -186,6 +186,7 @@ pub struct CountingAllocator;
 
 thread_local! {
     static THREAD_LIVE_BYTES: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static THREAD_ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn add_live(delta: isize) {
@@ -197,11 +198,16 @@ pub fn thread_live_heap_bytes() -> isize {
     THREAD_LIVE_BYTES.with(std::cell::Cell::get)
 }
 
+pub fn thread_allocations() -> usize {
+    THREAD_ALLOCATIONS.with(std::cell::Cell::get)
+}
+
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         let ptr = std::alloc::System.alloc(layout);
         if !ptr.is_null() {
             add_live(layout.size() as isize);
+            THREAD_ALLOCATIONS.with(|cell| cell.set(cell.get().wrapping_add(1)));
         }
         ptr
     }
@@ -215,6 +221,7 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
         let new_ptr = std::alloc::System.realloc(ptr, layout, new_size);
         if !new_ptr.is_null() {
             add_live(new_size as isize - layout.size() as isize);
+            THREAD_ALLOCATIONS.with(|cell| cell.set(cell.get().wrapping_add(1)));
         }
         new_ptr
     }
