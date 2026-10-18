@@ -2685,9 +2685,6 @@ fn try_apply_issue_monitor_control(
             // previous pool must not commit under the new one.
             candidate.advance_effect_authority_epoch()?;
             candidate.set_launch_profile_pool(profiles);
-            if let Some(percent) = usage_threshold_percent {
-                candidate.set_launch_usage_threshold_percent(percent);
-            }
             *monitor = candidate;
             Some(true)
         }
@@ -3580,6 +3577,72 @@ async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
+    let _prefs_budget = pin_prefs_hang_guard();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+    let issue = crate::IssueMonitorIssue {
+        number: 42,
+        title: "Restored agent".to_string(),
+        labels: Vec::new(),
+        state: crate::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: Default::default(),
+        updated_at: None,
+    };
+    monitor.record_candidate(issue.clone());
+    monitor.record_monitor_runtime_counts(
+        101,
+        1001,
+        std::collections::BTreeMap::from([(42, 1)]),
+        "2026-06-29T01:00:00Z",
+    );
+    assert_eq!(monitor.agent_status().active_launches, vec![42]);
+    let before = monitor.prefs();
+    assert!(before.launched_issues.is_empty());
+    crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
+
+    assert!(matches!(
+        try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut monitor,
+            AcceptedIssueMonitorControl::new(IssueMonitorControl::WaitDeclared {
+                issue_number: 42,
+                reason: "verification".to_string(),
+                resume_condition: "lease available".to_string(),
+                at: "2026-06-29T01:00:00Z".to_string(),
+            }),
+        ),
+        IssueMonitorControlCommit::Committed {
+            should_scan: false,
+            authority_changed: false,
+        }
+    ));
+    let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("committed wait");
+    assert_eq!(persisted, monitor.prefs());
+    assert!(persisted.last_control_receipt.is_some());
+    assert_eq!(persisted.launched_issues, before.launched_issues);
+    assert_eq!(persisted.launch_bindings, before.launch_bindings);
+    assert_eq!(
+        persisted.effect_authority_epoch,
+        before.effect_authority_epoch
+    );
+    let mut restored =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+    restored.record_candidate(issue);
+    let status = restored.agent_status_at("2026-06-29T02:00:00Z");
+    assert_eq!(status.active_launches, vec![42]);
+    let waiting = status.inbox[0].waiting.as_ref().expect("wait projected");
+    assert_eq!(waiting.reason, "verification");
+    assert_eq!(waiting.resume_condition, "lease available");
+    assert_eq!(waiting.since, "2026-06-29T01:00:00Z");
+    assert!(waiting.in_force);
+}
+
 fn decode_issue_monitor_control_in_repo(
     payload: serde_json::Value,
     repo_path: Option<&std::path::Path>,
@@ -3722,10 +3785,8 @@ fn decode_issue_monitor_control_in_repo(
                     profiles_set.get("profiles")?.clone(),
                 )
                 .ok()?;
-                let usage_threshold_percent = match profiles_set.get("usage_threshold_percent") {
-                    None | Some(serde_json::Value::Null) => None,
-                    Some(value) => Some(u8::try_from(value.as_u64()?).ok()?),
-                };
+                // Legacy control frames may still carry the retired setting.
+                let usage_threshold_percent = None;
                 crate::cli::issue::validate_monitor_profiles_set(
                     &profiles,
                     usage_threshold_percent,
@@ -4440,9 +4501,6 @@ fn commit_issue_monitor_scan_if_current(
     captured_authority_epoch: u64,
 ) -> bool {
     let _timing = crate::issue_monitor_worker::IssueMonitorScanTiming::start("durable-commit");
-    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
-    );
     if monitor.effect_authority_epoch() != captured_authority_epoch {
         return false;
     }
@@ -4454,13 +4512,30 @@ fn commit_issue_monitor_scan_if_current(
     scanned.set_process_held_issues(monitor.process_held_issues().clone());
     let proposed_effects = scanned.pending_effects().to_vec();
     let proposed_launch_session_strategies = scanned.prefs().queued_launch_session_strategies;
+    // Read trusted runtime evidence before the prefs transaction. Its rebase
+    // can restore a terminal predecessor and the queue entry the scan retired.
+    let execution_owners = monitor
+        .execution_settlement_issue_numbers()
+        .into_iter()
+        .chain(scanned.execution_settlement_issue_numbers())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let execution_observations =
+        crate::issue_monitor_worker::read_execution_observations(project_root, &execution_owners);
+    let execution_observed_at = chrono::Utc::now().to_rfc3339();
     let recovery_baseline = monitor.prefs();
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
+    );
     let transaction =
         crate::mutate_issue_monitor_prefs_recovering(prefs_path, &recovery_baseline, |disk| {
             if disk.effect_authority_epoch != captured_authority_epoch {
                 return false;
             }
             scanned.rebase_daemon_driver_prefs(disk);
+            scanned
+                .reconcile_dead_terminal_launches(&execution_observations, &execution_observed_at);
             // A rebase can import the stale owner this scan just disproved.
             // Revalidate the producing Session after adopting the latest ACKs.
             crate::issue_monitor_worker::reconcile_verified_live_launch_bindings(
@@ -5671,6 +5746,15 @@ fn scan_issue_monitor_once_blocking(
             detail: error.to_string(),
         });
     }
+    timing.next("execution-observation");
+    let execution_observations =
+        crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
+            &mut monitor,
+            &scope.project_root,
+        );
+    // Candidate projection may run again for refreshed cache rows. Retire the
+    // dead predecessor once, before any verified ownership repair can requeue it.
+    let terminal_windows = monitor.reconcile_dead_terminal_launches(&execution_observations, &now);
     timing.next("candidate-reconciliation");
     let monitor_owner = crate::process::current_claim_owner();
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
@@ -5828,10 +5912,19 @@ fn scan_issue_monitor_once_blocking(
     // Recover stuck launches and classify idle windows before admission,
     // sharing the live worktree observations across both decisions (#4862).
     timing.next("window-reconciliation");
-    crate::issue_monitor_worker::reconcile_issue_monitor_windows(
+    let (live_launch_owners, observed_at) =
+        crate::issue_monitor_worker::read_verified_live_launch_owners(
+            &monitor,
+            &scope.project_root,
+            &now,
+        );
+    crate::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
         &mut monitor,
-        &scope.project_root,
+        &execution_observations,
+        &live_launch_owners,
+        &observed_at,
         &now,
+        terminal_windows,
     );
     // SPEC #3200 Phase 7: a scan only proposes kill-switch disarms. Executing
     // `gh pr merge --disable-auto` here would let a stale cloned scan mutate
@@ -10030,52 +10123,6 @@ exit 0
     }
 
     #[test]
-    fn issue_5066_wait_control_rejects_an_untracked_physical_launch_without_a_receipt() {
-        let _prefs_budget = pin_prefs_hang_guard();
-        let temp = TempDir::new().expect("tempdir");
-        let prefs_path = temp.path().join("issue-monitor.json");
-        let mut monitor = crate::IssueMonitorState::with_prefs(
-            crate::IssueMonitorConfig::default(),
-            crate::IssueMonitorPrefs {
-                enabled: true,
-                autonomous_mode: true,
-                ..crate::IssueMonitorPrefs::default()
-            },
-        );
-        monitor.record_candidate(sample_issue_monitor_issue(42));
-        monitor.record_monitor_runtime_counts(
-            101,
-            1001,
-            std::collections::BTreeMap::from([(42, 1)]),
-            "2026-06-29T01:00:00Z",
-        );
-        assert_eq!(monitor.active_issue_numbers(), vec![42]);
-        let before = monitor.prefs();
-        crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
-
-        assert_eq!(
-            apply_control_for_test(
-                &prefs_path,
-                &mut monitor,
-                IssueMonitorControl::WaitDeclared {
-                    issue_number: 42,
-                    reason: "verification".to_string(),
-                    resume_condition: "lease available".to_string(),
-                    at: "2026-06-29T01:00:00Z".to_string(),
-                },
-            ),
-            super::IssueMonitorControlCommit::WaitNotLaunched
-        );
-        assert_eq!(monitor.prefs(), before);
-        assert_eq!(
-            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
-            before
-        );
-        assert!(monitor.autonomous_wait(42).is_none());
-        assert!(monitor.last_control_receipt().is_none());
-    }
-
-    #[test]
     fn issue_monitor_wait_control_invalidates_the_wait() {
         // Issue #4286 AC-1/AC-2: `wait.invalidate:true` from the PM records
         // who / when / why on the declaration and hands the row back to
@@ -12374,7 +12421,7 @@ exit 0
             serde_json::json!({
                 "profiles_set": {
                     "profiles": [{"agent_id": "codex"}, {"agent_id": "claude"}],
-                    "usage_threshold_percent": 70,
+                    "usage_threshold_percent": 0,
                 }
             }),
             std::process::id() + 1,
@@ -12389,7 +12436,7 @@ exit 0
         };
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[1].agent_id, "claude");
-        assert_eq!(*usage_threshold_percent, Some(70));
+        assert_eq!(*usage_threshold_percent, None);
 
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
@@ -12412,13 +12459,16 @@ exit 0
         assert_eq!(pool.len(), 2);
         assert_eq!(pool[0].agent_id, "codex");
         assert_eq!(persisted.launch_profile.as_ref(), Some(&pool[0]));
-        assert_eq!(persisted.launch_usage_threshold_percent, 70);
+        assert_eq!(persisted.launch_usage_threshold_percent, 80);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&prefs_path).expect("saved prefs"))
+                .expect("saved prefs json");
+        assert!(saved.get("launch_usage_threshold_percent").is_none());
         assert_eq!(persisted.effect_authority_epoch, 8);
         assert_eq!(monitor.launch_profile_pool().len(), 2);
 
         for profiles_set in [
             serde_json::json!({"profiles": []}),
-            serde_json::json!({"profiles": [{"agent_id": "codex"}], "usage_threshold_percent": 0}),
             serde_json::json!({"profiles": [{"model": "opus"}]}),
         ] {
             let payload = crate::runtime_daemon_events::issue_monitor_payload(
@@ -21214,7 +21264,7 @@ exit 1
         let _prefs_budget = pin_prefs_hang_guard();
         // SPEC #3914 FR-012 / AC-7: the pool is saved by the GUI / gwtd straight
         // to disk; the daemon's stale in-memory copy must not shrink it back to
-        // one candidate or drop the usage threshold.
+        // one candidate.
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
         let mut on_disk = crate::IssueMonitorPrefs {
@@ -21239,7 +21289,7 @@ exit 1
         assert_eq!(pool[0].agent_id, "codex");
         assert_eq!(pool[1].agent_id, "claude");
         assert_eq!(persisted.launch_profile.as_ref(), Some(&pool[0]));
-        assert_eq!(persisted.launch_usage_threshold_percent, 65);
+        assert_eq!(persisted.launch_usage_threshold_percent, 80);
         assert_eq!(monitor.prefs().launch_profile_pool().len(), 2);
     }
 

@@ -1,7 +1,7 @@
 fn main() {
     emit_build_stamp();
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", not(test)))]
     embed_windows_resources();
 }
 
@@ -22,11 +22,13 @@ fn emit_build_stamp() {
     let commit = git_output(&workspace_root, &["rev-parse", "HEAD"]).unwrap_or_default();
     println!("cargo:rustc-env=GWT_BUILD_COMMIT={commit}");
 
-    let epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs().to_string())
-        .unwrap_or_default();
+    let epoch = build_epoch(
+        &workspace_root,
+        std::env::var("CARGO_LLVM_COV").as_deref() == Ok("1"),
+        std::time::SystemTime::now(),
+    );
     println!("cargo:rustc-env=GWT_BUILD_EPOCH={epoch}");
+    println!("cargo:rerun-if-env-changed=CARGO_LLVM_COV");
 
     // Without these the stamp survives a rebuild and starts lying, which is
     // the exact failure this feature exists to report. HEAD covers a checkout;
@@ -44,6 +46,23 @@ fn emit_build_stamp() {
             println!("cargo:rerun-if-changed={resolved}");
         }
     }
+}
+
+fn build_epoch(
+    workspace_root: &std::path::Path,
+    coverage: bool,
+    build_time: std::time::SystemTime,
+) -> String {
+    // Coverage shards must produce identical objects before their profiles can
+    // be combined. Ordinary builds retain the real build-time release stamp.
+    if coverage {
+        return git_output(workspace_root, &["show", "-s", "--format=%ct", "HEAD"])
+            .unwrap_or_default();
+    }
+    build_time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs().to_string())
+        .unwrap_or_default()
 }
 
 /// `refs/heads/<branch>` for the current branch, or empty when detached.
@@ -69,7 +88,36 @@ fn git_output(workspace_root: &std::path::Path, args: &[&str]) -> Option<String>
     (!text.is_empty()).then_some(text)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instrumented_artifacts_share_the_source_commit_epoch() {
+        let root = std::path::Path::new(".");
+        let expected = git_output(root, &["show", "-s", "--format=%ct", "HEAD"]).unwrap();
+        assert_eq!(build_epoch(root, true, std::time::UNIX_EPOCH), expected);
+        assert_eq!(
+            build_epoch(
+                root,
+                true,
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(123)
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn ordinary_builds_keep_the_actual_build_time() {
+        let build_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(123);
+        assert_eq!(
+            build_epoch(std::path::Path::new("."), false, build_time),
+            "123"
+        );
+    }
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
 fn embed_windows_resources() {
     println!("cargo:rerun-if-changed=../../assets/icons/icon.ico");
 

@@ -4790,14 +4790,8 @@ fn pm_successor_recovery_checkout(
             },
         };
         let expected_owner = super::workspace::workspace_owner_label(owner);
-        if [parent, target].iter().any(|item| {
-            item.owner.as_deref().is_some_and(|known| {
-                known != expected_owner
-                    && !work::can_upgrade_work_owner(Some(known), Some(&expected_owner))
-            })
-        }) {
-            return Err("known Work owner conflicts with the execution owner".into());
-        }
+        // Recovery authority comes from the PM and this proven checkout,
+        // not the historical labels on the invalid successor being retired.
         let resolved = (owner, expected_owner, container);
         if selected
             .as_ref()
@@ -7737,7 +7731,7 @@ impl AppRuntime {
                             locked_parent,
                             &locked_target,
                             container.clone(),
-                            &expected_owner,
+                            super::workspace::SuccessorSupersessionAuthority::RegisteredPm,
                             &live_session_ids,
                             chrono::Utc::now(),
                         )?;
@@ -7752,7 +7746,9 @@ impl AppRuntime {
                             &context.project_root,
                             container.branch.as_deref(),
                             container.worktree_path.as_deref(),
-                            Some(&expected_owner),
+                            // Diagnose structural occupancy independently of
+                            // the foreign owner this PM recovery is repairing.
+                            None,
                         )?;
                         if current.as_deref() != Some(locked_parent.id.as_str()) {
                             return Err(gwt_core::GwtError::Other(

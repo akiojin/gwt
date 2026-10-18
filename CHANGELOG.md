@@ -1,6 +1,187 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.129.2] - 2026-10-18
+
+### Bug Fixes
+
+- **settings:** Remove unused monitor usage threshold
+- **web:** Open cloned projects in their own browser tabs
+- **ci:** Support coverage on pre-shard pull request heads
+- **ci:** Validate both coverage transports
+- **issue-monitor:** Explain admission and slot accounting
+
+### Miscellaneous Tasks
+
+- **work:** Record clone auto-open pull request
+- **work:** Attach board auth delivery PR
+- **voice:** 未使用の依存宣言を削除する
+
+### Refactor
+
+- **ui:** Render board auth settings from shared state
+
+### Testing
+
+- **monitor:** Remove wall-clock gate from provider resume fixture
+- **ui:** Stabilize board auth screenshot capture
+
+## [9.129.1] - 2026-10-18
+
+### Bug Fixes
+
+- **launch:** Recover owner-conflicting invalid successors
+
+### Miscellaneous Tasks
+
+- **work:** Record merged Monitor notification delivery
+- **work:** Record autostart PR delivery checkpoint
+- **work:** Record autostart delivery continuation
+- **work:** Attach inherited autostart PR to successor work
+
+### Refactor
+
+- **ui:** Render autostart settings from shared state
+
+### Testing
+
+- **core:** Stabilize scoped tracing capture with cold callsites
+
+## [9.129.0] - 2026-10-18
+
+### Bug Fixes
+
+- **verify:** Pin recovery target and capture prefixed nextest
+- **web:** Preserve Playwright consumers in unused export audit
+- **deps:** Update ammonia to 4.2.4
+- **execution:** Restore fresh generations across terminal work history
+- **ci:** Activation拒否fixtureとsanitizer依存を修復する
+
+### Features
+
+- **settings:** Save candidate profiles on committed changes
+
+### Miscellaneous Tasks
+
+- **work:** Settle restoration follow-up PR
+- **work:** Record issue 5480 delivery continuation
+- **work:** Record Monitor notification delivery PR
+
+### Refactor
+
+- **web:** Remove unused frontend APIs and stale UI code
+- **ui:** Render Monitor notifications from shared state
+
+### Testing
+
+- **settings:** Align project profile checks with autosave
+- **monitor:** Profile保存fixtureの壁時計依存を解消する
+- 設定プレビューと並行修復fixtureの負荷依存を解消する
+
+## [9.128.1] - 2026-10-17
+
+### Bug Fixes
+
+- **hook:** Bound cold live delivery without losing prompt deadlines
+- **search:** 変更可能な索引 reader を要求ごとに閉じる
+- **ci:** Install rustfmt for coverage verification fixtures
+- **workspace:** Preserve transaction data during cleanup
+- **update:** Confirm active work impact before restarting
+- **update:** Keep apply deferred until wait scheduling succeeds
+- **verify:** Keep pool snapshots and FIFO diagnostics consistent
+- **test:** Synchronize coverage-sensitive runtime fixtures
+- **issue-monitor:** Release terminal dead-host launch slots
+- **issue-monitor:** Preserve live successor idle diagnostics
+- **issue-monitor:** Clarify handoff recovery guidance
+- **issue-monitor:** Reclaim count-only dead-host slots
+- **index:** Expose resident query worker model readiness
+- **gui:** Resync only on foreground transitions
+- **gui:** Recover on native foreground notifications
+- **gui:** Discard native websocket backlog on foreground
+- **gui:** Keep live input during snapshot recovery
+- **gui:** Consolidate recovery transport operations
+- **gui:** Recover foreground during pending socket replacement
+- **verify:** Restore operational gwtd after Windows test matrices
+- **gui:** Keep judgment holds out of active kanban
+- **gui:** Preserve current launches over blocked work
+- **gui:** Normalize supported agent versions and align table actions
+- **git:** Serialize worktree branch configuration
+- **monitor:** Align wait admission with active runtime accounting
+- **verify:** Allow five minutes for the known Node fixture suite
+- **verify:** Normalize environment-prefixed cargo commands
+- **daemon:** Isolate blocking spawns and fence scan handovers
+
+### Documentation
+
+- **hook:** Clarify timeout measurement and record delivery
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 5542 delivery audit
+- **work:** Issue #5542 の配信記録を更新
+- **work:** PR #5661 の配信記録を保存
+- **work:** Record Issue 5598 delivery state
+- **work:** Record close project pull request
+- **work:** Preserve resumed session audit events
+- **work:** Record issue 5310 delivery continuation
+- **work:** Record issue 5310 resumed delivery
+- **work:** Record UI trace feedback pull request
+- **work:** Retain verification session resume history
+- **work:** Retain late session resume history
+- **work:** Retain verification planning resume history
+- **work:** Record coverage fixture delivery state
+- **work:** Record PR delivery reference
+- **work:** Record issue-5531 delivery verification
+- **work:** Record issue-5531 delivery audit
+- **work:** Preserve external resume settlement event
+- **work:** Exclude unbound launch residues from delivery
+- **work:** Record coverage pull request
+- **work:** Record pull request link
+
+### Performance
+
+- **search:** 同時検索の準備処理と待機負荷を削減
+- **gui:** Bound websocket backlog and recover snapshots
+
+### Refactor
+
+- **ui:** Render close project preview from shared state
+- **ui:** Render UI trace feedback from shared state
+
+### Testing
+
+- **hook:** Record concurrent cold delivery evidence
+- **hook:** 計測バイナリの再現可能な準備手順を追加
+- **monitor:** Claim結果の検証時計を固定
+- **search:** Keep regression tests within repository CI contracts
+- **workspace:** Make lock deadline assertion deterministic
+- **skills:** Avoid inherited write descriptors in hook fixtures
+- **monitor:** Isolate profile save contents from fsync timing
+- **hygiene:** Reject unclassified coverage time dependencies
+- **monitor:** Isolate profile save contents from fsync timing
+- **issue-monitor:** Retain the live holder cleanup fixture
+- **web:** Normalize dynamic import paths to file URLs
+- **index:** Separate model readiness from latency acceptance
+- **gui:** Isolate recovery timing from trace snapshots
+- **gui:** Record integrated background recovery evidence
+- **gui:** Align receive recovery contracts with upstream
+- **gui:** Refresh receive recovery evidence after develop integration
+- **verify:** Align Node admission timeout expectation
+
+### Ci
+
+- Decouple lint and shard instrumented coverage
+- Fix coverage shard evidence and toolchain setup
+- Align coverage toolchain and pre-pr fixture
+- Budget flake detection across compilation and tests
+- Bound coverage load and reduce flake compilation
+- Restore coverage concurrency after fixture fixes
+- Move paired Windows timing measurements off the PR path
+
+### Revert
+
+- **ci:** Use the delivered upstream coverage prerequisite
+
 ## [9.128.0] - 2026-10-16
 
 ### Bug Fixes

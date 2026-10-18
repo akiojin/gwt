@@ -1641,7 +1641,7 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains("function handleSocketOpen()"),
+        html.contains("function handleSocketOpen(recoverSnapshots = false)"),
         "expected socket open flow to live in a named handler",
     );
 
@@ -1650,17 +1650,19 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
         "expected socket message flow to live in a named handler",
     );
     assert!(
-        html.contains("function handleSocketClose()"),
+        html.contains("function handleSocketClose(recoverSnapshots = false)"),
         "expected socket close flow to live in a named handler",
     );
     assert!(
-        html.contains("function installSocketEventHandlers(activeSocket)"),
+        html.contains(
+            "function installSocketEventHandlers(activeSocket, recoverSnapshots = false)"
+        ),
         "expected socket listener registration to be isolated behind an installer",
     );
     assert!(
-        html.contains("[\"open\", handleSocketOpen]")
+        html.contains("[\"open\", () => handleSocketOpen(recoverSnapshots)]")
             && html.contains("[\"message\", handleSocketMessage]")
-            && html.contains("[\"close\", handleSocketClose]")
+            && html.contains("[\"close\", () => handleSocketClose(recoverSnapshots)]")
             && html.contains("activeSocket.addEventListener(kind, (event) => {")
             && html.contains("if (socket === activeSocket) handler(event);"),
         "expected named socket handlers to ignore events from replaced connections",
@@ -1673,18 +1675,18 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
     // Readiness and the ephemeral attention report precede queue replay, and
     // replay must match the immutable connection scope.
     let open_flow = regex::Regex::new(
-        r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
+        r#"function handleSocketOpen\(recoverSnapshots = false\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*if \(socketProjectKey\) projectPageMetadata\.reportAttention\(\);\s*recoveryCenterController\?\.reconnect\(\);\s*for \(let index = 0; index < pendingMessages\.length;\) \{\s*const pending = pendingMessages\[index\];\s*if \(pending\.projectKey !== socketProjectKey\) \{\s*index \+= 1;\s*continue;\s*\}\s*pendingMessages\.splice\(index, 1\);\s*socket\.send\(JSON\.stringify\(pending\.message\)\);\s*\}"#,
     )
     .expect("valid regex");
 
     assert!(
-        html.contains("function connectSocket()"),
+        html.contains("function connectSocket(force = false)"),
         "expected socket transport bootstrap helper in embedded html",
     );
     assert!(
             html.contains("socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;")
                 && html.contains("setConnectionState(false);")
-                && html.contains("installSocketEventHandlers(socket);"),
+                && html.contains("installSocketEventHandlers(socket, force === true);"),
             "expected socket bootstrap to create the websocket, reset connection state, and install handlers",
         );
     assert!(
@@ -2299,10 +2301,7 @@ fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_r
     let load_request_block = html
         .split("function requestKnowledgeBridge")
         .nth(1)
-        .and_then(|tail| {
-            tail.split("function scheduleKnowledgeRelatedWorkRefresh")
-                .next()
-        })
+        .and_then(|tail| tail.split("\n      }").next())
         .expect("knowledge load request block");
     assert!(
         load_request_block.contains("state.loadSelectionGeneration = state.selectionGeneration;")
@@ -3809,7 +3808,7 @@ fn embedded_web_completed_work_resume_surfaces_open_input_capable_sessions() {
         "expected the Work Resume picker to exclude fresh-start metadata and open sessions as plain input-capable resumes",
     );
     assert!(
-        wizard.contains("export function launchWizardStartMethodIntent")
+        wizard.contains("function launchWizardStartMethodIntent")
             && wizard.contains("button.dataset.executionIntent = startMethodIntent")
             && !wizard.contains("History only"),
         "expected legacy conversation methods in the Launch Wizard to reopen conversations without an observation-only notice",
@@ -4007,13 +4006,15 @@ fn embedded_web_issue_monitor_candidate_pool_contract() {
         "issue_monitor_profiles_set",
         "Add candidate",
         "prefer_for",
-        "usage_threshold_percent",
+        "next candidate when a provider rejects a launch due to a rate limit",
     ] {
         assert!(
             surface.contains(contract),
             "missing pool contract: {contract}"
         );
     }
+    assert!(!surface.contains("usage_threshold_percent"));
+    assert!(!surface.contains("Usage threshold (%)"));
     let css = static_asset_text("/styles/components.css");
     let control_styles = js_braced_block_after(css, ":root[data-theme] .settings-input")
         .expect("Settings input styles");

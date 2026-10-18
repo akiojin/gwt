@@ -357,6 +357,13 @@ export function renderProjectCloneModal({
   if (current.error) {
     body.appendChild(createNode("div", "clone-project-error", current.error));
   }
+  if (current.existingProjectUrl) {
+    const link = createNode("a", "", "Open existing project");
+    link.href = current.existingProjectUrl;
+    link.target = "_blank";
+    link.rel = "noopener";
+    body.appendChild(link);
+  }
 
   const selectedUrl =
     current.mode === "search" ? current.selectedRepositoryUrl : current.url;

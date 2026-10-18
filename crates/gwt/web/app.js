@@ -413,6 +413,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       let inputTraceSeq = 0;
 
       let socket = null;
+      let socketInputHandoff = null;
       let hubSocket = null;
       let hubReconnectTimer = null;
       const pendingHubMessages = [];
@@ -823,6 +824,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         setIndexStatus,
         handleProjectIndexSearchResults,
         handleProjectIndexSearchError,
+        resyncProjectIndexSearch,
         mountProjectIndexSurface,
         disposeIndexSearchWindow,
         pendingIndexOpenTargetsByPreset,
@@ -941,6 +943,15 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       function send(message) {
+        const liveInputHandoff = (message.kind === "terminal_input" || message.kind === "pane_send_input")
+          && socket?.readyState !== WebSocket.OPEN
+          && socketInputHandoff?.projectKey === activeProjectKey()
+          && socketProjectKey === activeProjectKey()
+          && socketInputHandoff.socket.readyState === WebSocket.OPEN;
+        return sendOnSocket(message, liveInputHandoff ? socketInputHandoff.socket : socket);
+      }
+
+      function sendOnSocket(message, socket) {
         if (isHubNavigationMessage(message.kind)) {
           if (hubSocket?.readyState === WebSocket.OPEN) {
             hubSocket.send(JSON.stringify(message));
@@ -1262,13 +1273,41 @@ import { createUiStateStore } from "/ui-state-store.js";
       // Project. Show the path-free not-found view and stop reconnecting.
       function showProjectRouteNotFound() {
         routeProjectMissing = true;
-        for (const connection of [socket, hubSocket]) {
+        for (const connection of [socket, hubSocket, socketInputHandoff?.socket]) {
           try { connection?.close(); } catch { /* already closed */ }
         }
+        socketInputHandoff = null;
         renderRouteNotFound(document);
       }
 
-      function handleSocketOpen() {
+      function resyncSocketSurfaces() {
+        if (!socketProjectKey) return;
+        const ids = (activeWorkspace()?.windows || []).map((entry) => entry.id);
+        resyncBoardLogs(ids);
+        resyncBranches(ids);
+        resyncKnowledge(ids);
+        resyncProfile(ids);
+        resyncProjectIndexSearch(ids);
+        resyncSettings();
+      }
+
+      function requestSocketSnapshots() {
+        if (socket?.readyState !== WebSocket.OPEN) return;
+        send({ kind: "frontend_ready" });
+        recoveryCenterController?.reconnect();
+        resyncSocketSurfaces();
+        if (socketProjectKey) requestVisiblePmReports();
+      }
+
+      function closeSocketInputHandoff() {
+        const handoff = socketInputHandoff;
+        socketInputHandoff = null;
+        handoff?.socket.close();
+      }
+
+      function handleSocketOpen(recoverSnapshots = false) {
+        closeSocketInputHandoff();
+        socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcherGeneration += 1;
         const ownGeneration = socketReceiveDispatcherGeneration;
         socketReceiveDispatcher = createSocketReceiveDispatcher({
@@ -1282,6 +1321,13 @@ import { createUiStateStore } from "/ui-state-store.js";
             traceUi(kind, fields);
           },
           shouldTrace: uiTraceWiring.isTracing,
+          onResync: (reason) => {
+            if (ownGeneration !== socketReceiveDispatcherGeneration) return;
+            // A native receive backlog precedes snapshots on the old socket.
+            // Replace the project transport on foreground recovery to discard it.
+            if ((reason === "visible" || reason === "overflow") && socketProjectKey) connectSocket(true);
+            else requestSocketSnapshots();
+          },
           // Issue #3365 — a receive() failure keeps the event stream alive but
           // must not stay console-only: surface it as a degradation notice.
           onReceiveError: (error, eventKind) => {
@@ -1308,6 +1354,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
+        if (recoverSnapshots === true) resyncSocketSurfaces();
         syncRunningBranchCleanups();
         requestVisiblePmReports();
         requestSupportedAgentRefresh();
@@ -1382,22 +1429,23 @@ import { createUiStateStore } from "/ui-state-store.js";
         return false;
       }
 
-      function handleSocketClose() {
+      function handleSocketClose(recoverSnapshots = false) {
         closeProjectController.connectionLost();
         socketReceiveDispatcherGeneration += 1;
+        socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
         setConnectionState(false);
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
         }
-        reconnectTimer = window.setTimeout(connectSocket, 1000);
+        reconnectTimer = window.setTimeout(() => connectSocket(recoverSnapshots === true), 1000);
       }
 
-      function installSocketEventHandlers(activeSocket) {
+      function installSocketEventHandlers(activeSocket, recoverSnapshots = false) {
         for (const [kind, handler] of [
-          ["open", handleSocketOpen],
+          ["open", () => handleSocketOpen(recoverSnapshots)],
           ["message", handleSocketMessage],
-          ["close", handleSocketClose],
+          ["close", () => handleSocketClose(recoverSnapshots)],
         ]) {
           activeSocket.addEventListener(kind, (event) => {
             if (socket === activeSocket) handler(event);
@@ -1454,25 +1502,34 @@ import { createUiStateStore } from "/ui-state-store.js";
         });
       }
 
-      function connectSocket() {
+      function connectSocket(force = false) {
         if (routeProjectMissing) return;
         const projectKey = activeProjectKey();
         connectHubSocket();
-        if (socket && socket.readyState <= WebSocket.OPEN
+        if (force !== true && socket && socket.readyState <= WebSocket.OPEN
           && socketProjectKey === projectKey) {
           return;
         }
         const previousSocket = socket;
+        if (force === true && socketProjectKey === projectKey) {
+          if (previousSocket?.readyState === WebSocket.OPEN && previousSocket !== hubSocket) {
+            closeSocketInputHandoff();
+            socketInputHandoff = { socket: previousSocket, projectKey };
+          }
+        } else closeSocketInputHandoff();
+        if (force === true) closeProjectController.connectionLost();
         socket = null;
         socketReceiveDispatcherGeneration += 1;
+        socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = null;
-        if (previousSocket && previousSocket !== hubSocket && socketProjectKey) previousSocket.close();
+        if (previousSocket && previousSocket !== hubSocket && socketProjectKey
+          && previousSocket !== socketInputHandoff?.socket) previousSocket.close();
         socketProjectKey = projectKey;
         socket = projectKey ? new WebSocket(websocketUrl(projectKey)) : hubSocket;
         setConnectionState(false);
-        if (projectKey) installSocketEventHandlers(socket);
+        if (projectKey) installSocketEventHandlers(socket, force === true);
         else if (socket.readyState === WebSocket.OPEN) handleSocketOpen();
       }
 
@@ -1742,11 +1799,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         return String(windowData?.dynamic_title_detail || "").trim();
       }
 
-      function windowActivityLabel(windowData) {
-        const title = windowDisplayTitle(windowData);
-        const detail = String(windowData?.dynamic_title_detail || "").trim();
-        return detail && detail !== title ? `${title} · ${detail}` : title;
-      }
 
       // SPEC-3064 Phase 3 (E7): escapeHtml moved to
       // /project-shell-surface.js with the Window List renderer (its only
@@ -1962,9 +2014,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       }
 
-      function openWorkspaceOverview() {
-        focusOrSpawnPreset("issue");
-      }
 
       // Issue #4777: fixed surfaces share the rail and optional split host.
       function openSurface(surface) {
@@ -2073,6 +2122,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         onClosed: (projectKey) => {
           if (projectKey !== routeProjectKey) return;
           routeProjectMissing = true;
+          closeSocketInputHandoff();
           if (reconnectTimer) clearTimeout(reconnectTimer);
           if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
           const oldSocket = socket;
@@ -2218,13 +2268,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       // the pointerup.
       const RESIZE_STALENESS_TIMEOUT_MS = 30_000;
 
-      function hasPendingTerminalViewportRefresh(windowId) {
-        const runtime = terminalMap.get(windowId);
-        return (
-          runtime?.viewportRefreshPending === true ||
-          terminalViewportRefreshScheduler?.hasPending?.(windowId) === true
-        );
-      }
 
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
@@ -2760,12 +2803,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       }
 
-      function compactPathLabel(value) {
-        if (!value) return "";
-        const parts = String(value).split(/[\\/]+/).filter(Boolean);
-        if (parts.length <= 2) return String(value);
-        return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
-      }
 
       function appendMeta(container, value) {
         if (!value) return;
@@ -3726,6 +3763,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       const {
         ensureProfileState,
         requestProfile,
+        resyncProfile,
         renderProfile,
         createProfile,
         setActiveProfile,
@@ -3820,6 +3858,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
+        resyncKnowledge,
         scheduleKnowledgeRelatedWorkRefresh,
         resumeKnowledgeEventRefresh,
         scheduleKnowledgeSearch,
@@ -3886,7 +3925,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           workspaceOverviewSurface.renderInto(parent, windowId, options),
         formatWorkLifecycleLabel: formatLifecycleStateLabel,
         continueWork: (workId, bounds) => continueWorkDispatcher.dispatch(workId, bounds),
-        openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
         // Lazy: the Branches & cleanup surface is constructed after this factory.
         openWorkspaceCleanup: (candidate, sourceWindowId) =>
           openWorkspaceCleanup(candidate, sourceWindowId),
@@ -3919,6 +3957,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         ensureBoardState,
         ensureLogState,
         requestBoard,
+        resyncBoardLogs,
         requestOlderBoardEntries,
         requestLogs,
         renderBoard,
@@ -4097,6 +4136,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         branchListStateMap,
         ensureBranchListState,
         requestBranches,
+        resyncBranches,
         renderBranches,
         syncBranchSelectionState,
         openBranchCleanupModal,
@@ -4137,7 +4177,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         send,
         windowMap,
         workspaceWindowById,
-        openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
         focusBoardEntry,
         getResumeBounds: () => visibleBounds(),
         launchPending,
@@ -4653,8 +4692,8 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       // SPEC-3064 Phase 3 (E4): the Settings windows surface (tabbed
-      // Settings body, customAgentsState / agentBackendsState /
-      // systemSettingsState, Teams channel converters, add-from-preset
+      // Settings body, customAgentsModel / agentBackendsState /
+      // systemSettingsModel, Teams channel converters, add-from-preset
       // flow, autostart appliers, and the system-settings interaction
       // guard) moved to /settings-surface.js. app.js keeps the receive()
       // case arms, the frontendUnits registry entries, and the delegated
@@ -4665,27 +4704,24 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
         applyIssueMonitorProfilesError,
-        customAgentsState,
         agentBackendsState,
-        systemSettingsState,
         systemSettingsInteractionGuard,
-        applyAgentResourceSnapshot,
+        applySystemSettingsEvent,
+        applyBoardAuthStatus,
         applyAutostartStatus,
         applyAutostartError,
-        applyCustomAgentDeleted,
-        applyCustomAgentError,
+        applyCustomAgentsReceiveEvent,
         applySupportedAgentList,
         applySupportedAgentMaintenance,
         requestSupportedAgentRefresh,
+        resyncSettings,
         renderSettingsWindow,
         renderSettingsAgentList,
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,
-        renderSystemPanelInAllSettingsWindows,
         renderIndexPanelInAllSettingsWindows,
         requestFullIndexStatusRefresh,
         setSettingsStatus,
-        completeAddFromPreset,
       } = createSettingsSurface({
         send,
         createNode,
@@ -5028,6 +5064,29 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
+      const issueMonitorNotificationModel = createUiStateStore(null);
+      issueMonitorNotificationModel.subscribe(event => event, event => {
+        if (!event) return;
+        const monitorNotice = notificationForTransition({
+          source: "monitor",
+          state: event?.notification_transition,
+          issueNumber: event?.issue_number,
+        });
+        // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
+        // into the notification center history FIRST and independently of
+        // any display path, so events that fire while no Issue window is
+        // open (or while the operator is away) are never lost.
+        // The optional typed transition changes wording on this one surface;
+        // inbox snapshots never generate a second notification.
+        notificationCenter.record({
+          kind: "issue-monitor",
+          level: event?.level,
+          title: monitorNotice?.title || "Issue Monitor",
+          message: event?.message,
+          issueNumber: event?.issue_number,
+        });
+      });
+
       // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
       const agentAttentionToaster = createAgentAttentionToaster({
         showToast: showAttentionToast,
@@ -5110,7 +5169,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderAgentBackendsPanel,
         renderAgentBackendsPanelInAllSettingsWindows,
         setSettingsStatus,
-        completeAddFromPreset,
         persistKanbanHideDone: writeKanbanHideDonePreference,
       });
 
@@ -5277,27 +5335,9 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "issue_monitor_launch_failed":
             scheduleIssueMonitorProjectionRefresh();
             break;
-          case "issue_monitor_toast": {
-            const monitorNotice = notificationForTransition({
-              source: "monitor",
-              state: event?.notification_transition,
-              issueNumber: event?.issue_number,
-            });
-            // SPEC #3206 v2 FR-011 / FR-012: every autonomous event is recorded
-            // into the notification center history FIRST and independently of
-            // any display path, so events that fire while no Issue window is
-            // open (or while the operator is away) are never lost. The backend
-            // The optional typed transition changes wording on this one surface;
-            // inbox snapshots never generate a second notification.
-            notificationCenter.record({
-              kind: "issue-monitor",
-              level: event?.level,
-              title: monitorNotice?.title || "Issue Monitor",
-              message: event?.message,
-              issueNumber: event?.issue_number,
-            });
+          case "issue_monitor_toast":
+            issueMonitorNotificationModel.update(() => ({ ...event }));
             break;
-          }
           case "terminal_output":
             applyPmWindowReceiveEvent(event);
             break;
@@ -5550,9 +5590,11 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "custom_agent_list":
-            customAgentsState.agents = event.agents || [];
-            customAgentsState.loading = false;
-            frontendUnits.knowledgeSettingsSurface.renderSettingsAgentList();
+          case "custom_agent_saved":
+          case "custom_agent_deleted":
+          case "custom_agent_error":
+          case "backend_connection_result":
+            applyCustomAgentsReceiveEvent(event);
             break;
           case "supported_agent_list":
             applySupportedAgentList(event);
@@ -5607,165 +5649,29 @@ import { createUiStateStore } from "/ui-state-store.js";
               "error",
             );
             break;
-          case "custom_agent_saved":
-            if (event.agent) {
-              const idx = customAgentsState.agents.findIndex(
-                (a) => a.id === event.agent.id,
-              );
-              if (idx >= 0) {
-                customAgentsState.agents[idx] = event.agent;
-              } else {
-                customAgentsState.agents.push(event.agent);
-              }
-            }
-            customAgentsState.loading = false;
-            setSettingsStatus(
-              `Saved custom agent "${event.agent ? event.agent.id : "?"}".`,
-              "success",
-            );
-            break;
-          case "custom_agent_deleted":
-            // SPEC-3064 Phase 3 (E4): body reassigns editingCustomAgentId,
-            // which now lives in the settings surface.
-            applyCustomAgentDeleted(event);
-            break;
           case "board_auth_status":
-            // SPEC-2963: remote provider sign-in state + editable config view.
-            systemSettingsState.boardAuth = {
-              slack: event.slack === true,
-              teams: event.teams === true,
-            };
-            systemSettingsState.boardAuthMessage = event.message || "";
-            systemSettingsState.boardConfig = {
-              slackClientId: event.slack_client_id || "",
-              slackDefaultChannel: event.slack_default_channel || "",
-              slackHasSecret: event.slack_has_secret === true,
-              teamsClientId: event.teams_client_id || "",
-              teamsTenantId: event.teams_tenant_id || "",
-              teamsDefaultChannel: event.teams_default_channel || "",
-              oauthRedirectPort: event.oauth_redirect_port || 8765,
-            };
-            renderSystemPanelInAllSettingsWindows();
+            applyBoardAuthStatus(event);
             break;
           case "update_settings":
             applyGlobalUpdateSettings(event);
             break;
           case "system_settings":
-            // SPEC-1933 US-4: backend echoed the on-disk language value.
-            // Issue #2698 PR 4 — defer when user is mid-dropdown.
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "system_settings",
-                language: event.language,
-                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
-                board_provider: event.board_provider,
-                agent_resource: event.agent_resource,
-              })
-            ) {
-              break;
-            }
-            systemSettingsState.language = event.language || "auto";
-            systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              event.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(event.agent_resource);
-            systemSettingsState.loaded = true;
-            // Don't clobber an in-flight "Saving…" status; only seed when no
-            // pending feedback is shown.
-            if (!systemSettingsState.statusMessage || systemSettingsState.statusKind === "info") {
-              systemSettingsState.statusMessage = "";
-              systemSettingsState.statusKind = "";
-            }
-            renderSystemPanelInAllSettingsWindows();
-            break;
           case "system_settings_updated":
-            // Issue #2698 PR 4 — defer when user is mid-dropdown.
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "system_settings_updated",
-                language: event.language,
-                codex_trust_managed_hooks: event.codex_trust_managed_hooks,
-                board_provider: event.board_provider,
-                agent_resource: event.agent_resource,
-              })
-            ) {
-              break;
-            }
-            systemSettingsState.language = event.language || systemSettingsState.language;
-            systemSettingsState.codexTrustManagedHooks =
-              event.codex_trust_managed_hooks !== false;
-            systemSettingsState.boardProvider =
-              event.board_provider || systemSettingsState.boardProvider || "local";
-            applyAgentResourceSnapshot(event.agent_resource);
-            systemSettingsState.statusMessage = "Saved system settings.";
-            systemSettingsState.statusKind = "success";
-            renderSystemPanelInAllSettingsWindows();
+            applySystemSettingsEvent(event);
             break;
           case "system_settings_error":
             applyGlobalUpdateSettings(event);
-            // Issue #2698 PR 4 — defer when user is mid-dropdown.
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "system_settings_error",
-                message: event.message,
-              })
-            ) {
-              break;
-            }
-            systemSettingsState.statusMessage = event.message || "Failed to update system settings.";
-            systemSettingsState.statusKind = "error";
-            renderSystemPanelInAllSettingsWindows();
+            applySystemSettingsEvent(event);
             break;
-          case "autostart_status": {
-            const wasPending = systemSettingsState.autostartPending === true;
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "autostart_status",
-                enabled: event.enabled,
-                mechanism: event.mechanism,
-                install_path: event.install_path,
-                from_update: wasPending,
-              })
-            ) {
-              break;
-            }
-            applyAutostartStatus(
-              event,
-              wasPending ? "Saved login launch setting." : "",
-            );
-            renderSystemPanelInAllSettingsWindows();
+          case "autostart_status":
+            applyAutostartStatus(event);
             break;
-          }
           case "autostart_error":
-            if (
-              systemSettingsInteractionGuard.defer({
-                kind: "autostart_error",
-                message: event.message,
-              })
-            ) {
-              break;
-            }
             applyAutostartError(event);
-            renderSystemPanelInAllSettingsWindows();
-            break;
-          case "backend_connection_result":
-            frontendUnits.knowledgeSettingsSurface.setSettingsStatus(
-              `/v1/models returned ${event.models.length} model(s).`,
-              "success",
-            );
-            frontendUnits.knowledgeSettingsSurface.completeAddFromPreset(
-              event.models,
-            );
             break;
           case "custom_agent_preset_list":
             // Reserved for a future "Add from preset" picker — the current
             // UI hardcodes the one preset.
-            break;
-          case "custom_agent_error":
-            // SPEC-3064 Phase 3 (E4): body reassigns pendingAddFromPreset,
-            // which now lives in the settings surface.
-            applyCustomAgentError(event);
             break;
           // SPEC-3064 Phase 3 (E7): migration modal state and rendering live
           // in the project shell surface.
@@ -6140,9 +6046,16 @@ import { createUiStateStore } from "/ui-state-store.js";
         scheduleFit: scheduleTerminalFit,
         markPending: markTerminalViewportRefreshPending,
       });
-      document.addEventListener("visibilitychange", () => {
+      document.addEventListener("visibilitychange", (event) => {
         if (document.hidden) {
           return;
+        }
+        // Pane visibility notifications also use this event. Only a native
+        // foreground event should discard the receive backlog; a hidden
+        // event need not have reached this document before the restore.
+        if (event.isTrusted) {
+          if (socketReceiveDispatcher) socketReceiveDispatcher.resume();
+          else if (socketProjectKey) connectSocket(true);
         }
         rearmVisibleTerminalViewportRefreshes();
         resumeKnowledgeEventRefresh();
@@ -6164,9 +6077,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the same socket transport the preset
       // buttons use, so they share the legacy invariants.
-      function isAutoMaximizedSurfacePreset(_preset) {
-        return false;
-      }
 
       function isSingletonSurfacePreset(preset) {
         const sessionPresets = new Set(["agent", "shell", "claude", "codex"]);

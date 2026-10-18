@@ -349,6 +349,102 @@ test("budget overflow defers remaining events to the next frame", () => {
   assert.equal(scheduler.pendingCount(), 0, "all events drained across two frames");
 });
 
+test("budget deferral moves only linear work for growing backlogs", (t) => {
+  for (const count of [64, 256, 1024]) {
+    const scheduler = manualScheduler();
+    const received = [];
+    let clock = 0;
+    let moved = 0;
+    const unshift = Array.prototype.unshift;
+    const slice = Array.prototype.slice;
+    const concat = Array.prototype.concat;
+    const dispatcher = createSocketReceiveDispatcher({
+      receive(event) { received.push(event.index); clock += 10; },
+      schedule: scheduler.schedule,
+      now: () => clock,
+    });
+    for (let index = 0; index < count; index += 1) {
+      dispatcher.enqueue({ kind: "terminal_output", index });
+    }
+    // Count copied/shifted elements rather than timing the runner. A repeated
+    // single-item prepend performs 1+2+...+N moves; bulk copies stay linear.
+    Array.prototype.unshift = function (...items) {
+      moved += this.length + items.length;
+      return unshift.apply(this, items);
+    };
+    Array.prototype.slice = function (start = 0, end = this.length) {
+      const result = slice.call(this, start, end);
+      moved += result.length;
+      return result;
+    };
+    Array.prototype.concat = function (...items) {
+      const result = concat.apply(this, items);
+      moved += result.length;
+      return result;
+    };
+    try { scheduler.runOnce(); }
+    finally {
+      Array.prototype.unshift = unshift;
+      Array.prototype.slice = slice;
+      Array.prototype.concat = concat;
+    }
+    assert.ok(moved <= count * 4, `${count} entries required ${moved} element moves`);
+    t.diagnostic(`${count} queued entries: ${moved} copied/shifted elements in one budgeted flush`);
+    assert.equal(dispatcher.pendingCount(), count - 1);
+    scheduler.runAll();
+    assert.deepEqual(received, Array.from({ length: count }, (_, index) => index));
+  }
+});
+
+test("overflow replaces a bounded backlog with one snapshot recovery", () => {
+  const scheduler = manualScheduler();
+  const received = [];
+  const recovery = [];
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    maxQueueSize: 8,
+    onResync(reason) {
+      recovery.push(reason);
+      dispatcher.enqueue({ kind: "terminal_snapshot", id: "pane", revision: 99 });
+    },
+  });
+  for (let index = 0; index < 1000; index += 1) {
+    if (index % 2) dispatcher.handle({ data: JSON.stringify({ kind: "terminal_output", index }) });
+    else dispatcher.enqueue({ kind: "terminal_output", index });
+    assert.ok(dispatcher.pendingCount() <= 8, "all inbound paths share the limit");
+  }
+  scheduler.runAll();
+  assert.deepEqual(recovery, ["overflow"]);
+  assert.deepEqual(received, [{ kind: "terminal_snapshot", id: "pane", revision: 99 }]);
+});
+
+test("resume discards stale frames before requesting authoritative state and dispose cancels delivery", () => {
+  const scheduler = manualScheduler();
+  const received = [];
+  const recovery = [];
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onResync: (reason) => recovery.push(reason),
+  });
+  dispatcher.enqueue({ kind: "terminal_output", data: "stale" });
+  dispatcher.resume();
+  dispatcher.enqueue({ kind: "terminal_snapshot", data: "fresh" });
+  scheduler.runAll();
+  assert.deepEqual(recovery, ["visible"]);
+  assert.deepEqual(received, [{ kind: "terminal_snapshot", data: "fresh" }]);
+  dispatcher.enqueue({ kind: "terminal_output", data: "old socket" });
+  dispatcher.dispose();
+  dispatcher.resume();
+  scheduler.runAll();
+  assert.equal(received.length, 1);
+  assert.equal(recovery.length, 1);
+  assert.equal(dispatcher.pendingCount(), 0);
+});
+
 test("handle() accepts both WebSocket message events and pre-parsed payloads", () => {
   const received = [];
   const scheduler = manualScheduler();

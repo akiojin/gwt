@@ -18,16 +18,24 @@ fn pr_coverage_and_lint_run_independently_under_stable_check_names() {
         "coverage must be callable by PR CI"
     );
     let lint = workflow("lint.yml");
+    assert!(lint["jobs"].get("coverage").is_none());
+    let caller = workflow("coverage-ci.yml");
+    for event in ["push", "pull_request", "merge_group"] {
+        assert!(caller["on"].get(event).is_some());
+    }
     assert_eq!(
-        lint["jobs"]["coverage"]["uses"],
+        caller["jobs"]["coverage"]["uses"],
         "./.github/workflows/coverage.yml"
     );
-    assert!(lint["jobs"]["coverage"].get("name").is_none());
-    assert!(lint["jobs"]["coverage"].get("needs").is_none());
-    assert!(lint["jobs"]["coverage"].get("if").is_none());
-    assert!(lint["jobs"]["coverage"].get("continue-on-error").is_none());
+    assert!(caller["jobs"]["coverage"].get("name").is_none());
+    assert!(caller["jobs"]["coverage"].get("needs").is_none());
+    assert!(caller["jobs"]["coverage"].get("if").is_none());
+    assert!(caller["jobs"]["coverage"]
+        .get("continue-on-error")
+        .is_none());
     assert_eq!(coverage["jobs"]["rust-coverage"]["name"], "Rust Coverage");
-    assert!(coverage["jobs"]["rust-coverage"].get("if").is_none());
+    assert_eq!(coverage["jobs"]["rust-coverage"]["needs"], "coverage-shard");
+    assert_eq!(coverage["jobs"]["rust-coverage"]["if"], "${{ always() }}");
     assert!(coverage["jobs"]["rust-coverage"]
         .get("continue-on-error")
         .is_none());
@@ -49,6 +57,20 @@ fn coverage_measures_the_requested_source_without_cancelling_its_caller() {
     let steps = coverage["jobs"]["rust-coverage"]["steps"]
         .as_sequence()
         .unwrap();
+    let download = steps
+        .iter()
+        .find(|s| s["name"] == "Download pre-shard head summary")
+        .unwrap();
+    assert_eq!(download["with"]["name"], "workspace-tests-1");
+    assert_eq!(
+        download["with"]["path"],
+        "target/coverage-shards/workspace-tests-1"
+    );
+    assert!(steps
+        .iter()
+        .any(|s| s["run"].as_str() == Some("test \"$COVERAGE_SHARDS_RESULT\" = success")));
+    assert!(steps.iter().any(|s| s["run"].as_str()
+        == Some("python3 scripts/ci_workspace_tests.py target/coverage-shards --shards 6")));
     let checkout = steps
         .iter()
         .find(|s| {
@@ -66,6 +88,75 @@ fn coverage_measures_the_requested_source_without_cancelling_its_caller() {
             .contains("node scripts/check-coverage-threshold.mjs")
             && run.contains(threshold)
             && run.contains(scope))));
+    }
+}
+
+#[test]
+fn coverage_keeps_pre_shard_pr_heads_on_their_supported_full_workspace_transport() {
+    let coverage = workflow("coverage.yml");
+    for job in ["coverage-shard", "rust-coverage"] {
+        let steps = coverage["jobs"][job]["steps"].as_sequence().unwrap();
+        let mode = steps.iter().find(|s| s["id"] == "transport").unwrap();
+        let run = mode["run"].as_str().unwrap();
+        assert!(run.contains("git show HEAD:.github/workflows/coverage.yml"));
+        assert!(run.contains("grep -q '^  coverage-shard:'"));
+        assert!(run.contains("sharded=true") && run.contains("sharded=false"));
+        assert!(!run.contains("|| true"));
+    }
+    let steps = coverage["jobs"]["coverage-shard"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let legacy = steps
+        .iter()
+        .find(|s| s["name"] == "Run pre-shard head coverage")
+        .unwrap();
+    assert_eq!(
+        legacy["if"],
+        "${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 }}"
+    );
+    let run = legacy["run"].as_str().unwrap();
+    assert!(run.contains("node scripts/coverage-summary.mjs --output-path target/coverage-export/coverage-summary.json --nextest -- --workspace --all-features"));
+    assert!(!run.contains("--partition") && !run.contains("--export-dir"));
+    assert_eq!(legacy["env"]["NEXTEST_PROFILE"], "coverage");
+    let legacy_lcov = steps
+        .iter()
+        .find(|s| s["name"] == "Generate pre-shard head lcov")
+        .unwrap();
+    let run = legacy_lcov["run"].as_str().unwrap();
+    assert!(run.contains("coverage-summary.json.profiles.json"));
+    assert!(run.contains("--failure-mode all"));
+    assert!(run.contains("--lcov --output-path target/coverage-export/lcov.info"));
+    let steps = coverage["jobs"]["rust-coverage"]["steps"]
+        .as_sequence()
+        .unwrap();
+    for name in [
+        "Verify the complete workspace test union",
+        "Generate workspace summary",
+    ] {
+        let step = steps.iter().find(|s| s["name"] == name).unwrap();
+        assert_eq!(
+            step["if"],
+            "${{ steps.transport.outputs.sharded == 'true' }}"
+        );
+    }
+    let legacy = steps
+        .iter()
+        .find(|s| s["name"] == "Restore pre-shard head summary")
+        .unwrap();
+    assert_eq!(
+        legacy["if"],
+        "${{ steps.transport.outputs.sharded == 'false' }}"
+    );
+    assert_eq!(legacy["run"], "cp target/coverage-shards/workspace-tests-1/coverage-summary.json target/coverage-summary.json");
+    for step in steps.iter().filter(|s| {
+        s["name"]
+            .as_str()
+            .is_some_and(|n| n.starts_with("Enforce coverage"))
+    }) {
+        assert!(
+            step.get("if").is_none(),
+            "both transports must enforce the same thresholds"
+        );
     }
 }
 
@@ -119,23 +210,28 @@ fn rust_ci_uses_the_exact_repository_toolchain() {
 #[test]
 fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest() {
     let coverage = workflow("coverage.yml");
-    let steps = coverage["jobs"]["rust-coverage"]["steps"]
-        .as_sequence()
-        .unwrap();
-    let toolchain = steps
-        .iter()
-        .find(|s| {
-            s["uses"]
+    let shard = &coverage["jobs"]["coverage-shard"];
+    assert_eq!(shard["strategy"]["fail-fast"], false);
+    assert_eq!(
+        shard["strategy"]["matrix"]["shard"],
+        serde_yaml::from_str::<Value>("[1, 2, 3, 4, 5, 6]").unwrap()
+    );
+    assert_eq!(coverage["env"]["CARGO_PROFILE_DEV_DEBUG"], "0");
+    assert_eq!(coverage["env"]["CARGO_PROFILE_TEST_DEBUG"], "0");
+    let steps = shard["steps"].as_sequence().unwrap();
+    assert!(
+        steps.iter().any(|step| {
+            step["uses"]
                 .as_str()
                 .is_some_and(|action| action.starts_with("dtolnay/rust-toolchain@"))
-        })
-        .unwrap();
-    // Verification admission tests execute the Light `cargo fmt --version` command.
-    assert!(toolchain["with"]["components"]
-        .as_str()
-        .unwrap()
-        .split(',')
-        .any(|component| component.trim() == "rustfmt"));
+                && step["with"]["components"]
+                    .as_str()
+                    .is_some_and(|components| {
+                        components.split(',').any(|part| part.trim() == "rustfmt")
+                    })
+        }),
+        "coverage workspace tests invoke cargo fmt --version"
+    );
     let cache = steps
         .iter()
         .find(|s| {
@@ -149,21 +245,29 @@ fn coverage_caches_instrumented_builds_and_runs_the_full_inventory_with_nextest(
         cache["with"]["cache-workspace-crates"].as_bool(),
         Some(true)
     );
-    assert_eq!(cache["with"]["key"], "coverage-instrumented-workspace-v1");
+    assert_eq!(cache["with"]["key"], "coverage-instrumented-workspace-v2");
     let saves = cache["with"]["save-if"].as_str().unwrap();
     assert!(saves.contains("github.ref == 'refs/heads/develop'"));
     assert!(saves.contains("github.event_name == 'schedule'"));
     assert!(saves.contains("github.event_name == 'workflow_dispatch'"));
+    assert!(saves.contains("matrix.shard == 1"));
     assert!(steps
         .iter()
         .any(|s| s["with"]["tool"].as_str() == Some("cargo-nextest@0.9.146")));
-    let summary = steps.iter().find(|s| s["run"].as_str() == Some("node scripts/coverage-summary.mjs --output-path target/coverage-summary.json --nextest -- --workspace --all-features")).unwrap();
+    let summary = steps.iter().find(|s| s["run"].as_str() == Some("node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features")).unwrap();
     assert_eq!(summary["env"]["LLVM_PROFILE_FILE_NAME"], "gwt-%8m.profraw");
     assert_eq!(summary["env"]["NEXTEST_PROFILE"], "coverage");
+    assert!(steps
+        .iter()
+        .any(|s| s["with"]["name"].as_str() == Some("workspace-tests-${{ matrix.shard }}")));
     let nextest: toml::Value =
         toml::from_str(include_str!("../../../.config/nextest.toml")).unwrap();
     assert_eq!(
         nextest["profile"]["coverage"]["test-threads"].as_integer(),
         Some(16)
+    );
+    assert_eq!(
+        nextest["profile"]["coverage"]["junit"]["path"].as_str(),
+        Some("junit.xml")
     );
 }

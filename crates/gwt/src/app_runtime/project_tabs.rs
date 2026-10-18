@@ -495,6 +495,7 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::CloneProjectError {
                     message: "repository URL is required".to_string(),
+                    existing_project_key: None,
                 },
             )];
         }
@@ -504,23 +505,62 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::CloneProjectError {
                     message: "destination parent folder is required".to_string(),
+                    existing_project_key: None,
                 },
             )];
         }
 
         let proxy = self.proxy.clone();
+        let client_id = client_id.to_string();
         let url = trimmed_url.to_string();
         let parent = PathBuf::from(trimmed_parent);
+        let project_key = gwt_core::repo_hash::compute_repo_hash(trimmed_url);
+        let registered_keys = self
+            .project_tab_incarnations
+            .values()
+            .map(|incarnation| incarnation.project_key.clone())
+            .collect::<Vec<_>>();
+        let recent_projects = self
+            .recent_projects
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    self.recent_project_key(&entry.path).cloned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let worker_client_id = client_id.clone();
         self.blocking_tasks.spawn(move || {
+            // Recent identities may not be hydrated yet. Resolve them here,
+            // before clone creates directories or starts Git, off the tao thread.
+            let existing_project_key = registered_keys
+                .into_iter()
+                .chain(recent_projects.into_iter().map(|(path, key)| {
+                    key.unwrap_or_else(|| gwt_core::paths::resolve_project_scope(&path).hash)
+                }))
+                .find(|key| key == &project_key);
+            if let Some(existing_project_key) = existing_project_key {
+                proxy.send(UserEvent::CloneProjectError {
+                    client_id: worker_client_id,
+                    message: "Repository is already registered.".to_string(),
+                    existing_project_key: Some(existing_project_key.to_string()),
+                });
+                return;
+            }
             proxy.send(UserEvent::CloneProjectProgress {
+                client_id: worker_client_id.clone(),
                 message: "Cloning repository...".to_string(),
             });
             match gwt_git::clone_project_as_nested_bare(&url, &parent) {
                 Ok(outcome) => proxy.send(UserEvent::CloneProjectDone {
+                    client_id: worker_client_id,
                     workspace_home: outcome.workspace_home,
                 }),
                 Err(error) => proxy.send(UserEvent::CloneProjectError {
+                    client_id: worker_client_id,
                     message: error.to_string(),
+                    existing_project_key: None,
                 }),
             }
         });
@@ -547,11 +587,13 @@ impl AppRuntime {
 
     pub(crate) fn handle_clone_project_done(
         &mut self,
+        client_id: &str,
         workspace_home: &Path,
     ) -> Vec<OutboundEvent> {
         self.request_project_open(
             workspace_home.to_path_buf(),
             ProjectNavigationSource::Clone {
+                client_id: client_id.to_string(),
                 workspace_home: workspace_home.to_path_buf(),
             },
         )
@@ -617,7 +659,10 @@ impl AppRuntime {
         message: String,
     ) -> Vec<OutboundEvent> {
         let event = match source {
-            ProjectNavigationSource::Clone { .. } => BackendEvent::CloneProjectError { message },
+            ProjectNavigationSource::Clone { .. } => BackendEvent::CloneProjectError {
+                message,
+                existing_project_key: None,
+            },
             ProjectNavigationSource::Open { request_id } => BackendEvent::ProjectOpenError {
                 message,
                 request_id: request_id.clone(),
@@ -628,7 +673,12 @@ impl AppRuntime {
                 request_id: None,
             },
         };
-        vec![OutboundEvent::hub(event)]
+        vec![match source {
+            ProjectNavigationSource::Clone { client_id, .. } => {
+                OutboundEvent::reply(client_id, event)
+            }
+            _ => OutboundEvent::hub(event),
+        }]
     }
 
     fn project_navigation_request_is_current(&self, request: &ProjectNavigationRequest) -> bool {
@@ -674,6 +724,15 @@ impl AppRuntime {
                     "superseded by a newer project navigation".to_string(),
                 )),
             );
+            if matches!(
+                &prepared.request.source,
+                ProjectNavigationSource::Clone { .. }
+            ) {
+                return self.project_open_error_events(
+                    &prepared.request.source,
+                    "superseded by a newer project navigation".to_string(),
+                );
+            }
             return Vec::new();
         }
         match prepared.result {
@@ -795,22 +854,29 @@ impl AppRuntime {
         self.register_project_log_scope(&tab_id);
         let project_scope = self.project_log_scope_for_tab(&tab_id).cloned();
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter());
-        if let ProjectNavigationSource::Clone { workspace_home } = &source {
+        if let ProjectNavigationSource::Clone { workspace_home, .. } = &source {
             self.remember_recent_clone_workspace_home(workspace_home);
         }
         let _ = self.persist();
 
+        let opened = BackendEvent::ProjectOpened {
+            project_key: prepared.project_key.to_string(),
+            title: prepared.target.title.clone(),
+            request_id: match &source {
+                ProjectNavigationSource::Open { request_id } => request_id.clone(),
+                _ => None,
+            },
+        };
+        let opened = match &source {
+            ProjectNavigationSource::Clone { client_id, .. } => {
+                OutboundEvent::reply(client_id, opened)
+            }
+            _ => OutboundEvent::hub(opened),
+        };
         let mut events = vec![
             self.hub_state_broadcast(),
             self.workspace_state_broadcast(&context),
-            OutboundEvent::hub(BackendEvent::ProjectOpened {
-                project_key: prepared.project_key.to_string(),
-                title: prepared.target.title.clone(),
-                request_id: match &source {
-                    ProjectNavigationSource::Open { request_id } => request_id.clone(),
-                    _ => None,
-                },
-            }),
+            opened,
         ];
         if new_tab {
             events.extend(
@@ -853,10 +919,18 @@ impl AppRuntime {
                 ));
             }
         }
-        if let ProjectNavigationSource::Clone { workspace_home } = source {
-            events.push(OutboundEvent::hub(BackendEvent::CloneProjectDone {
-                workspace_home: workspace_home.display().to_string(),
-            }));
+        if let ProjectNavigationSource::Clone {
+            client_id,
+            workspace_home,
+        } = source
+        {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::CloneProjectDone {
+                    project_key: context.project_key.to_string(),
+                    workspace_home: workspace_home.display().to_string(),
+                },
+            ));
         }
         events
     }

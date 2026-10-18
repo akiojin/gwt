@@ -2046,9 +2046,7 @@ fn agent_pane_close_bypasses_a_contended_pane_lock() {
     locked_rx.recv().expect("pane mutex acquired");
 
     let mut events = None;
-    let mut elapsed = Duration::MAX;
     let logs = capture_tracing_events(|| {
-        let started = Instant::now();
         events = Some(runtime.handle_agent_frontend_event(
             "pane-client".to_string(),
             principal,
@@ -2058,7 +2056,8 @@ fn agent_pane_close_bypasses_a_contended_pane_lock() {
                 responder: None,
             },
         ));
-        elapsed = started.elapsed();
+        // The holder cannot release until close returns: returning while this
+        // channel is unreleased proves that close did not acquire the mutex.
         release_tx.send(()).expect("release pane mutex");
         let queued = {
             let mut finalizers = finalizers
@@ -2074,32 +2073,14 @@ fn agent_pane_close_bypasses_a_contended_pane_lock() {
     let events = events.expect("pane close events");
     holder.join().expect("pane mutex holder");
 
-    let proof_deadline = Instant::now() + Duration::from_secs(5);
-    let terminal_proof = loop {
-        let child_exited = pty
-            .try_wait()
-            .expect("probe exact holder child exit")
-            .is_some();
-        let proof = gwt_agent::SessionRuntimeState::load(&runtime_path).ok();
-        if child_exited
-            && proof
-                .as_ref()
-                .is_some_and(|proof| proof.status == gwt_agent::AgentStatus::Stopped)
-        {
-            break proof.expect("terminal runtime proof");
-        }
-        assert!(
-            Instant::now() < proof_deadline,
-            "exact holder child exit and terminal proof were not observed before the deadline"
-        );
-        // test-hygiene: allow-short-duration bounded OS child-exit and durable stop-proof polling; ordering comes from observed state, not this interval
-        thread::sleep(Duration::from_millis(10));
-    };
-
+    // Running the queued finalizer acknowledges both reap and durable proof.
     assert!(
-        elapsed < Duration::from_millis(300),
-        "pane.close waited {elapsed:?} for the pane mutex"
+        pty.try_wait().expect("exact holder child exit").is_some(),
+        "completed finalizer must reap its exact child"
     );
+    let terminal_proof = gwt_agent::SessionRuntimeState::load(&runtime_path)
+        .expect("completed finalizer must persist terminal proof");
+    assert_eq!(terminal_proof.status, gwt_agent::AgentStatus::Stopped);
     assert!(matches!(
         events.first(),
         Some(OutboundEvent {

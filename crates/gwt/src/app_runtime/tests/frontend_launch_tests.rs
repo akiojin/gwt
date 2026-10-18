@@ -881,6 +881,7 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
     ));
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let notifications = notify_on_test_events(&mut runtime);
     let window_id = combined_window_id("tab-1", "agent-holder");
     let holder = install_manual_launch_holder(
         &mut runtime,
@@ -916,9 +917,10 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
         },
         Some(canvas_bounds()),
     );
-    wait_for_recorded_event(
+    wait_for_notified_event(
         "initial manual successor request",
         &recorded_events,
+        &notifications,
         |events| {
             events.iter().any(|event| {
                 matches!(
@@ -962,15 +964,23 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
     let invalid_profile = temp.path().join("invalid-profile.toml");
     fs::write(&invalid_profile, "this is not valid TOML = [").expect("write invalid profile");
     runtime.profile_config_path = Some(invalid_profile);
-    runtime.handle_launch_wizard_launch_materialization_requested(
+    let materialization = runtime.handle_launch_wizard_launch_materialization_requested(
         wizard_id,
         client_id,
         config.as_ref().clone(),
         bounds,
     );
-    wait_for_recorded_event(
+    assert!(
+        !materialization.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::LaunchWizardState { wizard: Some(view) } if view.error.is_some()
+        )),
+        "preflight must succeed before the asynchronous failure: {materialization:#?}"
+    );
+    wait_for_notified_event(
         "manual successor async failure",
         &recorded_events,
+        &notifications,
         |events| {
             events
                 .iter()
@@ -1017,25 +1027,30 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
         Some(canvas_bounds()),
     );
 
-    wait_for_recorded_event("manual successor exact retry", &recorded_events, |events| {
-        events.iter().any(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
-                    if matches!(
-                        config.as_ref(),
-                        gwt::LaunchWizardLaunchRequest::Agent(config)
-                            if matches!(
-                                &config.execution_intent,
-                                gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
-                                    operation_id: replayed,
-                                    ..
-                                } if replayed == &operation_id
-                            )
-                    )
-            )
-        })
-    });
+    wait_for_notified_event(
+        "manual successor exact retry",
+        &recorded_events,
+        &notifications,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
+                        if matches!(
+                            config.as_ref(),
+                            gwt::LaunchWizardLaunchRequest::Agent(config)
+                                if matches!(
+                                    &config.execution_intent,
+                                    gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+                                        operation_id: replayed,
+                                        ..
+                                    } if replayed == &operation_id
+                                )
+                        )
+                )
+            })
+        },
+    );
     let mut replay = recorded_events
         .lock()
         .expect("events")
@@ -1093,6 +1108,7 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
     ));
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let notifications = notify_on_test_events(&mut runtime);
     let window_id = combined_window_id("tab-1", "agent-holder");
     let holder = install_manual_launch_holder(
         &mut runtime,
@@ -1128,14 +1144,19 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         },
         Some(canvas_bounds()),
     );
-    wait_for_recorded_event("sync failure request", &recorded_events, |events| {
-        events.iter().any(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
-            )
-        })
-    });
+    wait_for_notified_event(
+        "sync failure request",
+        &recorded_events,
+        &notifications,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+        },
+    );
     let request = {
         let mut events = recorded_events.lock().expect("events");
         let index = events
@@ -1192,11 +1213,14 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
     });
     let failure = failure.expect("synchronous failure events");
 
-    assert!(failure.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::LaunchWizardState { wizard: Some(view) }
-            if view.error.as_deref() == Some("injected synchronous spawn failure")
-    )));
+    assert!(
+        failure.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::LaunchWizardState { wizard: Some(view) }
+                if view.error.as_deref() == Some("injected synchronous spawn failure")
+        )),
+        "expected injected failure after successful preflight: {failure:#?}"
+    );
     let recovery = runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -1230,14 +1254,19 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         LaunchWizardAction::Submit,
         Some(bounds),
     );
-    wait_for_recorded_event("exact sync failure retry", &recorded_events, |events| {
-        events.iter().any(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
-            )
-        })
-    });
+    wait_for_notified_event(
+        "exact sync failure retry",
+        &recorded_events,
+        &notifications,
+        |events| {
+            events.iter().any(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+        },
+    );
     let replay = recorded_events
         .lock()
         .expect("events")

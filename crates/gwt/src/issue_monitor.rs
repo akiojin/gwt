@@ -982,9 +982,9 @@ pub struct IssueMonitorPrefs {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tier_overrides: BTreeMap<u64, u8>,
 
-    /// SPEC #3914 FR-002: a candidate whose known usage is at or above this
-    /// percentage yields to the next candidate. Unknown usage never blocks.
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    /// Legacy in-memory compatibility field. Old JSON values are ignored and
+    /// the retired threshold is never written back to preferences.
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     pub launch_usage_threshold_percent: u8,
     /// Issue #3785 / SPEC #3165: provider-wide launch admission holds keyed by
     /// the canonical agent command. Values are concrete RFC3339 reset
@@ -2715,6 +2715,8 @@ pub struct IssueMonitorExecutionObservation {
     pub process_held: bool,
     /// Exact holder runtime evidence proves its previous GUI host has exited.
     pub holder_host_dead: bool,
+    /// Exact dead holder host incarnations, observed outside the prefs lock.
+    pub dead_holder_hosts: BTreeSet<(u32, u64)>,
     /// Current ECR holder identity while its exact runtime is live or uncertain.
     pub held_holder_session_id: Option<String>,
 }
@@ -3501,8 +3503,8 @@ pub struct IssueMonitorStatusView {
     /// force, whether or not a candidate uses that provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_quota_holds: Vec<IssueMonitorProviderQuotaHold>,
-    /// SPEC #3914 FR-009: the usage demotion threshold.
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    /// Legacy in-memory compatibility field, excluded from status payloads.
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     pub usage_threshold_percent: u8,
 }
 
@@ -3682,7 +3684,7 @@ pub struct IssueMonitorAgentStatus {
     /// head (`launch_profile_candidates[0]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_launch_profile: Option<IssueMonitorEffectiveLaunchProfile>,
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     pub usage_threshold_percent: u8,
     /// Issue #3923 AC-1: every provider hold in force, with its evidence, so
     /// the PM can see a hold on a provider the profile is not using and
@@ -4655,7 +4657,7 @@ pub struct IssueMonitorState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     tier_overrides: BTreeMap<u64, u8>,
 
-    #[serde(default = "default_launch_usage_threshold_percent")]
+    #[serde(skip, default = "default_launch_usage_threshold_percent")]
     launch_usage_threshold_percent: u8,
     /// Durable provider-wide launch admission source of truth. Keys and values
     /// are canonicalized on restore and joined monotonically across rebases.
@@ -6373,6 +6375,12 @@ pub(crate) fn establish_issue_monitor_authority_fence_with_lease(
                 save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
                 persist_issue_monitor_authority_fence(prefs_path, current)?;
             }
+        }
+        // The caller holds the exclusive lifetime lease, so the previous
+        // GUI/daemon driver has handed over authority. Its recent heartbeat
+        // cannot establish concurrent scanning by this new owner.
+        if prefs.last_scan_driver.take().is_some() {
+            save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
         }
         Ok(prefs)
     })
@@ -8671,7 +8679,9 @@ impl IssueMonitorState {
         resume_condition: &str,
         now: &str,
     ) -> AutonomousWaitOutcome {
-        if !self.active_launches.contains(&issue_number) {
+        // Restored runtimes may be accounted for before their launch binding
+        // is recovered. A wait records liveness, not new launch authority.
+        if !self.active_issue_numbers().contains(&issue_number) {
             return AutonomousWaitOutcome::NotLaunched;
         }
         declare_wait_on_record(
@@ -12996,7 +13006,18 @@ impl IssueMonitorState {
                         }),
                         claim_diagnostics: self.claim_diagnostics_at(item.issue.number, now),
                         blocked_by_claim_id: item.blocked_by_claim_id.clone(),
-                        exclusion_reason: item.exclusion_reason.clone(),
+                        exclusion_reason: if item.state == MonitorInboxState::Queued {
+                            let mut reasons =
+                                item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
+                            reasons.extend(
+                                self.claim_candidate_exclusions(item.issue.number)
+                                    .into_iter()
+                                    .map(str::to_string),
+                            );
+                            (!reasons.is_empty()).then(|| reasons.join("; "))
+                        } else {
+                            item.exclusion_reason.clone()
+                        },
                         launched_window_id: self.launched_window_id(item.issue.number),
                         error_message: item
                             .error_message
@@ -16069,6 +16090,39 @@ impl IssueMonitorState {
             .collect()
     }
 
+    /// Shared by the claim planner and its row diagnostics. Delivery
+    /// annotations deliberately do not appear here: they are not holds.
+    fn claim_candidate_exclusions(&self, issue_number: u64) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if !self.terminal_queue_contains(issue_number) {
+            reasons.push("not_in_terminal_queue: use issue.monitor.queue.push");
+        }
+        if !self.queue.contains(&issue_number) {
+            reasons.push("not_in_launch_queue: use issue.monitor.launch_now");
+        }
+        if self.has_observed_monitor_runtime(issue_number) {
+            reasons.push("runtime_already_present");
+        }
+        for effect in &self.pending_effects {
+            match effect.payload {
+                IssueMonitorEffectPayload::AcquireClaim {
+                    issue_number: owner,
+                    ..
+                } if owner == issue_number && !reasons.contains(&"claim_pending") => {
+                    reasons.push("claim_pending");
+                }
+                IssueMonitorEffectPayload::SettleMergedIssue {
+                    issue_number: owner,
+                    ..
+                } if owner == issue_number && !reasons.contains(&"merged_settlement_pending") => {
+                    reasons.push("merged_settlement_pending");
+                }
+                _ => {}
+            }
+        }
+        reasons
+    }
+
     /// The claim slots still open, paired with the ordered queue entries a
     /// proposal may consult to fill them.
     ///
@@ -16082,18 +16136,6 @@ impl IssueMonitorState {
             return (0, Vec::new());
         }
         let pending_claims = self.pending_claim_issue_numbers();
-        // Issue #3917: a delivered Issue whose settlement (close / comment) is
-        // still in flight must not be relaunched by the same scan.
-        let settling = self
-            .pending_effects
-            .iter()
-            .filter_map(|effect| match effect.payload {
-                IssueMonitorEffectPayload::SettleMergedIssue { issue_number, .. } => {
-                    Some(issue_number)
-                }
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
         let available = max_active
             .saturating_sub(self.occupied_slot_count())
             .saturating_sub(pending_claims.len());
@@ -16104,12 +16146,7 @@ impl IssueMonitorState {
             .queue
             .iter()
             .copied()
-            .filter(|issue_number| {
-                self.terminal_queue_contains(*issue_number)
-                    && !self.has_observed_monitor_runtime(*issue_number)
-                    && !pending_claims.contains(issue_number)
-                    && !settling.contains(issue_number)
-            })
+            .filter(|issue_number| self.claim_candidate_exclusions(*issue_number).is_empty())
             .collect();
         (available, candidates)
     }
@@ -19301,6 +19338,7 @@ impl IssueMonitorState {
             .filter(|item| {
                 let issue_number = item.issue.number;
                 item.state == MonitorInboxState::Launched
+                    && self.terminal_queue_contains(issue_number)
                     && item.launched_window_id.is_none()
                     && !self.active_launches.contains(&issue_number)
                     && !self.launched_windows.contains_key(&issue_number)
@@ -20657,9 +20695,11 @@ impl IssueMonitorState {
 
     /// Issue #4084 AC-1: classify every idle launched window against the last
     /// fresh canvas snapshot. Pure: nothing is mutated, and a missing, stale,
-    /// or foreign-tab snapshot classifies nothing (a binding is judged dead
+    /// or foreign-tab snapshot cannot prove a binding dead: absence is judged
     /// only against the complete canvas of its own tab, as
-    /// [`Self::vanished_launched_windows`] judges it).
+    /// [`Self::vanished_launched_windows`] judges it. A terminal ECR whose
+    /// exact holder host is dead can release independently of the canvas,
+    /// after registration grace and only without live/uncertain processes.
     ///
     /// `settlements` is the execution record state per launched Issue, read by
     /// the caller from the trusted store; an absent entry is `Unknown`.
@@ -20668,8 +20708,49 @@ impl IssueMonitorState {
         settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
         now: &str,
     ) -> Vec<IssueMonitorIdleWindow> {
+        let mut classified = self
+            .launched_windows
+            .iter()
+            .filter(|(number, window)| {
+                settlements.get(number).is_some_and(|observation| {
+                    observation.holder_host_dead
+                        && matches!(
+                            observation.settlement,
+                            IssueMonitorExecutionSettlement::Completed
+                                | IssueMonitorExecutionSettlement::Blocked
+                        )
+                }) && !self.binding_recovery_pending(**number, now, settlements)
+                    // A fresh ordered absence already has its own unfinished
+                    // recovery policy. Only bypass missing/stale canvas proof
+                    // or a retained obsolete pane identity (Issue #4446).
+                    && !self.fresh_window_snapshot(now).is_some_and(|snapshot| {
+                        issue_monitor_qualified_window_id(window).is_some_and(|(tab, _)| {
+                            self.window_snapshot_tabs.contains(tab)
+                                || self.window_snapshot_host.is_some()
+                        }) && self.window_observation_covers_launch(
+                            **number,
+                            window,
+                            &snapshot.observed_at,
+                        ) && !snapshot.windows.iter().any(|observed| {
+                            issue_monitor_window_ids_match(window, &observed.window_id)
+                        })
+                    })
+            })
+            .map(|(number, window)| IssueMonitorIdleWindow {
+                window_id: window.clone(),
+                issue_number: Some(*number),
+                idle_kind: IssueMonitorIdleKind::ExecutionSettled,
+                idle_since: now.to_string(),
+                bound: true,
+                // The exact holder host is gone. A remaining canvas ID
+                // can belong to a new pane, so never issue a GUI close.
+                pane_present: false,
+                rebind_to: None,
+                requeue_on_release: false,
+            })
+            .collect::<Vec<_>>();
         let Some(snapshot) = self.fresh_window_snapshot(now) else {
-            return Vec::new();
+            return classified;
         };
         let observation = |window_id: &str| {
             snapshot
@@ -20694,8 +20775,10 @@ impl IssueMonitorState {
                 )
             })
         };
-        let mut classified = Vec::new();
         for (issue_number, window_id) in &self.launched_windows {
+            if classified.iter().any(|idle| idle.window_id == *window_id) {
+                continue;
+            }
             let owned_here =
                 issue_monitor_qualified_window_id(window_id).is_some_and(|(tab, _)| {
                     self.window_snapshot_tabs.contains(tab)
@@ -20803,7 +20886,11 @@ impl IssueMonitorState {
                     })
                     .map(|other| other.window_id.clone());
             }
-            if idle_kind == IssueMonitorIdleKind::BindingDead
+            if (idle_kind == IssueMonitorIdleKind::BindingDead
+                || (idle_kind == IssueMonitorIdleKind::ExecutionSettled
+                    && settlements
+                        .get(issue_number)
+                        .is_some_and(|observation| observation.holder_host_dead)))
                 && rebind_to.is_none()
                 && self.binding_recovery_pending(*issue_number, &snapshot.observed_at, settlements)
             {
@@ -20848,6 +20935,16 @@ impl IssueMonitorState {
             let Some(issue_number) = observed.issue_number else {
                 continue;
             };
+            // The terminal ECR belongs to the dead predecessor, not an
+            // unbound successor whose process still owns this worktree.
+            if !observed.review_dispatch
+                && settlements
+                    .get(&issue_number)
+                    .is_some_and(|observation| observation.holder_host_dead)
+                && self.binding_recovery_pending(issue_number, now, settlements)
+            {
+                continue;
+            }
             if issue_monitor_qualified_window_id(&observed.window_id)
                 .is_none_or(|(tab, _)| tab != snapshot.project_tab_id)
                 || !self.window_observation_covers_launch(
@@ -20918,6 +21015,107 @@ impl IssueMonitorState {
             });
         }
         classified
+    }
+
+    /// Retire only exact dead terminal holders before verified binding repair.
+    /// Normal pane closes, review rebinds and missing-pane grace run afterwards.
+    pub fn reconcile_dead_terminal_launches(
+        &mut self,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
+        now: &str,
+    ) -> IssueMonitorIdleReconciliation {
+        let idle_windows = self
+            .classify_idle_windows(settlements, now)
+            .into_iter()
+            .filter(|idle| {
+                idle.bound
+                    && idle.idle_kind == IssueMonitorIdleKind::ExecutionSettled
+                    && idle.issue_number.is_some_and(|number| {
+                        settlements.get(&number).is_some_and(|observation| {
+                            observation.holder_host_dead && !observation.process_held
+                        })
+                    })
+            })
+            .collect();
+        let mut outcome = IssueMonitorIdleReconciliation {
+            idle_windows,
+            ..IssueMonitorIdleReconciliation::default()
+        };
+        self.apply_idle_release(
+            &mut outcome,
+            None,
+            "released automatically by the Issue Monitor: terminal holder host is dead",
+            false,
+            IdleReleaseScope::FinishedImplementations,
+        );
+        self.prune_dead_terminal_launches(&outcome, settlements, now);
+        outcome
+    }
+
+    fn prune_dead_terminal_launches(
+        &mut self,
+        outcome: &IssueMonitorIdleReconciliation,
+        settlements: &BTreeMap<u64, IssueMonitorExecutionObservation>,
+        now: &str,
+    ) {
+        // A canvas/census left by the dead host is no longer physical evidence.
+        // Retire only the released binding; live or uncertain successors vetoed
+        // its release above and keep their observations and capacity.
+        for idle in &outcome.idle_windows {
+            let Some(number) = idle.issue_number.filter(|number| {
+                idle.bound
+                    && idle.idle_kind == IssueMonitorIdleKind::ExecutionSettled
+                    && outcome.released.contains(number)
+                    && settlements.get(number).is_some_and(|observation| {
+                        observation.holder_host_dead
+                            && !observation.process_held
+                            && matches!(
+                                observation.settlement,
+                                IssueMonitorExecutionSettlement::Completed
+                                    | IssueMonitorExecutionSettlement::Blocked
+                            )
+                    })
+            }) else {
+                continue;
+            };
+            // A settled generation must not return after the stranded-row
+            // grace or a restart. Explicit operator resubmission remains valid.
+            self.terminal_queue_remove(&[number], now);
+            if let Some(snapshot) = &mut self.window_snapshot {
+                for observed in &mut snapshot.windows {
+                    if observed.issue_number == Some(number)
+                        && issue_monitor_qualified_window_id(&idle.window_id).is_some()
+                        && observed.window_id == idle.window_id
+                    {
+                        // Keep the old ID: our derived cleanup is not a new
+                        // canvas absence observation after a prefs rebase.
+                        observed.status = WindowState::Stopped;
+                        observed.monitor_owned = false;
+                    }
+                }
+            }
+            for census in self.monitor_runtime_counts.values_mut() {
+                if !settlements[&number]
+                    .dead_holder_hosts
+                    .contains(&(census.host_pid, census.host_started_at))
+                {
+                    continue;
+                }
+                let count_removed = census.counts.remove(&number).is_some();
+                let before = census.windows.len();
+                census.windows.retain(|_, owner| *owner != number);
+                if count_removed || before != census.windows.len() {
+                    // Rebase rejects equal/older observations. Publish this
+                    // correction after the old census, even within one tick.
+                    if let Some(previous) = parse_rfc3339_utc(&census.observed_at) {
+                        let next = previous + chrono::Duration::nanoseconds(1);
+                        census.observed_at = parse_rfc3339_utc(now)
+                            .map_or(next, |now| now.max(next))
+                            .to_rfc3339();
+                    }
+                }
+            }
+        }
     }
 
     /// Issue #4084 AC-2/AC-3/AC-4: classify the idle windows, then act.
@@ -21102,6 +21300,7 @@ impl IssueMonitorState {
                 );
             }
         }
+        self.prune_dead_terminal_launches(&outcome, settlements, now);
         outcome
     }
 
@@ -21136,8 +21335,9 @@ impl IssueMonitorState {
         forced: bool,
         scope: IdleReleaseScope,
     ) {
-        let targets = self
-            .idle_windows()
+        let targets = outcome
+            .idle_windows
+            .clone()
             .into_iter()
             .filter(|idle| number.is_none_or(|number| idle.issue_number == Some(number)))
             .filter(|idle| scope.admits(idle.idle_kind))
@@ -21230,8 +21430,10 @@ impl IssueMonitorState {
                     });
                 outcome.pane_closes.push(idle.window_id.clone());
             }
-            self.launch_bindings
-                .retain(|window_id, _| !issue_monitor_window_ids_match(window_id, &idle.window_id));
+            self.launch_bindings.retain(|window_id, owner| {
+                idle.issue_number.is_some_and(|number| *owner != number)
+                    || !issue_monitor_window_ids_match(window_id, &idle.window_id)
+            });
             self.idle_windows.remove(&idle.window_id);
         }
     }
@@ -21301,8 +21503,9 @@ impl IssueMonitorState {
             item.launched_window_id = None;
         }
         self.queue.retain(|queued| *queued != issue_number);
-        self.launch_bindings
-            .retain(|bound, _| !issue_monitor_window_ids_match(bound, window_id));
+        self.launch_bindings.retain(|bound, owner| {
+            *owner != issue_number || !issue_monitor_window_ids_match(bound, window_id)
+        });
         // Same reason as the requeue notice: a release reached with autonomous
         // mode off — the dead-binding recovery, or an operator-forced
         // `release_idle_windows` — must still be reported.
@@ -25483,12 +25686,19 @@ mod tests {
     #[test]
     fn legacy_prefs_without_launch_profiles_read_as_a_single_candidate_pool() {
         let prefs: IssueMonitorPrefs = serde_json::from_str(
-            r#"{"enabled":false,"max_active_agents":1,"priority_order":[],"launch_profile":{"agent_id":"codex"}}"#,
+            r#"{"enabled":false,"max_active_agents":1,"priority_order":[],"launch_profile":{"agent_id":"codex"},"launch_usage_threshold_percent":65}"#,
         )
         .expect("legacy prefs with one saved profile");
 
         assert!(prefs.launch_profiles.is_empty());
         assert_eq!(prefs.launch_usage_threshold_percent, 80);
+        assert!(
+            serde_json::to_value(&prefs)
+                .expect("serialize legacy prefs")
+                .get("launch_usage_threshold_percent")
+                .is_none(),
+            "the retired threshold is accepted and discarded on save"
+        );
         let pool = prefs.launch_profile_pool();
         assert_eq!(pool.len(), 1);
         assert_eq!(pool[0].agent_id, "codex");
@@ -26802,7 +27012,10 @@ mod tests {
             status.launch_profile_summary
         );
         assert!(status.launch_profile_summary.contains(" | "));
-        assert_eq!(status.usage_threshold_percent, 65);
+        assert!(serde_json::to_value(&status)
+            .expect("GUI status")
+            .get("usage_threshold_percent")
+            .is_none());
         assert_eq!(status.launch_profile_candidates.len(), 2);
         assert_eq!(status.launch_profile_candidates[0].index, 0);
         assert_eq!(status.launch_profile_candidates[0].agent_id, "codex");
@@ -26829,7 +27042,7 @@ mod tests {
         );
 
         let agent = serde_json::to_value(monitor.agent_status_at(now)).expect("agent status");
-        assert_eq!(agent["usage_threshold_percent"], 65);
+        assert!(agent.get("usage_threshold_percent").is_none());
         assert_eq!(
             agent["launch_profile_candidates"].as_array().map(Vec::len),
             Some(2)
@@ -36890,6 +37103,11 @@ mod tests {
             &prefs_path,
             &IssueMonitorPrefs {
                 effect_authority_epoch: 7,
+                last_scan_driver: Some(IssueMonitorScanDriver {
+                    kind: IssueMonitorScanDriverKind::Daemon,
+                    pid: u32::MAX,
+                    at: "2026-10-17T02:00:00Z".into(),
+                }),
                 ..IssueMonitorPrefs::default()
             },
         )
@@ -36910,11 +37128,63 @@ mod tests {
                 .expect("free lifetime lock proves that the current fence is stale");
 
         assert_eq!(prefs.effect_authority_epoch, 8);
+        assert!(prefs.last_scan_driver.is_none());
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            monitor.diagnose_scan_drive(
+                IssueMonitorScanDriverKind::Daemon,
+                std::process::id(),
+                "2026-10-17T02:00:01Z",
+            ),
+            None,
+            "restarting a dead daemon is a fenced takeover, not a second driver"
+        );
         assert_eq!(
             load_issue_monitor_authority_fence(&prefs_path).expect("load replacement fence"),
             IssueMonitorAuthorityFenceState::Active(current)
         );
         drop(lease);
+    }
+
+    #[test]
+    fn exclusive_daemon_takeover_does_not_diagnose_the_previous_gui_as_concurrent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let now = "2026-10-17T02:00:00Z";
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                last_scan_at: Some(now.to_string()),
+                last_scan_driver: Some(IssueMonitorScanDriver {
+                    kind: IssueMonitorScanDriverKind::GuiFrontDoor,
+                    pid: std::process::id(),
+                    at: now.to_string(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (prefs, _lease) = establish_issue_monitor_authority_fence(
+            &prefs_path,
+            &IssueMonitorAuthorityFence::current_process(),
+            |_| true,
+        )
+        .expect("exclusive lease proves the GUI no longer drives the monitor");
+        assert_eq!(prefs.last_scan_at.as_deref(), Some(now));
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            monitor.diagnose_scan_drive(
+                IssueMonitorScanDriverKind::Daemon,
+                std::process::id(),
+                now
+            ),
+            None,
+            "a fenced handover is not simultaneous scan ownership"
+        );
+        assert!(load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .last_scan_driver
+            .is_none());
     }
 
     #[test]
@@ -41677,6 +41947,51 @@ mod tests {
             .expect("undelivered row");
         assert!(!undelivered.recoverable_merged);
         assert_eq!(undelivered.completion_reason, None);
+
+        // Issue #5002 AC-1/4: delivery is only an annotation. Explain the
+        // actual planner exclusion even with free capacity and remaining work.
+        monitor.config.enabled = true;
+        monitor.terminal_queues.clear();
+        monitor
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == 42)
+            .unwrap()
+            .issue
+            .readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
+        let before = monitor.prefs();
+        assert_eq!(monitor.claim_probe_plan(1), (1, vec![]));
+        let status = monitor.agent_status();
+        let delivered = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert_eq!(delivered.state, MonitorInboxState::Queued);
+        assert!(delivered.recoverable_merged);
+        assert!(delivered
+            .exclusion_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("not_in_terminal_queue"));
+        assert_eq!(
+            monitor.prefs(),
+            before,
+            "diagnostics must not mutate admission"
+        );
+
+        monitor.terminal_queue_push(&[42], "operator", "2026-09-01T01:00:00Z");
+        assert_eq!(monitor.claim_probe_plan(1), (1, vec![42]));
+        assert_eq!(
+            monitor
+                .agent_status()
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == 42)
+                .unwrap()
+                .exclusion_reason,
+            None
+        );
     }
 
     /// Issue #4477 AC-2/AC-4: with auto-close off the delivery is annotated and
@@ -42574,6 +42889,7 @@ mod tests {
                     settlement,
                     process_held,
                     holder_host_dead,
+                    dead_holder_hosts: Default::default(),
                     held_holder_session_id: None,
                 },
             )]);
@@ -42637,6 +42953,7 @@ mod tests {
                         settlement: *settlement,
                         process_held: false,
                         holder_host_dead: false,
+                        dead_holder_hosts: Default::default(),
                         held_holder_session_id: None,
                     },
                 )
@@ -42754,6 +43071,7 @@ mod tests {
                 settlement: IssueMonitorExecutionSettlement::Completed,
                 process_held: true,
                 holder_host_dead: false,
+                dead_holder_hosts: Default::default(),
                 held_holder_session_id: None,
             },
         )]);

@@ -220,13 +220,10 @@ fn pull_request_workflows_cancel_the_superseded_run_of_the_same_pr() {
                         && key.contains("github.event.pull_request.number")
                 );
                 assert!(key.ends_with(id), "job groups must be independent: {id}");
-                if matches!(
-                    id,
-                    "source-sync" | "changes" | "test-windows-verify-timings"
-                ) {
+                if matches!(id, "source-sync" | "changes") {
                     assert!(
                         cancel_in_progress(id, policy),
-                        "short classifiers and superseded paired measurements remain replaceable"
+                        "short classifiers remain replaceable"
                     );
                 } else {
                     assert!(needs(body).iter().any(|need| need == "source-sync"));
@@ -255,7 +252,7 @@ fn gates_develop_pull_requests(doc: &Value) -> bool {
 /// together before merge. Run the same gates on the resulting develop tree.
 #[test]
 fn required_ci_workflows_run_on_develop_pushes() {
-    for name in ["test.yml", "lint.yml", "build.yml"] {
+    for name in ["test.yml", "lint.yml", "build.yml", "coverage-ci.yml"] {
         let doc = workflow(name);
         let branches = triggers(&doc)
             .get("push")
@@ -298,6 +295,7 @@ fn post_merge_runs_do_not_cancel_other_develop_trees_or_their_coverage() {
         "lint.yml",
         "build.yml",
         "coverage.yml",
+        "coverage-ci.yml",
         "post-merge-ci.yml",
     ] {
         let doc = workflow(name);
@@ -325,7 +323,7 @@ fn post_merge_failures_are_reported_to_a_bug_issue() {
     // The default branch is main. A workflow_run listener added to develop
     // cannot report anything until release, so call from the tested tree.
     assert!(triggers(&doc).get("workflow_call").is_some());
-    for name in ["test.yml", "lint.yml", "build.yml"] {
+    for name in ["test.yml", "lint.yml", "build.yml", "coverage-ci.yml"] {
         let caller = workflow(name);
         let report = job(&caller, "report-post-merge-failure");
         let guard = condition(report);

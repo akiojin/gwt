@@ -70,7 +70,7 @@ test("Toolsets and Skills render through the multi-choice picker and still emit 
   );
   const fn = surface.slice(
     surface.indexOf("function appendHermesMultiChoiceField("),
-    surface.indexOf("function appendCheckboxField("),
+    surface.indexOf("function appendReasoningField("),
   );
   assert.match(fn, /checkbox\.type = "checkbox"/);
   assert.match(fn, /onChange\(values\.join\(","\)\)/);

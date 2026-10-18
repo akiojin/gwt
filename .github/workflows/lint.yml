@@ -27,8 +27,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  coverage:
-    uses: ./.github/workflows/coverage.yml
   audit:
     name: Cargo Deny (advisories + sources)
     runs-on: ubuntu-latest
@@ -88,6 +86,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Compile coverage build stamp tests
+        run: rustc --edition=2021 --test crates/gwt/build.rs -o "$RUNNER_TEMP/gwt-build-stamp-tests"
+      - name: Check coverage build stamps
+        run: '"$RUNNER_TEMP/gwt-build-stamp-tests"'
       - name: Check rustdoc warnings
         # The codebase is at 0 rustdoc warnings post-PR #2331; this
         # gate keeps it that way by failing CI if a future PR
@@ -98,6 +100,8 @@ jobs:
         run: cargo doc --workspace --no-deps --document-private-items
       - name: Check frontend bundle syntax
         run: bash scripts/check-frontend-bundle.sh
+      - name: Check unused frontend modules and exports
+        run: bash scripts/run-node-tests-with-linkedom.sh crates/gwt/web/__tests__/unused-code.test.mjs
       - name: Check release flow contract
         run: bash scripts/check-release-flow.sh
       # SPEC #3576: the Git hook contract, including the rule that `git push`
@@ -220,7 +224,7 @@ jobs:
           fi
 
   report-post-merge-failure:
-    needs: [coverage, audit, lint, lint-windows, lint-macos, commitlint]
+    needs: [audit, lint, lint-windows, lint-macos, commitlint]
     if: ${{ github.event_name == 'push' && failure() }}
     permissions:
       issues: write

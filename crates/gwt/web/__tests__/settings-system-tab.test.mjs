@@ -15,6 +15,9 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
+import { createInteractionGuard } from "../interaction-guard.js";
+import { setControlExplanation } from "../control-explanations.js";
+import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -54,10 +57,364 @@ function loadFunctionWithDeps(name, deps) {
   )();
 }
 
+function createSettingsHarness() {
+  const { document, window } = parseHTML("<html><body><main></main></body></html>");
+  const sent = [];
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
+      .replace(/^import .*;\r?\n/gm, "")
+      .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
+  );
+  const surface = factory({
+    send: message => sent.push(message),
+    createNode(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text) node.textContent = text;
+      return node;
+    },
+    focusWindowLocally() {},
+    activeProjectTab: () => ({ project_root: "/projects/A", title: "Project A" }),
+    focusOrSpawnPreset() {}, renderUsagePanel() {},
+    indexStatusByProjectRoot: new Map(), pmSettingsPanel: { mount() {} },
+    mountIssues(_windowData, host) {
+      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><button data-action="monitor-settings"></button></div>';
+    },
+  });
+  const body = document.querySelector("main");
+  return { surface, body, document, window, sent };
+}
+
+test("Custom Agent replies commit immutable snapshots shared by all mounts and candidates", () => {
+  const { surface, body, document, sent } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
+  surface.applySupportedAgentList({ agents: [{ id: "codex", name: "Codex" }] });
+  surface.applyIssueMonitorProfiles({ project_root: "/projects/A", profiles: [] });
+  const initial = surface.customAgentsModel.read();
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "unavailable", message: "Catalog unavailable" });
+  assert.ok(body.querySelector('[data-settings-candidates] option[value="codex"]'),
+    "a failed first custom-agent read must unblock the known built-in catalog");
+  const agent = { id: "fixture-cli", display_name: "Fixture CLI", command: "fixture", env: { TOKEN: "***REDACTED***" } };
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [agent] });
+  const loaded = surface.customAgentsModel.read();
+  agent.env.TOKEN = "mutated";
+  assert.equal(initial.catalog.loading, true);
+  assert.deepEqual(initial.catalog.agents, []);
+  assert.equal(loaded.catalog.agents[0].env.TOKEN, "***REDACTED***");
+  assert.equal(loaded.catalog.loading, false);
+  for (const host of [body, second]) {
+    assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /Fixture CLI/);
+    assert.ok(host.querySelector('[data-settings-candidates] option[value="fixture-cli"]'));
+  }
+  body.querySelector('[aria-label="Edit agent environment"]').click();
+  const draft = body.querySelector('[aria-label="Environment value"]');
+  draft.value = "unsaved-draft";
+  const reads = sent.filter(message => message.kind === "list_custom_agents").length;
+  surface.resyncSettings();
+  surface.resyncSettings();
+  assert.ok(body.querySelector('[aria-label="Environment value"]') === draft,
+    "recovery reads preserve the existing environment input");
+  assert.equal(draft.value, "unsaved-draft");
+  assert.equal(sent.filter(message => message.kind === "list_custom_agents").length, reads + 2);
+  assert.equal(sent.filter(message => message.kind === "update_custom_agent").length, 0);
+  body.querySelector('[aria-label="Cancel environment editing"]').click();
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { ...agent, display_name: "Updated CLI", env: {} } });
+  assert.equal(loaded.catalog.agents[0].display_name, "Fixture CLI", "past snapshot stays immutable");
+  assert.equal(surface.customAgentsModel.read().catalog.agents.length, 1, "save replaces the existing agent");
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { id: "other", command: "other" } });
+  assert.equal(surface.customAgentsModel.read().catalog.agents.length, 2, "save inserts a new agent");
+  surface.applyCustomAgentsReceiveEvent({ kind: "backend_connection_result", models: ["fixture-model"] });
+  for (const host of [body, second]) {
+    assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /Updated CLI/);
+    assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /returned 1 model/);
+  }
+  const detachedText = second.textContent;
+  second.remove();
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_deleted", agent_id: "fixture-cli" });
+  assert.equal(second.textContent, detachedText, "detached mount is no longer rendered");
+  assert.equal(body.querySelector('[data-settings-candidates] option[value="fixture-cli"]'), null);
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "invalid", message: "Fixture rejected" });
+  assert.equal(surface.customAgentsModel.read().catalog.loading, false);
+  assert.match(body.querySelector('[data-role="settings-scroll"]').textContent, /Error \[invalid\]: Fixture rejected/);
+  const reopened = document.createElement("main");
+  document.body.appendChild(reopened);
+  surface.renderSettingsWindow(reopened, { id: "settings-reopened", title: "Settings" });
+  assert.match(reopened.querySelector('[data-role="settings-scroll"]').textContent, /Fixture rejected/);
+  assert.match(reopened.querySelector('[data-role="settings-scroll"]').textContent, /other/);
+});
+
+test("System replies advance one immutable snapshot for all mounts, including while guarded", () => {
+  const { surface, body, document } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
+  const initial = surface.systemSettingsModel.read();
+  const resource = { enabled: true, preset: "custom", priority: "idle", cpu_limit_percent: 35, build_jobs: 2 };
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "en", board_provider: "slack", agent_resource: resource });
+  const loaded = surface.systemSettingsModel.read();
+  resource.build_jobs = 99;
+  assert.equal(loaded.agentResource.buildJobs, 2, "wire objects cannot mutate committed state");
+  assert.equal(initial.loaded, false);
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector('[id$="-settings-system-codex-hooks"]').checked, true);
+    assert.equal(host.querySelector('[id$="-settings-system-agent-build-jobs"]').value, "2");
+  }
+  const select = body.querySelector('[id$="-settings-system-language"]');
+  surface.systemSettingsInteractionGuard.activate();
+  surface.applySystemSettingsEvent({ kind: "system_settings_updated", language: "ja", codex_trust_managed_hooks: false });
+  surface.applyAutostartStatus({ enabled: true });
+  surface.applyBoardAuthStatus({ slack: true });
+  assert.equal(surface.systemSettingsModel.read().language, "ja", "guard delays DOM only");
+  assert.equal(body.querySelector('[id$="-settings-system-language"]'), select);
+  assert.equal(body.querySelector('[id$="-settings-system-codex-hooks"]').checked, true);
+  assert.equal(loaded.language, "en", "an earlier snapshot stays immutable");
+  surface.systemSettingsInteractionGuard.release();
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector('[id$="-settings-system-codex-hooks"]').checked, false);
+    assert.equal(host.querySelector("[data-role='system-settings-status']").textContent, "Saved system settings.");
+  }
+  const detached = second.innerHTML;
+  second.remove();
+  surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Denied" });
+  assert.equal(body.querySelector("[data-role='system-settings-status']").textContent, "Denied");
+  assert.equal(second.innerHTML, detached, "removed mounts no longer render");
+});
+
+test("System local resource edits use current model values and preserve wire validation", () => {
+  const { surface, body, window, sent } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja", agent_resource: {
+    enabled: true, preset: "custom", priority: "idle", cpu_limit_percent: 35, build_jobs: 2,
+  } });
+  const previous = surface.systemSettingsModel.read();
+  const jobs = body.querySelector('[id$="-settings-system-agent-build-jobs"]');
+  const trust = body.querySelector('[id$="-settings-system-codex-hooks"]');
+  surface.systemSettingsInteractionGuard.activate();
+  jobs.value = "4";
+  jobs.dispatchEvent(new window.Event("change"));
+  assert.equal(body.querySelector("[data-role='system-settings-status']").textContent, "Saving…",
+    "safe status feedback remains visible while destructive rendering is guarded");
+  assert.deepEqual(sent.at(-1), { kind: "update_system_settings", language: "ja", agent_resource: {
+    enabled: true, preset: "custom", priority: "idle", cpu_limit_percent: 35, build_jobs: 4,
+  } });
+  assert.equal(previous.agentResource.buildJobs, 2);
+  surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Denied while focused" });
+  assert.equal(body.querySelector("[data-role='system-settings-status']").textContent, "Denied while focused");
+  surface.systemSettingsInteractionGuard.release();
+  assert.ok(body.querySelector('[id$="-settings-system-codex-hooks"]') === trust,
+    "flushing a local input change must retain its neighboring click target");
+  trust.checked = false;
+  trust.dispatchEvent(new window.Event("change"));
+  assert.deepEqual(sent.at(-1), { kind: "update_system_settings", language: "ja", codex_trust_managed_hooks: false });
+  const cpu = body.querySelector('[id$="-settings-system-agent-cpu-limit"]');
+  const count = sent.length;
+  cpu.value = "101";
+  cpu.dispatchEvent(new window.Event("change"));
+  assert.equal(sent.length, count);
+  assert.equal(surface.systemSettingsModel.read().agentResource.cpuLimitPercent, 35);
+  assert.equal(surface.systemSettingsModel.read().statusKind, "error");
+});
+
+test("Board auth snapshots jointly render Settings and survive guarded System refreshes", () => {
+  const { surface, body, document } = createSettingsHarness();
+  surface.applySystemSettingsEvent({ kind: "system_settings", board_provider: "slack" });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
+  const previous = surface.systemSettingsModel.read();
+  surface.applyBoardAuthStatus({ slack: true, slack_client_id: "client-a", message: "Connected" });
+  const signedIn = surface.systemSettingsModel.read();
+  assert.ok(Object.isFrozen(signedIn.boardConfig));
+  assert.equal(previous.boardAuth.slack, false, "later replies cannot mutate earlier snapshots");
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector(".board-auth-status").dataset.signedIn, "true");
+    assert.equal(host.querySelector('input[id$="-settings-board-slack-client-id"]').value, "client-a");
+  }
+  surface.systemSettingsInteractionGuard.activate();
+  surface.applySystemSettingsEvent({ kind: "system_settings_updated", language: "ja" });
+  surface.applyBoardAuthStatus({ slack: false, slack_client_id: "client-b" });
+  assert.equal(surface.systemSettingsModel.read().boardAuth.slack, false,
+    "the shared model updates while a dropdown is open");
+  assert.equal(body.querySelector(".board-auth-status").dataset.signedIn, "true");
+  surface.systemSettingsInteractionGuard.release();
+  assert.equal(surface.systemSettingsModel.read().language, "ja", "the queued System reply still flushes");
+  assert.equal(signedIn.boardAuth.slack, true);
+  surface.renderSystemPanelInAllSettingsWindows();
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector(".board-auth-status").dataset.signedIn, "false");
+    assert.equal(host.querySelector('input[id$="-settings-board-slack-client-id"]').value, "client-b");
+  }
+  second.remove();
+  surface.applyBoardAuthStatus({ slack: true });
+  assert.equal(second.querySelector(".board-auth-status").dataset.signedIn, "false",
+    "detached mounts are removed from the subscription");
+});
+
+test("Autostart snapshots jointly render mounted Settings and remain immutable across replies", () => {
+  const { surface, body, document, window } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
+  const snapshot = surface.systemSettingsModel.read();
+  assert.ok(Object.isFrozen(snapshot));
+  surface.applyAutostartStatus({ enabled: false });
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector('input[id$="-settings-system-autostart"]').disabled, false);
+  }
+  const checkbox = body.querySelector('input[id$="-settings-system-autostart"]');
+  checkbox.checked = true;
+  checkbox.dispatchEvent(new window.Event("change"));
+  const pending = surface.systemSettingsModel.read();
+  assert.equal(pending.autostartPending, true);
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector('input[id$="-settings-system-autostart"]').checked, true);
+    assert.equal(host.querySelector('[data-role="autostart-settings-status"]').textContent, "Saving…");
+  }
+  surface.applyAutostartError({ message: "Could not save" });
+  assert.equal(pending.autostartPending, true, "later replies cannot mutate an earlier snapshot");
+  assert.equal(snapshot.autostartChecking, true);
+  for (const host of [body, second]) {
+    assert.equal(host.querySelector('input[id$="-settings-system-autostart"]').checked, false);
+    assert.equal(host.querySelector('[data-role="autostart-settings-status"]').textContent, "Could not save");
+  }
+  second.remove();
+  surface.systemSettingsInteractionGuard.activate();
+  surface.applyAutostartStatus({ enabled: true }, "Saved login launch setting.");
+  assert.equal(surface.systemSettingsModel.read().autostartEnabled, true,
+    "the model advances even while destructive rendering waits");
+  assert.equal(body.querySelector('input[id$="-settings-system-autostart"]').checked, false);
+  surface.systemSettingsInteractionGuard.release();
+  assert.equal(body.querySelector('input[id$="-settings-system-autostart"]').checked, true);
+  assert.equal(body.querySelector('[data-role="autostart-settings-status"]').textContent, "Saved login launch setting.");
+  surface.systemSettingsInteractionGuard.activate();
+  surface.applySystemSettingsEvent({ kind: "system_settings_updated",
+    language: "ja", codex_trust_managed_hooks: false, board_provider: "teams",
+  });
+  surface.renderSystemPanelInAllSettingsWindows();
+  surface.applyAutostartStatus({ enabled: false });
+  surface.systemSettingsInteractionGuard.release();
+  assert.equal(surface.systemSettingsModel.read().language, "ja",
+    "a subscribed refresh must not replace another System reply waiting in the shared guard");
+  assert.equal(surface.systemSettingsModel.read().codexTrustManagedHooks, false);
+  assert.equal(surface.systemSettingsModel.read().boardProvider, "teams");
+  assert.equal(body.querySelector('input[id$="-settings-system-autostart"]').checked, false);
+});
+
+test("Issue #5531: mounted Settings recovers all lost reads without replaying writes or replacing input", () => {
+  const { surface, body, document, sent } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  assert.equal(sent.filter(message => message.kind === "get_autostart_status").length, 1);
+  assert.equal(surface.systemSettingsModel.read().autostartChecking, true);
+  assert.equal(body.querySelector('[data-role="autostart-settings-status"]').textContent,
+    "Checking login launch status…");
+  const secondBody = document.createElement("main");
+  document.body.appendChild(secondBody);
+  surface.renderSettingsWindow(secondBody, { id: "settings-second", title: "Settings" });
+  assert.equal(sent.filter(message => message.kind === "get_autostart_status").length, 1,
+    "another mount does not duplicate a pending status read");
+  secondBody.remove();
+  const draft = body.querySelector('[aria-label="Allowed labels"]');
+  draft.value = "keep-my-draft";
+  assert.equal(surface.customAgentsModel.read().catalog.loading, true);
+  sent.length = 0;
+  surface.resyncSettings();
+  assert.deepEqual(sent, [
+    { kind: "list_issue_monitor" }, { kind: "get_issue_monitor_profiles" },
+    { kind: "list_supported_agents" }, { kind: "get_system_settings" },
+    { kind: "get_update_settings" }, { kind: "get_board_auth_status" },
+    { kind: "get_autostart_status" }, { kind: "list_custom_agents" },
+    { kind: "list_agent_backends", agent: "claudeCode" },
+    { kind: "list_agent_backends", agent: "codex" },
+  ]);
+  assert.equal(body.querySelector('[aria-label="Allowed labels"]'), draft);
+  assert.equal(draft.value, "keep-my-draft");
+  sent.length = 0;
+  body.remove();
+  surface.resyncSettings();
+  assert.deepEqual(sent, [], "detached Settings must not trigger read probes");
+});
+
+test("Issue #5531: recovered System snapshots preserve unsaved provider and OAuth inputs", () => {
+  const { surface, body, window } = createSettingsHarness();
+  surface.applySystemSettingsEvent({ kind: "system_settings", board_provider: "slack" });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const secret = body.querySelector('input[type="password"]');
+  const port = body.querySelector(".board-oauth-port-form input");
+  secret.value = "unsaved-secret";
+  secret.dispatchEvent(new window.Event("input", { bubbles: true }));
+  port.value = "9876";
+  port.dispatchEvent(new window.Event("input", { bubbles: true }));
+  surface.resyncSettings();
+  surface.applyBoardAuthStatus({ oauth_redirect_port: 8765 });
+  assert.equal(body.querySelector('input[type="password"]'), secret);
+  assert.equal(secret.value, "unsaved-secret");
+  assert.equal(body.querySelector(".board-oauth-port-form input"), port);
+  assert.equal(port.value, "9876");
+  body.querySelector(".board-config-form button").click();
+  body.querySelector(".board-oauth-port-form button").click();
+  surface.renderSystemPanelInAllSettingsWindows();
+  assert.notEqual(body.querySelector('input[type="password"]'), secret,
+    "explicit saves allow the next authoritative snapshot to render");
+  assert.equal(body.querySelector('input[type="password"]').value, "");
+});
+
+test("Issue #5531: dirty provider drafts keep autostart pending and error state synchronized", () => {
+  const { surface, body, window, sent } = createSettingsHarness();
+  surface.applySystemSettingsEvent({ kind: "system_settings", board_provider: "slack" });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  surface.applyAutostartStatus({ enabled: false });
+  surface.applySystemSettingsEvent({ kind: "system_settings_updated" });
+  surface.renderSystemPanelInAllSettingsWindows();
+  const secret = body.querySelector('input[type="password"]');
+  secret.value = "unsaved-secret";
+  secret.dispatchEvent(new window.Event("input", { bubbles: true }));
+  const port = body.querySelector(".board-oauth-port-form input");
+  port.value = "9876";
+  port.dispatchEvent(new window.Event("input", { bubbles: true }));
+  const autostart = body.querySelector('input[id$="-settings-system-autostart"]');
+  autostart.checked = true;
+  autostart.dispatchEvent(new window.Event("change"));
+  const pendingDisabled = autostart.disabled;
+  const status = body.querySelector('[data-role="autostart-settings-status"]');
+  assert.equal(status.textContent, "Saving…");
+  sent.length = 0;
+  surface.resyncSettings();
+  assert.equal(sent.filter(message => message.kind === "get_autostart_status").length, 1);
+  assert.equal(sent.some(message => message.kind === "update_autostart"), false,
+    "recovery probes status without retrying the pending mutation");
+  assert.equal(surface.systemSettingsModel.read().autostartPending, true);
+  surface.applyAutostartError({ message: "Login launch could not be saved." });
+  assert.equal(autostart.checked, false, "a failed write restores the authoritative checkbox value");
+  assert.equal(autostart.disabled, false, "the error releases the pending checkbox");
+  assert.equal(pendingDisabled, true, "the checkbox is disabled while its write is pending");
+  assert.equal(status.textContent, "Login launch could not be saved.");
+  assert.equal(status.dataset.kind, "error");
+  assert.equal(body.querySelector('[data-role="system-settings-status"]').textContent,
+    "Saved system settings.");
+  surface.resyncSettings();
+  assert.equal(autostart.disabled, true, "a recovery query disables the known checkbox until its reply");
+  assert.equal(status.textContent, "Checking login launch status…");
+  surface.applyAutostartStatus({ enabled: true });
+  assert.equal(autostart.checked, true);
+  assert.equal(autostart.disabled, false);
+  assert.equal(status.textContent, "");
+  assert.equal(status.dataset.kind, undefined);
+  assert.equal(body.querySelector('input[type="password"]'), secret);
+  assert.equal(secret.value, "unsaved-secret");
+  assert.equal(port.value, "9876");
+});
+
 test("Supported Agents renders the catalog, identifiers, versions, and install actions", () => {
   const { document } = parseHTML("<html><body><section></section></body></html>");
   const panel = document.querySelector("section");
-  const render = loadFunction("renderSupportedAgentsPanel");
+  const render = loadFunctionWithDeps("renderSupportedAgentsPanel", ["supportedAgentVersion"]);
   render(panel, [
     { id: "claude", name: "Claude Code", installed: true, installed_version: "2.1.0" },
     { id: "codex", name: "Codex", installed: true, installed_version: null },
@@ -66,9 +423,10 @@ test("Supported Agents renders the catalog, identifiers, versions, and install a
   const rows = panel.querySelectorAll("[data-agent-id]");
   assert.equal(rows.length, 3);
   assert.match(rows[0].textContent, /Claude Code.*Installed.*2\.1\.0/);
-  assert.match(rows[1].textContent, /Codex.*Installed.*Unknown \(version unavailable\)/);
+  assert.equal(rows[1].children[2].textContent, "Unknown");
+  assert.match(rows[1].children[2].title, /version unavailable/i);
   assert.match(rows[2].textContent, /Grok Build.*Not installed/);
-  assert.doesNotMatch(rows[2].textContent, /Unknown/);
+  assert.equal(rows[2].children[2].textContent, "Not installed");
   assert.match(rows[0].textContent, /\(claude\)/);
   assert.equal(rows[2].querySelector("button")?.getAttribute("aria-label"), "Install Grok Build");
   assert.equal(panel.querySelectorAll("th[scope='col']").length, 5);
@@ -77,10 +435,35 @@ test("Supported Agents renders the catalog, identifiers, versions, and install a
   assert.equal(panel.querySelectorAll("[data-agent-id]").length, 0);
 });
 
+test("Issue #5594 normalizes the five reported CLI outputs without losing diagnostic details", () => {
+  const normalize = loadFunction("supportedAgentVersion");
+  const examples = [
+    ["2.1.301 (Claude Code)", "2.1.301"],
+    ["codex-cli 0.162.1", "0.162.1"],
+    ["grok 1.0.46 (2765805b9442) [stable]", "1.0.46"],
+    ["OpenClaw 2026.3.23-2 (7ffe7e4)", "2026.3.23-2"],
+    ["Unknown (version unavailable)", null],
+  ];
+  for (const [raw, version] of examples) assert.equal(normalize(raw), version, raw);
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  const render = loadFunctionWithDeps("renderSupportedAgentsPanel", ["supportedAgentVersion"]);
+  render(panel, examples.map(([raw], index) => ({
+    id: String(index), name: "Agent", installed: true, installed_version: raw,
+    update_check_error: "Release channel cannot be verified. Run the native updater manually.",
+  })));
+  for (const [index, row] of [...panel.querySelectorAll("tbody tr")].entries()) {
+    assert.equal(row.children[2].textContent, examples[index][1] || "Unknown");
+    assert.equal(row.children[2].title, examples[index][0]);
+    assert.equal(row.children[3].textContent, "Unknown");
+    assert.match(row.children[3].title, /Release channel cannot be verified/);
+  }
+});
+
 test("Supported Agents sends maintenance requests and exposes failures and automatic update conditions", () => {
   const { document, Event } = parseHTML("<html><body><section></section></body></html>");
   const panel = document.querySelector("section");
-  const render = loadFunction("renderSupportedAgentsPanel");
+  const render = loadFunctionWithDeps("renderSupportedAgentsPanel", ["supportedAgentVersion"]);
   const messages = [];
   const agents = [
     { id: "opencode", name: "OpenCode", installed: false, install_supported: true },
@@ -90,6 +473,8 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   render(panel, agents, options);
   const install = panel.querySelector('[aria-label="Install OpenCode"]');
   assert.ok(install, "a missing supported agent needs an Install action");
+  assert.equal(install.textContent, "Install");
+  assert.equal(panel.querySelector('[aria-label="Update Grok Build"]').textContent, "Update");
   install.click();
   panel.querySelector('[aria-label="Update Grok Build"]').click();
   const automatic = panel.querySelector('[aria-label="Automatically update agents"]');
@@ -140,6 +525,7 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, true);
   handlers.applySupportedAgentMaintenance({ agent_id: "opencode", pending: false, success: false, message: "Registry unavailable. Check your connection and retry." });
   assert.match(panel.querySelector('[role="alert"]').textContent, /Check your connection and retry/);
+  assert.equal(panel.querySelector('[role="alert"]').title, "Registry unavailable. Check your connection and retry.");
   assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false);
   agents[1].installed_version = "grok 2.0.0";
   agents[1].update_available = false;
@@ -179,6 +565,14 @@ test("Supported Agents table uses Operator tokens in both themes", () => {
   assert.match(cells[1], /var\(--space-/);
   assert.match(cells[1], /var\(--color-border\)/);
   assert.doesNotMatch(table[1] + cells[1], /#[\da-f]{3,8}\b|\brgba?\(/i);
+  assert.match(table[1], /table-layout:\s*fixed/);
+  assert.match(cells[1], /white-space:\s*nowrap/);
+  assert.match(cells[1], /text-overflow:\s*ellipsis/);
+  const button = componentsCss.match(/\.settings-supported-agents \.wizard-button\s*\{([^}]*)\}/);
+  assert.ok(button, "action buttons need a shared width and one-line labels");
+  assert.match(button[1], /width:/);
+  assert.match(button[1], /white-space:\s*nowrap/);
+  assert.doesNotMatch(button[1], /#[\da-f]{3,8}\b|\brgba?\(/i);
 });
 
 test("two Settings System panels keep labels associated with controls in their own window", () => {
@@ -455,12 +849,12 @@ test("renderSystemPanel exposes Codex managed hook trust opt-in", () => {
   );
   assert.match(
     settingsSource,
-    /trustCheckbox\.checked\s*=\s*systemSettingsState\.codexTrustManagedHooks\s*!==\s*false/,
+    /trustCheckbox\.checked\s*=\s*state\.codexTrustManagedHooks\s*!==\s*false/,
     "expected unchecked only when config explicitly disables Codex hook trust",
   );
   assert.match(
     settingsSource,
-    /send\(\{\s*kind:\s*"update_system_settings",\s*language:\s*systemSettingsState\.language\s*\|\|\s*"auto",\s*codex_trust_managed_hooks:\s*next,\s*\}\)/,
+    /send\(\{\s*kind:\s*"update_system_settings",\s*language:\s*systemSettingsModel\.read\(\)\.language\s*\|\|\s*"auto",\s*codex_trust_managed_hooks:\s*next,\s*\}\)/,
     "expected checkbox onChange to send codex_trust_managed_hooks",
   );
 });
@@ -543,7 +937,7 @@ test("System tab exposes remote provider config form that saves via update_board
   );
   // Dispatch must store the non-secret config view for prefill.
   assert.match(
-    appSource,
+    settingsSource,
     /slackClientId:\s*event\.slack_client_id/,
     "dispatch must prefill slack client id from board_auth_status",
   );
@@ -658,7 +1052,7 @@ test("System tab exposes an editable OAuth callback port + redirect URL hint (SP
     "Save port must send update_board_oauth_port",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /oauthRedirectPort:\s*event\.oauth_redirect_port/,
     "dispatch must prefill the OAuth port from board_auth_status",
   );
@@ -685,7 +1079,7 @@ test("System tab exposes Launch GWT at login autostart control", () => {
   );
   assert.match(
     settingsSource,
-    /systemSettingsState\.autostartEnabled\s*=\s*systemSettingsState\.autostartPreviousEnabled\s*===\s*true/,
+    /autostartEnabled:\s*state\.autostartPending\s*\?\s*state\.autostartPreviousEnabled\s*===\s*true/,
     "expected autostart update errors to restore the last confirmed value",
   );
   assert.match(
@@ -707,6 +1101,7 @@ test("autostart checking and failures stay local and preserve the last confirmed
     autostartLoaded: false, autostartPending: false, autostartChecking: true,
     statusMessage: "Saved system settings.", statusKind: "success",
   };
+  const model = createUiStateStore(state);
   const messages = [];
   const createDiv = className => {
     const element = document.createElement("div");
@@ -719,14 +1114,15 @@ test("autostart checking and failures stay local and preserve the last confirmed
     renderSource.indexOf('panel.appendChild(section)'),
   );
   const { render, applyAutostartStatus, applyAutostartError } = Function(
-    "document", "systemSettingsState", "createDiv", "send", `
-      const renderSystemPanelInAllSettingsWindows = () => {};
+    "document", "systemSettingsModel", "createDiv", "send", `
       ${extractFunctionSource(settingsSource, "applyAutostartStatus")}
       ${extractFunctionSource(settingsSource, "applyAutostartError")}
-      function render() { ${autostartSource}; return autostartSection; }
+      ${extractFunctionSource(settingsSource, "syncAutostartCheckbox")}
+      ${extractFunctionSource(settingsSource, "renderAutostartStatus")}
+      function render() { const state = systemSettingsModel.read(); ${autostartSource}; return autostartSection; }
       return { render, applyAutostartStatus, applyAutostartError };
     `,
-  )(document, state, createDiv, message => messages.push(message));
+  )(document, model, createDiv, message => messages.push(message));
   const toggle = section => section.querySelector('input[type="checkbox"]');
   let section = render();
   assert.equal(toggle(section).disabled, true, "unknown autostart cannot be changed");
@@ -739,10 +1135,9 @@ test("autostart checking and failures stay local and preserve the last confirmed
   assert.doesNotMatch(section.textContent, /Checking login launch status/);
 
   applyAutostartStatus({ enabled: true, mechanism: "fixture", install_path: "/fixture/gwt" });
-  state.autostartPreviousEnabled = false;
-  state.autostartChecking = true;
+  model.update(state => ({ ...state, autostartPreviousEnabled: false, autostartChecking: true }));
   applyAutostartError({ message: "Refresh query unavailable." });
-  assert.equal(state.autostartEnabled, true, "refresh failure preserves the last confirmed value");
+  assert.equal(model.read().autostartEnabled, true, "refresh failure preserves the last confirmed value");
   section = render();
   assert.equal(toggle(section).disabled, false);
   assert.equal(toggle(section).checked, true);
@@ -759,12 +1154,12 @@ test("autostart checking and failures stay local and preserve the last confirmed
   assert.match(render().textContent, /Saved login launch setting/);
   assert.equal(state.statusMessage, "Saved system settings.");
   assert.equal(state.statusKind, "success");
-  const openSource = extractFunctionSource(settingsSource, "renderSettingsWindow");
-  assert.match(openSource, /const shouldRequestAutostartStatus = !systemSettingsState\.autostartPending\s*&& !systemSettingsState\.autostartChecking/,
+  const requestSource = extractFunctionSource(settingsSource, "requestSettingsSnapshots");
+  assert.match(requestSource, /const shouldRequestAutostartStatus = recovering \|\| \(!autostart\.autostartPending\s*&& !autostart\.autostartChecking\)/,
     "reopening Settings must preserve an in-flight query or update");
-  assert.match(openSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*systemSettingsState\.autostartChecking = true/,
+  assert.match(requestSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*systemSettingsModel\.update\([\s\S]{0,100}autostartChecking: true/,
     "only a new query starts checking");
-  assert.match(openSource, /if \(shouldRequestAutostartStatus\)\s*\{\s*send\(\{ kind: "get_autostart_status" \}\)/,
+  assert.match(requestSource, /if \(shouldRequestAutostartStatus\)\s*\{[\s\S]*?send\(\{ kind: "get_autostart_status" \}\)/,
     "use the same decision when sending the query");
 });
 
@@ -884,7 +1279,7 @@ test("renderSystemPanel exposes agent process-tree resource controls (#3813)", (
   }
   assert.match(
     settingsSource,
-    /kind:\s*"update_system_settings",\s*language:\s*systemSettingsState\.language\s*\|\|\s*"auto",\s*agent_resource:/,
+    /kind:\s*"update_system_settings",\s*language:\s*systemSettingsModel\.read\(\)\.language\s*\|\|\s*"auto",\s*agent_resource:/,
     "expected agent resource controls to send the complete agent_resource object",
   );
   assert.match(
@@ -894,8 +1289,8 @@ test("renderSystemPanel exposes agent process-tree resource controls (#3813)", (
   );
   assert.match(
     settingsSource,
-    /applyAgentResourceSnapshot\(deferred\.agent_resource\)/,
-    "expected deferred backend events to reconcile agent resource state",
+    /normalizeAgentResource\(event\.agent_resource, state\.agentResource\)/,
+    "expected model commits to normalize agent resource state",
   );
   assert.match(
     settingsSource,
@@ -942,20 +1337,7 @@ test("renderSystemPanel exposes agent process-tree resource controls (#3813)", (
   );
 });
 
-test("app.js reconciles agent_resource from system settings events (#3813)", () => {
-  assert.match(
-    appSource,
-    /kind:\s*"system_settings",\s*language:\s*event\.language,\s*codex_trust_managed_hooks:\s*event\.codex_trust_managed_hooks,\s*board_provider:\s*event\.board_provider,\s*agent_resource:\s*event\.agent_resource,/,
-    "expected deferred system_settings payload to carry agent_resource",
-  );
-  assert.match(
-    appSource,
-    /kind:\s*"system_settings_updated",\s*language:\s*event\.language,\s*codex_trust_managed_hooks:\s*event\.codex_trust_managed_hooks,\s*board_provider:\s*event\.board_provider,\s*agent_resource:\s*event\.agent_resource,/,
-    "expected deferred system_settings_updated payload to carry agent_resource",
-  );
-  const applyCalls = appSource.match(/applyAgentResourceSnapshot\(event\.agent_resource\)/g) || [];
-  assert.ok(
-    applyCalls.length >= 2,
-    "expected both system_settings and system_settings_updated arms to reconcile agent_resource",
-  );
+test("app.js delegates complete System events to the shared model (#3813)", () => {
+  assert.match(appSource, /case "system_settings":\s*case "system_settings_updated":\s*applySystemSettingsEvent\(event\);/);
+  assert.match(settingsSource, /agentResource: normalizeAgentResource\(event\.agent_resource, state\.agentResource\)/);
 });
