@@ -736,9 +736,25 @@ fn issue_3777_runtime_hook_profiles_work_lease_wait_separately_from_parse() {
         .open(work_items_path.with_extension("lock"))
         .expect("open Work lease");
     lease.lock_exclusive().expect("hold Work lease");
+    let (contention_tx, contention_rx) = std::sync::mpsc::channel();
+    let _contention = gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
+        &work_items_path.with_extension("lock"),
+        move || {
+            contention_tx
+                .send(())
+                .expect("report Work lease contention")
+        },
+    );
     let release = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(120));
+        // Start the existing hold interval only after the loader is waiting.
+        // Always unlock before reporting a missing notification to avoid a hang.
+        // test-hygiene: allow-wall-clock-deadline Bounds a missing notification, not the measured lock wait; unlock before failing.
+        let contention = contention_rx.recv_timeout(Duration::from_secs(30));
+        if contention.is_ok() {
+            thread::sleep(Duration::from_millis(120));
+        }
         lease.unlock().expect("release Work lease");
+        contention.expect("observe Work lease contention before release");
     });
 
     runtime.refresh_active_work_projection_for_project_root(&repo);
