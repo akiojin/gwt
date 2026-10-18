@@ -185,8 +185,10 @@ fn builtin_path_batch_resolves_changed_root_and_file_symlinks() {
     symlink(first.join("keep.rs"), &file).unwrap();
     let policy = default_index_path_policy();
     assert_eq!(
-        policy.filter_builtin_denied_paths(&root, vec![file.clone()]),
-        [file.clone()]
+        policy
+            .filter_builtin_denied_paths(&root, vec![file.clone()])
+            .as_slice(),
+        std::slice::from_ref(&file)
     );
     fs::remove_file(&file).unwrap();
     symlink(first.join(".gwt/config"), &file).unwrap();
