@@ -58,6 +58,7 @@ pub mod persistence;
 pub mod pm_conversation;
 pub mod pm_current;
 pub mod pm_planning;
+pub mod pm_policy;
 pub mod pm_registry;
 pub mod preset;
 pub mod process;

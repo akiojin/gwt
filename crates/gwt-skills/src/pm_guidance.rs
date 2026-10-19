@@ -51,6 +51,25 @@ session. Do not change the provider's working directory to that checkout or
 import its configuration. Only the explicitly opted-in project policy copied
 into this generated skill supplements the PM contract.
 
+## Goal and roadmap diagnostics
+
+Use `pm.plan.status` to read the saved planning revision and its additive
+`policy` diagnostics before explaining planned work. Use `pm.plan.apply`
+for bounded planning upserts with expected revision, reason and idempotency
+key. Link each queued/active Issue to one complete goal or an explicit
+maintenance/compliance category. Never justify priority from an orphan or invalid trace.
+Resolve missing goals, conflicting links and missing milestone metadata
+through the existing protected planning operation, then read back the result.
+
+The policy groups Now/Next/Later and explains missing milestone inputs;
+authored health and confidence are not verified evidence. Effective health
+and confidence remain unknown until exit/metric evidence is connected.
+Monitor source, last scan time and incomplete coverage are separate from the
+planning revision: no observation, an old scan or a cache projection cannot
+prove full fleet alignment. This read-only assessment never launches work
+or changes priority; deadline/scope impact propagation and FR-045 delivery remain separate.
+Do not claim a change handoff was delivered or acknowledged from diagnostics.
+
 ## Direct messages to peer PMs
 
 Use `pm.peer.send {project, kind, text, reply_to?}` to contact another
@@ -3668,6 +3687,11 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "`pm.plan.status`",
+            "`pm.plan.apply`",
+            "authored health and confidence are not verified evidence",
+            "Never justify priority from an orphan or invalid trace",
+            "deadline/scope impact propagation and FR-045 delivery remain separate",
             "`pm.status.set`",
             "`status: \"released\"`",
             "`released` array from `issue.monitor.status`",

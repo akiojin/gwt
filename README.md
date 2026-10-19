@@ -782,6 +782,14 @@ decides the semantic execution order, and tells the Issue Monitor which Issue
 to take next. It reports progress and brings `NeedsHuman` escalations back to
 you in the same conversation.
 
+Ask the PM to link planned Issues to a project goal or an explicit maintenance
+or compliance category. `pm.plan.status` shows the saved planning revision and a
+`policy` assessment with unlinked or invalid work, Now/Next/Later items, and
+missing milestone information. Monitor observations include their source and
+scan time; unavailable or incomplete observations do not prove full coverage.
+Reported milestone health and confidence remain unverified until supporting
+evidence is connected.
+
 The PM never launches implementation agents itself — it moves an Issue to the
 front of the queue and asks for a scan, and the Issue Monitor's existing
 claim/slot path does the launching, so the duplicate-launch protections are
