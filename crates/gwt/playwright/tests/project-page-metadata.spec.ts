@@ -1,6 +1,6 @@
 /* Issue #4540 AC-2 — project metadata and server-owned unread in both themes. */
 import { expect, test, type Page } from "@playwright/test";
-import { gotoLiveGwt } from "./_helpers/live-gwt";
+import { gotoLiveGwt, openLiveGwtProject } from "./_helpers/live-gwt";
 import { APP_URL, HUB_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
 async function installMetadataBackend(page: Page) {
@@ -135,5 +135,62 @@ test("live server projects the seeded agent aggregate and keeps Hub metadata fix
   await gotoLiveGwt(page, base!, { hub: true });
   await expect(page).toHaveTitle("gwt — Hub");
   await expect(page.locator('link[rel="icon"]')).toHaveAttribute("href", "data:,");
+  expect(errors).toEqual([]);
+});
+
+test("live shared metadata renders one accepted revision in title, favicon, and acknowledgement", async ({ page }, testInfo) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires browser-check isolated checkout server");
+  const errors = collectErrors(page);
+  const acknowledgements: any[] = [];
+  let transport: import("@playwright/test").WebSocketRoute;
+  await page.addInitScript(() => {
+    (window as any).__metadataFocused = false;
+    document.hasFocus = () => (window as any).__metadataFocused;
+  });
+  await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+    transport = socket;
+    const server = socket.connectToServer();
+    server.onMessage(message => {
+      const event = typeof message === "string" ? JSON.parse(message) : null;
+      if (event?.kind !== "project_agent_aggregate") socket.send(message);
+    });
+    socket.onMessage(message => {
+      const event = typeof message === "string" ? JSON.parse(message) : null;
+      if (event?.kind === "project_aggregate_ack") acknowledgements.push(event);
+      else server.send(message);
+    });
+  });
+  await gotoLiveGwt(page, base!, { suppressProjectSurfaces: true });
+  await openLiveGwtProject(page, process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd());
+  const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
+  await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await page.evaluate(() => {
+    (window as any).__metadataRestoreRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+  });
+  const update = (aggregate: object) => transport!.send(JSON.stringify({ kind: "project_agent_aggregate", aggregate }));
+  update({ running_count: 2, block_count: 1, error_count: 1, unread: true, revision: 5 });
+  await expect(page).toHaveTitle(/^● .* — RUN 2 · BLOCK 1 — gwt$/);
+  const icon = page.locator('link[rel="icon"]');
+  await expect(icon).toHaveAttribute("data-state", "error");
+  await expect(icon).toHaveAttribute("data-unread", "true");
+  expect(acknowledgements).toEqual([]);
+  update({ running_count: 99, block_count: 99, error_count: 0, unread: false, revision: 4 });
+  await page.evaluate(() => {
+    (window as any).__metadataFocused = true;
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect.poll(() => acknowledgements.at(-1)?.revision).toBe(5);
+  await expect(page).toHaveTitle(/^● .* — RUN 2 · BLOCK 1 — gwt$/);
+  await expect(icon).toHaveAttribute("data-state", "error");
+  update({ running_count: 1, block_count: 0, error_count: 0, unread: false, revision: 6 });
+  await expect(page).toHaveTitle(/ — RUN 1 · BLOCK 0 — gwt$/);
+  await expect(page).not.toHaveTitle(/^●/);
+  await expect(icon).toHaveAttribute("data-state", "running");
+  await expect(icon).toHaveAttribute("data-unread", "false");
+  await page.evaluate(() => { window.requestAnimationFrame = (window as any).__metadataRestoreRaf; });
+  await page.screenshot({ path: testInfo.outputPath(`shared-metadata-${theme}.png`) });
   expect(errors).toEqual([]);
 });

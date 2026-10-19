@@ -10,6 +10,19 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Project metadata receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const metadata = readFileSync(new URL('../project-page-metadata.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/project-page-metadata.js', metadata]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/project_agent_aggregate');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "project_agent_aggregate":',
+    'case "project_agent_aggregate": document.body.textContent = event.aggregate.revision;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
 test("Runtime health receiver updates shared state and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const findings = source => scanModule(source, 'crates/gwt/web/app.js')
