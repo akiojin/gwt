@@ -1600,6 +1600,26 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             text: required_string(params, "text")?,
         }),
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
+        "pm.plan.status" => {
+            reject_unknown_params(params, &[], "pm.plan.status")?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::PlanStatus)
+        }
+        "pm.plan.apply" => {
+            reject_unknown_params(
+                params,
+                &["action", "expected_revision", "reason", "idempotency_key"],
+                "pm.plan.apply",
+            )?;
+            let request: crate::pm_planning::PlanningApplyRequest =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            request
+                .validate()
+                .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::PlanApply {
+                request: Box::new(request),
+            })
+        }
         "pm.peer.send" => {
             reject_unknown_params(
                 params,
@@ -6710,6 +6730,112 @@ mod tests {
                 assert_eq!(project_root.as_deref(), Some("/tmp/elsewhere"));
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pm_plan_status_accepts_only_empty_params() {
+        assert!(matches!(
+            ok("pm.plan.status", json!({})),
+            CliCommand::Pm(crate::cli::pm::PmCommand::PlanStatus)
+        ));
+        for params in [
+            json!({"project_root": "/tmp/foreign"}),
+            json!({"path": "/tmp/planning.json"}),
+            json!({"actor": "another-pm"}),
+            json!({"unexpected": true}),
+        ] {
+            assert!(matches!(
+                err("pm.plan.status", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        let report = crate::cli::pm::capabilities_report();
+        for operation in ["pm.plan.status", "pm.plan.apply"] {
+            assert!(report
+                .capabilities
+                .iter()
+                .any(|row| row.operation == operation && row.executable));
+        }
+    }
+
+    #[test]
+    fn pm_plan_apply_parses_each_typed_action() {
+        for kind in [
+            "goal",
+            "milestone",
+            "risk",
+            "decision",
+            "policy",
+            "recurring",
+            "link",
+        ] {
+            let params = json!({
+                "action": {"kind": kind, "value": {"id": kind}},
+                "expected_revision": 0,
+                "reason": "Record the approved plan",
+                "idempotency_key": format!("planning-{kind}")
+            });
+            let CliCommand::Pm(crate::cli::pm::PmCommand::PlanApply { request }) =
+                ok("pm.plan.apply", params)
+            else {
+                panic!("expected a typed planning apply command for {kind}");
+            };
+            assert_eq!(request.expected_revision, 0);
+            assert_eq!(request.idempotency_key, format!("planning-{kind}"));
+            let action = serde_json::to_value(request.action).unwrap();
+            assert_eq!(action["kind"], kind);
+            assert_eq!(action["value"]["id"], kind);
+        }
+    }
+
+    #[test]
+    fn pm_plan_apply_rejects_invalid_and_scope_overrides() {
+        let valid = json!({
+            "action": {"kind": "goal", "value": {"id": "goal-1"}},
+            "expected_revision": 0,
+            "reason": "Record the approved plan",
+            "idempotency_key": "planning-1"
+        });
+        for field in ["action", "expected_revision", "reason", "idempotency_key"] {
+            let mut params = valid.clone();
+            params.as_object_mut().unwrap().remove(field);
+            assert!(matches!(
+                err("pm.plan.apply", params),
+                CliParseError::InvalidJson(_)
+            ));
+        }
+        for (field, value) in [
+            ("project_root", json!("/tmp/foreign")),
+            ("path", json!("/tmp/planning.json")),
+            ("actor", json!("another-pm")),
+            ("session_id", json!("another-pm")),
+            ("unexpected", json!(true)),
+            ("expected_revision", json!(-1)),
+            ("expected_revision", json!(1.5)),
+            ("expected_revision", json!("0")),
+            ("reason", json!(" ")),
+            ("idempotency_key", json!("")),
+            (
+                "action",
+                json!({"kind": "delete", "value": {"id": "goal-1"}}),
+            ),
+            (
+                "action",
+                json!({"kind": "goal", "value": {"id": "goal-1", "unknown": true}}),
+            ),
+            (
+                "action",
+                json!({"kind": "goal", "value": {"id": "goal-1"}, "unknown": true}),
+            ),
+            ("action", json!({"kind": "goal", "value": {"id": " "}})),
+        ] {
+            let mut params = valid.clone();
+            params[field] = value;
+            assert!(matches!(
+                err("pm.plan.apply", params),
+                CliParseError::InvalidJson(_)
+            ));
         }
     }
 

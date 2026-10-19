@@ -764,6 +764,13 @@ fn format_pm_help() -> String {
         "               kind, text, reply_to (required for reply), timeout_seconds (1..86400; default 900).",
         "               Unavailable peers return status=unavailable; Reports retain the attempt.",
         "               Unread messages reach the peer's next prompt; a successful reply acknowledges.",
+        "  pm.plan.status Read the stored typed planning snapshot (read-only, ownerless-safe).",
+        "                 Params must be empty; no derived health or WIP projections.",
+        "  pm.plan.apply Upsert one typed planning record (registered PM only).",
+        "                Required: action {kind, value}, expected_revision, reason, idempotency_key.",
+        "                kind: goal|milestone|risk|decision|policy|recurring|link; link uses RoadmapItem.",
+        "                reason and idempotency_key must be nonempty. Exact retries return the receipt.",
+        "                No project_root, path, or actor override; the current PM supplies authority.",
         "  pm.status    Report the per-project PM registration, auto-start setting,",
         "               a stale hint from the durable session store, and every PM",
         "               registration in this repository including other project",
@@ -778,7 +785,7 @@ fn format_pm_help() -> String {
         "               caller's own registration (Issue #3607).",
         "",
         "Key params:",
-        "  project_root (optional; defaults to the current repository path)",
+        "  project_root (where supported; optional; defaults to the current repository path)",
         "  session_id   (pm.stop; defaults to the calling PM's own Session)",
         "  items        (pm.status.set; 1-3 {kind: working|waiting, text, started_at})",
         "  next_trigger (pm.status.set; required, nonempty)",
@@ -1394,6 +1401,25 @@ mod tests {
             assert!(
                 help.contains(expected),
                 "board help must document {expected}. help:\n{help}",
+            );
+        }
+    }
+
+    #[test]
+    fn format_pm_help_documents_planning_authority_and_request() {
+        let help = format_pm_help();
+        for expected in [
+            "pm.plan.status",
+            "pm.plan.apply",
+            "expected_revision",
+            "idempotency_key",
+            "goal|milestone|risk|decision|policy|recurring|link",
+            "registered PM only",
+            "No project_root, path, or actor override",
+        ] {
+            assert!(
+                help.contains(expected),
+                "PM help must document {expected}: {help}"
             );
         }
     }

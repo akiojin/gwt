@@ -463,3 +463,144 @@ fn incompatible_valid_json_retries_do_not_create_corrupt_backups() {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }
+
+fn plan_request(kind: &str, revision: u64, key: &str) -> gwt::pm_planning::PlanningApplyRequest {
+    serde_json::from_value(json!({
+        "action": {"kind": kind, "value": {"id": kind}},
+        "expected_revision": revision, "reason": "Accepted project plan", "idempotency_key": key
+    }))
+    .unwrap()
+}
+
+#[test]
+fn planning_apply_upserts_all_seven_records_with_atomic_receipts() {
+    use gwt::pm_planning::apply_planning_action;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pm-planning.json");
+    for (revision, kind) in [
+        "goal",
+        "milestone",
+        "risk",
+        "decision",
+        "policy",
+        "recurring",
+        "link",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let receipt =
+            apply_planning_action(&path, "pm-a", &plan_request(kind, revision as u64, kind))
+                .unwrap();
+        assert_eq!(receipt.actor, "pm-a");
+        assert_eq!(receipt.requester, "pm-a");
+        assert_eq!(receipt.action_kind, kind);
+        assert_eq!(receipt.target_id, kind);
+        assert_eq!(receipt.expected_revision, revision as u64);
+        assert_eq!(receipt.resulting_revision, revision as u64 + 1);
+        assert_eq!(receipt.outcome, "applied");
+        let state = load_planning_state(&path).unwrap();
+        assert_eq!(state.revision, receipt.resulting_revision);
+        assert_eq!(state.audit_receipts.last(), Some(&receipt));
+    }
+    let mut request = plan_request("goal", 7, "replace-goal");
+    if let gwt::pm_planning::PlanningAction::Goal(goal) = &mut request.action {
+        goal.outcome = "Updated outcome".into();
+    }
+    apply_planning_action(&path, "pm-a", &request).unwrap();
+    let state = load_planning_state(&path).unwrap();
+    assert_eq!(state.revision, 8);
+    assert_eq!(state.goals.len(), 1);
+    assert_eq!(state.goals[0].outcome, "Updated outcome");
+    assert_eq!(state.audit_receipts.len(), 8);
+    assert_eq!(state.milestones.len(), 1);
+    assert_eq!(state.risks.len(), 1);
+    assert_eq!(state.decisions.len(), 1);
+    assert_eq!(state.policies.len(), 1);
+    assert_eq!(state.recurring_items.len(), 1);
+    assert_eq!(state.roadmap_items.len(), 1);
+}
+
+#[test]
+fn planning_apply_replays_exact_request_after_later_writes_and_refuses_conflicts() {
+    use gwt::pm_planning::apply_planning_action;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pm-planning.json");
+    let request = plan_request("goal", 0, "first");
+    let receipt = apply_planning_action(&path, "pm-a", &request).unwrap();
+    apply_planning_action(&path, "pm-a", &plan_request("risk", 1, "second")).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        apply_planning_action(&path, "pm-a", &request).unwrap(),
+        receipt
+    );
+    let mut conflict = request.clone();
+    conflict.reason = "Different rationale".into();
+    assert!(apply_planning_action(&path, "pm-a", &conflict).is_err());
+    assert!(apply_planning_action(&path, "other-pm", &request).is_err());
+    assert!(apply_planning_action(&path, "pm-a", &plan_request("risk", 0, "stale")).is_err());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn planning_apply_rejects_credentials_in_records_and_redacts_audit_reason() {
+    use gwt::pm_planning::{apply_planning_action, PlanningAction};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pm-planning.json");
+    let token = "ghp_0123456789abcdefghij";
+    let mut request = plan_request("goal", 0, "redacted-audit");
+    for credential in [
+        token,
+        "OPENAI_API_KEY=sk-example0123456789",
+        "Bearer example0123456789",
+    ] {
+        if let PlanningAction::Goal(goal) = &mut request.action {
+            goal.outcome = credential.into();
+        }
+        assert!(
+            apply_planning_action(&path, "pm-a", &request).is_err(),
+            "refuse known credential form"
+        );
+        assert!(!path.exists());
+    }
+    request = plan_request("goal", 0, "redacted-audit");
+    request.reason = format!("Rotate token={token}\nAuthorization: Bearer {token}\nOPENAI_API_KEY=sk-example0123456789\nBearer example0123456789");
+    let receipt = apply_planning_action(&path, "pm-a", &request).unwrap();
+    assert!(receipt.reason.contains("***redacted***"));
+    let bytes = fs::read_to_string(&path).unwrap();
+    assert!(!bytes.contains(token));
+    assert!(!bytes.contains("sk-example0123456789"));
+    assert!(!bytes.contains("example0123456789"));
+    assert!(!bytes.contains("Accepted project plan"));
+    assert_eq!(
+        apply_planning_action(&path, "pm-a", &request).unwrap(),
+        receipt
+    );
+}
+
+#[test]
+fn planning_apply_concurrent_exact_retry_publishes_once() {
+    use gwt::pm_planning::apply_planning_action;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pm-planning.json");
+    let barrier = Arc::new(Barrier::new(2));
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                apply_planning_action(&path, "pm-a", &plan_request("goal", 0, "shared"))
+            })
+        })
+        .collect();
+    let receipts: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap().unwrap())
+        .collect();
+    assert_eq!(receipts[0], receipts[1]);
+    let state = load_planning_state(&path).unwrap();
+    assert_eq!(state.revision, 1);
+    assert_eq!(state.goals.len(), 1);
+    assert_eq!(state.audit_receipts.len(), 1);
+}
