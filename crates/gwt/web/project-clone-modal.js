@@ -245,7 +245,8 @@ export function renderProjectCloneModal({
   onClone,
 }) {
   const ownerDoc = modalEl.ownerDocument;
-  const current = state || { open: false };
+  // Input handlers edit a view-local draft, never the immutable model snapshot.
+  const current = { ...(state || { open: false }) };
   dialogEl.innerHTML = "";
   if (!current.open) {
     closeModal(modalEl, dialogEl);

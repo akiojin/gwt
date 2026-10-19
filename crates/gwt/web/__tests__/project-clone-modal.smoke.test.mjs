@@ -85,15 +85,17 @@ test("manual open retains its path on failure and closes only after open success
 
 test("url mode renders URL and destination controls", () => {
   const { modalEl, dialogEl, createNode } = mount();
+  const snapshot = Object.freeze(state());
+  let draftUrl;
 
   renderProjectCloneModal({
     modalEl,
     dialogEl,
-    state: state(),
+    state: snapshot,
     createNode,
     onClose: noop,
     onModeChange: noop,
-    onUrlChange: noop,
+    onUrlChange: value => { draftUrl = value; },
     onParentSelect: noop,
     onSearchQueryChange: noop,
     onSearch: noop,
@@ -106,6 +108,12 @@ test("url mode renders URL and destination controls", () => {
   assert.ok(dialogEl.querySelector("#clone-project-url-input"));
   assert.ok(dialogEl.querySelector("#clone-project-parent-button"));
   assert.ok(dialogEl.querySelector("#clone-project-start"));
+  const input = dialogEl.querySelector("#clone-project-url-input");
+  input.value = "";
+  input.dispatchEvent(new modalEl.ownerDocument.defaultView.Event("input"));
+  assert.equal(draftUrl, "");
+  assert.equal(dialogEl.querySelector("#clone-project-start").disabled, true);
+  assert.equal(snapshot.url, "https://github.com/akiojin/gwt.git");
 });
 
 test("search mode renders candidates and selects repository URL", () => {

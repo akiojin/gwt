@@ -274,19 +274,20 @@ export function createProjectShellSurface({
         message: "",
         recovery: "",
       });
-      let cloneProjectModalState = {
-        open: false,
-        mode: "url",
-        url: "",
-        parentPath: "",
-        query: "",
-        repositories: [],
-        selectedRepositoryUrl: "",
-        searching: false,
-        cloning: false,
-        progress: "",
-        error: "",
-      };
+      // Draft edits are model updates too, but do not rebuild focused inputs.
+      const cloneProjectModel = createUiStateStore({
+        form: { url: "", parentPath: "", query: "" },
+        modal: {
+          open: false,
+          mode: "url",
+          repositories: [],
+          selectedRepositoryUrl: "",
+          searching: false,
+          cloning: false,
+          progress: "",
+          error: "",
+        },
+      });
 
       function sendOpenProjectDialog() {
         openPathDialog.open();
@@ -306,14 +307,17 @@ export function createProjectShellSurface({
             button.textContent = pending ? "Choosing folder…" : "Open Folder…";
             button.setAttribute("aria-busy", String(Boolean(pending)));
           }
-          cloneProjectModalState = { ...cloneProjectModalState, pickerPending: Boolean(pending), pickerMessage: message };
-          renderProjectCloneModal();
+          cloneProjectModel.update(current => ({ ...current,
+            modal: { ...current.modal, pickerPending: Boolean(pending), pickerMessage: message },
+          }));
         },
         onSelected: (event) => {
           if (event.purpose === "open") openPathDialog.waitForOpen(event.path, `picker:${event.request_id}`);
           if (event.purpose === "clone_parent") {
-            cloneProjectModalState = { ...cloneProjectModalState, parentPath: event.path, error: "" };
-            renderProjectCloneModal();
+            cloneProjectModel.update(current => ({
+              form: { ...current.form, parentPath: event.path },
+              modal: { ...current.modal, error: "" },
+            }));
           }
         },
       });
@@ -323,37 +327,25 @@ export function createProjectShellSurface({
       function clearPickerPending() { folderPicker.connectionLost(); }
 
       function openCloneProjectModal() {
-        cloneProjectModalState = {
-          ...cloneProjectModalState,
-          open: true,
-          error: "",
-          progress: "",
-        };
-        renderProjectCloneModal();
+        cloneProjectModel.update(current => ({ ...current,
+          modal: { ...current.modal, open: true, error: "", progress: "" },
+        }));
       }
 
       function closeCloneProjectModal() {
-        if (cloneProjectModalState.cloning) {
-          return;
-        }
-        cloneProjectModalState = {
-          ...cloneProjectModalState,
-          open: false,
-          searching: false,
-          error: "",
-          progress: "",
-        };
-        renderProjectCloneModal();
+        if (cloneProjectModel.read().modal.cloning) return;
+        cloneProjectModel.update(current => ({ ...current,
+          modal: { ...current.modal, open: false, searching: false, error: "", progress: "" },
+        }));
       }
 
       function renderProjectCloneModal() {
-        if (!cloneProjectModal || !cloneProjectDialog) {
-          return;
-        }
+        if (!cloneProjectModal || !cloneProjectDialog) return;
+        const { form, modal } = cloneProjectModel.read();
         renderProjectCloneModalView({
           modalEl: cloneProjectModal,
           dialogEl: cloneProjectDialog,
-          state: cloneProjectModalState,
+          state: { ...modal, ...form },
           createNode: (tagName, className, textContent) => {
             const node = document.createElement(tagName);
             if (className) node.className = className;
@@ -362,73 +354,50 @@ export function createProjectShellSurface({
           },
           onClose: closeCloneProjectModal,
           onModeChange: (mode) => {
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              mode,
-              error: "",
-              progress: "",
-            };
-            renderProjectCloneModal();
+            cloneProjectModel.update(current => ({ ...current,
+              modal: { ...current.modal, mode, error: "", progress: "" },
+            }));
           },
           onUrlChange: (url) => {
-            cloneProjectModalState = { ...cloneProjectModalState, url };
+            cloneProjectModel.update(current => ({ ...current, form: { ...current.form, url } }));
           },
-          onParentSelect: () => {
-            folderPicker.begin("clone_parent");
+          onParentSelect: () => { folderPicker.begin("clone_parent"); },
+          onParentChange: (parentPath) => {
+            cloneProjectModel.update(current => ({ ...current, form: { ...current.form, parentPath } }));
           },
-          onParentChange: (parentPath) => { cloneProjectModalState = { ...cloneProjectModalState, parentPath }; },
           onSearchQueryChange: (query) => {
-            cloneProjectModalState = { ...cloneProjectModalState, query };
+            cloneProjectModel.update(current => ({ ...current, form: { ...current.form, query } }));
           },
           onSearch: () => {
-            const query = cloneProjectModalState.query.trim();
+            const query = cloneProjectModel.read().form.query.trim();
             if (!query) return;
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              searching: true,
-              error: "",
-            };
-            renderProjectCloneModal();
+            cloneProjectModel.update(current => ({ ...current,
+              modal: { ...current.modal, searching: true, error: "" },
+            }));
             send({ kind: "github_repository_search", query });
           },
           onRepositorySelect: (url) => {
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              selectedRepositoryUrl: url,
-              url,
-              error: "",
-            };
-            renderProjectCloneModal();
+            cloneProjectModel.update(current => ({
+              form: { ...current.form, url },
+              modal: { ...current.modal, selectedRepositoryUrl: url, error: "" },
+            }));
           },
           onClone: () => {
-            const url = (
-              cloneProjectModalState.mode === "search"
-                ? cloneProjectModalState.selectedRepositoryUrl
-                : cloneProjectModalState.url
-            ).trim();
-            const parentPath = cloneProjectModalState.parentPath.trim();
+            const { form, modal } = cloneProjectModel.read();
+            const url = (modal.mode === "search" ? modal.selectedRepositoryUrl : form.url).trim();
+            const parentPath = form.parentPath.trim();
             if (!url || !parentPath) {
-              cloneProjectModalState = {
-                ...cloneProjectModalState,
-                error: !url
+              cloneProjectModel.update(current => ({ ...current,
+                modal: { ...current.modal, error: !url
                   ? "Select or enter a repository URL."
-                  : "Choose a destination parent folder.",
-              };
-              renderProjectCloneModal();
+                  : "Choose a destination parent folder." },
+              }));
               return;
             }
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              cloning: true,
-              progress: "Cloning repository...",
-              error: "",
-            };
-            renderProjectCloneModal();
-            send({
-              kind: "clone_project_start",
-              url,
-              parent_path: parentPath,
-            });
+            cloneProjectModel.update(current => ({ ...current,
+              modal: { ...current.modal, cloning: true, progress: "Cloning repository...", error: "" },
+            }));
+            send({ kind: "clone_project_start", url, parent_path: parentPath });
           },
         });
       }
@@ -693,71 +662,33 @@ export function createProjectShellSurface({
       // GitHub repository search events. The case arms stay in app.js as
       // thin delegates.
       function applyCloneProjectReceiveEvent(event) {
-        switch (event.kind) {
-          case "clone_project_parent_selected":
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              parentPath: event.path || "",
-              error: "",
-            };
-            renderProjectCloneModal();
-            break;
-          case "github_repository_search_results":
-            if (event.query !== cloneProjectModalState.query.trim()) {
-              break;
-            }
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              repositories: event.repositories || [],
-              selectedRepositoryUrl: "",
-              searching: false,
-              error: "",
-            };
-            renderProjectCloneModal();
-            break;
-          case "github_repository_search_error":
-            if (event.query !== cloneProjectModalState.query.trim()) {
-              break;
-            }
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              searching: false,
-              error: event.message || "Repository search failed.",
-            };
-            renderProjectCloneModal();
-            break;
-          case "clone_project_progress":
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              cloning: true,
-              progress: event.message || "Cloning repository...",
-              error: "",
-            };
-            renderProjectCloneModal();
-            break;
-          case "clone_project_done":
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              open: false,
-              cloning: false,
-              searching: false,
-              progress: "",
-              error: "",
-            };
-            renderProjectCloneModal();
-            break;
-          case "clone_project_error":
-            cloneProjectModalState = {
-              ...cloneProjectModalState,
-              cloning: false,
-              progress: "",
-              error: event.message || "Clone failed.",
-            };
-            renderProjectCloneModal();
-            break;
-          default:
-            break;
-        }
+        cloneProjectModel.update(current => {
+          const { form, modal } = current;
+          switch (event.kind) {
+            case "clone_project_parent_selected":
+              return { form: { ...form, parentPath: event.path || "" },
+                modal: { ...modal, error: "" } };
+            case "github_repository_search_results":
+              if (event.query !== form.query.trim()) return current;
+              return { ...current, modal: { ...modal, repositories: event.repositories || [],
+                selectedRepositoryUrl: "", searching: false, error: "" } };
+            case "github_repository_search_error":
+              if (event.query !== form.query.trim()) return current;
+              return { ...current, modal: { ...modal, searching: false,
+                error: event.message || "Repository search failed." } };
+            case "clone_project_progress":
+              return { ...current, modal: { ...modal, cloning: true,
+                progress: event.message || "Cloning repository...", error: "" } };
+            case "clone_project_done":
+              return { ...current, modal: { ...modal, open: false, cloning: false,
+                searching: false, progress: "", error: "" } };
+            case "clone_project_error":
+              return { ...current, modal: { ...modal, cloning: false,
+                progress: "", error: event.message || "Clone failed." } };
+            default:
+              return current;
+          }
+        });
       }
 
       // SPEC-3064 Phase 3 (E7): receive() bodies for the migration events.
@@ -937,9 +868,10 @@ export function createProjectShellSurface({
       const unsubscribeCatalog = windowCatalogModel.subscribe(state => state.catalog, () => renderWindowList());
       const unsubscribeList = windowCatalogModel.subscribe(state => state.listEntries, () => renderWindowList());
       const unsubscribeMigration = migrationModel.subscribe(state => state, () => renderMigrationModal());
+      const unsubscribeClone = cloneProjectModel.subscribe(state => state.modal, () => renderProjectCloneModal());
 
       return {
-        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); },
+        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); unsubscribeClone(); },
         sendOpenProjectDialog,
         closeCloneProjectModal,
         updateActionAvailability,
