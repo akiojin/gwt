@@ -794,6 +794,12 @@ Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.
 Use the states to inspect holds, failures or claim contention; missing observations
 and Merged/Released states do not prove milestone health or completion.
+Goal diagnostics list roadmap references, Issue numbers, observed inbox states and
+unobserved Issues for links explicitly naming a unique, nonempty exact goal ID.
+Invalid links remain reference facts; milestone-only or category-only links do
+not expand membership, and empty or duplicate goal IDs resolve no links.
+Goal observations do not prove outcome achievement or metric evidence;
+`metric_evidence` remains missing until a supporting source is connected.
 Goal, milestone and roadmap changes also retain their reason, revision, changed
 values and directly affected Issues in the planning audit receipts. Goal changes
 include only Issues explicitly linked to that goal through roadmap items. These records do
