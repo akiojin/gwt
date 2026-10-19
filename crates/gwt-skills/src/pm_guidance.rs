@@ -61,6 +61,15 @@ maintenance/compliance category. Never justify priority from an orphan or invali
 Resolve missing goals, conflicting links and missing milestone metadata
 through the existing protected planning operation, then read back the result.
 
+Milestone and roadmap-link apply receipts include `change_impact`: redacted
+changed fields before/after and `directly_affected_issues` from old/new membership
+and, for milestones, referencing roadmap links. Read these receipts in
+`pm.plan.status` alongside their reason and revisions when explaining a date,
+scope or reported-health change. An identical upsert has no direct impact;
+an exact retry returns the original receipt. Older receipts lack this evidence.
+This record does not prove dependency propagation or owner notification:
+`missing_inputs` names the absent dependency graph and active-owner handoff.
+
 The policy groups Now/Next/Later and explains missing milestone inputs;
 authored health and confidence are not verified evidence. Effective health
 and confidence remain unknown until exit/metric evidence is connected.
@@ -3692,6 +3701,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "authored health and confidence are not verified evidence",
             "Never justify priority from an orphan or invalid trace",
             "deadline/scope impact propagation and FR-045 delivery remain separate",
+            "`change_impact`",
+            "`directly_affected_issues`",
+            "does not prove dependency propagation or owner notification",
             "`pm.status.set`",
             "`status: \"released\"`",
             "`released` array from `issue.monitor.status`",

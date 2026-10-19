@@ -522,6 +522,117 @@ fn planning_apply_upserts_all_seven_records_with_atomic_receipts() {
 }
 
 #[test]
+fn planning_change_receipts_keep_direct_impact_and_exact_history_on_replay() {
+    use gwt::pm_planning::{apply_planning_action, PlanningApplyRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pm-planning.json");
+    write_fixture(
+        &path,
+        &json!({
+            "milestones":[{"id":"m","target_date":"2026-12-01","health":"green","issues":[1]}],
+            "roadmap_items":[
+                {"id":"linked","milestone_id":"m","issues":[2,1]},
+                {"id":"moving","category":"maintenance","horizon":"now","issues":[3,1]},
+                {"id":"unrelated","milestone_id":"other","issues":[99]}
+            ]
+        }),
+    );
+    let request: PlanningApplyRequest = serde_json::from_value(json!({
+        "action":{"kind":"milestone","value":{"id":"m","target_date":"2027-01-01",
+            "health":"yellow","issues":[4]}},
+        "expected_revision":0,"reason":"Adjust accepted delivery scope","idempotency_key":"move-date"
+    })).unwrap();
+    let receipt = apply_planning_action(&path, "pm-a", &request).unwrap();
+    let value = serde_json::to_value(&receipt).unwrap();
+    let impact = &value["change_impact"];
+    assert_eq!(impact["record_created"], false);
+    assert_eq!(
+        impact["changes"]["target_date"],
+        json!({"before":"2026-12-01","after":"2027-01-01"})
+    );
+    assert_eq!(
+        impact["changes"]["health"],
+        json!({"before":"green","after":"yellow"})
+    );
+    assert_eq!(
+        impact["changes"]["issues"],
+        json!({"before":[1],"after":[4]})
+    );
+    assert_eq!(impact["changes"].as_object().unwrap().len(), 3);
+    assert_eq!(impact["directly_affected_issues"], json!([1, 2, 4]));
+    assert_eq!(
+        impact["missing_inputs"],
+        json!(["dependency_graph", "active_owner_handoff"])
+    );
+    let mut link = plan_request("link", 1, "move-link");
+    link.action = serde_json::from_value(json!({"kind":"link","value":{
+        "id":"moving","category":"maintenance","horizon":"next","issues":[5,3]
+    }}))
+    .unwrap();
+    let moved = serde_json::to_value(apply_planning_action(&path, "pm-a", &link).unwrap()).unwrap();
+    assert_eq!(
+        moved["change_impact"]["directly_affected_issues"],
+        json!([1, 3, 5])
+    );
+    assert_eq!(
+        moved["change_impact"]["changes"]["horizon"],
+        json!({"before":"now","after":"next"})
+    );
+    let other = apply_planning_action(&path, "pm-a", &plan_request("risk", 2, "risk")).unwrap();
+    assert!(serde_json::to_value(other)
+        .unwrap()
+        .get("change_impact")
+        .is_none());
+    let before = fs::read(&path).unwrap();
+    assert_eq!(
+        apply_planning_action(&path, "pm-a", &request).unwrap(),
+        receipt
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    link.expected_revision = 3;
+    link.idempotency_key = "same-link".into();
+    let same = serde_json::to_value(apply_planning_action(&path, "pm-a", &link).unwrap()).unwrap();
+    assert_eq!(same["change_impact"]["changes"], json!({}));
+    assert_eq!(same["change_impact"]["directly_affected_issues"], json!([]));
+    let created = serde_json::to_value(
+        apply_planning_action(&path, "pm-a", &plan_request("milestone", 4, "new")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(created["change_impact"]["record_created"], true);
+    assert_eq!(
+        created["change_impact"]["changes"]["id"],
+        json!({"before":null,"after":"milestone"})
+    );
+}
+
+#[test]
+fn planning_change_history_redacts_legacy_values_and_accepts_old_receipts() {
+    use gwt::pm_planning::apply_planning_action;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pm-planning.json");
+    write_fixture(
+        &path,
+        &json!({"milestones":[{"id":"milestone",
+        "exit_criteria":["Bearer example0123456789"]}]}),
+    );
+    let receipt =
+        apply_planning_action(&path, "pm-a", &plan_request("milestone", 0, "redact")).unwrap();
+    let mut value = serde_json::to_value(receipt).unwrap();
+    let captured = value["change_impact"]["changes"]["exit_criteria"]["before"].to_string();
+    assert!(captured.contains("REDACTED"), "{captured}");
+    assert!(!captured.contains("example0123456789"));
+    value.as_object_mut().unwrap().remove("change_impact");
+    let mut legacy = serde_json::to_value(load_planning_state(&path).unwrap()).unwrap();
+    legacy["audit_receipts"] = json!([value]);
+    write_fixture(&path, &legacy);
+    let loaded = load_planning_state(&path).unwrap();
+    assert!(serde_json::to_value(&loaded.audit_receipts[0])
+        .unwrap()
+        .get("change_impact")
+        .is_none());
+}
+
+#[test]
 fn planning_apply_replays_exact_request_after_later_writes_and_refuses_conflicts() {
     use gwt::pm_planning::apply_planning_action;
     let dir = tempfile::tempdir().unwrap();
