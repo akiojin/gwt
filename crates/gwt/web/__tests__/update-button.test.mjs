@@ -229,11 +229,10 @@ test("app.js delegates update handling to the unified update CTA controller", ()
   assert.match(appSource, /applyUpdateApplyError\(/);
   assert.match(appSource, /handleUpdateProgress: applyUpdateProgress/);
   assert.match(appSource, /applyUpdateProgress\(/);
-  assert.match(appSource, /updateCtaController\.handleUpdateReady\(/);
-  assert.match(
-    appSource,
-    /updateCtaController\.handleUpdateApplyPendingPersisted\(/,
-  );
+  assert.match(appSource, /handleUpdateReady: applyUpdateReady/);
+  assert.match(appSource, /applyUpdateReady\(/);
+  assert.match(appSource, /handleUpdateApplyPendingPersisted: applyUpdateApplyPendingPersisted/);
+  assert.match(appSource, /applyUpdateApplyPendingPersisted\(/);
 });
 
 test("legacy split update toast and button surfaces are removed", () => {

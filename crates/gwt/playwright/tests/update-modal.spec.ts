@@ -115,12 +115,17 @@ test.describe("Update modal", () => {
     expect(errors).toEqual([]);
   });
 
-  test("CTA -> downloading -> ready -> Later morphs CTA to ready", async ({ page }) => {
+  test("CTA -> downloading -> ready -> Later and persisted state share the staged release", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
     await gotoLiveGwt(page, BASE, {
       enableTestBridge: true,
       suppressProjectSurfaces: true,
       suppressUpdateApplyStart: true,
     });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     // Simulate `update_state available` arriving from backend.
     await page.evaluate(() => {
@@ -173,9 +178,32 @@ test.describe("Update modal", () => {
       );
     });
     await expect(modal).toHaveAttribute("data-state", "ready");
+    // Same-version replay must preserve the action button through a click.
+    expect(await page.evaluate(() => {
+      const later = document.querySelector("[data-update-modal-later]");
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "update_ready", version: "9.26.0" },
+      }));
+      return later === document.querySelector("[data-update-modal-later]");
+    })).toBe(true);
     await page.locator("[data-update-modal-later]").click();
     await expect(modal).toHaveCount(0);
     await expect(cta).toHaveText(/Update v9\.26\.0 ready.*Restart now/);
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "update_apply_pending_persisted", version: "9.27.0" },
+      }));
+    });
+    await expect(cta).toHaveAttribute("data-status", "ready");
+    await expect(cta).toHaveText(/Update v9\.27\.0 ready.*Restart now/);
+    await page.screenshot({ path: testInfo.outputPath(`update-staged-cta-${theme}.png`) });
+    await cta.click();
+    await expect(modal).toHaveAttribute("data-state", "ready");
+    await expect(modal.locator(".update-modal__version")).toHaveText("gwt v9.27.0 is ready to install.");
+    await expect(modal.getByRole("dialog")).toHaveAttribute("aria-modal", "true");
+    await expect(page.locator("[data-update-modal-release-notes]")).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath(`update-staged-modal-${theme}.png`) });
+    expect(errors).toEqual([]);
   });
 
   test("update_apply_error renders failed state with stage / reason / log", async ({ page }, testInfo) => {
