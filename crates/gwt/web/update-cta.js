@@ -35,6 +35,12 @@ export function createUpdateCtaController({
       updateProgressDisplay(progress);
     }
   });
+  const errorModel = createUiStateStore(null);
+  errorModel.subscribe(value => value, error => {
+    if (!error) return;
+    showError(updateFailureDetail(error));
+    renderModalFailed(error);
+  });
   // Issue #3906 AC-12: the version whose draining CTA the user dismissed, so
   // the periodic issue_monitor_status ticks do not resurrect it.
   let dismissedDrainVersion = null;
@@ -330,8 +336,7 @@ export function createUpdateCtaController({
     // A successful project snapshot can precede another project's wait failure.
     if (status === "applying" || status === "ready"
       || (status === "draining" && payload.stage === "Apply after agents finish")) {
-      showError(updateFailureDetail(payload));
-      renderModalFailed(payload);
+      errorModel.update(() => payload);
     }
   }
 

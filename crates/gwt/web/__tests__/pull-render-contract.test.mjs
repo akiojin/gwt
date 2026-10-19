@@ -10,6 +10,19 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Update apply error receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/update_apply_error');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "update_apply_error":',
+    'case "update_apply_error": document.body.textContent = event.reason;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
 test("Update progress receiver commits model data and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');

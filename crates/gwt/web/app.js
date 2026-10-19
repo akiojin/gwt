@@ -1157,7 +1157,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         });
       }
 
-      const { handleUpdateProgress: applyUpdateProgress, ...updateCtaController } = createUpdateCtaController({
+      const {
+        handleUpdateProgress: applyUpdateProgress,
+        handleUpdateApplyError: applyUpdateApplyError,
+        ...updateCtaController
+      } = createUpdateCtaController({
         document,
         send,
         setVersionState,
@@ -5568,7 +5572,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "update_apply_error":
-            updateCtaController.handleUpdateApplyError({
+            applyUpdateApplyError({
               stage: event.stage,
               reason: event.reason || event.message,
               log_path: event.log_path,
