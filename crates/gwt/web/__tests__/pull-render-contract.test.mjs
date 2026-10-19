@@ -10,6 +10,19 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Open Project result receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/project-clone-modal.js';
+  const source = readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8');
+  const findings = code => scanModule(code, file)
+    .filter(finding => finding.root === 'applyOpenProjectPathResultReceiveEvent');
+  assert.match(source, /receive: applyOpenProjectPathResultReceiveEvent/);
+  assert.deepEqual(findings(source), []);
+  const bypass = source.replace('function applyOpenProjectPathResultReceiveEvent(event) {',
+    'function applyOpenProjectPathResultReceiveEvent(event) { status.textContent = event.message;');
+  assert.notEqual(bypass, source);
+  assert.ok(findings(bypass).length > 0);
+});
+
 test("Clone Project receivers commit shared state and reject bypass rendering", () => {
   const file = 'crates/gwt/web/project-shell-surface.js';
   const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
