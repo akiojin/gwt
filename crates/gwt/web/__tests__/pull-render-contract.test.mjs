@@ -10,6 +10,22 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Update availability and auto-apply receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive'
+    && ['/update_state', '/update_auto_apply'].includes(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['update_state', 'update_auto_apply']) {
+    const bypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.version;`);
+    assert.notEqual(bypass, app);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
 test("Update staged-ready receivers commit shared state and reject bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');

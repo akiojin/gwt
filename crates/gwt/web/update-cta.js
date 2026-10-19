@@ -28,6 +28,14 @@ export function createUpdateCtaController({
   let pendingVersion = null;
   let pendingReadyReason = null;
   let status = "idle";
+  const availabilityModel = createUiStateStore(null);
+  availabilityModel.subscribe(value => value, available => {
+    if (available) renderUpdateState(available);
+  });
+  const autoApplyModel = createUiStateStore(null);
+  autoApplyModel.subscribe(value => value, autoApply => {
+    if (autoApply) renderUpdateAutoApply(autoApply);
+  });
   const stagedModel = createUiStateStore(null);
   stagedModel.subscribe(value => value, staged => {
     if (!staged) return;
@@ -300,6 +308,10 @@ export function createUpdateCtaController({
     if (!event || event.state !== "available") {
       return;
     }
+    availabilityModel.update(() => ({ current: event.current, latest: event.latest }));
+  }
+
+  function renderUpdateState(event) {
     removeLegacyUpdateSurfaces();
     setVersionState(event.current, event.latest);
     const previousVersion = pendingVersion || latestVersion;
@@ -352,6 +364,15 @@ export function createUpdateCtaController({
   // grace; `postponed` / `cancelled` withdraw it; `applying` precedes the
   // graceful restart.
   function handleUpdateAutoApply(payload) {
+    if (!payload?.version) return;
+    autoApplyModel.update(() => ({
+      version: payload.version,
+      phase: payload.phase,
+      grace_secs: payload.grace_secs,
+    }));
+  }
+
+  function renderUpdateAutoApply(payload) {
     const version = payload?.version;
     if (!version) return;
     switch (payload.phase) {
