@@ -1754,6 +1754,7 @@ mod tests {
     #[test]
     fn worktree_sources_share_one_container_allocation_per_group() {
         let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let entry = gwt::worktree_inventory::WorktreeEntry {
             id: "shared-group".into(),
             kind: gwt::worktree_inventory::WorktreeEntryKind::Workspace,
