@@ -250,7 +250,7 @@ test('Reports reuses the content renderer and Operator tokens without an overlay
 
 test('Reports rejects file-drop input while Execution log keeps the attachment bridge', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
-  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu']) {
+  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
   const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
@@ -289,7 +289,7 @@ test('Reports rejects file-drop input while Execution log keeps the attachment b
 // Exercise the real token/XHR path: the uploader override bypasses both.
 async function clipboardFixture(windowId, run) {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
-  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu']) {
+  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
   const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
@@ -363,7 +363,7 @@ test('clipboard failure shows and reports the concrete upload cause', async () =
 
 test('Agents tiles own browser and native file drops and their progress', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
-  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu']) {
+  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
   const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
