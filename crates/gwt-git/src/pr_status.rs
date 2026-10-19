@@ -1179,7 +1179,6 @@ pub fn parse_pr_inventory_json_with(
     let arr: Vec<serde_json::Value> =
         serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
     arr.iter()
-        .filter(|row| inventory_row_is_open(row))
         .map(|value| inventory_item_from_value(value, now, options))
         .collect()
 }
@@ -7697,9 +7696,12 @@ mod tests {
         // Snapshots written before state was requested remain readable.
         rows.push(light_row(4, "2026-09-01T00:00:00Z", "CLEAN"));
         let raw = serde_json::to_string(&rows).unwrap();
-        let items = parse_pr_inventory_json(&raw, now_3891()).unwrap();
+        let items = parse_inventory_rows(&raw).unwrap();
         assert_eq!(
-            items.iter().map(|item| item.number).collect::<Vec<_>>(),
+            items
+                .iter()
+                .map(|item| item["number"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
             [1, 4]
         );
         let cache = PrInventoryCache {
