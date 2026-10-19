@@ -54,6 +54,18 @@ test("Max active commits the final stepper value once and Auto never saves numbe
     const apply = issues.getByRole("button", { name: "Apply Max active", exact: true });
     await expect(mode).toHaveValue("manual");
     await expect(input).toHaveValue("6");
+    await input.fill("2");
+    operation("issue.monitor.config.set", { max_active_mode: "auto" });
+    await expect(mode).toHaveValue("auto");
+    await expect(input).toBeDisabled();
+    await expect(apply).toBeDisabled();
+    await apply.evaluate(button => (button as HTMLButtonElement).click());
+    expect(saves).toEqual([]);
+    expect((await prefs()).max_active_last_change.source).toBe("json_operation");
+    operation("issue.monitor.config.set", { max_active: 6 });
+    await expect(mode).toHaveValue("manual");
+    await expect(input).toHaveValue("6");
+    await expect(apply).toBeDisabled();
     await input.focus();
     await input.press("ArrowDown");
     await input.press("ArrowDown");

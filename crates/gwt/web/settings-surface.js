@@ -325,7 +325,15 @@ function renderIssuesSettingsPanel(panel, options) {
   let latestStatus = status;
   panel.updateMaxActiveStatus = nextStatus => {
     latestStatus = nextStatus;
-    if (max.disabled && nextStatus?.max_active_agents_override == null) max.value = String(nextStatus?.max_active_agents ?? 0);
+    const wasAuto = max.disabled;
+    committedMax = nextStatus?.max_active_agents_override ?? null;
+    max.disabled = committedMax == null;
+    mode.querySelector(`[value="${max.disabled ? "auto" : "manual"}"]`).selected = true;
+    if (max.disabled || wasAuto || panel.dataset.maxActiveDraft == null) {
+      delete panel.dataset.maxActiveDraft;
+      max.value = String(committedMax ?? nextStatus?.max_active_agents ?? 0);
+    }
+    updateApply();
     message.textContent = max.disabled && !nextStatus?.agent_capacity?.measurement_complete
       ? "Measuring capacity…"
       : Number(nextStatus?.active_count) > Number(nextStatus?.max_active_agents)
@@ -340,7 +348,8 @@ function renderIssuesSettingsPanel(panel, options) {
     if (!max.disabled && !(Number.isInteger(Number(max.value)) && Number(max.value) > 0)) max.value = "1";
     committedMax = max.disabled ? null : Number(max.value);
     updateApply();
-    panel.updateMaxActiveStatus(latestStatus);
+    panel.updateMaxActiveStatus({ ...latestStatus, max_active_agents_override: committedMax,
+      max_active_agents: committedMax ?? latestStatus?.max_active_agents });
     send({ kind: "set_issue_monitor_max_active_agents",
       max_active_agents: committedMax });
   });
@@ -352,7 +361,7 @@ function renderIssuesSettingsPanel(panel, options) {
   max.addEventListener("input", editMax);
   max.addEventListener("change", editMax);
   apply.addEventListener("click", () => {
-    if (apply.disabled) return;
+    if (apply.disabled || latestStatus?.max_active_agents_override == null) return;
     const value = Number(max.value);
     committedMax = value;
     delete panel.dataset.maxActiveDraft;

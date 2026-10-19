@@ -181,6 +181,34 @@ test("Max active stepper edits commit once on Apply and survive status redraw", 
   assert.match(panel.textContent, /Existing agents continue.*new launches wait/i);
 });
 
+test("authoritative Auto status disables a focused Manual draft before deferred redraw", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
+    status: { max_active_agents: 6, max_active_agents_override: 6 }, send: message => sent.push(message) });
+  const max = panel.querySelector('[aria-label="Max active"]');
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  const apply = panel.querySelector('[aria-label="Apply Max active"]');
+  max.value = "3";
+  max.dispatchEvent(new Event("input"));
+  assert.equal(apply.disabled, false);
+  // The edit guard keeps these nodes; only the status callback runs while focused.
+  panel.updateMaxActiveStatus({ max_active_agents: 7, max_active_agents_override: null });
+  assert.equal(max.disabled, true);
+  assert.equal(mode.value, "auto");
+  assert.equal(apply.disabled, true);
+  assert.equal(max.value, "7");
+  assert.equal(panel.dataset.maxActiveDraft, undefined);
+  max.dispatchEvent(new Event("change"));
+  apply.click();
+  assert.deepEqual(sent, [], "an old Manual draft cannot overwrite remote Auto");
+  panel.updateMaxActiveStatus({ max_active_agents: 5, max_active_agents_override: 5 });
+  assert.equal(max.disabled, false);
+  assert.equal(mode.value, "manual");
+  assert.equal(max.value, "5", "returning to Manual does not resurrect the old draft");
+  assert.equal(apply.disabled, true);
+});
+
 test("Auto shows measuring state beside its effective limit until capacity is ready", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
