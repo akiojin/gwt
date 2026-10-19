@@ -1158,6 +1158,8 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       const {
+        handleUpdateState: applyUpdateState,
+        handleUpdateAutoApply: applyUpdateAutoApply,
         handleUpdateProgress: applyUpdateProgress,
         handleUpdateApplyError: applyUpdateApplyError,
         handleUpdateReady: applyUpdateReady,
@@ -5556,7 +5558,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "update_state":
             if (event.state === "available") {
-              updateCtaController.handleUpdateState(event);
+              applyUpdateState(event);
             }
             break;
           case "update_progress":
@@ -5590,7 +5592,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "update_auto_apply":
             // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
-            updateCtaController.handleUpdateAutoApply({
+            applyUpdateAutoApply({
               version: event.version,
               phase: event.phase,
               grace_secs: event.grace_secs,

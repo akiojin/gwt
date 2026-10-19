@@ -223,7 +223,8 @@ test("update_state removes stale split toast and button DOM before showing CTA",
 
 test("app.js delegates update handling to the unified update CTA controller", () => {
   assert.match(appSource, /createUpdateCtaController/);
-  assert.match(appSource, /updateCtaController\.handleUpdateState\(event\)/);
+  assert.match(appSource, /handleUpdateState: applyUpdateState/);
+  assert.match(appSource, /applyUpdateState\(event\)/);
   // Phase 19 replaces showError() with handleUpdateApplyError().
   assert.match(appSource, /handleUpdateApplyError: applyUpdateApplyError/);
   assert.match(appSource, /applyUpdateApplyError\(/);
@@ -1183,7 +1184,7 @@ test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends c
   assert.match(cssRule(".update-cta.is-scheduled"), /var\(--color-state-needs-input\)/);
   assert.match(
     appSource,
-    /case "update_auto_apply":[\s\S]{0,200}updateCtaController\.handleUpdateAutoApply\(/,
+    /case "update_auto_apply":[\s\S]{0,200}applyUpdateAutoApply\(/,
     "app.js must hand update_auto_apply to the update CTA controller",
   );
 });

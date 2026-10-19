@@ -15,6 +15,66 @@ const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 test.describe("Update modal", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
+  test("shared availability and auto-apply phases preserve cancel and supersession", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
+    // Record the local cancel action without touching the real updater.
+    await page.addInitScript(() => {
+      (window as any).__updateCancels = 0;
+      const originalSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === "string" && JSON.parse(data).kind === "cancel_update_auto_apply") {
+          (window as any).__updateCancels++;
+          return;
+        }
+        return originalSend.call(this, data);
+      };
+    });
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true, suppressProjectSurfaces: true, suppressUpdateApplyStart: true,
+    });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const inject = (detail: Record<string, unknown>) => page.evaluate(payload => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+    }, detail);
+    const available = { kind: "update_state", state: "available", current: "9.25.0", latest: "9.26.0" };
+    const autoApply = { kind: "update_auto_apply", version: "9.26.0" };
+    const cta = page.locator("#update-cta");
+    const modal = page.locator("#update-modal");
+    await inject(available);
+    await expect(cta).toHaveAttribute("data-status", "available");
+    await cta.click();
+    await expect(modal).toHaveAttribute("data-state", "downloading");
+    await inject({ ...autoApply, phase: "scheduled", grace_secs: 45 });
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveText("Update v9.26.0 applies in 45 s — click to cancel");
+    await cta.click();
+    await expect.poll(() => page.evaluate(() => (window as any).__updateCancels)).toBe(1);
+    await expect(cta).toHaveText("Cancelling automatic update…");
+    await inject({ ...autoApply, phase: "cancelled" });
+    await expect(cta).toHaveAttribute("data-status", "ready");
+    await inject({ ...autoApply, phase: "postponed" });
+    await expect(cta).toHaveAttribute("data-status", "draining");
+    await inject({ ...autoApply, phase: "elevation_required" });
+    await inject(available);
+    await expect(cta).toHaveText(/Administrator privileges required/);
+    await cta.click();
+    await expect(modal.locator(".modal-shell")).toHaveAttribute("role", "dialog");
+    await expect(modal.locator(".modal-shell")).toHaveAttribute("aria-modal", "true");
+    await expect(modal).toHaveAttribute("data-state", "ready");
+    await expect(page.locator("[data-update-modal-release-notes]")).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath(`update-availability-${theme}.png`) });
+    await inject({ ...available, latest: "9.27.0" });
+    await expect(modal).toHaveCount(0);
+    await expect(cta).toHaveText("Update available: v9.27.0 - Click to update");
+    await inject({ ...autoApply, version: "9.27.0", phase: "applying" });
+    await expect(cta).toHaveText("Applying update v9.27.0…");
+    await expect(cta).toBeDisabled();
+    expect(errors).toEqual([]);
+  });
+
   test("shared progress renders the saved snapshot on mount and subsequent updates", async ({ page }, testInfo) => {
     const errors: string[] = [];
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
