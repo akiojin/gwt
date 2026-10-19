@@ -5073,6 +5073,15 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
+      const terminalStatusModel = createUiStateStore(null);
+      terminalStatusModel.subscribe(state => state, state => {
+        if (!state) return;
+        applyStatus(state.id, state.status, state.detail);
+        if (state.kind === "terminal_status") {
+          startupMetrics.onTerminalStatus(state.id, state.status, terminalMap.get(state.id));
+        }
+      });
+
       const launchProgressModel = createUiStateStore(null);
       launchProgressModel.subscribe(progress => progress, progress => {
         if (!progress) return;
@@ -5365,18 +5374,17 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyPmWindowReceiveEvent(event);
             break;
           case "terminal_status":
-            frontendUnits.terminalHost.applyStatus(
-              event.id,
-              event.status,
-              event.detail,
-            );
-            startupMetrics.onTerminalStatus(event.id, event.status, terminalMap.get(event.id));
+            terminalStatusModel.update(() => ({
+              kind: event.kind, id: event.id, status: event.status, detail: event.detail,
+            }));
             break;
           case "attachment_progress":
             handleAttachmentProgress(event);
             break;
           case "window_state":
-            frontendUnits.terminalHost.applyStatus(event.window_id, event.state);
+            terminalStatusModel.update(() => ({
+              kind: event.kind, id: event.window_id, status: event.state,
+            }));
             break;
           case "launch_progress": {
             launchProgressModel.update(() => ({ id: event.id, message: event.message }));

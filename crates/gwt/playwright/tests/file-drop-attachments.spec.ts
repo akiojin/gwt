@@ -23,6 +23,52 @@ test.describe("Browser file drop attachments", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("runtime status receivers preserve details and isolate windows", async ({ page }, testInfo) => {
+    if (!fileDropBase) await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+    await page.goto(fileDropAppUrl);
+    const tile = page.locator(".agent-tile[data-agent-id='agent-1']");
+    await expect(tile).toBeVisible();
+    const tileNode = await tile.elementHandle();
+    const agent = page.locator(".workspace-window[data-id='agent-1']");
+    const chip = agent.locator(".status-chip");
+    const chipNode = await chip.elementHandle();
+    const message = agent.locator(".overlay-message");
+    const shellChip = page.locator(".workspace-window[data-id='shell-1'] .status-chip");
+    const shellBefore = await shellChip.getAttribute("class");
+    const emit = (event: Record<string, unknown>) => page.evaluate(event => {
+      window.__emitFileDropBackendEvent?.(event);
+    }, event);
+
+    // Controlled inbound frames exercise the checkout receiver and real renderers.
+    await emit({ kind: "terminal_status", id: "agent-1", status: "error", detail: "Launch <failed> & retry" });
+    await expect(chip).toHaveClass(/\berror\b/);
+    await expect(chip).toHaveAttribute("title", /Launch <failed> & retry/);
+    await expect(message).toHaveText("Launch <failed> & retry");
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    await emit({ kind: "window_state", window_id: "agent-1", state: "stopped" });
+    await expect(chip).toHaveClass(/\bstopped\b/);
+    await expect(message).toHaveText("Launch <failed> & retry");
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    await emit({ kind: "window_state", window_id: "agent-1", state: "running" });
+    await expect(chip).toHaveClass(/\brunning\b/);
+    await expect(message).toBeEmpty();
+    await expect(chip).not.toHaveAttribute("title", /Launch <failed> & retry/);
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    await emit({ kind: "terminal_status", id: "agent-1", status: "starting", detail: "Preparing runtime" });
+    await expect(chip).toHaveClass(/\bstarting\b/);
+    await expect(message).toHaveText("Preparing runtime");
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    await emit({ kind: "terminal_status", id: "agent-1", status: "running", detail: null });
+    await expect(chip).toHaveClass(/\brunning\b/);
+    await expect(message).toBeEmpty();
+    await expect(shellChip).toHaveAttribute("class", shellBefore!);
+    expect(await chip.evaluate((node, original) => node === original, chipNode)).toBe(true);
+    expect(await tile.evaluate((node, original) => node === original, tileNode)).toBe(true);
+    await expect(agent.locator(".terminal-overlay")).toBeHidden();
+    await page.screenshot({ path: testInfo.outputPath("terminal-status.png") });
+  });
+
   test("launch progress updates only its window message and copy state", async ({ page }, testInfo) => {
     if (!fileDropBase) await installEmbeddedRoutes(page);
     await installFileDropBackend(page);
