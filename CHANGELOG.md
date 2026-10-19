@@ -1,6 +1,43 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.129.4] - 2026-10-19
+
+### Bug Fixes
+
+- **github:** 期限切れのRESTページキャッシュを回収
+- **github:** 未知のキャッシュ補助ファイルを保持
+- **ci:** Windows nightly の前提ツールを準備する
+- **pr:** Prevent stale inventories from driving PM actions
+- **pr:** Preserve merged PR parser compatibility
+- **workspace:** Resumeで認証済みownerを保持する
+
+### Documentation
+
+- **perf:** Preserve Git batch allocation evidence for issue 5561
+
+### Miscellaneous Tasks
+
+- **work:** Record PR #5744 delivery
+- **work:** Issue #5016 のPR関連付けを記録
+- **work:** PR #5754の配信記録を保存する
+
+### Performance
+
+- **work:** Bound source metadata retention during ingest
+- **work:** Transfer metadata during history rebuild
+- **git:** Move work event batch descriptors into results
+
+### Refactor
+
+- **terminal:** 未使用のTokioテスト依存を削除
+- **ui:** プロジェクトメタデータを共有状態から描画
+
+### Testing
+
+- **issue-monitor:** Cover relaunch after prior delivery
+- **work:** Isolate shared container allocation fixture
+
 ## [9.129.3] - 2026-10-18
 
 ### Bug Fixes

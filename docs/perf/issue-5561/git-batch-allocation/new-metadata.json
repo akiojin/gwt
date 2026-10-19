@@ -1,0 +1,19 @@
+{
+  "variant": "new",
+  "scope": "actual Git batch implementation; identical frozen origin refs and select-all callback; no worktree scan, caller fingerprint maps, projection fold or persistence",
+  "refs": 749,
+  "unique_commits": 589,
+  "product_source": "E:\\gwt\\work\\issue-5561\\target\\issue-5561-ref-new-product.rs",
+  "product_source_sha256": "e68ec458da4abc1dfd97a1a05263dea7c099a0c89065fb9f3fc93d3e4c559cba",
+  "instrumented_copy": "E:\\gwt\\work\\issue-5561\\target\\issue-5561-ref-new-instrumented.rs",
+  "instrumented_copy_sha256": "ec3e0aa3d0b9fe765cd1445b608598c0b9fff5463177502b064b6cd6a6078e70",
+  "example": "E:\\gwt\\work\\issue-5561\\crates\\gwt-git\\examples\\issue_5561_ref_allocation_probe.rs",
+  "example_sha256": "04c21d97ca043e9fafb063fd61b83525588d87e887132abb2b8d1f14f614e642",
+  "input_sha256": "d1684293bacbfbf1930737802644fad998cb2f6a1379dd5a393a06727daad3b8",
+  "cargo_lock_sha256": "809f1b400b56644ab153bccc13d880f6f664fcb88eed850aba7e5224790e9966",
+  "toolchain": "1.99.1",
+  "command": "cargo run -p gwt-git --example issue_5561_ref_allocation_probe -- E:/gwt/work/issue-5561 target/issue-5561-ref-probe-input.json",
+  "worktree_stub": "supplied checkout path; validated .git exists; no workspace-home behavior claim",
+  "binary_sha256": "f0d96d85b035fb040d202dda361690d6641345c694653cb796dd32d9d176eec5",
+  "tracked_product_source_sha256": "e68ec458da4abc1dfd97a1a05263dea7c099a0c89065fb9f3fc93d3e4c559cba"
+}

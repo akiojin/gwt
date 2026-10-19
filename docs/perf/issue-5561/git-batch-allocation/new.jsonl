@@ -1,0 +1,11 @@
+{"stage":"input","refs":749,"unique_commits":589}
+{"stage":"api_begin","live_bytes":156063,"peak_bytes":182972,"cumulative_allocated_bytes":291878,"descriptors":0,"unique_oids":0}
+{"stage":"descriptors_done","live_bytes":194832814,"peak_bytes":195197326,"cumulative_allocated_bytes":435550618,"descriptors":765426,"unique_oids":0}
+{"stage":"matrix_done","live_bytes":214140176,"peak_bytes":214140376,"cumulative_allocated_bytes":454881540,"descriptors":873959,"unique_oids":0}
+{"stage":"selector_begin","live_bytes":214890352,"peak_bytes":215041368,"cumulative_allocated_bytes":490659208,"descriptors":873959,"unique_oids":0}
+{"stage":"selector_end","live_bytes":215640528,"peak_bytes":215791544,"cumulative_allocated_bytes":526436876,"descriptors":873959,"unique_oids":8514}
+{"stage":"payloads_done","live_bytes":271598280,"peak_bytes":274419646,"cumulative_allocated_bytes":641852081,"descriptors":873959,"unique_oids":8514}
+{"stage":"output_done","live_bytes":290338712,"peak_bytes":290731928,"cumulative_allocated_bytes":786944945,"descriptors":873959,"unique_oids":8514}
+{"stage":"api_return","live_bytes":242063239,"peak_bytes":290731928,"cumulative_allocated_bytes":786944945,"descriptors":873959,"unique_oids":0}
+{"stage":"duration","wall_ms":9571.3556}
+{"stage":"output_dropped","live_bytes":168351,"peak_bytes":290731928,"cumulative_allocated_bytes":786944945,"descriptors":0,"unique_oids":0}

@@ -5051,7 +5051,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderAppState,
       });
 
-      const projectPageMetadata = createProjectPageMetadata({ document, window, send });
+      const { update: applyProjectAggregate, ...projectPageMetadata } = createProjectPageMetadata({ document, window, send });
 
       const agentCompletionNotifier = createAgentCompletionNotifier({
         window,
@@ -5204,7 +5204,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "project_agent_aggregate": {
-            projectPageMetadata.update(event.aggregate);
+            applyProjectAggregate(event.aggregate);
             break;
           }
           case "project_notification": {

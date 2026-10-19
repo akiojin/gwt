@@ -340,7 +340,23 @@ run("Nightly CI proves the Rust suites with default parallelism three times", ()
   // The three runs must share one job so they share one SHA and one runner.
   // Splitting them across jobs would let a green run and a red run coexist.
   const defaultParallelJob = nightlyWorkflow.slice(
-    nightlyWorkflow.indexOf("  test-windows-default-parallel:")
+    nightlyWorkflow.indexOf("  test-windows-default-parallel:"),
+    nightlyWorkflow.indexOf("  test-windows-startup-tray:")
+  );
+  // Issue #4897: the suites invoke nextest and a real checkout gwtd. A warm
+  // cache must not be the only thing supplying either prerequisite.
+  const suiteBuildAt = defaultParallelJob.indexOf("--all-features --no-run");
+  const nextestInstallAt = defaultParallelJob.indexOf("tool: cargo-nextest@0.9.146");
+  assert.ok(
+    nextestInstallAt >= 0 && nextestInstallAt < suiteBuildAt,
+    "install cargo-nextest before building the suites that invoke it"
+  );
+  const daemonBuildAt = defaultParallelJob.indexOf("cargo build -p gwt --bin gwtd");
+  assert.match(defaultParallelJob, /^ +run: cargo build -p gwt --bin gwtd\r?$/m);
+  assert.ok(
+    daemonBuildAt > suiteBuildAt &&
+      daemonBuildAt < defaultParallelJob.indexOf("1..3 | ForEach-Object"),
+    "build the operational checkout gwtd after the suites and before the timed loop"
   );
   assert.match(defaultParallelJob, /1\.\.3 \| ForEach-Object/);
   // The build must sit outside the timed loop, or the first iteration is
