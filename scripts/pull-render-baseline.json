@@ -5,7 +5,6 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"/branch_entries\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/continue_work_outcome\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/hub_state\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/launch_progress\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/project_not_found\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/project_open_error\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/recovery_center_board_entry\"]",
@@ -75,6 +74,5 @@
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/picker_started|picker_selected|picker_cancelled|picker_error|picker_busy\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/project_open_error\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/project_opened\"]",
-  "[\"crates/gwt/web/terminal-attachments.js\",\"receive\",\"/attachment_progress\"]",
-  "[\"crates/gwt/web/terminal-attachments.js\",\"receive\",\"/launch_progress\"]"
+  "[\"crates/gwt/web/terminal-attachments.js\",\"receive\",\"/attachment_progress\"]"
 ]

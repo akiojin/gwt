@@ -23,6 +23,45 @@ test.describe("Browser file drop attachments", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("launch progress updates only its window message and copy state", async ({ page }, testInfo) => {
+    if (!fileDropBase) await installEmbeddedRoutes(page);
+    await installFileDropBackend(page);
+    await page.goto(fileDropAppUrl);
+    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await page.evaluate(() => window.__emitFileDropBackendEvent?.({
+      kind: "terminal_status", id: "agent-1", status: "starting", detail: null,
+    }));
+    // Legacy overlays stay parked and hidden; progress must not cover the TTY.
+    const overlay = page.locator(".workspace-window[data-id='agent-1'] .terminal-overlay");
+    await expect(overlay).toHaveCount(1);
+    await expect(overlay).toBeHidden();
+    const message = overlay.locator(".overlay-message");
+    const copy = overlay.locator(".overlay-copy-button");
+    const messageNode = await message.elementHandle();
+    const otherBefore = await page.locator(".workspace-window[data-id='shell-1'] .overlay-message").textContent();
+    const emit = (id: string, text: string) => page.evaluate(({ id, text }) => {
+      window.__emitFileDropBackendEvent?.({ kind: "launch_progress", id, message: text });
+    }, { id, text });
+
+    await emit("agent-1", "Preparing <workspace> & runtime");
+    await expect(message).toHaveText("Preparing <workspace> & runtime");
+    expect(await copy.evaluate(node => (node as HTMLButtonElement).hidden)).toBe(false);
+    await expect(copy).toBeEnabled();
+    await emit("agent-1", "");
+    await expect(message).toBeEmpty();
+    expect(await copy.evaluate(node => (node as HTMLButtonElement).hidden)).toBe(true);
+    await expect(copy).toBeDisabled();
+    await emit("missing-window", "Ignore this unknown window");
+    await emit("agent-1", "Starting Agent — progress received");
+    await expect(message).toHaveText("Starting Agent — progress received");
+    expect(await copy.evaluate(node => (node as HTMLButtonElement).hidden)).toBe(false);
+    await expect(copy).toBeEnabled();
+    expect(await message.evaluate((node, original) => node === original, messageNode)).toBe(true);
+    await expect(page.locator(".workspace-window[data-id='shell-1'] .overlay-message")).toHaveText(otherBefore || "");
+    await expect(overlay).toBeHidden();
+    await page.screenshot({ path: testInfo.outputPath("launch-progress.png") });
+  });
+
   test("dropping a file on an Agent window body uploads and sends uploaded attach_files", async ({
     page,
   }) => {

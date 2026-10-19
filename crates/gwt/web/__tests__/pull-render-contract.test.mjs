@@ -10,6 +10,21 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Launch progress receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const attachments = readFileSync(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/terminal-attachments.js', attachments]]),
+  }).filter(finding => finding.context === '/launch_progress');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;',
+    'updateTerminalOverlayCopyState(document.body);']) {
+    const mutated = app.replace('case "launch_progress": {', `case "launch_progress": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Open Project result receiver commits shared state and rejects bypass rendering", () => {
   const file = 'crates/gwt/web/project-clone-modal.js';
   const source = readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8');
