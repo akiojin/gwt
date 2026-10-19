@@ -11,8 +11,6 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"/recovery_center_state\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/remote_start_work_branches\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/runtime_hook_event\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/terminal_status\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/window_state\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_projection_prune_error\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_projection_prune_result\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_resumable_agents\"]",
