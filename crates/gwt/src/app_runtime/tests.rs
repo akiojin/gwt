@@ -1009,7 +1009,7 @@ fn project_event_isolation_inactive_runtime_events_keep_the_window_owner() {
     insert_test_pane_runtime(&mut runtime, &id);
     let incarnation = runtime.runtimes[&id].incarnation;
     let mut events =
-        runtime.handle_runtime_output_event(id.clone(), incarnation, b"B output".to_vec(), 1);
+        runtime.handle_runtime_output_event(id.clone(), incarnation, b"B output".to_vec(), 1, None);
     events.extend(runtime.handle_runtime_status(
         id.clone(),
         WindowProcessStatus::Error,
@@ -1678,6 +1678,7 @@ fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
             incarnation,
             b"pending".to_vec(),
             1,
+            None,
         );
         assert!(runtime.pending_runtime_outputs.contains_key(window_id));
     }

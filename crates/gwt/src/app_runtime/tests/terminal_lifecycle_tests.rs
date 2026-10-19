@@ -2714,9 +2714,13 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         }
         if !reader_ahead || index == 19 {
             for (data, seq) in undispatched.drain(..) {
-                for event in
-                    runtime.handle_runtime_output_event(window_id.clone(), incarnation, data, seq)
-                {
+                for event in runtime.handle_runtime_output_event(
+                    window_id.clone(),
+                    incarnation,
+                    data,
+                    seq,
+                    None,
+                ) {
                     let prepared = prepare_outbound_event(&event);
                     repair_queue.enqueue(&prepared);
                     if resync_connected {
@@ -3231,6 +3235,56 @@ fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
 }
 
 #[test]
+fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let data = b"worker captured output";
+    let seq = {
+        let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
+        pane.process_bytes(data);
+        pane.output_seq()
+    };
+    runtime.handle_runtime_output_event(
+        id.clone(),
+        incarnation,
+        data.to_vec(),
+        seq,
+        Some("worker captured output".into()),
+    );
+    let pane = runtime.runtimes[&id].pane.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = pane.lock().unwrap();
+        ready_tx.send(()).unwrap();
+        // Release on failure too, so a regressed GUI wait fails instead of hanging.
+        // test-hygiene: allow-wall-clock-deadline Bound a regressed GUI mutex wait; the ready channel establishes ordering.
+        release_rx.recv_timeout(Duration::from_secs(10)).is_ok()
+    });
+    // test-hygiene: allow-wall-clock-deadline Fail if the lock-holder thread cannot start; elapsed time is not asserted.
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let events =
+        runtime.flush_runtime_output_batches(runtime.next_runtime_output_deadline().unwrap());
+    let _ = release_tx.send(());
+    assert!(
+        holder.join().unwrap(),
+        "GUI flush waited for the PTY parser mutex"
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text.contains("worker captured output"))));
+}
+
+#[test]
 fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -3251,14 +3305,19 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     let mut bytes = Vec::new();
     let mut deadline = None;
     for chunk in chunks {
-        let seq = {
+        let (seq, screen) = {
             let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
             pane.process_bytes(chunk);
-            pane.output_seq()
+            (pane.output_seq(), pane.screen().contents())
         };
         bytes.extend_from_slice(chunk);
-        let events =
-            runtime.handle_runtime_output_event(id.clone(), incarnation, chunk.to_vec(), seq);
+        let events = runtime.handle_runtime_output_event(
+            id.clone(),
+            incarnation,
+            chunk.to_vec(),
+            seq,
+            Some(screen),
+        );
         assert_eq!(events.len(), 1, "only raw output is immediate");
         assert_eq!(events[0].terminal_stream_seq, Some(seq));
         assert!(
@@ -3299,6 +3358,19 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     assert!(runtime
         .flush_runtime_output_batches(deadline + Duration::from_secs(1))
         .is_empty());
+    let events = runtime.handle_runtime_output_event(
+        id,
+        incarnation,
+        vec![b'x'; gwt::pane_runtime::OUTPUT_BATCH_MAX_BYTES],
+        100,
+        Some("large burst".into()),
+    );
+    assert!(
+        runtime.next_runtime_output_deadline().is_none(),
+        "a size-limited batch flushes immediately"
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text == "large burst")));
 }
 
 #[test]
@@ -3315,7 +3387,7 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
     let id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &id);
     let old = runtime.runtimes[&id].incarnation;
-    runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1);
+    runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1, Some("old".into()));
     runtime.runtimes.get_mut(&id).unwrap().incarnation += 1;
     let deadline = runtime.next_runtime_output_deadline().unwrap();
     assert!(runtime.flush_runtime_output_batches(deadline).is_empty());
@@ -3325,7 +3397,13 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
         .lock()
         .unwrap()
         .process_bytes(b"final output");
-    runtime.handle_runtime_output_event(id.clone(), current, b"final output".to_vec(), 2);
+    runtime.handle_runtime_output_event(
+        id.clone(),
+        current,
+        b"final output".to_vec(),
+        2,
+        Some("final output".into()),
+    );
     let events = runtime.handle_runtime_status_event(
         id.clone(),
         current,

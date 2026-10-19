@@ -1,0 +1,85 @@
+{
+  "passed": true,
+  "source_files_verified": 10,
+  "baseline_source_sha": "0cc32f2984255f72f55885854d380f1fb780f4d1",
+  "comparisons": {
+    "dark": {
+      "before": {
+        "elapsed_ms": 1801461,
+        "native_samples": 49311,
+        "native_raw_rows": 49311,
+        "stalls_ge_100ms": 19,
+        "max_ms": 437,
+        "runtime_output": {
+          "event": "RuntimeOutput",
+          "count": 27974,
+          "stalls": 9,
+          "max_ms": 407
+        },
+        "producer_bytes": 73728000,
+        "wire_bytes": 80063890
+      },
+      "after": {
+        "elapsed_ms": 1801463,
+        "native_samples": 41603,
+        "native_raw_rows": 41603,
+        "stalls_ge_100ms": 1,
+        "max_ms": 119,
+        "runtime_output": {
+          "event": "RuntimeOutput",
+          "count": 17976,
+          "stalls": 0,
+          "max_ms": 13
+        },
+        "output_batches": {
+          "count": 9010,
+          "stalls": 0,
+          "max_ms": 21
+        },
+        "producer_bytes": 73728000,
+        "wire_bytes": 80063890
+      },
+      "stall_count_delta": -18,
+      "max_ms_delta": -318
+    },
+    "light": {
+      "before": {
+        "elapsed_ms": 11013,
+        "native_samples": 259,
+        "native_raw_rows": 259,
+        "stalls_ge_100ms": 0,
+        "max_ms": 17,
+        "runtime_output": {
+          "event": "RuntimeOutput",
+          "count": 154,
+          "stalls": 0,
+          "max_ms": 3
+        },
+        "producer_bytes": 409600,
+        "wire_bytes": 444690
+      },
+      "after": {
+        "elapsed_ms": 10527,
+        "native_samples": 227,
+        "native_raw_rows": 227,
+        "stalls_ge_100ms": 1,
+        "max_ms": 106,
+        "runtime_output": {
+          "event": "RuntimeOutput",
+          "count": 100,
+          "stalls": 0,
+          "max_ms": 1
+        },
+        "output_batches": {
+          "count": 50,
+          "stalls": 0,
+          "max_ms": 0
+        },
+        "producer_bytes": 409600,
+        "wire_bytes": 444690
+      },
+      "stall_count_delta": 1,
+      "max_ms_delta": 89
+    }
+  }
+}

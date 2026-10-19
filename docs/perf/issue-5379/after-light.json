@@ -1,0 +1,324 @@
+{
+  "issue": 5379,
+  "fixture": {
+    "duration_seconds": 1800,
+    "projects": [
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-0",
+        "branch_name": "main",
+        "project_key": "80668b99f28b9db7"
+      },
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-1",
+        "branch_name": "main",
+        "project_key": "f5ec32b38e30030b"
+      },
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-2",
+        "branch_name": "main",
+        "project_key": "b2cc372f2ad5b0a3"
+      },
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-3",
+        "branch_name": "main",
+        "project_key": "052b2315333ad94f"
+      },
+      {
+        "path": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b/workload/project-4",
+        "branch_name": "main",
+        "project_key": "b84be104ecda54b7"
+      }
+    ],
+    "binary_origin": "current checkout target/debug",
+    "gui_started_at": "2026-10-18T23:32:24.1829761Z",
+    "isolated_home": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b",
+    "issue": 5379,
+    "binary_sha256": "F1766EAFDD187BDD6442F8A0BD4B561ED5FF6B6B93E6CD3E9B175ADE8C758AFB",
+    "binary": "E:\\gwt\\work\\issue-5379\\target\\debug\\gwt.exe",
+    "checkout": "E:\\gwt\\work\\issue-5379",
+    "arm": "after",
+    "checkout_head": "f16d1243095672d50fdd7e4b4681d0832ce68a6c",
+    "gui_pid": 25132
+  },
+  "theme": "light",
+  "passed": true,
+  "duration_seconds": 10,
+  "full_acceptance_observation": false,
+  "started_at": "2026-10-19T00:04:29.851Z",
+  "ended_at": "2026-10-19T00:04:40.378Z",
+  "actual_elapsed_ms": 10527,
+  "workload": "5 custom Agent PTYs; 8192 ASCII bytes per second per Agent",
+  "producer_receipts": [
+    {
+      "index": 4,
+      "pid": 23688,
+      "started_at": 1792368267819.8196,
+      "session": "d04f6ff5-5fa3-4334-a810-76299f9f3875",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-19T00:04:39.852Z",
+      "complete": true
+    },
+    {
+      "index": 2,
+      "pid": 42976,
+      "started_at": 1792368246938.7034,
+      "session": "e441994d-cb57-4ee1-bf1a-1a8c0e56a879",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-19T00:04:39.852Z",
+      "complete": true
+    },
+    {
+      "index": 0,
+      "pid": 56340,
+      "started_at": 1792368224391.4717,
+      "session": "6b5728c0-0638-4195-b317-3957a0bcef23",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-19T00:04:39.852Z",
+      "complete": true
+    },
+    {
+      "index": 1,
+      "pid": 67092,
+      "started_at": 1792368235360.69,
+      "session": "7abe81b1-f4b5-488e-b8af-e04f56e5176b",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-19T00:04:39.852Z",
+      "complete": true
+    },
+    {
+      "index": 3,
+      "pid": 67620,
+      "started_at": 1792368259004.8147,
+      "session": "e127d596-341f-4984-ae26-03373f22a663",
+      "run_id": "after-light",
+      "sequence": 10,
+      "bytes": 81920,
+      "observed_at": "2026-10-19T00:04:39.852Z",
+      "complete": true
+    }
+  ],
+  "wire": [
+    {
+      "index": 0,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "index": 1,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "index": 2,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "index": 3,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    },
+    {
+      "index": 4,
+      "output_bytes": 88938,
+      "snapshot_bytes": 0,
+      "output_frames": 20,
+      "snapshot_frames": 0,
+      "sequences": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ]
+    }
+  ],
+  "native_dispatch": {
+    "samples": 227,
+    "stalls": 1,
+    "max_ms": 106,
+    "events": [
+      {
+        "event": "IssueMonitorCapacityChanged",
+        "count": 10,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "LogEntry",
+        "count": 2,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "MainEventsCleared",
+        "count": 38,
+        "stalls": 1,
+        "max_ms": 106
+      },
+      {
+        "event": "NewEvents",
+        "count": 38,
+        "stalls": 0,
+        "max_ms": 5
+      },
+      {
+        "event": "RedrawEventsCleared",
+        "count": 38,
+        "stalls": 0,
+        "max_ms": 0
+      },
+      {
+        "event": "RuntimeOutput",
+        "count": 100,
+        "stalls": 0,
+        "max_ms": 1
+      },
+      {
+        "event": "SupportedAgentCatalogReady",
+        "count": 1,
+        "stalls": 0,
+        "max_ms": 0
+      }
+    ],
+    "slow_rows": [
+      {
+        "file": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-5379-after-b3fb31663b284d169ca77709d000c48b\\.gwt\\logs\\gwt.log.2026-10-19",
+        "timestamp": "2026-10-19T09:04:31.147699900+09:00",
+        "level": "WARN",
+        "fields": {
+          "message": "MainEventsCleared blocked the GUI event loop for 106ms",
+          "event": "MainEventsCleared",
+          "elapsed_ms": 106
+        },
+        "target": "gwt.frontend.timing"
+      }
+    ],
+    "summaries": [],
+    "output_batches": {
+      "count": 50,
+      "stalls": 0,
+      "max_ms": 0
+    }
+  },
+  "browser_errors": [],
+  "dom_snapshot": [
+    {
+      "pane_id": "output-0::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-0::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    },
+    {
+      "pane_id": "output-1::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-1::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    },
+    {
+      "pane_id": "output-2::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-2::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    },
+    {
+      "pane_id": "output-3::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-3::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    },
+    {
+      "pane_id": "output-4::agent-1",
+      "agent_tiles": [
+        {
+          "id": "output-4::agent-1",
+          "terminal_rows": 1
+        }
+      ]
+    }
+  ],
+  "limitations": "Deterministic custom PTYs, no provider inference/hooks/builds. Native outer RuntimeOutput dispatch remains the event label; batching flushes at the beginning of every native callback and can be attributed to any event label. All event counts and maxima are retained rather than treating RuntimeOutput alone as the flush budget. Native timing uses integer milliseconds truncated. Slow raw rows are retained; minute summaries cover >50ms events and may straddle interval boundaries. Light is a separate 10-second functional check. Preserved binary source identity must be established by the owner separately from the current checkout HEAD.",
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "pass"
+}
