@@ -2654,11 +2654,12 @@ fn try_apply_issue_monitor_control(
             if let Some(autonomous_mode) = autonomous_mode {
                 candidate.set_autonomous_mode_with_effect_revocation(autonomous_mode)?;
             }
-            if let Some(max_active_agents) = max_active_agents {
-                candidate.set_max_active_agents(max_active_agents);
-            }
-            if max_active_auto {
-                candidate.set_max_active_agents_override(None);
+            if max_active_agents.is_some() || max_active_auto {
+                candidate.set_max_active_agents_override_with_source(
+                    max_active_agents,
+                    crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+                    now,
+                );
             }
             if let Some(auto_close_merged_issues) = auto_close_merged_issues {
                 candidate.set_auto_close_merged_issues_with_effect_revocation(Some(
@@ -2962,7 +2963,11 @@ fn apply_routine_issue_monitor_control(
             false
         }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
-            monitor.set_max_active_agents_override(max_active_agents);
+            monitor.set_max_active_agents_override_with_source(
+                max_active_agents,
+                crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+                now,
+            );
             true
         }
         IssueMonitorControl::PriorityOrder(issue_numbers) => {
@@ -9596,6 +9601,43 @@ exit 0
         assert_eq!(stale.prefs(), monitor.prefs());
         assert_eq!(review_attempts(&stale).count, 1);
         assert_eq!(stale.attempt_count(42), 0);
+
+        let json_control = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set": {"max_active_agents": 3}}),
+                std::process::id() + 1,
+            ),
+        )
+        .expect("JSON max-active control");
+        for (source, control) in [
+            ("gui", IssueMonitorControl::MaxActiveAgents(Some(5))),
+            ("json_operation", json_control),
+        ] {
+            let prefs_path = temp.path().join(format!("{source}-limit.json"));
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+                .expect("seed limit prefs");
+            let mut stale = monitor.clone();
+            let accepted = super::AcceptedIssueMonitorControl {
+                control_id: format!("{source}-limit-replay"),
+                processed_at: "2000-01-01T00:00:00Z".to_string(),
+                control,
+            };
+            assert!(matches!(
+                apply_accepted_control_for_test(&prefs_path, &mut monitor, accepted.clone()),
+                super::IssueMonitorControlCommit::Committed { .. }
+            ));
+            let change = serde_json::to_value(monitor.prefs()).expect("prefs json")
+                ["max_active_last_change"]
+                .clone();
+            assert_eq!(change["source"], source);
+            assert_eq!(change["changed_at"], accepted.processed_at);
+            assert!(matches!(
+                apply_accepted_control_for_test(&prefs_path, &mut stale, accepted),
+                super::IssueMonitorControlCommit::Committed { .. }
+            ));
+            assert_eq!(stale.prefs(), monitor.prefs());
+        }
     }
 
     #[test]
@@ -12001,12 +12043,32 @@ exit 0
         );
         assert!(should_scan);
         assert_eq!(monitor.status_view().max_active_agents, 5);
+        let changed = serde_json::to_value(monitor.agent_status()).expect("status json")
+            ["max_active_last_change"]
+            .clone();
+        assert_eq!(changed["source"], "gui");
+        assert_eq!(changed["max_active_agents_override"], 5);
+        chrono::DateTime::parse_from_rfc3339(changed["changed_at"].as_str().expect("change time"))
+            .expect("RFC3339 change time");
 
         let should_scan = apply_issue_monitor_control(
             &mut monitor,
             IssueMonitorControl::PriorityOrder(vec![43, 42]),
         );
         assert!(should_scan);
+        assert_eq!(
+            serde_json::to_value(monitor.agent_status()).expect("status json")
+                ["max_active_last_change"],
+            changed,
+            "an unrelated control preserves the last explicit limit change"
+        );
+        assert!(apply_issue_monitor_control(
+            &mut monitor,
+            IssueMonitorControl::MaxActiveAgents(None),
+        ));
+        let automatic = serde_json::to_value(monitor.agent_status()).expect("status json");
+        assert_eq!(automatic["max_active_last_change"]["source"], "gui");
+        assert!(automatic["max_active_last_change"]["max_active_agents_override"].is_null());
     }
 
     // SPEC #3165 TQ-9: the GUI's "Remove from queue" reaches the daemon as a
@@ -12241,6 +12303,12 @@ exit 0
         assert!(!persisted.autonomous_mode);
         assert_eq!(persisted.max_active_agents, 4);
         assert_eq!(persisted.effect_authority_epoch, 9);
+        let change =
+            serde_json::to_value(&persisted).expect("prefs json")["max_active_last_change"].clone();
+        assert_eq!(change["source"], "json_operation");
+        assert_eq!(change["max_active_agents_override"], 4);
+        chrono::DateTime::parse_from_rfc3339(change["changed_at"].as_str().expect("change time"))
+            .expect("RFC3339 change time");
     }
 
     #[test]
