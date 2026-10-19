@@ -871,7 +871,7 @@ export function createProjectShellSurface({
       const unsubscribeClone = cloneProjectModel.subscribe(state => state.modal, () => renderProjectCloneModal());
 
       return {
-        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); unsubscribeClone(); },
+        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); unsubscribeClone(); openPathDialog.dispose(); },
         sendOpenProjectDialog,
         closeCloneProjectModal,
         updateActionAvailability,

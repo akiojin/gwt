@@ -1,4 +1,5 @@
 import { createFocusTrap } from "./focus-trap.js";
+import { createUiStateStore } from "./ui-state-store.js";
 
 const focusReturnMap = new WeakMap();
 const focusTrapMap = new WeakMap();
@@ -58,7 +59,7 @@ export function createOpenProjectPathForm(ownerDoc, onOpen) {
 }
 
 export function createOpenProjectPathDialog(ownerDoc, { onChoose, onOpen }) {
-  let awaitingOpen = null;
+  const model = createUiStateStore({ open: false, awaitingOpen: null, pending: false, message: "" });
   const node = (tag, className, text) => {
     const element = ownerDoc.createElement(tag);
     element.className = className;
@@ -94,38 +95,42 @@ export function createOpenProjectPathDialog(ownerDoc, { onChoose, onOpen }) {
   footer.append(button(ownerDoc, "Close", "text-button", hide), choose);
   dialog.append(header, body, footer);
   modal.append(dialog);
-  function hide() { awaitingOpen = null; closeModal(modal, dialog); }
+  function hide() { model.update(current => ({ ...current, open: false, awaitingOpen: null })); }
   function waitForOpen(path, requestId) {
-    awaitingOpen = requestId;
     const input = form.querySelector('[data-open-project-path]');
     input.value = path;
     form.querySelector('[data-open-project-submit]').disabled = !path.trim();
-    status.textContent = "Opening project…";
-    status.hidden = false;
-    openModal(modal, dialog, ownerDoc);
+    model.update(current => ({ ...current, open: true, awaitingOpen: requestId, message: "Opening project…" }));
+  }
+  function applyOpenProjectPathResultReceiveEvent(event) {
+    model.update(current => {
+      if (!current.awaitingOpen || event.request_id !== current.awaitingOpen || !["project_opened", "project_open_error"].includes(event.kind)) return current;
+      return { ...current, awaitingOpen: null, open: event.kind !== "project_opened",
+        message: event.kind === "project_open_error" ? event.message || "Could not open the project." : current.message };
+    });
   }
   modal.addEventListener("click", (event) => { if (event.target === modal) hide(); });
   modal.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); hide(); }
   });
+  const unsubscribe = model.subscribe(current => current, current => {
+    if (current.open && !modal.classList.contains("open")) openModal(modal, dialog, ownerDoc);
+    if (!current.open && modal.classList.contains("open")) closeModal(modal, dialog);
+    choose.textContent = current.pending ? "Choosing folder…" : "Choose Folder…";
+    dialog.setAttribute("aria-busy", String(current.open && current.pending));
+    status.textContent = current.message;
+    status.hidden = !current.message;
+  });
   return {
     modal,
     hide,
     waitForOpen,
-    receive(event) {
-      if (!awaitingOpen || event.request_id !== awaitingOpen || !["project_opened", "project_open_error"].includes(event.kind)) return;
-      awaitingOpen = null;
-      if (event.kind === "project_opened") { hide(); return; }
-      openModal(modal, dialog, ownerDoc);
-      status.textContent = event.message || "Could not open the project.";
-      status.hidden = false;
-    },
-    open() { openModal(modal, dialog, ownerDoc); },
+    receive: applyOpenProjectPathResultReceiveEvent,
+    dispose() { unsubscribe(); model.dispose(); },
+    open() { model.update(current => ({ ...current, open: true })); },
     update(pending, message) {
-      choose.textContent = pending ? "Choosing folder…" : "Choose Folder…";
-      dialog.setAttribute("aria-busy", String(Boolean(pending)));
-      status.textContent = message || (pending ? "Choose a folder in the system dialog, or cancel to return." : "");
-      status.hidden = !status.textContent;
+      model.update(current => ({ ...current, pending: Boolean(pending),
+        message: message || (pending ? "Choose a folder in the system dialog, or cancel to return." : "") }));
     },
   };
 }
