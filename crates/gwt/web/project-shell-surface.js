@@ -53,6 +53,7 @@ import { renderMigrationModal as renderMigrationModalView } from "/migration-mod
 import { renderProjectCloneModal as renderProjectCloneModalView, createFolderPickerController, createOpenProjectPathForm, createOpenProjectPathDialog } from "/project-clone-modal.js";
 import { windowRuntimeLabel } from "/window-runtime-state.js";
 import { groupProjectWindowList } from "/window-list-model.js";
+import { createUiStateStore } from "/ui-state-store.js";
 import {
   applyWindowWorktreeData,
   shouldShowWindowWorktreeBadge,
@@ -259,7 +260,7 @@ export function createProjectShellSurface({
       // SPEC-1934 US-6: state for the migration confirmation / progress modal.
       // `tabId` identifies which tab the active migration belongs to so a
       // multi-project frontend never mixes events from different repos.
-      let migrationModalState = {
+      const migrationModel = createUiStateStore({
         open: false,
         stage: "confirm", // "confirm" | "running" | "error"
         tabId: null,
@@ -272,7 +273,7 @@ export function createProjectShellSurface({
         percent: 0,
         message: "",
         recovery: "",
-      };
+      });
       let cloneProjectModalState = {
         open: false,
         mode: "url",
@@ -658,10 +659,11 @@ export function createProjectShellSurface({
             : `${tab.project_root} is not a Git workspace yet. Open another project or initialize this folder in your shell first.`;
       }
 
-      // SPEC-1934 US-6: Migration modal entry point. Re-rendered on every
-      // BackendEvent::Migration* arrival so the UI mirrors the executor state.
+      // Migration receivers and local actions commit data; this view reads
+      // the same immutable snapshot through its synchronous subscription.
       function renderMigrationModal() {
         if (!migrationModal || !migrationDialog) return;
+        const migrationModalState = migrationModel.read();
         renderMigrationModalView({
           modalEl: migrationModal,
           dialogEl: migrationDialog,
@@ -670,10 +672,9 @@ export function createProjectShellSurface({
           onMigrate: () => {
             if (!migrationModalState.tabId) return;
             const tabId = migrationModalState.tabId;
-            migrationModalState.stage = "running";
-            migrationModalState.phase = "validate";
-            migrationModalState.percent = 0;
-            renderMigrationModal();
+            migrationModel.update(current => ({
+              ...current, stage: "running", phase: "validate", percent: 0,
+            }));
             send({ kind: "start_migration", tab_id: tabId });
           },
           // SPEC-1934 US-7 / FR-032: only the error stage exposes a dismissal
@@ -681,11 +682,9 @@ export function createProjectShellSurface({
           // the tab keeps its pending status so the next Open Project shows
           // the Accept-only modal again.
           onClose: () => {
-            migrationModalState.open = false;
-            migrationModalState.stage = "confirm";
-            migrationModalState.message = "";
-            migrationModalState.recovery = "";
-            renderMigrationModal();
+            migrationModel.update(current => ({
+              ...current, open: false, stage: "confirm", message: "", recovery: "",
+            }));
           },
         });
       }
@@ -764,10 +763,11 @@ export function createProjectShellSurface({
       // SPEC-3064 Phase 3 (E7): receive() bodies for the migration events.
       // The case arms stay in app.js as thin delegates.
       function applyMigrationReceiveEvent(event) {
+        const migrationModalState = migrationModel.read();
         switch (event.kind) {
           case "migration_detected": {
             // SPEC-1934 US-6.1: server says a project tab needs migration.
-            migrationModalState = {
+            migrationModel.update(() => ({
               open: true,
               stage: "confirm",
               tabId: event.tab_id,
@@ -780,8 +780,7 @@ export function createProjectShellSurface({
               percent: 0,
               message: "",
               recovery: "",
-            };
-            renderMigrationModal();
+            }));
             break;
           }
           case "migration_progress": {
@@ -793,31 +792,29 @@ export function createProjectShellSurface({
             ) {
               break;
             }
-            migrationModalState.stage = "running";
-            migrationModalState.phase = event.phase || "confirm";
-            migrationModalState.percent = Number.isFinite(event.percent)
-              ? event.percent
-              : 0;
-            renderMigrationModal();
+            migrationModel.update(current => ({
+              ...current,
+              stage: "running",
+              phase: event.phase || "confirm",
+              percent: Number.isFinite(event.percent) ? event.percent : 0,
+            }));
             break;
           }
           case "migration_done": {
             if (migrationModalState.tabId === event.tab_id) {
-              migrationModalState.open = false;
-              migrationModalState.stage = "confirm";
-              migrationModalState.percent = 0;
-              renderMigrationModal();
+              migrationModel.update(current => ({
+                ...current, open: false, stage: "confirm", percent: 0,
+              }));
             }
             break;
           }
           case "migration_error": {
             if (migrationModalState.tabId !== event.tab_id) break;
-            migrationModalState.open = true;
-            migrationModalState.stage = "error";
-            migrationModalState.phase = event.phase || "error";
-            migrationModalState.message = event.message || "";
-            migrationModalState.recovery = event.recovery || "";
-            renderMigrationModal();
+            migrationModel.update(current => ({
+              ...current, open: true, stage: "error",
+              phase: event.phase || "error",
+              message: event.message || "", recovery: event.recovery || "",
+            }));
             break;
           }
           default:
@@ -835,12 +832,10 @@ export function createProjectShellSurface({
           // swallowed (so the user can't bypass migration), at the error
           // stage it dismisses the failure UI without flipping
           // migration_pending so the next Open Project re-presents Accept.
-          if (migrationModalState.stage === "error") {
-            migrationModalState.open = false;
-            migrationModalState.stage = "confirm";
-            migrationModalState.message = "";
-            migrationModalState.recovery = "";
-            renderMigrationModal();
+          if (migrationModel.read().stage === "error") {
+            migrationModel.update(current => ({
+              ...current, open: false, stage: "confirm", message: "", recovery: "",
+            }));
           }
           event.preventDefault();
           return true;
@@ -941,9 +936,10 @@ export function createProjectShellSurface({
 
       const unsubscribeCatalog = windowCatalogModel.subscribe(state => state.catalog, () => renderWindowList());
       const unsubscribeList = windowCatalogModel.subscribe(state => state.listEntries, () => renderWindowList());
+      const unsubscribeMigration = migrationModel.subscribe(state => state, () => renderMigrationModal());
 
       return {
-        dispose() { unsubscribeCatalog(); unsubscribeList(); },
+        dispose() { unsubscribeCatalog(); unsubscribeList(); unsubscribeMigration(); },
         sendOpenProjectDialog,
         closeCloneProjectModal,
         updateActionAvailability,
