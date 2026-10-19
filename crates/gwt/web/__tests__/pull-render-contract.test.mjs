@@ -10,6 +10,21 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Clone Project receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/project-shell-surface.js';
+  const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([['crates/gwt/web/project-clone-modal.js', readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8')]]);
+  const findings = code => scanModule(code, file, { modules })
+    .filter(finding => finding.root === 'applyCloneProjectReceiveEvent');
+  assert.deepEqual(findings(source), []);
+  for (const kind of ['clone_project_parent_selected', 'github_repository_search_results', 'github_repository_search_error', 'clone_project_progress', 'clone_project_done', 'clone_project_error']) {
+    const bypass = source.replace(`case "${kind}":`,
+      `case "${kind}": renderProjectCloneModal();`);
+    assert.notEqual(bypass, source);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
 test("Migration receivers commit shared state and reject bypass rendering", () => {
   const file = 'crates/gwt/web/project-shell-surface.js';
   const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
