@@ -1,0 +1,336 @@
+{
+  "issue": 5561,
+  "theme": "light",
+  "passed": true,
+  "gui_pid": 11552,
+  "checkout_sha": "2744c7b6c846abbdcdcdf0595163083e703e8155",
+  "checkout": "E:\\gwt\\work\\issue-5561",
+  "checkout_binary": "E:\\gwt\\work\\issue-5561\\target\\debug\\gwt.exe",
+  "checkout_branch": "work/issue-5561",
+  "source_worktree_count": 501,
+  "isolated_home": "C:\\Users\\AkioJinsenji秦泉寺章夫\\AppData\\Local\\Temp\\gwt-runtime-memory-5f22a23f-2a6c-470e-927a-78d6e81d8a39",
+  "started_at": "2026-10-16T01:23:16.257Z",
+  "ended_at": "2026-10-16T01:29:45.804Z",
+  "observation_started_at": "2026-10-16T01:28:36.463Z",
+  "requested_duration_seconds": 60,
+  "budget_bytes": 1500000000,
+  "pane_ids": [
+    "memory-workload-0::agent-1",
+    "memory-workload-1::agent-1",
+    "memory-workload-2::agent-1",
+    "memory-workload-3::agent-1",
+    "memory-workload-4::agent-1",
+    "memory-workload-5::agent-1",
+    "memory-workload-6::agent-1",
+    "memory-workload-7::agent-1",
+    "memory-workload-8::agent-1",
+    "memory-workload-9::agent-1",
+    "memory-workload-10::agent-1",
+    "memory-workload-11::agent-1"
+  ],
+  "workload": "12 custom command Agent panes; node heartbeat and 512-byte PTY output every second; no model-provider calls",
+  "limitations": "12 deterministic PTYs in separate fresh folder Projects with isolated fixture Git metadata plus the real checkout source-history Project. Provider inference, provider hooks and implementation builds are not covered. This is not same-condition real model-agent fleet evidence.",
+  "user_verification_result": "n/a (autonomous)",
+  "agent_visual_check": "pass",
+  "initial_producers": [
+    {
+      "pid": 25020,
+      "started_at": 1792113820075.4988,
+      "session": "a50cef47-e407-4249-9c89-2ece4e43adf1",
+      "tick": 272,
+      "observed_at": "2026-10-16T01:28:32.598Z"
+    },
+    {
+      "pid": 28904,
+      "started_at": 1792114061758.243,
+      "session": "23bf5244-011e-4a1f-b6d1-df5f4ab360dc",
+      "tick": 48,
+      "observed_at": "2026-10-16T01:28:32.598Z"
+    },
+    {
+      "pid": 30208,
+      "started_at": 1792113913524.596,
+      "session": "b2fcc700-dce1-4c4d-95dc-f6404d6fb913",
+      "tick": 185,
+      "observed_at": "2026-10-16T01:28:32.617Z"
+    },
+    {
+      "pid": 32624,
+      "started_at": 1792113985126.1516,
+      "session": "b7d9ba46-f952-4072-9ab0-7e13a40dbcc1",
+      "tick": 119,
+      "observed_at": "2026-10-16T01:28:32.597Z"
+    },
+    {
+      "pid": 3456,
+      "started_at": 1792113880910.7273,
+      "session": "a5c1f33c-427a-4d09-87f1-8d9d56b1f9de",
+      "tick": 215,
+      "observed_at": "2026-10-16T01:28:32.708Z"
+    },
+    {
+      "pid": 40040,
+      "started_at": 1792114081777.1294,
+      "session": "caab13a6-bd4a-464e-ac29-2358a02b4127",
+      "tick": 28,
+      "observed_at": "2026-10-16T01:28:32.678Z"
+    },
+    {
+      "pid": 48532,
+      "started_at": 1792113959078.8188,
+      "session": "74af83b5-ce9e-4419-826c-2f1880766a8b",
+      "tick": 143,
+      "observed_at": "2026-10-16T01:28:32.587Z"
+    },
+    {
+      "pid": 49272,
+      "started_at": 1792113938450.8806,
+      "session": "e7003d53-2c41-4295-ad20-1c670ef73207",
+      "tick": 162,
+      "observed_at": "2026-10-16T01:28:32.597Z"
+    },
+    {
+      "pid": 49300,
+      "started_at": 1792114033199.9846,
+      "session": "f3ec8c47-72c0-40e5-8881-3b79974908a4",
+      "tick": 75,
+      "observed_at": "2026-10-16T01:28:32.587Z"
+    },
+    {
+      "pid": 49560,
+      "started_at": 1792113854066.061,
+      "session": "ff0b171e-19ce-4daa-9827-5dd765205c83",
+      "tick": 238,
+      "observed_at": "2026-10-16T01:28:32.598Z"
+    },
+    {
+      "pid": 50656,
+      "started_at": 1792114006946.3174,
+      "session": "a011cf76-a788-4cfc-9cc5-a5e508edf06c",
+      "tick": 100,
+      "observed_at": "2026-10-16T01:28:32.598Z"
+    },
+    {
+      "pid": 54516,
+      "started_at": 1792114108570.2693,
+      "session": "906d2919-dcdf-486a-bd89-34a526ed3f91",
+      "tick": 4,
+      "observed_at": "2026-10-16T01:28:32.652Z"
+    }
+  ],
+  "final_producers": [
+    {
+      "pid": 25020,
+      "started_at": 1792113820075.4988,
+      "session": "a50cef47-e407-4249-9c89-2ece4e43adf1",
+      "tick": 336,
+      "observed_at": "2026-10-16T01:29:41.421Z"
+    },
+    {
+      "pid": 28904,
+      "started_at": 1792114061758.243,
+      "session": "23bf5244-011e-4a1f-b6d1-df5f4ab360dc",
+      "tick": 112,
+      "observed_at": "2026-10-16T01:29:41.427Z"
+    },
+    {
+      "pid": 30208,
+      "started_at": 1792113913524.596,
+      "session": "b2fcc700-dce1-4c4d-95dc-f6404d6fb913",
+      "tick": 248,
+      "observed_at": "2026-10-16T01:29:41.419Z"
+    },
+    {
+      "pid": 32624,
+      "started_at": 1792113985126.1516,
+      "session": "b7d9ba46-f952-4072-9ab0-7e13a40dbcc1",
+      "tick": 183,
+      "observed_at": "2026-10-16T01:29:41.419Z"
+    },
+    {
+      "pid": 3456,
+      "started_at": 1792113880910.7273,
+      "session": "a5c1f33c-427a-4d09-87f1-8d9d56b1f9de",
+      "tick": 278,
+      "observed_at": "2026-10-16T01:29:41.419Z"
+    },
+    {
+      "pid": 40040,
+      "started_at": 1792114081777.1294,
+      "session": "caab13a6-bd4a-464e-ac29-2358a02b4127",
+      "tick": 91,
+      "observed_at": "2026-10-16T01:29:41.417Z"
+    },
+    {
+      "pid": 48532,
+      "started_at": 1792113959078.8188,
+      "session": "74af83b5-ce9e-4419-826c-2f1880766a8b",
+      "tick": 206,
+      "observed_at": "2026-10-16T01:29:41.418Z"
+    },
+    {
+      "pid": 49272,
+      "started_at": 1792113938450.8806,
+      "session": "e7003d53-2c41-4295-ad20-1c670ef73207",
+      "tick": 226,
+      "observed_at": "2026-10-16T01:29:41.418Z"
+    },
+    {
+      "pid": 49300,
+      "started_at": 1792114033199.9846,
+      "session": "f3ec8c47-72c0-40e5-8881-3b79974908a4",
+      "tick": 139,
+      "observed_at": "2026-10-16T01:29:41.418Z"
+    },
+    {
+      "pid": 49560,
+      "started_at": 1792113854066.061,
+      "session": "ff0b171e-19ce-4daa-9827-5dd765205c83",
+      "tick": 302,
+      "observed_at": "2026-10-16T01:29:41.411Z"
+    },
+    {
+      "pid": 50656,
+      "started_at": 1792114006946.3174,
+      "session": "a011cf76-a788-4cfc-9cc5-a5e508edf06c",
+      "tick": 164,
+      "observed_at": "2026-10-16T01:29:41.418Z"
+    },
+    {
+      "pid": 54516,
+      "started_at": 1792114108570.2693,
+      "session": "906d2919-dcdf-486a-bd89-34a526ed3f91",
+      "tick": 68,
+      "observed_at": "2026-10-16T01:29:41.419Z"
+    }
+  ],
+  "rss_samples": [
+    {
+      "timestamp": "2026-10-16T01:23:56.4867003Z",
+      "rss_bytes": 261685248,
+      "private_bytes": 205328384,
+      "cpu_seconds": 95.453125,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:24:19.0193186Z",
+      "rss_bytes": 264032256,
+      "private_bytes": 207187968,
+      "cpu_seconds": 101.890625,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:24:46.2542765Z",
+      "rss_bytes": 267034624,
+      "private_bytes": 210812928,
+      "cpu_seconds": 111.5,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:25:18.8948854Z",
+      "rss_bytes": 271306752,
+      "private_bytes": 213909504,
+      "cpu_seconds": 124.5625,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:25:42.9044043Z",
+      "rss_bytes": 276746240,
+      "private_bytes": 219951104,
+      "cpu_seconds": 131.09375,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:26:03.8647008Z",
+      "rss_bytes": 277438464,
+      "private_bytes": 219717632,
+      "cpu_seconds": 138.75,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:26:30.5859366Z",
+      "rss_bytes": 282435584,
+      "private_bytes": 225112064,
+      "cpu_seconds": 147.375,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:26:50.4786839Z",
+      "rss_bytes": 284815360,
+      "private_bytes": 227328000,
+      "cpu_seconds": 153.78125,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:27:16.9960519Z",
+      "rss_bytes": 290381824,
+      "private_bytes": 243535872,
+      "cpu_seconds": 164,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:27:45.6415177Z",
+      "rss_bytes": 298639360,
+      "private_bytes": 252043264,
+      "cpu_seconds": 176.546875,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:28:18.0944875Z",
+      "rss_bytes": 304132096,
+      "private_bytes": 257798144,
+      "cpu_seconds": 186.640625,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:28:32.8868189Z",
+      "rss_bytes": 307286016,
+      "private_bytes": 260640768,
+      "cpu_seconds": 190.203125,
+      "elapsed_ms": 0
+    },
+    {
+      "timestamp": "2026-10-16T01:28:39.4845968Z",
+      "rss_bytes": 309104640,
+      "private_bytes": 262615040,
+      "cpu_seconds": 192.265625,
+      "elapsed_ms": 0.0017000000225380063
+    },
+    {
+      "timestamp": "2026-10-16T01:28:54.1643198Z",
+      "rss_bytes": 312283136,
+      "private_bytes": 265170944,
+      "cpu_seconds": 195.234375,
+      "elapsed_ms": 14497.236600000004
+    },
+    {
+      "timestamp": "2026-10-16T01:29:08.4997450Z",
+      "rss_bytes": 316882944,
+      "private_bytes": 269746176,
+      "cpu_seconds": 198.34375,
+      "elapsed_ms": 29395.362200000032
+    },
+    {
+      "timestamp": "2026-10-16T01:29:21.3197378Z",
+      "rss_bytes": 318820352,
+      "private_bytes": 271863808,
+      "cpu_seconds": 201.703125,
+      "elapsed_ms": 42718.41980000003
+    },
+    {
+      "timestamp": "2026-10-16T01:29:34.5217016Z",
+      "rss_bytes": 320823296,
+      "private_bytes": 274100224,
+      "cpu_seconds": 204.6875,
+      "elapsed_ms": 55698.182700000005
+    },
+    {
+      "timestamp": "2026-10-16T01:29:41.3938453Z",
+      "rss_bytes": 323805184,
+      "private_bytes": 277241856,
+      "cpu_seconds": 207.125,
+      "elapsed_ms": 62290.584900000016
+    }
+  ],
+  "browser_errors": []
+}
