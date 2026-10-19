@@ -10,6 +10,21 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Migration receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/project-shell-surface.js';
+  const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([['crates/gwt/web/migration-modal.js', readFileSync(new URL('../migration-modal.js', import.meta.url), 'utf8')]]);
+  const findings = code => scanModule(code, file, { modules })
+    .filter(finding => finding.root === 'applyMigrationReceiveEvent');
+  assert.deepEqual(findings(source), []);
+  for (const kind of ['migration_detected', 'migration_progress', 'migration_done', 'migration_error']) {
+    const bypass = source.replace(`case "${kind}":`,
+      `case "${kind}": renderMigrationModal();`);
+    assert.notEqual(bypass, source);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
 test("Update availability and auto-apply receivers commit shared state and reject bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
