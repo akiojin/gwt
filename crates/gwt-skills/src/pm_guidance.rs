@@ -1237,8 +1237,8 @@ quota:
 - Every answer carries `source` (`github` / `cache` / `stale-cache`),
   `cache_age_secs`, `throttled`, and `github_calls`. When the budget is
   below its reserve, `pr.list` serves the last snapshot with
-  `source: stale-cache` and the reason in `throttled`: act on those rows
-  as usual, say "PR inventory throttled: <reason>" in the digest, and do
+  `source: stale-cache` and the reason in `throttled`: hold those rows
+  without taking their suggested actions, say "PR inventory throttled: <reason>" in the digest, and do
   not retry the read this cycle. With no snapshot to serve it fails as
   unobservable (see below).
 - Do not pass `refresh:true` on the periodic inventory. Reserve it for
@@ -1295,7 +1295,8 @@ quota:
   - `CI-RED`: relaunch the owner to fix CI
   - `SUPERSEDED`: propose close in the digest
   - `IN-PROGRESS`: leave it unless `stale` is true
-  - `UNDETERMINED`: GitHub has not computed mergeability yet; hold and
+  - `UNDETERMINED`: GitHub has not computed mergeability yet, or
+    `lifecycle_source: stale-cache` means the snapshot could not be refreshed; hold and
     re-read next cycle. `lifecycle_source` is `held` when `pr.list` kept
     the previous class because the PR's real data did not change, so a
     class never flips on a non-final GitHub answer.
@@ -1309,6 +1310,8 @@ quota:
   (default 3, overridable with `params.escalate_after_cycles`), and
   `escalation_due`. Dwell and staleness are measured from the PR's real
   `updated_at`, never from the class of the moment.
+  `stale` is also true for an unverified inventory snapshot; that hold
+  does not advance `unchanged_cycles` or trigger `escalation_due`.
 - `owner_issue` names the Issue a relaunch or triage would target (the
   first closing Issue, else the Issue on the head's launch ref).
   `owner_issue_source` says whether the owner was declared by the PR
@@ -1398,9 +1401,13 @@ PR | owner Issue | dwell | conflicting files | behind | recommendation
 and `behind` is `conflict.behind_by`. Use `?` for a fact the row did not
 measure; never leave a column out and never guess one.
 - When `default_action_executable` is false the Issue Monitor cannot
-  perform the default action and `blocker` says why: `owner_unknown`
+  perform the default action and `blocker` says why: `stale_pr_inventory`,
+  `owner_unknown`
   (no closing Issue and no launch ref naming one) or
-  `owner_issue_closed`. A head sitting on the owner's own launch ref is
+  `owner_issue_closed`. For `stale_pr_inventory`, wait for the budget to
+  recover and obtain a fresh `pr.list` before any action; do not apply
+  the CI/conflict fallback below to unverified rows.
+  A head sitting on the owner's own launch ref is
   no longer a blocker — since #4074 a relaunch inherits that branch and
   its commits instead of being refused, so relaunch the owner.
   Do not retry the default action. The row's `fallback` fixes the
@@ -1486,8 +1493,12 @@ measure; never leave a column out and never guess one.
 branch with commits `origin/develop` does not have and no open PR
 carrying them. Each row names the `branch`, its `owner_issue`, how many
 commits it is `ahead`, and its `last_commit_at`. It is read from local
-refs, so it costs no GitHub budget and stays truthful even when the PR
-rows came from cache. `unlanded_branch_count` is the row count.
+refs, so it costs no GitHub budget. `unlanded_branch_count` is the row count.
+With `source: stale-cache`, the open PR set is unverified: stocktake arrays
+and counts are `null` (unknown, not zero), and rows have stale provenance
+with non-executable actions. Do not relaunch an owner from a stale snapshot;
+retry `pr.list` with `refresh:true` after the budget recovers. A snapshot
+inside the normal TTL still supports the stocktake.
 
 - Read it every cycle. A row is committed work with nothing carrying it
   to `develop` — #3551 sat unlanded for ten days because no open PR
@@ -2756,6 +2767,11 @@ mod tests {
             "`unlanded_branch_count`",
             "`last_commit_at`",
             "costs no GitHub budget",
+            "`source: stale-cache`",
+            "unknown, not zero",
+            "Do not relaunch an owner from a stale snapshot",
+            "hold those rows without taking their suggested actions",
+            "`stale_pr_inventory`",
             "relaunch the owner Issue so the work reaches a PR, or rule the branch archived",
             "A row that survives a cycle unaddressed is an escalation",
             "## Terminal executions never justify a successor Issue",
@@ -2773,6 +2789,7 @@ mod tests {
         ] {
             assert!(body.contains(phrase), "PM contract is missing: {phrase}");
         }
+        assert!(!body.contains("act on those rows as usual"));
     }
 
     /// Issue #3776 / SPEC-3431 FR-145〜148 and Issue #3825: a slow gwtd
