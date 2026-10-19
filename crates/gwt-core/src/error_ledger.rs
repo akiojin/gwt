@@ -246,7 +246,7 @@ fn open_ledger_lock() -> io::Result<fs::File> {
 pub fn sanitize_error_message(message: &str) -> String {
     const MAX_CHARS: usize = 1_000;
     let stripped = crate::process_console::strip_ansi::strip_ansi(message);
-    let mut redacted = redact_secrets(&crate::process_console::redact::redact_line(&stripped));
+    let mut redacted = redact_credentials(&stripped);
     redacted = redacted
         .chars()
         .filter(|ch| !ch.is_control() || *ch == '\n' || *ch == '\t')
@@ -256,6 +256,12 @@ pub fn sanitize_error_message(message: &str) -> String {
         redacted.push('…');
     }
     redacted
+}
+
+/// Remove the known credential forms used by diagnostic sanitization without
+/// stripping or truncating otherwise valid authored text.
+pub fn redact_credentials(message: &str) -> String {
+    redact_secrets(&crate::process_console::redact::redact_line(message))
 }
 
 fn sanitize_target(mut target: ErrorTarget) -> ErrorTarget {
