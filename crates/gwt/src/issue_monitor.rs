@@ -42001,6 +42001,13 @@ mod tests {
                 .exclusion_reason,
             None
         );
+
+        // Issue #5739: the delivered OPEN row must also produce a launch request.
+        monitor.set_gui_connected(true);
+        let launch = monitor
+            .next_launch_request("2026-09-01T01:00:01Z")
+            .expect("the requeued delivered issue launches");
+        assert_eq!(launch.issue_number, 42);
     }
 
     /// Issue #4477 AC-2/AC-4: with auto-close off the delivery is annotated and
