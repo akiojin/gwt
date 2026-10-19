@@ -112,6 +112,7 @@ pub struct PlanningAssessment {
     pub issue_traces: Vec<IssueTrace>,
     pub roadmap: RoadmapHorizons,
     pub roadmap_items: Vec<RoadmapDiagnostic>,
+    pub goals: Vec<GoalDiagnostic>,
     pub milestones: Vec<MilestoneDiagnostic>,
 }
 
@@ -146,6 +147,16 @@ pub struct RoadmapDiagnostic {
 }
 
 #[derive(Debug, Serialize)]
+pub struct GoalDiagnostic {
+    pub id: String,
+    pub roadmap_item_ids: Vec<String>,
+    pub issues: Vec<u64>,
+    pub observed_issue_states: Vec<MilestoneIssueStates>,
+    pub unobserved_issues: Vec<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct MilestoneDiagnostic {
     pub id: String,
     pub issues: Vec<u64>,
@@ -164,6 +175,31 @@ pub struct MilestoneDiagnostic {
 pub struct MilestoneIssueStates {
     pub issue_number: u64,
     pub states: Vec<MonitorInboxState>,
+}
+
+fn observe_issues(
+    members: &BTreeSet<u64>,
+    monitor: Option<&IssueMonitorAgentStatus>,
+) -> (Vec<MilestoneIssueStates>, Vec<u64>) {
+    let mut observed_issue_states = Vec::new();
+    let mut unobserved_issues = Vec::new();
+    for &issue_number in members {
+        let mut states = Vec::new();
+        for row in monitor.into_iter().flat_map(|status| &status.inbox) {
+            if row.issue_number == issue_number && !states.contains(&row.state) {
+                states.push(row.state);
+            }
+        }
+        if states.is_empty() {
+            unobserved_issues.push(issue_number);
+        } else {
+            observed_issue_states.push(MilestoneIssueStates {
+                issue_number,
+                states,
+            });
+        }
+    }
+    (observed_issue_states, unobserved_issues)
 }
 
 /// Assess only the supplied snapshots. Alignment is structural, never an
@@ -276,6 +312,46 @@ pub fn assess_planning(
             }
         })
         .collect();
+    let goals = state
+        .goals
+        .iter()
+        .map(|goal| {
+            let mut missing_inputs = vec!["metric_evidence"];
+            let nonempty_id = !goal.id.trim().is_empty();
+            if !nonempty_id {
+                missing_inputs.push("id");
+            }
+            let unique_id = state
+                .goals
+                .iter()
+                .filter(|other| other.id == goal.id)
+                .count()
+                == 1;
+            if !unique_id {
+                missing_inputs.push("unique_goal_id");
+            }
+            let links: Vec<_> = state
+                .roadmap_items
+                .iter()
+                .filter(|item| {
+                    nonempty_id && unique_id && item.goal_id.as_deref() == Some(goal.id.as_str())
+                })
+                .collect();
+            let members: BTreeSet<_> = links
+                .iter()
+                .flat_map(|item| item.issues.iter().copied())
+                .collect();
+            let (observed_issue_states, unobserved_issues) = observe_issues(&members, monitor);
+            GoalDiagnostic {
+                id: goal.id.clone(),
+                roadmap_item_ids: links.iter().map(|item| item.id.clone()).collect(),
+                issues: members.into_iter().collect(),
+                observed_issue_states,
+                unobserved_issues,
+                missing_inputs,
+            }
+        })
+        .collect();
     let milestones = state
         .milestones
         .iter()
@@ -303,24 +379,7 @@ pub fn assess_planning(
                     }
                 }
             }
-            let mut observed_issue_states = Vec::new();
-            let mut unobserved_issues = Vec::new();
-            for issue_number in members {
-                let mut states = Vec::new();
-                for row in monitor.into_iter().flat_map(|status| &status.inbox) {
-                    if row.issue_number == issue_number && !states.contains(&row.state) {
-                        states.push(row.state);
-                    }
-                }
-                if states.is_empty() {
-                    unobserved_issues.push(issue_number);
-                } else {
-                    observed_issue_states.push(MilestoneIssueStates {
-                        issue_number,
-                        states,
-                    });
-                }
-            }
+            let (observed_issue_states, unobserved_issues) = observe_issues(&members, monitor);
             for (name, value) in [
                 ("target_date", &milestone.target_date),
                 ("health", &milestone.health),
@@ -366,6 +425,7 @@ pub fn assess_planning(
         issue_traces,
         roadmap,
         roadmap_items,
+        goals,
         milestones,
     }
 }
@@ -594,6 +654,99 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("complete_monitor_coverage")));
+    }
+
+    #[test]
+    fn goal_observations_follow_only_explicit_references_without_metric_claims() {
+        let state: PmPlanningState = serde_json::from_value(json!({
+            "goals":[{"id":"g"},{"id":"other"}],
+            "milestones":[{"id":"m","issues":[99]}],
+            "roadmap_items":[
+                {"id":"a","goal_id":"g","issues":[2,1,2]},
+                {"id":"invalid","goal_id":"g","category":"maintenance","issues":[3]},
+                {"id":"milestone-only","milestone_id":"m","issues":[99]},
+                {"id":"other","goal_id":"other","issues":[99]},
+                {"id":"category-only","category":"compliance","issues":[99]},
+                {"id":"last","goal_id":"g","issues":[5]},
+                {"id":"whitespace","goal_id":" g ","issues":[99]}
+            ]
+        }))
+        .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.queue = vec![5];
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":1,"state":"queued","attempts":0},
+            {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
+            {"issue_number":2,"state":"needs_human","attempts":0},
+            {"issue_number":2,"state":"merged","attempts":0},
+            {"issue_number":3,"state":"hold_excluded","attempts":0},
+            {"issue_number":99,"state":"released","attempts":0}
+        ]))
+        .unwrap();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            report["goals"][0],
+            json!({
+                "id":"g", "roadmap_item_ids":["a","invalid","last"], "issues":[1,2,3,5],
+                "observed_issue_states":[
+                    {"issue_number":1,"states":["queued"]},
+                    {"issue_number":2,"states":["needs_human","merged"]},
+                    {"issue_number":3,"states":["hold_excluded"]}
+                ],
+                "unobserved_issues":[5], "missing_inputs":["metric_evidence"]
+            })
+        );
+        assert!(!report.to_string().contains("private reason"));
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(absent["goals"][0]["observed_issue_states"], json!([]));
+        assert_eq!(absent["goals"][0]["unobserved_issues"], json!([1, 2, 3, 5]));
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        monitor.active_launches_incomplete = true;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["goals"], report["goals"]);
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        assert!(degraded["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("complete_monitor_coverage")));
+    }
+
+    #[test]
+    fn ambiguous_or_empty_goal_ids_resolve_no_roadmap_references() {
+        let state: PmPlanningState = serde_json::from_value(json!({
+            "goals":[{"id":"duplicate"},{"id":"duplicate"},{"id":" "}],
+            "roadmap_items":[{"id":"a","goal_id":"duplicate","issues":[1]},
+                {"id":"b","goal_id":" ","issues":[2]}]
+        }))
+        .unwrap();
+        let report = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        let goals = report["goals"].as_array().expect("goal diagnostics");
+        assert_eq!(goals.len(), 3);
+        for goal in goals {
+            for key in [
+                "roadmap_item_ids",
+                "issues",
+                "observed_issue_states",
+                "unobserved_issues",
+            ] {
+                assert_eq!(goal[key], json!([]));
+            }
+            assert!(goal["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("metric_evidence")));
+        }
+        assert_eq!(
+            report["goals"][0]["missing_inputs"],
+            json!(["metric_evidence", "unique_goal_id"])
+        );
+        assert_eq!(
+            report["goals"][2]["missing_inputs"],
+            json!(["metric_evidence", "id"])
+        );
     }
 
     #[test]

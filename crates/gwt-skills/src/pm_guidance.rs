@@ -82,6 +82,13 @@ These are reference facts, including invalid goal links, not proof of alignment.
 Read the exact inbox states to explain a hold, failure or claim contention;
 an empty list does not prove health. Merged or Released does not prove milestone completion.
 Absent inbox rows stay unobserved even when other Monitor lists mention the Issue.
+Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references
+to its unique, nonempty exact ID, including invalid links as reference facts.
+Milestone-only or category-only references do not expand Goal membership;
+empty or duplicate Goal IDs resolve no links and name the missing identity input.
+The Goal's `observed_issue_states` and `unobserved_issues` use the same inbox boundary.
+Goal observations do not prove outcome achievement or metric evidence;
+`metric_evidence` stays missing until a canonical source is connected.
 Monitor source, last scan time and incomplete coverage are separate from the
 planning revision: no observation, an old scan or a cache projection cannot
 prove full fleet alignment. This read-only assessment never launches work
@@ -3715,6 +3722,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`change_impact`",
             "`directly_affected_issues`",
             "Goal changes use only roadmap links explicitly naming the goal",
+            "Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references",
+            "Goal observations do not prove outcome achievement or metric evidence",
             "does not prove dependency propagation or owner notification",
             "`pm.status.set`",
             "`status: \"released\"`",
