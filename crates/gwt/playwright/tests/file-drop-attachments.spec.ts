@@ -327,7 +327,7 @@ test.describe("Browser file drop attachments", () => {
 
   test("the attachment surface auto-hides after the backend reports Attached (Issue #3315)", async ({
     page,
-  }) => {
+  }, testInfo) => {
     if (!fileDropBase) await installEmbeddedRoutes(page);
     await installFileDropBackend(page);
 
@@ -338,15 +338,30 @@ test.describe("Browser file drop attachments", () => {
       ".agent-tile[data-agent-id='agent-1'] .attachment-progress",
     );
 
+    await emitAttachmentProgress(page, { operationId: "", phase: "failed", message: "ignored" });
+    await expect(agentProgress).toHaveCount(0);
     await emitAttachmentProgress(page, {
       operationId: "op-attach",
       phase: "staging",
-      filename: "notes.txt",
+      filename: "/workspace/notes.txt",
       bytesDone: 8,
       bytesTotal: 16,
     });
     await expect(agentProgress).toBeVisible();
     await expect(agentProgress).toContainText("Staging");
+    await expect(agentProgress).toContainText("notes.txt");
+    await expect(agentProgress).not.toContainText("/workspace/");
+    const surfaceNode = await agentProgress.elementHandle();
+    const progressbar = agentProgress.locator('[role="progressbar"]');
+    await expect(progressbar).toHaveAttribute("aria-valuenow", "50");
+    await emitAttachmentProgress(page, {
+      operationId: "op-attach", phase: "injecting", filename: "notes.txt", bytesDone: 12, bytesTotal: 16,
+    });
+    await expect(agentProgress).toContainText("Injecting");
+    await expect(progressbar).toHaveAttribute("aria-valuenow", "75");
+    expect(await agentProgress.evaluate((node, original) => node === original, surfaceNode)).toBe(true);
+    await expect(page.locator(".agent-tile[data-agent-id='shell-1'] .attachment-progress")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("attachment-progress.png") });
 
     await emitAttachmentProgress(page, {
       operationId: "op-attach",
@@ -368,7 +383,7 @@ test.describe("Browser file drop attachments", () => {
 
   test("a Failed phase persists until the next attachment replaces it (Issue #3315)", async ({
     page,
-  }) => {
+  }, testInfo) => {
     if (!fileDropBase) await installEmbeddedRoutes(page);
     await installFileDropBackend(page);
 
@@ -390,6 +405,7 @@ test.describe("Browser file drop attachments", () => {
     await expect(agentProgress).toBeVisible();
     await expect(agentProgress).toContainText("disk full");
     await expect(agentProgress).toHaveAttribute("data-state", "error");
+    const surfaceNode = await agentProgress.elementHandle();
 
     // Unlike Attached, a failure has no auto-hide timer — it must stay visible
     // past the success dwell so the user can read it.
@@ -410,6 +426,9 @@ test.describe("Browser file drop attachments", () => {
     await expect(agentProgress).toContainText("Staging");
     await expect(agentProgress).toContainText("report.pdf");
     await expect(agentProgress).not.toContainText("disk full");
+    expect(await agentProgress.evaluate((node, original) => node === original, surfaceNode)).toBe(true);
+    await expect(page.locator(".agent-tile[data-agent-id='shell-1'] .attachment-progress")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("attachment-replacement.png") });
   });
 
   test("pasting an image on an Agent terminal uploads and shows progress", async ({ page }) => {

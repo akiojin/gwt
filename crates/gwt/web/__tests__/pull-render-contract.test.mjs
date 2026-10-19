@@ -10,6 +10,23 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Attachment progress receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const file = 'crates/gwt/web/terminal-attachments.js';
+  const attachments = readFileSync(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(app, 'crates/gwt/web/app.js', {
+    modules: new Map([[file, source]]),
+  }).filter(finding => finding.context === '/attachment_progress');
+  assert.deepEqual(findings(attachments), []);
+  for (const bypass of ['document.body.textContent = event.phase;',
+    'renderAttachmentProgress(event);']) {
+    const mutated = attachments.replace('function handleAttachmentProgress(event) {',
+      `function handleAttachmentProgress(event) { ${bypass}`);
+    assert.notEqual(mutated, attachments);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Terminal status receivers commit shared state and reject bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const findings = source => scanModule(source, 'crates/gwt/web/app.js')
