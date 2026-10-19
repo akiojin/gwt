@@ -77,13 +77,18 @@ fn list_cache_file_name(key: &str) -> String {
     format!("{:016x}.json", hasher.finish())
 }
 
-fn list_cache_lock(cache_dir: &Path) -> Option<gwt_core::operation_deadline::NamedFileLock> {
+fn list_cache_lock(cache_dir: &Path) -> Option<std::fs::File> {
     std::fs::create_dir_all(cache_dir).ok()?;
-    gwt_core::operation_deadline::NamedFileLock::try_acquire(
-        &cache_dir.join(".cache.lock"),
-        "REST page cache",
-    )
-    .ok()
+    // Do not create diagnostic sidecars that could replace unknown files.
+    let file = std::fs::File::options()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(cache_dir.join(".cache.lock"))
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(file)
 }
 
 /// Called only under the same lock as publication. Unrecognized files and
@@ -391,6 +396,8 @@ mod tests {
         let mut value: Value = serde_json::from_slice(&std::fs::read(&unknown).unwrap()).unwrap();
         value["version"] = 2.into();
         std::fs::write(&unknown, serde_json::to_vec(&value).unwrap()).unwrap();
+        let lock_metadata = cache.path().join(".cache.lock.holder.json");
+        std::fs::write(&lock_metadata, "unknown metadata").unwrap();
         let nested = cache.path().join("nested");
         std::fs::create_dir(&nested).unwrap();
         let nested_page = write_cached_page(&nested, "nested-old-cursor", expired_at);
@@ -420,10 +427,15 @@ mod tests {
             mismatch,
             malformed,
             unknown,
+            lock_metadata.clone(),
             nested_page,
         ] {
             assert!(path.exists(), "must preserve {}", path.display());
         }
+        assert_eq!(
+            std::fs::read_to_string(lock_metadata).unwrap(),
+            "unknown metadata"
+        );
         #[cfg(unix)]
         assert!(symlink.is_symlink());
     }
