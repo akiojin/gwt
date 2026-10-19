@@ -98,7 +98,7 @@ jobs:
       - name: Install tray + GTK dependencies (Linux)
         run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.119.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
@@ -118,7 +118,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref_name }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.119.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-workspace
@@ -151,7 +151,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.119.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-workspace
