@@ -2607,6 +2607,22 @@ fn prepare_agent_launch_inner(
             return Err("bound launch Session identity changed before PTY spawn".into());
         }
     }
+    let canonical_owner = expected_execution_identity
+        .as_ref()
+        .map(|expected| {
+            let binding = &expected.execution_binding;
+            let kind = match binding.owner_kind.as_str() {
+                "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+                "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                _ => return Err("bound launch owner kind is not canonical".to_string()),
+            };
+            Ok(gwt::cli::execution_state::ExecutionOwnerKey {
+                kind,
+                number: binding.owner_number,
+            })
+        })
+        .transpose()?
+        .or_else(|| genesis.as_ref().map(|genesis| genesis.owner));
     let active = ActiveAgentSession {
         window_id: input.window_id.clone(),
         session_id: session_id.clone(),
@@ -2846,7 +2862,7 @@ fn prepare_agent_launch_inner(
                 &active,
                 base,
                 linked_issue_number,
-                genesis.as_ref().map(|genesis| genesis.owner),
+                canonical_owner,
                 input.workspace_resume_context.as_ref(),
                 None,
             )
@@ -2857,6 +2873,7 @@ fn prepare_agent_launch_inner(
                 &active,
                 None,
                 linked_issue_number,
+                canonical_owner,
                 context,
                 None,
             )
