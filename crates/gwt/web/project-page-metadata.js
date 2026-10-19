@@ -1,3 +1,5 @@
+import { createUiStateStore } from "./ui-state-store.js";
+
 // Metadata is a projection of the server aggregate, including off-screen windows.
 export function createProjectPageMetadata({
   document: documentRef = globalThis.document,
@@ -6,7 +8,7 @@ export function createProjectPageMetadata({
   send = () => {},
 } = {}) {
   let name = "Project";
-  let aggregate = { running_count: 0, block_count: 0, error_count: 0, unread: false };
+  const model = createUiStateStore({ running_count: 0, block_count: 0, error_count: 0, unread: false });
   let latestRevision = -1;
   let attentionSyncPending = false;
   function render() {
@@ -15,7 +17,7 @@ export function createProjectPageMetadata({
       try { documentRef.querySelector('link[rel="icon"]')?.setAttribute("href", "data:,"); } catch { /* optional favicon */ }
       return;
     }
-    const { running_count: running = 0, block_count: blocked = 0, error_count: errors = 0, unread = false } = aggregate;
+    const { running_count: running = 0, block_count: blocked = 0, error_count: errors = 0, unread = false } = model.read();
     documentRef.title = `${unread ? "● " : ""}${name} — RUN ${running} · BLOCK ${blocked} — gwt`;
     try {
       let icon = documentRef.querySelector('link[rel="icon"]');
@@ -48,26 +50,21 @@ export function createProjectPageMetadata({
     });
   }
   function acknowledge() {
+    const aggregate = model.read();
     const visible = documentRef.visibilityState === "visible";
     const focused = documentRef.hasFocus?.() === true;
-    if (project && aggregate.unread && visible && focused) {
+    if (project && latestRevision >= 0 && aggregate.unread && visible && focused) {
       send({ kind: "project_aggregate_ack", revision: aggregate.revision, visible, focused });
     }
   }
   function update(value) {
     if (!value || value.revision < latestRevision) return;
     latestRevision = value.revision;
-    aggregate = value;
-    render();
-    if (attentionSyncPending) {
-      attentionSyncPending = false;
-      reportAttention();
-    }
-    acknowledge();
+    model.update(() => value);
   }
   function resetConnection() {
     latestRevision = -1;
-    aggregate = { ...aggregate, unread: false };
+    // Retain the server-owned display snapshot; latestRevision fences old ACKs.
     // A Recent Project may materialize after the initial socket-open report.
     attentionSyncPending = true;
   }
@@ -90,6 +87,13 @@ export function createProjectPageMetadata({
       attributes: true, attributeFilter: ["data-theme"],
     });
   }
-  render();
+  model.subscribe(aggregate => aggregate, () => {
+    render();
+    if (attentionSyncPending) {
+      attentionSyncPending = false;
+      reportAttention();
+    }
+    acknowledge();
+  });
   return { setProjectName, update, resetConnection, reportAttention };
 }

@@ -79,6 +79,27 @@ test("old aggregate cannot overwrite newer metadata", () => {
   controller.update({ running_count: 1, revision: 1 });
   assert.equal(document.title, "Project — RUN 1 · BLOCK 0 — gwt");
 });
+test("metadata owns the received snapshot across theme, name, and attention updates", () => {
+  const { document, window, sent, controller } = setup();
+  const aggregate = { running_count: 2, block_count: 1, error_count: 1, unread: true, revision: 5 };
+  controller.update(aggregate);
+  Object.assign(aggregate, { running_count: 99, error_count: 0, unread: false, revision: 99 });
+  controller.setProjectName("Repo A");
+  document.hasFocus = () => true;
+  window.dispatchEvent(new window.Event("focus"));
+  assert.equal(document.title, "● Repo A — RUN 2 · BLOCK 1 — gwt");
+  const icon = document.querySelector('link[rel="icon"]');
+  assert.equal(icon.dataset.state, "error");
+  assert.equal(icon.dataset.unread, "true");
+  const acknowledgements = () => sent.filter(event => event.kind === "project_aggregate_ack");
+  assert.equal(acknowledgements().at(-1).revision, 5);
+  controller.resetConnection();
+  window.dispatchEvent(new window.Event("focus"));
+  assert.equal(acknowledgements().length, 1, "reconnect must not acknowledge an old connection's snapshot");
+  controller.update({ running_count: 1, unread: false, revision: 1 });
+  assert.equal(document.title, "Repo A — RUN 1 · BLOCK 0 — gwt");
+  assert.equal(icon.dataset.state, "running");
+});
 test("unavailable favicon style API does not prevent title updates or acknowledgement", () => {
   const { document, window, sent, controller } = setup();
   window.getComputedStyle = () => { throw new Error("unavailable"); };
