@@ -5073,6 +5073,17 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
+      const launchProgressModel = createUiStateStore(null);
+      launchProgressModel.subscribe(progress => progress, progress => {
+        if (!progress) return;
+        const element = windowMap.get(progress.id);
+        const messageEl = element?.querySelector(".terminal-overlay .overlay-message");
+        if (messageEl) {
+          messageEl.textContent = progress.message;
+          updateTerminalOverlayCopyState(messageEl.closest(".terminal-overlay"));
+        }
+      });
+
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
         if (!event) return;
@@ -5368,14 +5379,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             frontendUnits.terminalHost.applyStatus(event.window_id, event.state);
             break;
           case "launch_progress": {
-            const element = windowMap.get(event.id);
-            if (element) {
-              const messageEl = element.querySelector(".terminal-overlay .overlay-message");
-              if (messageEl) {
-                messageEl.textContent = event.message;
-                updateTerminalOverlayCopyState(messageEl.closest(".terminal-overlay"));
-              }
-            }
+            launchProgressModel.update(() => ({ id: event.id, message: event.message }));
             break;
           }
           case "project_index_status":
