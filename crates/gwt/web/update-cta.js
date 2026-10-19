@@ -28,6 +28,16 @@ export function createUpdateCtaController({
   let pendingVersion = null;
   let pendingReadyReason = null;
   let status = "idle";
+  const stagedModel = createUiStateStore(null);
+  stagedModel.subscribe(value => value, staged => {
+    if (!staged) return;
+    pendingVersion = staged.version;
+    if (staged.phase === "persisted") {
+      showReadyPending(staged.version);
+    } else if (status === "applying") {
+      renderModalReady(staged.version);
+    }
+  });
   const progressModel = createUiStateStore(null);
   progressModel.subscribe(value => value, progress => {
     const modal = document.getElementById(modalId);
@@ -320,10 +330,7 @@ export function createUpdateCtaController({
 
   function handleUpdateReady(payload) {
     if (!payload || !payload.version) return;
-    pendingVersion = payload.version;
-    if (status === "applying") {
-      renderModalReady(payload.version);
-    }
+    stagedModel.update(() => ({ version: payload.version, phase: "downloaded" }));
   }
 
   function handleUpdateApplyError(payload) {
@@ -381,7 +388,7 @@ export function createUpdateCtaController({
 
   function handleUpdateApplyPendingPersisted(payload) {
     if (!payload || !payload.version) return;
-    showReadyPending(payload.version);
+    stagedModel.update(() => ({ version: payload.version, phase: "persisted" }));
   }
 
   function dismissCta(event) {

@@ -1160,6 +1160,8 @@ import { createUiStateStore } from "/ui-state-store.js";
       const {
         handleUpdateProgress: applyUpdateProgress,
         handleUpdateApplyError: applyUpdateApplyError,
+        handleUpdateReady: applyUpdateReady,
+        handleUpdateApplyPendingPersisted: applyUpdateApplyPendingPersisted,
         ...updateCtaController
       } = createUpdateCtaController({
         document,
@@ -5566,7 +5568,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "update_ready":
-            updateCtaController.handleUpdateReady({
+            applyUpdateReady({
               version: event.version,
               asset_path: event.asset_path,
             });
@@ -5579,7 +5581,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "update_apply_pending_persisted":
-            updateCtaController.handleUpdateApplyPendingPersisted({
+            applyUpdateApplyPendingPersisted({
               version: event.version,
             });
             break;
