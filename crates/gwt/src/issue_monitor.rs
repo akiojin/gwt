@@ -935,12 +935,29 @@ pub enum IssueMonitorMaxActiveMode {
     Manual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorMaxActiveChangeSource {
+    Gui,
+    JsonOperation,
+}
+
+/// Last explicit setting change; automatic capacity observations preserve it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorMaxActiveChange {
+    pub changed_at: String,
+    pub source: IssueMonitorMaxActiveChangeSource,
+    pub max_active_agents_override: Option<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
     pub max_active_agents: usize,
     #[serde(default)]
     pub max_active_agents_mode: IssueMonitorMaxActiveMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     pub priority_order: Vec<u64>,
     /// Project-local any-of admission; an empty list preserves existing policy.
     #[serde(default)]
@@ -1224,6 +1241,7 @@ impl Default for IssueMonitorPrefs {
             enabled: false,
             max_active_agents: 1,
             max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
+            max_active_last_change: None,
             priority_order: Vec::new(),
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
@@ -3453,6 +3471,8 @@ pub struct IssueMonitorStatusView {
     pub max_active_agents: usize,
     #[serde(default)]
     pub max_active_agents_override: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     #[serde(default)]
     pub agent_capacity: AgentCapacity,
     pub total_candidates: usize,
@@ -3658,6 +3678,8 @@ pub struct IssueMonitorAgentStatus {
     pub max_active: usize,
     #[serde(default)]
     pub max_active_agents_override: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     #[serde(default)]
     pub agent_capacity: AgentCapacity,
     pub enabled: bool,
@@ -4605,6 +4627,8 @@ pub struct IssueMonitorState {
     pub config: IssueMonitorConfig,
     #[serde(default)]
     max_active_agents_mode: IssueMonitorMaxActiveMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     /// Machine observations are refreshed separately and never stored in prefs.
     #[serde(skip)]
     agent_capacity: AgentCapacity,
@@ -7183,6 +7207,7 @@ impl IssueMonitorState {
             queue_label_observation: None,
             config,
             max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+            max_active_last_change: None,
             agent_capacity: AgentCapacity::default(),
             gui_connected: false,
             inbox: Vec::new(),
@@ -7278,6 +7303,7 @@ impl IssueMonitorState {
         };
         let mut state = Self::new(config);
         state.max_active_agents_mode = prefs.max_active_agents_mode;
+        state.max_active_last_change = prefs.max_active_last_change.clone();
         state.apply_agent_capacity_limit();
         state.legacy_git_launch_failure_migration_version =
             prefs.legacy_git_launch_failure_migration_version;
@@ -7451,6 +7477,7 @@ impl IssueMonitorState {
             // Auto persists its accepted limit for incomplete measurements and restarts.
             max_active_agents: self.effective_max_active_agents(),
             max_active_agents_mode: self.max_active_agents_mode,
+            max_active_last_change: self.max_active_last_change.clone(),
             priority_order: self.priority_order.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
@@ -9898,6 +9925,21 @@ impl IssueMonitorState {
         }
     }
 
+    /// Record only explicit GUI/JSON changes, independently of measured limits.
+    pub fn set_max_active_agents_override_with_source(
+        &mut self,
+        max_active_agents: Option<usize>,
+        source: IssueMonitorMaxActiveChangeSource,
+        changed_at: &str,
+    ) {
+        self.set_max_active_agents_override(max_active_agents);
+        self.max_active_last_change = Some(IssueMonitorMaxActiveChange {
+            changed_at: changed_at.to_string(),
+            source,
+            max_active_agents_override: self.max_active_agents_override(),
+        });
+    }
+
     pub fn max_active_agents_override(&self) -> Option<usize> {
         (self.max_active_agents_mode == IssueMonitorMaxActiveMode::Manual)
             .then_some(self.config.max_active.max(1))
@@ -10394,6 +10436,7 @@ impl IssueMonitorState {
             };
         }
         self.max_active_agents_mode = disk.max_active_agents_mode;
+        self.max_active_last_change = disk.max_active_last_change.clone();
         self.apply_agent_capacity_limit();
         self.set_allowed_labels(disk.allowed_labels.clone());
         self.priority_order = disk.priority_order.clone();
@@ -12653,6 +12696,7 @@ impl IssueMonitorState {
             active_count: self.active_count(),
             max_active_agents: self.effective_max_active_agents(),
             max_active_agents_override: self.max_active_agents_override(),
+            max_active_last_change: self.max_active_last_change.clone(),
             agent_capacity: self.agent_capacity.clone(),
             total_candidates: self.inbox.len(),
             active_issue_number: self.active_issue_number(),
@@ -12943,6 +12987,7 @@ impl IssueMonitorState {
             active_launches_incomplete: false,
             max_active: self.effective_max_active_agents(),
             max_active_agents_override: self.max_active_agents_override(),
+            max_active_last_change: self.max_active_last_change.clone(),
             agent_capacity: self.agent_capacity.clone(),
             enabled: self.config.enabled,
             gui_status: Some(status.clone()),
@@ -22390,6 +22435,44 @@ mod tests {
     }
 
     #[test]
+    fn max_active_change_survives_refresh_restore_and_stale_writer_rebase() {
+        let old_change = serde_json::json!({
+            "changed_at": "2026-10-19T00:00:00Z",
+            "source": "json_operation",
+            "max_active_agents_override": 7,
+        });
+        let mut original = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+        original["max_active_agents_mode"] = "manual".into();
+        original["max_active_agents"] = 7.into();
+        original["max_active_last_change"] = old_change.clone();
+        let original: IssueMonitorPrefs = serde_json::from_value(original).unwrap();
+        let mut stale = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), original);
+        stale.set_agent_capacity(AgentCapacity::default());
+        assert_eq!(
+            serde_json::to_value(stale.agent_status()).unwrap()["max_active_last_change"],
+            old_change,
+            "refresh and restore retain the last explicit change"
+        );
+
+        let new_change = serde_json::json!({
+            "changed_at": "2026-10-19T00:01:00Z",
+            "source": "gui",
+            "max_active_agents_override": 3,
+        });
+        let mut latest = serde_json::to_value(stale.prefs()).unwrap();
+        latest["max_active_agents"] = 3.into();
+        latest["max_active_last_change"] = new_change.clone();
+        let latest: IssueMonitorPrefs = serde_json::from_value(latest).unwrap();
+        stale.rebase_daemon_driver_prefs(&latest);
+        assert_eq!(stale.effective_max_active_agents(), 3);
+        assert_eq!(
+            serde_json::to_value(stale.prefs()).unwrap()["max_active_last_change"],
+            new_change,
+            "a stale writer rebases the limit and its audit together"
+        );
+    }
+
+    #[test]
     fn agent_capacity_auto_tracks_measurements_and_manual_override_survives() {
         let mut monitor = IssueMonitorState::with_prefs(
             IssueMonitorConfig::default(),
@@ -23082,6 +23165,7 @@ mod tests {
                 pending_claim_issues: Some(Vec::new()),
                 max_active: 3,
                 max_active_agents_override: Some(3),
+                max_active_last_change: None,
                 agent_capacity: AgentCapacity::default(),
                 enabled: true,
                 gui_status: Some(monitor.status_view_at("2026-08-03T00:00:00Z")),
@@ -42001,6 +42085,13 @@ mod tests {
                 .exclusion_reason,
             None
         );
+
+        // Issue #5739: the delivered OPEN row must also produce a launch request.
+        monitor.set_gui_connected(true);
+        let launch = monitor
+            .next_launch_request("2026-09-01T01:00:01Z")
+            .expect("the requeued delivered issue launches");
+        assert_eq!(launch.issue_number, 42);
     }
 
     /// Issue #4477 AC-2/AC-4: with auto-close off the delivery is annotated and

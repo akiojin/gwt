@@ -1157,7 +1157,15 @@ import { createUiStateStore } from "/ui-state-store.js";
         });
       }
 
-      const updateCtaController = createUpdateCtaController({
+      const {
+        handleUpdateState: applyUpdateState,
+        handleUpdateAutoApply: applyUpdateAutoApply,
+        handleUpdateProgress: applyUpdateProgress,
+        handleUpdateApplyError: applyUpdateApplyError,
+        handleUpdateReady: applyUpdateReady,
+        handleUpdateApplyPendingPersisted: applyUpdateApplyPendingPersisted,
+        ...updateCtaController
+      } = createUpdateCtaController({
         document,
         send,
         setVersionState,
@@ -5051,7 +5059,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderAppState,
       });
 
-      const projectPageMetadata = createProjectPageMetadata({ document, window, send });
+      const { update: applyProjectAggregate, ...projectPageMetadata } = createProjectPageMetadata({ document, window, send });
 
       const agentCompletionNotifier = createAgentCompletionNotifier({
         window,
@@ -5204,7 +5212,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "project_agent_aggregate": {
-            projectPageMetadata.update(event.aggregate);
+            applyProjectAggregate(event.aggregate);
             break;
           }
           case "project_notification": {
@@ -5550,11 +5558,11 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "update_state":
             if (event.state === "available") {
-              updateCtaController.handleUpdateState(event);
+              applyUpdateState(event);
             }
             break;
           case "update_progress":
-            updateCtaController.handleUpdateProgress({
+            applyUpdateProgress({
               downloaded: event.downloaded,
               total: event.total,
               asset: event.asset,
@@ -5562,20 +5570,20 @@ import { createUiStateStore } from "/ui-state-store.js";
             });
             break;
           case "update_ready":
-            updateCtaController.handleUpdateReady({
+            applyUpdateReady({
               version: event.version,
               asset_path: event.asset_path,
             });
             break;
           case "update_apply_error":
-            updateCtaController.handleUpdateApplyError({
+            applyUpdateApplyError({
               stage: event.stage,
               reason: event.reason || event.message,
               log_path: event.log_path,
             });
             break;
           case "update_apply_pending_persisted":
-            updateCtaController.handleUpdateApplyPendingPersisted({
+            applyUpdateApplyPendingPersisted({
               version: event.version,
             });
             break;
@@ -5584,7 +5592,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "update_auto_apply":
             // Issue #3906 AC-7: the cancel grace and its outcome drive the CTA.
-            updateCtaController.handleUpdateAutoApply({
+            applyUpdateAutoApply({
               version: event.version,
               phase: event.phase,
               grace_secs: event.grace_secs,

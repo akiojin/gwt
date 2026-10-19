@@ -3076,7 +3076,7 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
   );
   assert.match(
     projectShellSurfaceSource,
-    /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*migrationModalState\.stage\s*===\s*"error"[\s\S]*migrationModalState\.open\s*=\s*false/,
+    /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*migrationModel\.read\(\)\.stage\s*===\s*"error"[\s\S]*migrationModel\.update\([\s\S]*open:\s*false/,
     "expected Esc on the migration modal error stage to dismiss the dialog without backend skip",
   );
   assert.match(

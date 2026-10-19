@@ -12684,6 +12684,8 @@ impl AppRuntime {
                 request_id,
             ),
             FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
+                let changed_at =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let publication = self.publish_project_issue_monitor_control(
                     context,
                     serde_json::json!({ "max_active_agents": max_active_agents }),
@@ -12694,7 +12696,11 @@ impl AppRuntime {
                     publication,
                     "max-active",
                     |monitor| {
-                        monitor.set_max_active_agents_override(max_active_agents);
+                        monitor.set_max_active_agents_override_with_source(
+                            max_active_agents,
+                            gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+                            &changed_at,
+                        );
                         monitor.refresh_agent_capacity(&context.project_root);
                     },
                 )

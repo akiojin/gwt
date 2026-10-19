@@ -10,6 +10,107 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Clone Project receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/project-shell-surface.js';
+  const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([['crates/gwt/web/project-clone-modal.js', readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8')]]);
+  const findings = code => scanModule(code, file, { modules })
+    .filter(finding => finding.root === 'applyCloneProjectReceiveEvent');
+  assert.deepEqual(findings(source), []);
+  for (const kind of ['clone_project_parent_selected', 'github_repository_search_results', 'github_repository_search_error', 'clone_project_progress', 'clone_project_done', 'clone_project_error']) {
+    const bypass = source.replace(`case "${kind}":`,
+      `case "${kind}": renderProjectCloneModal();`);
+    assert.notEqual(bypass, source);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Migration receivers commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/project-shell-surface.js';
+  const source = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([['crates/gwt/web/migration-modal.js', readFileSync(new URL('../migration-modal.js', import.meta.url), 'utf8')]]);
+  const findings = code => scanModule(code, file, { modules })
+    .filter(finding => finding.root === 'applyMigrationReceiveEvent');
+  assert.deepEqual(findings(source), []);
+  for (const kind of ['migration_detected', 'migration_progress', 'migration_done', 'migration_error']) {
+    const bypass = source.replace(`case "${kind}":`,
+      `case "${kind}": renderMigrationModal();`);
+    assert.notEqual(bypass, source);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Update availability and auto-apply receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive'
+    && ['/update_state', '/update_auto_apply'].includes(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['update_state', 'update_auto_apply']) {
+    const bypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.version;`);
+    assert.notEqual(bypass, app);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Update staged-ready receivers commit shared state and reject bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive'
+    && ['/update_ready', '/update_apply_pending_persisted'].includes(finding.context));
+  assert.deepEqual(findings(app), []);
+  for (const kind of ['update_ready', 'update_apply_pending_persisted']) {
+    const bypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.version;`);
+    assert.notEqual(bypass, app);
+    assert.ok(findings(bypass).length > 0);
+  }
+});
+
+test("Update apply error receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/update_apply_error');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "update_apply_error":',
+    'case "update_apply_error": document.body.textContent = event.reason;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Update progress receiver commits model data and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const update = readFileSync(new URL('../update-cta.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/update-cta.js', update]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/update_progress');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "update_progress":',
+    'case "update_progress": document.body.textContent = event.downloaded;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
+test("Project metadata receiver commits shared state and rejects bypass rendering", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const metadata = readFileSync(new URL('../project-page-metadata.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/project-page-metadata.js', metadata]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/project_agent_aggregate');
+  assert.deepEqual(findings(app), []);
+  const bypass = app.replace('case "project_agent_aggregate":',
+    'case "project_agent_aggregate": document.body.textContent = event.aggregate.revision;');
+  assert.notEqual(bypass, app);
+  assert.ok(findings(bypass).length > 0);
+});
+
 test("Runtime health receiver updates shared state and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const findings = source => scanModule(source, 'crates/gwt/web/app.js')

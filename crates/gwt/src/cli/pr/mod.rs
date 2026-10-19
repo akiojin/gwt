@@ -1774,6 +1774,9 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
     let unlanded: Vec<serde_json::Value> = unlanded.into_iter().map(render_branch).collect();
     let bookkeeping_only: Vec<serde_json::Value> =
         bookkeeping_only.into_iter().map(render_branch).collect();
+    // A stale open-PR set cannot establish branch absence. Null means this
+    // stocktake was not observed; an empty array means it was observed empty.
+    let stocktake_observed = read.source != "stale-cache";
     // Issue #3891: provenance and cost of the read travel with the rows so a
     // cached or throttled inventory is never mistaken for a live one.
     let payload = serde_json::json!({
@@ -1786,10 +1789,10 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
         "hydrated": read.hydrated,
         "skipped_unchanged": read.skipped_unchanged,
         "pull_requests": rows,
-        "unlanded_branch_count": unlanded.len(),
-        "unlanded_branches": unlanded,
-        "bookkeeping_only_branch_count": bookkeeping_only.len(),
-        "bookkeeping_only_branches": bookkeeping_only,
+        "unlanded_branch_count": stocktake_observed.then_some(unlanded.len()),
+        "unlanded_branches": stocktake_observed.then_some(unlanded),
+        "bookkeeping_only_branch_count": stocktake_observed.then_some(bookkeeping_only.len()),
+        "bookkeeping_only_branches": stocktake_observed.then_some(bookkeeping_only),
     });
     match serde_json::to_string_pretty(&payload) {
         Ok(rendered) => {
@@ -4699,6 +4702,39 @@ mod tests {
                 "has_non_gwt_changes": false,
             })
         );
+    }
+
+    #[test]
+    fn pr_list_stale_stocktake_is_unknown_rather_than_empty() {
+        let mut read = gwt_git::PrInventoryRead {
+            items: vec![seeded_inventory_item()],
+            source: "stale-cache",
+            fetched_at: None,
+            cache_age_secs: Some(3600),
+            throttled: Some("budget_reserve".to_string()),
+            github_calls: 0,
+            hydrated: 0,
+            skipped_unchanged: 0,
+            unlanded_branches: Vec::new(),
+        };
+        for (source, expected) in [
+            ("stale-cache", serde_json::Value::Null),
+            ("github", serde_json::json!([])),
+        ] {
+            read.source = source;
+            let mut out = String::new();
+            render_pr_inventory(&mut out, &read);
+            let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(payload["unlanded_branches"], expected);
+            assert_eq!(payload["bookkeeping_only_branches"], expected);
+            let count = if expected.is_null() {
+                expected
+            } else {
+                serde_json::json!(0)
+            };
+            assert_eq!(payload["unlanded_branch_count"], count);
+            assert_eq!(payload["bookkeeping_only_branch_count"], count);
+        }
     }
 
     /// SPEC #3835 AC-2 / AC-3 / AC-4 / AC-6: the facts the PM used to collect

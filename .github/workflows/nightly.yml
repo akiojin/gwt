@@ -46,6 +46,11 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@1.99.1
+      # Issue #4897: lib fixtures invoke nextest even though this job uses
+      # cargo test to exercise in-process default parallelism.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
       # Compiling inside the timed loop would charge the first iteration for the
@@ -54,6 +59,12 @@ jobs:
       - name: Build the default-parallel suites
         run: cargo test -p gwt --lib --bin gwt --all-features --no-run
         timeout-minutes: 45
+      # Native hook integration tests launch the companion executable, which
+      # the selected --lib / --bin gwt targets do not build. Build it without
+      # test-only features after compiling the suites, outside the timed loop.
+      - name: Build the checkout daemon for native hook tests
+        run: cargo build -p gwt --bin gwtd
+        timeout-minutes: 30
       # windows-latest gives 4 logical processors, and one pass over these
       # suites costs ~16 minutes for `--lib` and about as much again for
       # `--bin gwt` there, so three passes need a budget in the 100-minute

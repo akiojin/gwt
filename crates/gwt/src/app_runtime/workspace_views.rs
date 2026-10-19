@@ -3093,6 +3093,7 @@ pub(super) fn save_resumed_workspace_projection(
     session: &ActiveAgentSession,
     base_branch: Option<&str>,
     linked_issue_number: Option<u64>,
+    canonical_owner: Option<gwt::cli::execution_state::ExecutionOwnerKey>,
     workspace_resume_context: &WorkspaceResumeContext,
     live_session_ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<(), String> {
@@ -3101,7 +3102,7 @@ pub(super) fn save_resumed_workspace_projection(
         session,
         base_branch,
         linked_issue_number,
-        None,
+        canonical_owner,
         Some(workspace_resume_context),
         WorkspaceLaunchProjectionKind::Resume {
             created_by_start_work: session.branch_name.starts_with("work/"),

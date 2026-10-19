@@ -1,0 +1,20 @@
+[
+  {
+    "schema_version": 1,
+    "type": "sample",
+    "timestamp": "2026-10-16T00:32:26.3576Z",
+    "stream": "ui",
+    "target": "phase:work_events.ingest.worktree_scan",
+    "value": 7724314.3253999995,
+    "unit": "ms"
+  },
+  {
+    "schema_version": 1,
+    "type": "sample",
+    "timestamp": "2026-10-16T00:33:03.952839900Z",
+    "stream": "ui",
+    "target": "phase:work_events.ingest.ref_scan",
+    "value": 37594.6347,
+    "unit": "ms"
+  }
+]

@@ -2346,6 +2346,15 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
     let mut completion =
         bound_runtime_launch_completion(&repo, session_id, identity.clone(), command, args);
     completion.11.active_launch_handshake = Some(handshake);
+    runtime.pending_workspace_resume_contexts.insert(
+        window_id.clone(),
+        WorkspaceResumeContext {
+            title: Some("Restore the bound Work".into()),
+            owner: Some("SPEC-42".into()),
+            summary: None,
+            next_action: None,
+        },
+    );
     let events = runtime.handle_launch_complete_and_drain(window_id.clone(), Ok(completion));
 
     assert!(events.iter().all(|event| !matches!(
@@ -2355,6 +2364,20 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
             ..
         }
     )));
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load resumed Work")
+        .expect("resumed Work");
+    let work = works
+        .work_items
+        .iter()
+        .find(|work| {
+            work.agents
+                .iter()
+                .any(|agent| agent.session_id == session_id)
+        })
+        .expect("Work attached to the authenticated Resume");
+    assert_eq!(work.owner.as_deref(), Some("Issue #42"));
+    assert_eq!(work.title, "Restore the bound Work");
     let incarnation = runtime
         .runtimes
         .get(&window_id)

@@ -30541,6 +30541,8 @@ exit 1
         // successful *non*-delivery, never a completion claim.
         #[test]
         fn no_action_settles_a_delivered_owner_without_verification_or_completion() {
+            use gwt_core::workspace_projection as work;
+
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -30556,6 +30558,48 @@ exit 1
             };
             save(dir.path(), &active_record("sess-no-action")).unwrap();
             ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+            save_build_state(dir.path(), "sess-no-action", Some(3248), true);
+            // AC-WA3/WA4: delivered source can outlive a foreign terminal
+            // successor; No Action must not need or rewrite its Work authority.
+            let predecessor_id =
+                work::canonical_work_id(dir.path(), Some("work/issue-3248"), Some(dir.path()))
+                    .unwrap();
+            let successor_id = work::successor_work_id(&predecessor_id);
+            let now = Utc::now();
+            let mut works = work::WorkItemsProjection::empty(now);
+            for (work_id, work_owner) in [
+                (&predecessor_id, "SPEC-3248"),
+                (&successor_id, "Issue #999"),
+            ] {
+                let mut start = work::WorkEvent::new(work::WorkEventKind::Start, work_id, now);
+                start.owner = Some(work_owner.to_string());
+                start.execution_container = Some(work::WorkspaceExecutionContainerRef {
+                    branch: Some("work/issue-3248".to_string()),
+                    worktree_path: Some(dir.path().to_path_buf()),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                });
+                if work_id == &successor_id {
+                    start.agent_session_id = Some("sess-no-action".to_string());
+                    start.related_work_item_id = Some(predecessor_id.clone());
+                }
+                works.apply_event(start);
+                works.apply_event(work::WorkEvent::new(
+                    work::WorkEventKind::Done,
+                    work_id,
+                    now,
+                ));
+            }
+            assert!(works.work_items.iter().any(|item| {
+                item.id == successor_id
+                    && item.owner.as_deref() == Some("Issue #999")
+                    && item.is_terminal()
+            }));
+            let work_path =
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(dir.path());
+            work::save_workspace_work_items_projection_to_path(&work_path, &works).unwrap();
+            let work_before = fs::read(&work_path).unwrap();
             let before = record_contents(dir.path()).unwrap().unwrap();
             let head_before = gwt_core::process::hidden_command("git")
                 .arg("-C")
@@ -30591,6 +30635,28 @@ exit 1
                 record.completion_evidence.is_none(),
                 "No Action claims no verification evidence"
             );
+            assert!(
+                !gwt_core::skill_state::load(dir.path(), crate::cli::build::SKILL_NAME)
+                    .unwrap()
+                    .unwrap()
+                    .active,
+                "No Action must finish the matching build despite foreign terminal Work"
+            );
+            assert_eq!(fs::read(&work_path).unwrap(), work_before);
+            for output in [
+                crate::cli::hook::skill_build_spec_stop_check::handle_with_input(
+                    dir.path(),
+                    "{}",
+                    Some("sess-no-action"),
+                ),
+                crate::cli::hook::execution_control_stop_check::handle_with_input(
+                    dir.path(),
+                    "{}",
+                    Some("sess-no-action"),
+                ),
+            ] {
+                assert_eq!(output, crate::cli::hook::HookOutput::Silent);
+            }
             assert_eq!(
                 gwt_core::process::hidden_command("git")
                     .arg("-C")
@@ -30639,6 +30705,7 @@ exit 1
                 pr_handoff_refusal(dir.path(), true).is_some(),
                 "and it never opens the Ready PR gate"
             );
+            assert_eq!(fs::read(&work_path).unwrap(), work_before);
         }
 
         // AC-2 / AS-219: a worktree with real source work refuses, and the

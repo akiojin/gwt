@@ -244,6 +244,7 @@ test.describe("Issue #5322 Settings", () => {
         const maxMode = issues.getByLabel("Max active mode", { exact: true });
         await selectCapacityMode(page, "manual");
         await editNumber(issues.getByLabel("Max active", { exact: true }), "6");
+        await issues.getByRole("button", { name: "Apply Max active", exact: true }).click();
         await expect.poll(async () => (await readPreferences(a)).max_active_agents).toBe(6);
         await expect(maxMode).toHaveValue("manual");
         await selectCapacityMode(page, "auto");
@@ -252,6 +253,7 @@ test.describe("Issue #5322 Settings", () => {
         await selectCapacityMode(page, "manual");
         await expect(issues.getByLabel("Max active", { exact: true })).toBeEnabled();
         await editNumber(issues.getByLabel("Max active", { exact: true }), "4");
+        await issues.getByRole("button", { name: "Apply Max active", exact: true }).click();
         await expect.poll(async () => (await readPreferences(a)).max_active_agents).toBe(4);
         await issues.getByLabel("Auto-refill", { exact: true }).check();
         await expect.poll(async () => (await readPreferences(a)).terminal_queue_auto_refill).toBe(true);

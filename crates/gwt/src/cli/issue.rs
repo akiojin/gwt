@@ -1107,10 +1107,12 @@ pub(crate) fn load_monitor_agent_status(
         let capacity_status = authority.agent_status();
         status.agent_capacity = capacity_status.agent_capacity.clone();
         status.max_active_agents_override = capacity_status.max_active_agents_override;
+        status.max_active_last_change = capacity_status.max_active_last_change.clone();
         status.max_active = capacity_status.max_active;
         if let Some(gui) = status.gui_status.as_mut() {
             gui.agent_capacity = capacity_status.agent_capacity;
             gui.max_active_agents_override = capacity_status.max_active_agents_override;
+            gui.max_active_last_change = capacity_status.max_active_last_change;
             gui.max_active_agents = capacity_status.max_active;
         }
         attach_monitor_control_identity(&authority, &mut status);
@@ -3882,11 +3884,13 @@ fn apply_monitor_config_set(
             .set_autonomous_mode_with_effect_revocation(autonomous_mode)
             .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
     }
-    if let Some(max_active) = max_active {
-        candidate.set_max_active_agents(max_active);
-    }
-    if max_active_auto {
-        candidate.set_max_active_agents_override(None);
+    if max_active.is_some() || max_active_auto {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        candidate.set_max_active_agents_override_with_source(
+            max_active,
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            &now,
+        );
     }
     if let Some(auto_close_merged_issues) = auto_close_merged_issues {
         candidate
@@ -10092,6 +10096,7 @@ mod tests {
         let mut published = crate::IssueMonitorAgentStatus {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
+            max_active_last_change: None,
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -10151,6 +10156,7 @@ mod tests {
         let mut live_open = crate::IssueMonitorAgentStatus {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
+            max_active_last_change: None,
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -10297,6 +10303,7 @@ mod tests {
             let mut status = crate::IssueMonitorAgentStatus {
                 agent_capacity: Default::default(),
                 max_active_agents_override: Some(1),
+                max_active_last_change: None,
                 source: crate::IssueMonitorStatusSource::Daemon,
                 active_launches_incomplete: false,
                 queue: vec![2338],
@@ -10417,6 +10424,7 @@ mod tests {
         let mut published = crate::IssueMonitorAgentStatus {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
+            max_active_last_change: None,
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: vec![2338],
@@ -11093,6 +11101,15 @@ mod tests {
             },
         )
         .expect("save prefs");
+        let current_change = serde_json::json!({
+            "changed_at": "2026-10-19T00:01:00Z",
+            "source": "json_operation",
+            "max_active_agents_override": 3,
+        });
+        let mut durable: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&prefs_path).expect("read prefs")).unwrap();
+        durable["max_active_last_change"] = current_change.clone();
+        std::fs::write(&prefs_path, serde_json::to_vec(&durable).unwrap()).expect("stamp prefs");
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
         gwt_github::Cache::new(cache_root.clone())
             .write_snapshot(&IssueSnapshot {
@@ -11215,6 +11232,11 @@ mod tests {
                                 "launched_window_id": "tab-1::closed"
                             }],
                             "max_active": 1,
+                            "max_active_last_change": {
+                                "changed_at": "2026-10-19T00:00:00Z",
+                                "source": "gui",
+                                "max_active_agents_override": 1
+                            },
                             "slot_occupancy": {
                                 "occupied": 1, "max_active": 1,
                                 "occupants": [{"kind":"review", "issue_number":43,
@@ -11256,6 +11278,7 @@ mod tests {
             "legacy publisher reservations must survive control identity reconciliation"
         );
         assert_eq!(status["max_active"], 3);
+        assert_eq!(status["max_active_last_change"], current_change);
         // The legacy publisher omitted capacity fields. Current durable mode
         // and the shared measurement still govern the actionable projection.
         assert_eq!(status["source"], "daemon");
@@ -11797,6 +11820,12 @@ mod tests {
         assert!(!prefs.autonomous_mode);
         assert_eq!(prefs.max_active_agents, 3);
         assert_eq!(prefs.effect_authority_epoch, 2);
+        let change =
+            serde_json::to_value(&prefs).expect("prefs json")["max_active_last_change"].clone();
+        assert_eq!(change["source"], "json_operation");
+        assert_eq!(change["max_active_agents_override"], 3);
+        chrono::DateTime::parse_from_rfc3339(change["changed_at"].as_str().expect("change time"))
+            .expect("RFC3339 change time");
 
         let before = std::fs::read(&prefs_path).expect("prefs bytes");
         out.clear();
@@ -13854,6 +13883,7 @@ command = "my-agent-cli"
         let status = crate::IssueMonitorAgentStatus {
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
+            max_active_last_change: None,
             source: crate::IssueMonitorStatusSource::Daemon,
             active_launches_incomplete: false,
             queue: Vec::new(),
