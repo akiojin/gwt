@@ -469,7 +469,10 @@ Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Activ
 **Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
 **Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
 設定を閉じると Autonomous と Start / Stop は要約帯に戻ります。Auto-apply updates は **System** で設定します。
-Max active は **Manual** に切り替えると数値を編集でき、**Auto** では計算値を表示します。Auto-refill は**既定で OFF**です。
+Max active は **Manual** で数値を編集し、**Apply** で最終値を保存します。
+**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
+稼働数より小さい上限に下げても既存エージェントは継続し、稼働数が上限未満になるまで新規起動を待ちます。
+Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
 空のキューから新しい作業は起動せず、実行中の作業は継続します。
 
@@ -487,12 +490,14 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 `target` が存在しない場合や計測中の場合も、それを理由に新規起動を止めません。
 完全な実測により上限が 0 になることはあります。容量を下げた資源や稼働中エージェントの
 消費は status とエラー台帳に記録します。
-正の数値を入力すると **Manual** の上書きを保存し、**Use Auto** で推奨値への追従に戻せます。
+**Manual** で正の数値を入力して **Apply** を押すと固定上限を保存し、**Auto** で推奨値への追従に戻せます。
 既存の保存済み上限は Manual として維持します。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
 自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`、共有実測値の `agent_capacity` を返します。
+`max_active_last_change` は最後の明示的な設定変更の `changed_at` と
+`source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 
 **Settings → Issues** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
 大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を

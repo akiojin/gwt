@@ -401,6 +401,7 @@ test("Issue #5321 Settings integrates Issues at 1280px without duplicate surface
   await expect(max).toBeEnabled();
   await max.fill("3");
   await max.press("Tab");
+  await controls.getByRole("button", { name: "Apply Max active", exact: true }).click();
   await expect(max).toHaveValue("3");
   // Wait for the saved Manual status before requesting Auto; the input's
   // optimistic value alone does not acknowledge the fixture's async reply.

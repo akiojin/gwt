@@ -90,6 +90,7 @@ test("Issues Settings keeps labels and values together and sends existing projec
     control.dispatchEvent(new Event("change"));
   };
   change("Max active", "6");
+  panel.querySelector('[aria-label="Apply Max active"]').click();
   const mode = panel.querySelector('[aria-label="Max active mode"]');
   assert.equal(mode.value, "manual");
   mode.querySelector('[value="auto"]').selected = true;
@@ -143,9 +144,65 @@ test("Auto capacity is read-only until Manual is selected", () => {
   const mode = panel.querySelector('[aria-label="Max active mode"]');
   assert.equal(max.disabled, true);
   assert.equal(mode.value, "auto");
+  assert.equal(max.value, "4");
+  max.value = "9";
+  max.dispatchEvent(new Event("input"));
+  max.dispatchEvent(new Event("change"));
+  panel.querySelector('[aria-label="Apply Max active"]').click();
+  assert.deepEqual(sent, [], "Auto never sends a numeric override");
+  max.value = "4";
   mode.querySelector('[value="manual"]').selected = true;
   mode.dispatchEvent(new Event("change"));
   assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 4 }]);
+});
+
+test("Max active stepper edits commit once on Apply and survive status redraw", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  const render = load("renderIssuesSettingsPanel");
+  const options = { project: { project_root: "/A" },
+    status: { max_active_agents: 6, max_active_agents_override: 6, active_count: 4 },
+    send: message => sent.push(message) };
+  render(panel, options);
+  const max = panel.querySelector('[aria-label="Max active"]');
+  for (const value of ["5", "4", "3"]) {
+    max.value = value;
+    max.dispatchEvent(new Event("input"));
+    max.dispatchEvent(new Event("change"));
+  }
+  assert.deepEqual(sent, [], "intermediate values are draft edits only");
+  render(panel, options);
+  assert.equal(panel.querySelector('[aria-label="Max active"]').value, "3");
+  const apply = panel.querySelector('[aria-label="Apply Max active"]');
+  apply.click();
+  apply.click();
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 3 }]);
+  render(panel, { ...options, status: { ...options.status, max_active_agents: 3, max_active_agents_override: 3 } });
+  assert.match(panel.textContent, /Existing agents continue.*new launches wait/i);
+});
+
+test("Auto shows measuring state beside its effective limit until capacity is ready", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  const render = load("renderIssuesSettingsPanel");
+  const options = { project: { project_root: "/A" }, status: {
+    max_active_agents: 4, max_active_agents_override: null,
+    agent_capacity: { measurement_complete: false },
+  }, send: () => {} };
+  render(panel, options);
+  assert.equal(panel.querySelector('[aria-label="Max active"]').value, "4");
+  assert.match(panel.querySelector(".settings-issues-capacity").textContent, /Measuring capacity/);
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  mode.querySelector('[value="manual"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  assert.doesNotMatch(panel.querySelector(".settings-issues-capacity").textContent, /Measuring capacity/);
+  mode.querySelector('[value="auto"]').selected = true;
+  mode.dispatchEvent(new Event("change"));
+  panel.updateMaxActiveStatus({ ...options.status, max_active_agents: 7,
+    agent_capacity: { measurement_complete: true } });
+  assert.equal(panel.querySelector('[aria-label="Max active"]').value, "7", "focused Auto status stays live");
+  render(panel, { ...options, status: { ...options.status, agent_capacity: { measurement_complete: true } } });
+  assert.doesNotMatch(panel.querySelector(".settings-issues-capacity").textContent, /Measuring capacity/);
 });
 
 test("AC-6: Issues Settings exposes explanations for capacity, refill and targeting", t => {
