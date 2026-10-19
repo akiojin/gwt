@@ -1,0 +1,17 @@
+probe_pid=38308
+runtime_rows=5698 invalid_runtime=0 sysinfo_rows=508 kept=157 candidates=157 orphan_ledgers=0 previous_boot=44 known_present_child_mismatch=38 union_excluded=46
+cohort=current candidates=157 legacy_hosts=64 legacy_children=76 named_requested=227 named_initial_present=164 named_initial_positive_start=142 legacy_sampled=73 named_sampled=155
+timing cohort=current iterations=12 legacy_cpu_ms=343.750 named_cpu_ms=625.000 legacy_wall_ms=450.475 named_wall_ms=785.032
+cohort=no_previous_boot candidates=113 legacy_hosts=64 legacy_children=76 named_requested=173 named_initial_present=135 named_initial_positive_start=120 legacy_sampled=68 named_sampled=116
+overlap=no_previous_boot:legacy pids=68 fresh_identity_match=60 env_equal=60 cwd_equal=60 rss_equal=60
+overlap=no_previous_boot:named pids=116 fresh_identity_match=101 env_equal=101 cwd_equal=101 rss_equal=94
+timing cohort=no_previous_boot iterations=12 legacy_cpu_ms=390.625 named_cpu_ms=515.625 legacy_wall_ms=575.224 named_wall_ms=634.579
+cohort=no_known_child_mismatch candidates=119 legacy_hosts=64 legacy_children=76 named_requested=185 named_initial_present=140 named_initial_positive_start=118 legacy_sampled=68 named_sampled=121
+overlap=no_known_child_mismatch:legacy pids=68 fresh_identity_match=60 env_equal=60 cwd_equal=60 rss_equal=60
+overlap=no_known_child_mismatch:named pids=121 fresh_identity_match=99 env_equal=99 cwd_equal=99 rss_equal=92
+timing cohort=no_known_child_mismatch iterations=12 legacy_cpu_ms=343.750 named_cpu_ms=437.500 legacy_wall_ms=391.119 named_wall_ms=564.258
+cohort=neither candidates=111 legacy_hosts=64 legacy_children=76 named_requested=171 named_initial_present=133 named_initial_positive_start=118 legacy_sampled=68 named_sampled=114
+overlap=neither:legacy pids=68 fresh_identity_match=60 env_equal=60 cwd_equal=60 rss_equal=60
+overlap=neither:named pids=114 fresh_identity_match=99 env_equal=99 cwd_equal=99 rss_equal=92
+timing cohort=neither iterations=12 legacy_cpu_ms=343.750 named_cpu_ms=468.750 legacy_wall_ms=373.008 named_wall_ms=560.010
+environment_contents_not_printed=true snapshot_cohort_fixed=true
