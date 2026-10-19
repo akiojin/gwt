@@ -21557,7 +21557,8 @@ impl IssueMonitorState {
     }
 
     /// AC-4: an Active record whose pane has been idle for twice
-    /// `stuck_timeout_secs` needs a human; ask the PM, naming the count.
+    /// `stuck_timeout_secs` without an in-force wait needs a human;
+    /// ask the PM, naming the count.
     fn notify_stuck_idle_windows(
         &mut self,
         outcome: &mut IssueMonitorIdleReconciliation,
@@ -21569,6 +21570,12 @@ impl IssueMonitorState {
             .idle_windows()
             .into_iter()
             .filter(|idle| idle.bound && idle.idle_kind == IssueMonitorIdleKind::StuckUnknown)
+            .filter(|idle| {
+                !idle
+                    .issue_number
+                    .and_then(|number| self.autonomous_records.get(&number))
+                    .is_some_and(|record| autonomous_wait_in_force(record, now))
+            })
             .collect::<Vec<_>>();
         let count = stuck.len();
         for idle in stuck {
@@ -43961,6 +43968,35 @@ mod tests {
                 .any(|notice| notice.level == "warn" && notice.message.contains("2 idle window")),
             "a PM-facing notice carries the count: {notices:?}"
         );
+
+        // Issue #5630 AC-4: a declared wait suspends timed PM steering too.
+        monitor.declare_autonomous_wait(44, "verification admission", "slot available", after);
+        let waiting = "2026-09-07T04:42:00Z";
+        observe(&mut monitor, waiting);
+        let outcome = monitor.reconcile_idle_windows(&active, waiting);
+        assert_eq!(outcome.steering_requested, vec![45]);
+        assert!(monitor.autonomous_record(44).unwrap().steering.is_none());
+        let notices = monitor.take_autonomous_notices();
+        assert!(notices
+            .iter()
+            .any(|notice| notice.level == "warn" && notice.message.contains("1 idle window")));
+
+        // Once the same declaration expires, both rows need a decision again.
+        let expired = "2026-09-07T07:22:00Z";
+        observe(&mut monitor, expired);
+        let outcome = monitor.reconcile_idle_windows(&active, expired);
+        assert_eq!(outcome.steering_requested, vec![44, 45]);
+        assert!(outcome.released.is_empty());
+        assert_eq!(monitor.active_count(), 2);
+        assert!(monitor.take_pending_idle_pane_closes().is_empty());
+        assert!(monitor
+            .autonomous_record(44)
+            .unwrap()
+            .steering
+            .as_ref()
+            .unwrap()
+            .reason
+            .contains("2 idle window"));
     }
 
     #[test]
