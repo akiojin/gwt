@@ -76,6 +76,12 @@ This record does not prove dependency propagation or owner notification:
 The policy groups Now/Next/Later and explains missing milestone inputs;
 authored health and confidence are not verified evidence. Effective health
 and confidence remain unknown until exit/metric evidence is connected.
+Each milestone's `observed_issue_states` and `unobserved_issues` cover its
+explicit Issues plus roadmap Issues referencing its unique, nonempty ID.
+These are reference facts, including invalid goal links, not proof of alignment.
+Read the exact inbox states to explain a hold, failure or claim contention;
+an empty list does not prove health. Merged or Released does not prove milestone completion.
+Absent inbox rows stay unobserved even when other Monitor lists mention the Issue.
 Monitor source, last scan time and incomplete coverage are separate from the
 planning revision: no observation, an old scan or a cache projection cannot
 prove full fleet alignment. This read-only assessment never launches work
@@ -3702,6 +3708,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`pm.plan.status`",
             "`pm.plan.apply`",
             "authored health and confidence are not verified evidence",
+            "`observed_issue_states` and `unobserved_issues`",
+            "Merged or Released does not prove milestone completion",
             "Never justify priority from an orphan or invalid trace",
             "deadline/scope impact propagation and FR-045 delivery remain separate",
             "`change_impact`",
