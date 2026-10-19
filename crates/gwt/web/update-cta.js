@@ -6,6 +6,7 @@
 // has four observable statuses: `available` | `applying` | `ready` | `error`.
 
 import { createFocusTrap } from "./focus-trap.js";
+import { createUiStateStore } from "./ui-state-store.js";
 
 export function createUpdateCtaController({
   document,
@@ -27,7 +28,13 @@ export function createUpdateCtaController({
   let pendingVersion = null;
   let pendingReadyReason = null;
   let status = "idle";
-  let lastProgress = null;
+  const progressModel = createUiStateStore(null);
+  progressModel.subscribe(value => value, progress => {
+    const modal = document.getElementById(modalId);
+    if (progress && modal?.dataset.state === "downloading") {
+      updateProgressDisplay(progress);
+    }
+  });
   // Issue #3906 AC-12: the version whose draining CTA the user dismissed, so
   // the periodic issue_monitor_status ticks do not resurrect it.
   let dismissedDrainVersion = null;
@@ -284,7 +291,7 @@ export function createUpdateCtaController({
       // Issue #4933: the authoritative target supersedes the staged release,
       // including any open Restart action and its download progress.
       pendingVersion = null;
-      lastProgress = null;
+      progressModel.update(() => null);
       drainBlockers = [];
       dismissedDrainVersion = null;
       closeModal();
@@ -302,12 +309,7 @@ export function createUpdateCtaController({
 
   function handleUpdateProgress(payload) {
     if (!payload) return;
-    lastProgress = payload;
-    const modal = document.getElementById(modalId);
-    if (!modal || modal.dataset.state !== "downloading") {
-      return;
-    }
-    updateProgressDisplay(payload);
+    progressModel.update(() => payload);
   }
 
   function handleUpdateReady(payload) {
@@ -574,8 +576,9 @@ export function createUpdateCtaController({
     );
     mountModalPanel(modal, panel);
 
-    if (lastProgress) {
-      updateProgressDisplay(lastProgress);
+    const progressSnapshot = progressModel.read();
+    if (progressSnapshot) {
+      updateProgressDisplay(progressSnapshot);
     }
   }
 
@@ -750,7 +753,7 @@ export function createUpdateCtaController({
 
   function onCancelDownload() {
     send({ kind: "cancel_update_download" });
-    lastProgress = null;
+    progressModel.update(() => null);
     closeModal();
     if (latestVersion) {
       showAvailable(latestVersion);
@@ -890,7 +893,7 @@ export function createUpdateCtaController({
   }
 
   function onRetryFailed() {
-    lastProgress = null;
+    progressModel.update(() => null);
     renderCta("applying", "Applying update...");
     renderModalDownloading(latestVersion || pendingVersion || "");
     send({ kind: "apply_update_start" });
@@ -920,7 +923,7 @@ export function createUpdateCtaController({
     if (!version) return;
     if (pendingReadyReason?.version !== version) pendingReadyReason = null;
     pendingVersion = null;
-    lastProgress = null;
+    progressModel.update(() => null);
     latestVersion = version;
     renderCta("applying", "Applying update...");
     renderModalDownloading(version);

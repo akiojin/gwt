@@ -1157,7 +1157,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         });
       }
 
-      const updateCtaController = createUpdateCtaController({
+      const { handleUpdateProgress: applyUpdateProgress, ...updateCtaController } = createUpdateCtaController({
         document,
         send,
         setVersionState,
@@ -5554,7 +5554,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             }
             break;
           case "update_progress":
-            updateCtaController.handleUpdateProgress({
+            applyUpdateProgress({
               downloaded: event.downloaded,
               total: event.total,
               asset: event.asset,
