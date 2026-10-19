@@ -606,6 +606,86 @@ fn planning_change_receipts_keep_direct_impact_and_exact_history_on_replay() {
 }
 
 #[test]
+fn goal_change_receipts_use_explicit_links_and_preserve_original_replay() {
+    use gwt::pm_planning::{apply_planning_action, PlanningApplyRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pm-planning.json");
+    write_fixture(
+        &path,
+        &json!({
+            "goals":[{"id":"g","target":"3","horizon":"quarter"}],
+            "roadmap_items":[
+                {"id":"a","goal_id":"g","milestone_id":"m","issues":[3,1]},
+                {"id":"b","goal_id":"g","category":"maintenance","issues":[2,3]},
+                {"id":"other","goal_id":"other","issues":[99]},
+                {"id":"category","category":"maintenance","issues":[77]}
+            ],
+            "milestones":[{"id":"m","issues":[88]}]
+        }),
+    );
+    let request: PlanningApplyRequest = serde_json::from_value(json!({
+        "action":{"kind":"goal","value":{"id":"g","target":"5","horizon":"year"}},
+        "expected_revision":0,"reason":"Revise accepted goal","idempotency_key":"goal-target"
+    }))
+    .unwrap();
+    let receipt = apply_planning_action(&path, "pm-a", &request).unwrap();
+    let value = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(value["change_impact"]["record_created"], false);
+    assert_eq!(
+        value["change_impact"]["changes"],
+        json!({
+            "target":{"before":"3","after":"5"},
+            "horizon":{"before":"quarter","after":"year"}
+        })
+    );
+    assert_eq!(
+        value["change_impact"]["directly_affected_issues"],
+        json!([1, 2, 3])
+    );
+    assert_eq!(
+        value["change_impact"]["missing_inputs"],
+        json!(["dependency_graph", "active_owner_handoff"])
+    );
+
+    let link: PlanningApplyRequest = serde_json::from_value(json!({
+        "action":{"kind":"link","value":{"id":"a","goal_id":"g","issues":[42]}},
+        "expected_revision":1,"reason":"Adjust linked scope","idempotency_key":"goal-link"
+    }))
+    .unwrap();
+    apply_planning_action(&path, "pm-a", &link).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        apply_planning_action(&path, "pm-a", &request).unwrap(),
+        receipt
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+
+    let mut same = request;
+    same.expected_revision = 2;
+    same.idempotency_key = "same-goal".into();
+    let unchanged =
+        serde_json::to_value(apply_planning_action(&path, "pm-a", &same).unwrap()).unwrap();
+    assert_eq!(unchanged["change_impact"]["changes"], json!({}));
+    assert_eq!(
+        unchanged["change_impact"]["directly_affected_issues"],
+        json!([])
+    );
+    let created = serde_json::to_value(
+        apply_planning_action(&path, "pm-a", &plan_request("goal", 3, "new-goal")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(created["change_impact"]["record_created"], true);
+    assert_eq!(
+        created["change_impact"]["changes"]["id"],
+        json!({"before":null,"after":"goal"})
+    );
+    assert_eq!(
+        created["change_impact"]["directly_affected_issues"],
+        json!([])
+    );
+}
+
+#[test]
 fn planning_change_history_redacts_legacy_values_and_accepts_old_receipts() {
     use gwt::pm_planning::apply_planning_action;
     let dir = tempfile::tempdir().unwrap();
@@ -630,6 +710,20 @@ fn planning_change_history_redacts_legacy_values_and_accepts_old_receipts() {
         .unwrap()
         .get("change_impact")
         .is_none());
+
+    write_fixture(
+        &path,
+        &json!({"goals":[{"id":"goal",
+        "target":"Bearer example0123456789"}]}),
+    );
+    let receipt =
+        apply_planning_action(&path, "pm-a", &plan_request("goal", 0, "redact-goal")).unwrap();
+    let value = serde_json::to_value(receipt).unwrap();
+    let captured = value["change_impact"]["changes"]["target"]["before"].to_string();
+    assert!(captured.contains("REDACTED"), "{captured}");
+    assert!(!fs::read_to_string(&path)
+        .unwrap()
+        .contains("example0123456789"));
 }
 
 #[test]

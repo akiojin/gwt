@@ -61,11 +61,14 @@ maintenance/compliance category. Never justify priority from an orphan or invali
 Resolve missing goals, conflicting links and missing milestone metadata
 through the existing protected planning operation, then read back the result.
 
-Milestone and roadmap-link apply receipts include `change_impact`: redacted
+Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
-and, for milestones, referencing roadmap links. Read these receipts in
+and, for goals and milestones, referencing roadmap links.
+Goal changes use only roadmap links explicitly naming the goal, including invalid
+links as reference facts, without expanding milestone membership or proving alignment.
+Read these receipts in
 `pm.plan.status` alongside their reason and revisions when explaining a date,
-scope or reported-health change. An identical upsert has no direct impact;
+goal, scope or reported-health change. An identical upsert has no direct impact;
 an exact retry returns the original receipt. Older receipts lack this evidence.
 This record does not prove dependency propagation or owner notification:
 `missing_inputs` names the absent dependency graph and active-owner handoff.
@@ -3703,6 +3706,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "deadline/scope impact propagation and FR-045 delivery remain separate",
             "`change_impact`",
             "`directly_affected_issues`",
+            "Goal changes use only roadmap links explicitly naming the goal",
             "does not prove dependency propagation or owner notification",
             "`pm.status.set`",
             "`status: \"released\"`",

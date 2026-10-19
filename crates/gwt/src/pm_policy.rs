@@ -30,7 +30,18 @@ pub(crate) fn assess_planning_change(
         }
     }
 
-    let (before, after, milestone_id) = match action {
+    let (before, after, milestone_id, goal_id) = match action {
+        PlanningAction::Goal(value) => (
+            state
+                .goals
+                .iter()
+                .find(|item| item.id == value.id)
+                .map(serde_json::to_value)
+                .transpose()?,
+            serde_json::to_value(value)?,
+            None,
+            Some(value.id.as_str()),
+        ),
         PlanningAction::Milestone(value) => (
             state
                 .milestones
@@ -40,6 +51,7 @@ pub(crate) fn assess_planning_change(
                 .transpose()?,
             serde_json::to_value(value)?,
             Some(value.id.as_str()),
+            None,
         ),
         PlanningAction::Link(value) => (
             state
@@ -49,6 +61,7 @@ pub(crate) fn assess_planning_change(
                 .map(serde_json::to_value)
                 .transpose()?,
             serde_json::to_value(value)?,
+            None,
             None,
         ),
         _ => return Ok(None),
@@ -75,11 +88,11 @@ pub(crate) fn assess_planning_change(
                 issues.extend(numbers.iter().filter_map(Value::as_u64));
             }
         }
-        if let Some(id) = milestone_id {
-            for item in &state.roadmap_items {
-                if item.milestone_id.as_deref() == Some(id) {
-                    issues.extend(item.issues.iter().copied());
-                }
+        for item in &state.roadmap_items {
+            if milestone_id.is_some_and(|id| item.milestone_id.as_deref() == Some(id))
+                || goal_id.is_some_and(|id| item.goal_id.as_deref() == Some(id))
+            {
+                issues.extend(item.issues.iter().copied());
             }
         }
     }
