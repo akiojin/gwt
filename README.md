@@ -789,6 +789,11 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+Milestone diagnostics also show the observed Monitor inbox states and unobserved
+Issues from explicit milestone membership and roadmap references to a unique,
+nonempty milestone ID. These are reference facts, not proof of goal alignment.
+Use the states to inspect holds, failures or claim contention; missing observations
+and Merged/Released states do not prove milestone health or completion.
 Goal, milestone and roadmap changes also retain their reason, revision, changed
 values and directly affected Issues in the planning audit receipts. Goal changes
 include only Issues explicitly linked to that goal through roadmap items. These records do
