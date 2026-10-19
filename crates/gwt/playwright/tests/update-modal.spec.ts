@@ -15,6 +15,56 @@ const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 test.describe("Update modal", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");
 
+  test("shared progress renders the saved snapshot on mount and subsequent updates", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      suppressProjectSurfaces: true,
+      suppressUpdateApplyStart: true,
+    });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const inject = (detail: Record<string, unknown>) => page.evaluate(payload => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+    }, detail);
+    await inject({ kind: "update_state", state: "available", current: "9.25.0", latest: "9.26.0" });
+    await inject({ kind: "update_progress", downloaded: 1024 * 1024, total: 4 * 1024 * 1024 });
+    const cta = page.locator("#update-cta");
+    const modal = page.locator("#update-modal");
+    const progress = page.locator("[data-update-modal-progress]");
+    const counter = page.locator("[data-update-modal-byte-counter]");
+    await expect(modal).toHaveCount(0);
+    await cta.click();
+    await expect(progress).toHaveAttribute("aria-valuenow", "25");
+    await expect(counter).toHaveText("1.0 MB / 4.0 MB");
+    await inject({ kind: "update_progress", downloaded: 3 * 1024 * 1024, total: 4 * 1024 * 1024 });
+    await expect(progress).toHaveAttribute("aria-valuenow", "75");
+    await expect(counter).toHaveText("3.0 MB / 4.0 MB");
+    // Closing the failure panel preserves the latest progress for a remount.
+    await inject({ kind: "update_apply_error", reason: "Fixture failure" });
+    await page.locator("[data-update-modal-close]").click();
+    await expect(modal).toHaveCount(0);
+    await cta.click();
+    await expect(progress).toHaveAttribute("aria-valuenow", "75");
+    await expect(counter).toHaveText("3.0 MB / 4.0 MB");
+    await inject({ kind: "update_progress", downloaded: 2 * 1024 * 1024, total: 4 * 1024 * 1024 });
+    await expect(progress).toHaveAttribute("aria-valuenow", "50");
+    await expect(counter).toHaveText("2.0 MB / 4.0 MB");
+    await expect.poll(() => progress.evaluate(node => Math.round(
+      node.querySelector(".update-modal__progress-fill")!.getBoundingClientRect().width
+      / node.getBoundingClientRect().width * 100,
+    ))).toBe(50);
+    await page.screenshot({ path: testInfo.outputPath(`update-progress-${theme}.png`) });
+    await page.locator("[data-update-modal-cancel]").click();
+    await expect(modal).toHaveCount(0);
+    await cta.click();
+    await expect(progress).toHaveAttribute("aria-valuenow", "0");
+    await expect(counter).toHaveText("0.0 MB / 0.0 MB");
+    expect(errors).toEqual([]);
+  });
+
   test("a newer release replaces the ready prompt without reopening a deferred same-version modal", async ({ page }) => {
     const errors: string[] = [];
     page.on("console", (message) => {

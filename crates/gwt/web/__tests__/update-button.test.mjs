@@ -226,7 +226,8 @@ test("app.js delegates update handling to the unified update CTA controller", ()
   assert.match(appSource, /updateCtaController\.handleUpdateState\(event\)/);
   // Phase 19 replaces showError() with handleUpdateApplyError().
   assert.match(appSource, /updateCtaController\.handleUpdateApplyError\(/);
-  assert.match(appSource, /updateCtaController\.handleUpdateProgress\(/);
+  assert.match(appSource, /handleUpdateProgress: applyUpdateProgress/);
+  assert.match(appSource, /applyUpdateProgress\(/);
   assert.match(appSource, /updateCtaController\.handleUpdateReady\(/);
   assert.match(
     appSource,
@@ -348,6 +349,25 @@ test("phase19: click no longer uses window.confirm and instead opens #update-mod
     fixture.document.getElementById("update-cta").dataset.status,
     "applying",
   );
+});
+
+test("update progress retains an immutable snapshot before the modal mounts", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  const payload = { downloaded: 1024 * 1024, total: 4 * 1024 * 1024 };
+  controller.handleUpdateProgress(payload);
+  payload.downloaded = payload.total;
+
+  fixture.document.getElementById("update-cta").click();
+  const progress = fixture.document.querySelector("[data-update-modal-progress]");
+  const counter = fixture.document.querySelector("[data-update-modal-byte-counter]");
+  assert.equal(progress.getAttribute("aria-valuenow"), "25");
+  assert.equal(counter.textContent, "1.0 MB / 4.0 MB");
+
+  controller.handleUpdateProgress({ downloaded: 3 * 1024 * 1024, total: payload.total });
+  assert.equal(progress.getAttribute("aria-valuenow"), "75");
+  assert.equal(counter.textContent, "3.0 MB / 4.0 MB");
 });
 
 test("phase19: update_progress events update modal progress bar and byte counter", () => {
