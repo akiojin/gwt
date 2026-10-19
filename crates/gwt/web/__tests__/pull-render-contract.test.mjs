@@ -621,3 +621,16 @@ test("Close Project receiver commits shared data and rejects direct rendering", 
   assert.notEqual(bypass, source);
   assert.ok(scanModule(bypass, file).some(finding => finding.kind.startsWith('dom-')));
 });
+
+
+test("folder picker receiver commits shared state and rejects direct rendering", () => {
+  const file = 'crates/gwt/web/project-clone-modal.js';
+  const source = readFileSync(new URL('../project-clone-modal.js', import.meta.url), 'utf8');
+  assert.match(source, /receive: applyFolderPickerReceiveEvent/);
+  const options = { rootName: 'applyFolderPickerReceiveEvent' };
+  assert.deepEqual(scanModule(source, file, options), []);
+  const bypass = source.replace('function applyFolderPickerReceiveEvent(event) {',
+    'function applyFolderPickerReceiveEvent(event) { element.textContent = event.message;');
+  assert.notEqual(bypass, source);
+  assert.ok(scanModule(bypass, file, options).some(finding => finding.kind === 'dom-write'));
+});

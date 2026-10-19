@@ -6,36 +6,52 @@ const focusTrapMap = new WeakMap();
 
 // One native picker may be pending on each client, across both entry points.
 export function createFolderPickerController({ send, onChange, onSelected }) {
-  let pending = null;
-  function update(message = "") { onChange(pending, message); }
+  const model = createUiStateStore({ pending: null, feedback: null, selected: null });
+  // Request acknowledgement changes authority without rebuilding focused forms.
+  const unsubscribeChanges = model.subscribe(current => current.feedback, feedback => {
+    if (feedback) onChange(model.read().pending, feedback.message);
+  });
+  const unsubscribeSelected = model.subscribe(current => current.selected, event => {
+    if (event) onSelected(event);
+  });
+
+  function applyFolderPickerReceiveEvent(event) {
+    if (!event.kind?.startsWith("picker_")) return false;
+    model.update(current => {
+      const pending = current.pending;
+      if (event.kind === "picker_busy") {
+        return { ...current, pending: pending?.request_id === null ? null : pending,
+          feedback: { message: event.message ?? "" } };
+      }
+      if (!pending || event.purpose !== pending.purpose) return current;
+      if (event.kind === "picker_started") {
+        return pending.request_id === null
+          ? { ...current, pending: { ...pending, request_id: event.request_id } } : current;
+      }
+      if (pending.request_id === null || event.request_id !== pending.request_id) return current;
+      if (!["picker_selected", "picker_cancelled", "picker_error"].includes(event.kind)) return current;
+      return { ...current, pending: null,
+        feedback: { message: event.kind === "picker_error" ? event.message ?? "" : "" },
+        selected: event.kind === "picker_selected" ? event : current.selected };
+    });
+    return true;
+  }
+
   return {
     begin(purpose) {
-      if (pending) { update("A folder picker is already open. Finish or cancel it first."); return false; }
-      pending = { purpose, request_id: null };
-      update();
+      if (model.read().pending) {
+        model.update(current => ({ ...current,
+          feedback: { message: "A folder picker is already open. Finish or cancel it first." },
+        }));
+        return false;
+      }
+      model.update(current => ({ ...current, pending: { purpose, request_id: null }, feedback: { message: "" } }));
       send({ kind: purpose === "open" ? "open_project_dialog" : "select_clone_project_parent" });
       return true;
     },
-    receive(event) {
-      if (!event.kind?.startsWith("picker_")) return false;
-      if (event.kind === "picker_busy") {
-        if (pending?.request_id === null) pending = null;
-        update(event.message);
-        return true;
-      }
-      if (!pending || event.purpose !== pending.purpose) return true;
-      if (event.kind === "picker_started") {
-        if (pending.request_id === null) pending.request_id = event.request_id;
-        return true;
-      }
-      if (pending.request_id === null || event.request_id !== pending.request_id) return true;
-      if (!["picker_selected", "picker_cancelled", "picker_error"].includes(event.kind)) return true;
-      pending = null;
-      update(event.kind === "picker_error" ? event.message : "");
-      if (event.kind === "picker_selected") onSelected(event);
-      return true;
-    },
-    connectionLost() { pending = null; update(); },
+    receive: applyFolderPickerReceiveEvent,
+    connectionLost() { model.update(current => ({ ...current, pending: null, feedback: { message: "" } })); },
+    dispose() { unsubscribeChanges(); unsubscribeSelected(); model.dispose(); },
   };
 }
 

@@ -98,7 +98,22 @@ test.describe("Project open entry surfaces", () => {
     await expect(modal.locator('.modal-shell > .modal-footer')).toBeVisible();
     await expect(modal.getByRole('dialog')).toHaveAttribute('aria-modal', 'true');
     await expect(modal.getByRole('status')).toContainText('Choose a folder');
+    const draft = modal.locator('[data-open-project-path]');
+    await draft.fill('/draft/project');
+    await draft.evaluate(element => {
+      (window as any).__pickerDraft = element;
+      (element as HTMLInputElement).setSelectionRange(2, 5);
+    });
     await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_started', purpose: 'open', request_id: 1 }));
+    await page.evaluate(() => {
+      const fixture = (window as any).__gwtProjectOpenFixture;
+      fixture.reply({ kind: 'picker_cancelled', purpose: 'clone_parent', request_id: 1 });
+      fixture.reply({ kind: 'picker_cancelled', purpose: 'open', request_id: 99 });
+    });
+    await expect(modal.getByRole('dialog')).toHaveAttribute('aria-busy', 'true');
+    expect(await draft.evaluate(element => element === (window as any).__pickerDraft)).toBe(true);
+    expect(await draft.evaluate(element => [(element as HTMLInputElement).selectionStart, (element as HTMLInputElement).selectionEnd])).toEqual([2, 5]);
+    await expect(draft).toBeFocused();
     await modal.getByRole('button', { name: 'Choosing folder…' }).click();
     expect((await sentMessageKinds(page)).filter((kind) => kind === 'open_project_dialog')).toHaveLength(1);
     await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_cancelled', purpose: 'open', request_id: 1 }));
@@ -110,6 +125,20 @@ test.describe("Project open entry surfaces", () => {
       (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_error', purpose: 'open', request_id: 2, message: 'Picker timed out' });
     });
     await expect(modal.getByRole('status')).toHaveText('Picker timed out');
+    await modal.getByRole('button', { name: 'Choose Folder…' }).click();
+    await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_busy', purpose: 'open', message: 'Finish the existing dialog first' }));
+    await expect(modal.getByRole('status')).toHaveText('Finish the existing dialog first');
+    await expect(modal.getByRole('dialog')).toHaveAttribute('aria-busy', 'false');
+    await modal.getByRole('button', { name: 'Choose Folder…' }).click();
+    await page.evaluate(() => {
+      const fixture = (window as any).__gwtProjectOpenFixture;
+      fixture.reply({ kind: 'picker_started', purpose: 'open', request_id: 3 });
+      fixture.reply({ kind: 'picker_cancelled', purpose: 'open', request_id: 2 });
+    });
+    await expect(modal.getByRole('dialog')).toHaveAttribute('aria-busy', 'true');
+    await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'picker_cancelled', purpose: 'open', request_id: 3 }));
+    await expect(modal.getByRole('status')).toBeHidden();
+    await expect(modal.getByRole('dialog')).toHaveAttribute('aria-busy', 'false');
     await modal.locator('[data-open-project-path]').fill('E:\\repos\\manual');
     await modal.locator('[data-open-project-submit]').click();
     await expect.poll(() => sentMessageKinds(page)).toContain('reopen_recent_project');
