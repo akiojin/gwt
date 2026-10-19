@@ -225,7 +225,8 @@ test("app.js delegates update handling to the unified update CTA controller", ()
   assert.match(appSource, /createUpdateCtaController/);
   assert.match(appSource, /updateCtaController\.handleUpdateState\(event\)/);
   // Phase 19 replaces showError() with handleUpdateApplyError().
-  assert.match(appSource, /updateCtaController\.handleUpdateApplyError\(/);
+  assert.match(appSource, /handleUpdateApplyError: applyUpdateApplyError/);
+  assert.match(appSource, /applyUpdateApplyError\(/);
   assert.match(appSource, /handleUpdateProgress: applyUpdateProgress/);
   assert.match(appSource, /applyUpdateProgress\(/);
   assert.match(appSource, /updateCtaController\.handleUpdateReady\(/);

@@ -178,12 +178,17 @@ test.describe("Update modal", () => {
     await expect(cta).toHaveText(/Update v9\.26\.0 ready.*Restart now/);
   });
 
-  test("update_apply_error renders failed state with stage / reason / log", async ({ page }) => {
+  test("update_apply_error renders failed state with stage / reason / log", async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    page.on("pageerror", error => errors.push(error.message));
     await gotoLiveGwt(page, BASE, {
       enableTestBridge: true,
       suppressProjectSurfaces: true,
       suppressUpdateApplyStart: true,
     });
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await page.evaluate(() => {
       window.dispatchEvent(
@@ -222,5 +227,26 @@ test.describe("Update modal", () => {
     await expect(page.locator("[data-update-modal-close]")).toBeVisible();
     await expect(page.locator("#update-cta")).toHaveAttribute("data-status", "error");
     await expect(page.locator("#update-cta")).toContainText("Update failed: HTTP 503");
+    await expect(modal.getByRole("dialog")).toHaveAttribute("aria-modal", "true");
+    await expect(page.locator("[data-update-modal-open-log]")).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath(`update-error-${theme}.png`) });
+    // The injected failure has no real download or log to act on. Retry is
+    // suppressed by the bridge; Open log is covered by the controller tests.
+    await page.locator("[data-update-modal-retry]").click();
+    await expect(modal).toHaveAttribute("data-state", "downloading");
+    await expect(page.locator("#update-cta")).toHaveAttribute("data-status", "applying");
+    await expect(page.locator("[data-update-modal-progress]")).toHaveAttribute("aria-valuenow", "0");
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+        detail: { kind: "update_apply_error", message: "Legacy fixture failure" },
+      }));
+    });
+    await expect(modal).toHaveAttribute("data-state", "failed");
+    await expect(page.locator("[data-update-modal-reason]")).toHaveText("Legacy fixture failure");
+    await expect(page.locator("#update-cta")).toContainText("Update failed: Legacy fixture failure");
+    await page.locator("[data-update-modal-close]").click();
+    await expect(modal).toHaveCount(0);
+    await expect(page.locator("#update-cta")).toHaveAttribute("data-status", "available");
+    expect(errors).toEqual([]);
   });
 });
