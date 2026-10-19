@@ -789,6 +789,9 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+Milestone and roadmap changes also retain their reason, revision, changed values
+and directly affected Issues in the planning audit receipts. These records do
+not confirm that dependent work or its agents have been notified.
 
 The PM never launches implementation agents itself — it moves an Issue to the
 front of the queue and asks for a scan, and the Issue Monitor's existing

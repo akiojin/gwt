@@ -204,7 +204,25 @@ impl PlanningApplyRequest {
     }
 }
 
-/// Receipts contain identity and request hashes, never a raw action or key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningFieldChange {
+    pub before: serde_json::Value,
+    pub after: serde_json::Value,
+}
+
+/// Direct planning references only, not dependency propagation or delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningChangeImpact {
+    pub record_created: bool,
+    pub changes: BTreeMap<String, PlanningFieldChange>,
+    pub directly_affected_issues: Vec<u64>,
+    pub missing_inputs: Vec<String>,
+}
+
+/// Receipts contain identity, request hashes and redacted changed fields,
+/// never the full action or raw idempotency key.
 /// Retention is intentionally append-only until the later audit-policy slice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -221,6 +239,8 @@ pub struct PlanningReceipt {
     pub outcome: String,
     pub request_digest: String,
     pub idempotency_key_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_impact: Option<PlanningChangeImpact>,
 }
 
 /// Typed decision data. Missing fields retain safe empty defaults; unknown
@@ -464,6 +484,8 @@ pub fn apply_planning_action(
         let next_revision = state.revision.checked_add(1).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "PM planning revision overflow")
         })?;
+        let change_impact = crate::pm_policy::assess_planning_change(&state, &request.action)
+            .map_err(io::Error::other)?;
         request.action.upsert(&mut state);
         let (kind, id) = request.action.target();
         let receipt = PlanningReceipt {
@@ -483,6 +505,7 @@ pub fn apply_planning_action(
             outcome: "applied".into(),
             request_digest,
             idempotency_key_digest: key_digest,
+            change_impact,
         };
         state.revision = next_revision;
         state.audit_cursor = Some(format!("plan-{next_revision}"));

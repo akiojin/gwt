@@ -6,9 +6,90 @@ use serde::Serialize;
 
 use crate::{
     issue_monitor::IssueMonitorInboxCoverage,
-    pm_planning::{PmPlanningState, RoadmapHorizon, RoadmapItem},
+    pm_planning::{
+        PlanningAction, PlanningChangeImpact, PlanningFieldChange, PmPlanningState, RoadmapHorizon,
+        RoadmapItem,
+    },
     IssueMonitorAgentStatus, IssueMonitorStatusSource, MonitorInboxState,
 };
+
+/// Compare the locked prior record with the proposed planning-only upsert.
+/// Capture only changed fields; legacy values need redaction too.
+pub(crate) fn assess_planning_change(
+    state: &PmPlanningState,
+    action: &PlanningAction,
+) -> serde_json::Result<Option<PlanningChangeImpact>> {
+    use serde_json::Value;
+
+    fn redact(value: &mut Value) {
+        match value {
+            Value::String(text) => *text = gwt_core::error_ledger::redact_credentials(text),
+            Value::Array(values) => values.iter_mut().for_each(redact),
+            Value::Object(values) => values.values_mut().for_each(redact),
+            _ => {}
+        }
+    }
+
+    let (before, after, milestone_id) = match action {
+        PlanningAction::Milestone(value) => (
+            state
+                .milestones
+                .iter()
+                .find(|item| item.id == value.id)
+                .map(serde_json::to_value)
+                .transpose()?,
+            serde_json::to_value(value)?,
+            Some(value.id.as_str()),
+        ),
+        PlanningAction::Link(value) => (
+            state
+                .roadmap_items
+                .iter()
+                .find(|item| item.id == value.id)
+                .map(serde_json::to_value)
+                .transpose()?,
+            serde_json::to_value(value)?,
+            None,
+        ),
+        _ => return Ok(None),
+    };
+    let mut changes = std::collections::BTreeMap::new();
+    if let Value::Object(fields) = &after {
+        for (name, new) in fields {
+            let old = before.as_ref().and_then(|record| record.get(name));
+            if old != Some(new) {
+                let mut field = PlanningFieldChange {
+                    before: old.cloned().unwrap_or(Value::Null),
+                    after: new.clone(),
+                };
+                redact(&mut field.before);
+                redact(&mut field.after);
+                changes.insert(name.clone(), field);
+            }
+        }
+    }
+    let mut issues = BTreeSet::new();
+    if !changes.is_empty() {
+        for record in before.iter().chain(std::iter::once(&after)) {
+            if let Some(Value::Array(numbers)) = record.get("issues") {
+                issues.extend(numbers.iter().filter_map(Value::as_u64));
+            }
+        }
+        if let Some(id) = milestone_id {
+            for item in &state.roadmap_items {
+                if item.milestone_id.as_deref() == Some(id) {
+                    issues.extend(item.issues.iter().copied());
+                }
+            }
+        }
+    }
+    Ok(Some(PlanningChangeImpact {
+        record_created: before.is_none(),
+        changes,
+        directly_affected_issues: issues.into_iter().collect(),
+        missing_inputs: vec!["dependency_graph".into(), "active_owner_handoff".into()],
+    }))
+}
 
 #[derive(Debug, Serialize)]
 pub struct PlanningAssessment {
