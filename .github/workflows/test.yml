@@ -651,6 +651,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # T453 receipts must describe the pushed head, not a synthetic merge.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -668,6 +671,22 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build default-runtime
         timeout-minutes: 30
+      # Issue #1921 T453: prove each accepted filter executes one native test.
+      - name: Run T453 exact Windows runtime regressions
+        shell: bash
+        run: |
+          exact() {
+            "$@" | tee "$RUNNER_TEMP/t453-exact.log"
+            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/t453-exact.log"
+          }
+          exact node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::continuation_authority_tests::continue_work_nonlocal_liveness_distinguishes_live_dead_and_stopped_owners -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt tests::powershell_agent_wrapper_quotes_spaced_path_and_single_quotes -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-runtime gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_to_explicit_hook_binary_pin -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-runtime gwt test hook_contracts hook_health_test::managed_hook_health_understands_runtime_indirect_fallbacks -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-runtime gwt test hook_contracts hook_health_test::managed_hook_health_understands_all_provider_runtime_indirect_fallbacks -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts discussion_cli_test::discussion_update_creates_single_canonical_discussions_file -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture
+        timeout-minutes: 15
       - name: Run cross-process FIFO reservation contention regression
         run: node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts verification_lease_cli_test::deferred_fifo_survives_status_read_contention_and_new_processes -- --exact --nocapture
         timeout-minutes: 5
@@ -774,6 +793,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # T453 receipts must describe the pushed head, not a synthetic merge.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -791,6 +813,22 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build default-lib
         timeout-minutes: 30
+      # Issue #1921 T453: prove each accepted filter executes one native test.
+      - name: Run T453 exact Windows library regressions
+        shell: bash
+        run: |
+          exact() {
+            "$@" | tee "$RUNNER_TEMP/t453-exact.log"
+            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/t453-exact.log"
+          }
+          exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::env::tests::dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::env::tests::dispatch_json_envelope_hook_health_returns_managed_health_json -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::env::tests::hook_doctor_repair_does_not_persist_path_local_build_binary -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::env::tests::new_for_hooks_keeps_detached_cache_root -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::env::tests::owner_runtime_override_requires_complete_explicit_loopback_environment -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::execution_state::tests::command::repair_recovers_mirror_pointer_partial_authority_advertised_by_status -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::execution_state::tests::command::repair_recovers_malformed_mirror_only_ecr -- --exact --test-threads=1 --nocapture
+        timeout-minutes: 15
       - name: Run targeted issue cache refresh regression
         run: node scripts/ci-windows-tests.mjs run-lib gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact
         timeout-minutes: 15
