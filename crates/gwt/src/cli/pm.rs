@@ -236,8 +236,25 @@ pub(super) fn run<E: CliEnv>(
                 &peer_project_dir(env.repo_path()).join("project-state/pm-planning.json"),
             )
             .map_err(|error| refusal(format!("pm.plan.status: {error}")))?;
+            // Optional observation must not hide the canonical planning data.
+            // Read the atomic publication directly: the combined status loader
+            // also refreshes capacity and can emit diagnostics.
+            let monitor = crate::daemon_publisher::read_issue_monitor_status(env.repo_path())
+                .ok()
+                .flatten()
+                .and_then(|value| serde_json::from_value(value).ok());
+            #[derive(Serialize)]
+            struct PlanningStatus<'a> {
+                #[serde(flatten)]
+                state: &'a crate::pm_planning::PmPlanningState,
+                policy: crate::pm_policy::PlanningAssessment,
+            }
+            let status = PlanningStatus {
+                state: &state,
+                policy: crate::pm_policy::assess_planning(&state, monitor.as_ref()),
+            };
             out.push_str(
-                &serde_json::to_string_pretty(&state)
+                &serde_json::to_string_pretty(&status)
                     .map_err(|error| refusal(format!("pm.plan.status: {error}")))?,
             );
             out.push('\n');
@@ -891,9 +908,16 @@ mod tests {
         assert_eq!(receipt["actor"], "pm-a");
         let runtime = peer_project_dir(&repo).join("pm/runtime/nested");
         fs::create_dir_all(&runtime).unwrap();
+        let planning_bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
         assert_eq!(status["revision"], 1);
         assert_eq!(status["goals"][0]["outcome"], "Ship safely");
+        assert_eq!(status["policy"]["planning_revision"], 1);
+        assert_eq!(
+            status["policy"]["monitor"]["active_launches_incomplete"],
+            true
+        );
         assert_eq!(invoke(&runtime, apply()).unwrap(), receipt);
         assert_eq!(fs::read(&prefs_path).unwrap(), prefs_bytes);
         let bytes = fs::read(&planning_path).unwrap();
