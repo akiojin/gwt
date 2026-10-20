@@ -7,8 +7,6 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"/recovery_center_state\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/remote_start_work_branches\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_resumable_agents\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_resume_agent_error\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_resume_agent_started\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_state\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"applyBoardLogsReceiveEvent\",\"/board_entries\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"applyBoardLogsReceiveEvent\",\"/log_entries\"]",

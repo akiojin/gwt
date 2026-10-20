@@ -786,12 +786,13 @@ test.describe("Issue Related Work Resume", () => {
     page.on("pageerror", (error) => pageErrors.push(String(error)));
 
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";
-    await installEmbeddedRoutes(page);
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!liveBase) await installEmbeddedRoutes(page);
     await installIssueBridgeBackend(page, {
       includeRelatedWork: true,
       theme,
     });
-    await page.goto(APP_URL);
+    await page.goto(liveBase ? new URL("p/0123456789abcdef", liveBase).href : APP_URL);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await page
@@ -841,17 +842,24 @@ test.describe("Issue Related Work Resume", () => {
       ).length,
     )).toBe(1);
 
-    await page.evaluate(() => {
-      const request = window.__knowledgeLoadMessages.find(
-        (message) => message.kind === "resume_workspace_agent",
-      );
-      window.__issueBridgeFixtureSocket.emit({
-        kind: "workspace_resume_agent_error",
-        operation_id: `${request.operation_id}-stale`,
-        session_id: request.session_id,
-        message: "Stale Resume failure must stay invisible",
-      });
-    });
+    const emitOutcome = async (kind: string, operationId: string, message = "Duplicate Resume failure must stay invisible") => {
+      const processed = page.waitForEvent("dialog");
+      await page.evaluate(({ kind, operationId, message }) => {
+        window.__issueBridgeFixtureSocket.emit({
+          kind, operation_id: operationId, session_id: "related-gwt-session", message,
+        });
+        // Both kinds retain FIFO order through the socket dispatcher. Seeing
+        // this later dialog proves the outcome ran before negative assertions.
+        window.__issueBridgeFixtureSocket.emit({
+          kind: "workspace_projection_prune_error", message: "Resume outcome processed",
+        });
+      }, { kind, operationId, message });
+      const dialog = await processed;
+      expect(dialog.message()).toBe("Work Projection Prune error: Resume outcome processed");
+      await dialog.dismiss();
+    };
+    await emitOutcome("workspace_resume_agent_error", `${first.operation_id}-stale`,
+      "Stale Resume failure must stay invisible");
     await expect(resume).toBeDisabled();
     await expect(resume).toHaveText("Resuming...");
     await expect(
@@ -922,6 +930,20 @@ test.describe("Issue Related Work Resume", () => {
     );
     expect(operations[1]).toEqual(expect.stringMatching(/^resume-/));
     expect(operations[1]).not.toBe(operations[0]);
+
+    await emitOutcome("workspace_resume_agent_started", operations[0]);
+    await expect(resume).toBeDisabled();
+    await expect(resume).toHaveText("Resuming...");
+    await resume.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("resume-pending.png") });
+    await emitOutcome("workspace_resume_agent_started", operations[1]);
+    await expect(resume).toBeEnabled();
+    await expect(resume).toHaveText("Resume");
+    await expect(resume).not.toHaveClass(/is-pending/);
+    await emitOutcome("workspace_resume_agent_error", operations[1]);
+    await expect(page.locator('.toast-alerts__item[data-level="error"]')).toHaveCount(0);
+    await resume.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("resume-settled.png") });
     expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
   });
