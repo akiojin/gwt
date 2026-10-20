@@ -7344,6 +7344,48 @@ mod tests {
             .status()
             .expect("git remote add origin");
         assert!(status.success(), "git remote add origin must succeed");
+        if remote_url.starts_with("https://") {
+            // These origins provide repository identity for the fake gh;
+            // transport is intentionally unavailable to monitor fixtures.
+            let status = gwt_core::process::hidden_command("git")
+                .args(["config", "--local", "protocol.https.allow", "never"])
+                .current_dir(path)
+                .status()
+                .expect("disable fixture HTTPS transport");
+            assert!(status.success(), "fixture HTTPS transport must be disabled");
+        }
+    }
+
+    fn assert_fixture_origin_rejects_network_transport(path: &Path, expected_origin: &str) {
+        let configured = gwt_core::process::hidden_command("git")
+            .args(["config", "--local", "--get", "protocol.https.allow"])
+            .current_dir(path)
+            .output()
+            .expect("read fixture transport policy");
+        // Check the fixture policy before any transport could run in a broken fixture.
+        assert_eq!(String::from_utf8_lossy(&configured.stdout).trim(), "never");
+        let origin = gwt_core::process::hidden_command("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(path)
+            .output()
+            .expect("read fixture origin identity");
+        assert!(origin.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&origin.stdout).trim(),
+            expected_origin
+        );
+        let output = gwt_core::process::hidden_command("git")
+            .args(["ls-remote", "origin"])
+            .env_remove("GIT_ALLOW_PROTOCOL")
+            .current_dir(path)
+            .output()
+            .expect("probe fixture transport refusal");
+        assert!(!output.status.success());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains("transport 'https' not allowed"),
+            "fixture origin must refuse transport before networking: {diagnostic}"
+        );
     }
 
     fn commit_initial_branch(path: &Path) {
@@ -14444,6 +14486,10 @@ exit 0
             String::from_utf8_lossy(&init.stderr)
         );
         git_remote_add_origin(&bare_repo, "https://github.com/example/repo.git");
+        assert_fixture_origin_rejects_network_transport(
+            &bare_repo,
+            "https://github.com/example/repo.git",
+        );
         let scope = RuntimeScope::new(
             "abcdef0123456789",
             "feedfacecafebeef",
@@ -14516,6 +14562,10 @@ exit 0
             String::from_utf8_lossy(&init.stderr)
         );
         git_remote_add_origin(&bare_repo, "https://github.com/example/repo.git");
+        assert_fixture_origin_rejects_network_transport(
+            &bare_repo,
+            "https://github.com/example/repo.git",
+        );
         let scope = RuntimeScope::new(
             "abcdef0123456789",
             "feedfacecafebeef",
