@@ -159,6 +159,7 @@ pub(crate) enum DelegatedRunError {
     Failed(String),
     TimedOut(std::time::Duration),
     Cancelled,
+    InteractiveAuthentication(String),
 }
 
 /// Find a daemon that can host verification for `worktree`.
@@ -331,6 +332,27 @@ async fn run_async_cancellable<G>(
     timeout: Option<std::time::Duration>,
     check_cancelled: Option<&(dyn Fn() -> Result<bool, String> + Sync)>,
 ) -> Result<DelegatedRun, DelegatedRunError> {
+    let mut detector =
+        crate::cli::verification_record::interactive_process::InteractiveProcessDetector::default();
+    run_async_cancellable_with_detector(
+        endpoint,
+        request,
+        on_started,
+        timeout,
+        check_cancelled,
+        &mut |pid| detector.detect(pid),
+    )
+    .await
+}
+
+async fn run_async_cancellable_with_detector<G>(
+    endpoint: &DaemonEndpoint,
+    request: &VerificationSpawnRequest,
+    on_started: impl FnOnce(u32) -> G,
+    timeout: Option<std::time::Duration>,
+    check_cancelled: Option<&(dyn Fn() -> Result<bool, String> + Sync)>,
+    detect: &mut (impl FnMut(u32) -> Option<String> + Send),
+) -> Result<DelegatedRun, DelegatedRunError> {
     if let Some(check_cancelled) = check_cancelled {
         if check_cancelled().map_err(DelegatedRunError::Failed)? {
             return Err(DelegatedRunError::Cancelled);
@@ -339,39 +361,73 @@ async fn run_async_cancellable<G>(
     let completion = async {
         let mut start_acknowledged = false;
         let execution = async {
-            let mut client = DaemonClient::connect(endpoint).await?;
+            let mut client = DaemonClient::connect(endpoint)
+                .await
+                .map_err(DelegatedRunError::Failed)?;
             client
                 .send_frame(&ClientFrame::SpawnVerification(request.clone()))
-                .await?;
+                .await
+                .map_err(DelegatedRunError::Failed)?;
 
-            let accepted = match client.read_frame::<DaemonFrame>().await? {
+            let accepted = match client
+                .read_frame::<DaemonFrame>()
+                .await
+                .map_err(DelegatedRunError::Failed)?
+            {
                 DaemonFrame::VerificationAccepted(accepted) => accepted,
                 DaemonFrame::Error { message } => {
-                    return Err(format!("daemon refused the verification spawn: {message}"))
+                    return Err(DelegatedRunError::Failed(format!(
+                        "daemon refused the verification spawn: {message}"
+                    )))
                 }
-                other => return Err(format!("expected VerificationAccepted, got: {other:?}")),
+                other => {
+                    return Err(DelegatedRunError::Failed(format!(
+                        "expected VerificationAccepted, got: {other:?}"
+                    )))
+                }
             };
             start_acknowledged = true;
             // Keep the caller's command scope alive until completion or error.
             // The PID is already part of the existing protocol response.
             let _command_scope = on_started(accepted.pid);
-
+            let command_pid = accepted.pid;
+            let frames = async {
+                loop {
+                    match client.read_frame::<DaemonFrame>().await? {
+                        DaemonFrame::VerificationFinished(finished) => {
+                            return Ok(DelegatedRun {
+                                exit_code: finished.exit_code,
+                                signal: finished.signal,
+                                accepted,
+                                reclaimed_survivors: finished.reclaimed_survivors,
+                            })
+                        }
+                        DaemonFrame::Error { message } => {
+                            return Err(format!("daemon reported a spawn failure: {message}"))
+                        }
+                        // Unrelated control frames do not end this run.
+                        _ => continue,
+                    }
+                }
+            };
+            // read_frame uses read_line: keep the same future alive between
+            // probes so an interval tick cannot discard a partial JSON frame.
+            tokio::pin!(frames);
+            let mut probe = tokio::time::interval(std::time::Duration::from_millis(100));
+            probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                match client.read_frame::<DaemonFrame>().await? {
-                    DaemonFrame::VerificationFinished(finished) => {
-                        return Ok(DelegatedRun {
-                            exit_code: finished.exit_code,
-                            signal: finished.signal,
-                            accepted,
-                            reclaimed_survivors: finished.reclaimed_survivors,
-                        })
+                tokio::select! {
+                    biased;
+                    // Completion must win if a host-wide process snapshot
+                    // takes longer than the interval on a saturated host.
+                    result = &mut frames => return result.map_err(DelegatedRunError::Failed),
+                    _ = probe.tick() => {
+                        if let Some(diagnostic) = detect(command_pid) {
+                            // Dropping this client invokes the daemon's
+                            // existing connection-owned reclamation handle.
+                            return Err(DelegatedRunError::InteractiveAuthentication(diagnostic));
+                        }
                     }
-                    DaemonFrame::Error { message } => {
-                        return Err(format!("daemon reported a spawn failure: {message}"))
-                    }
-                    // The daemon may fan unrelated control frames down any
-                    // connection; none of them ends this run.
-                    _ => continue,
                 }
             }
         };
@@ -389,9 +445,8 @@ async fn run_async_cancellable<G>(
                              command start was acknowledged; inspect the daemon connection and health"
                         ))
                     }
-                })?
-                .map_err(DelegatedRunError::Failed),
-            None => execution.await.map_err(DelegatedRunError::Failed),
+                })?,
+            None => execution.await,
         }
     };
     match check_cancelled {
@@ -554,6 +609,87 @@ mod tests {
                 "start acknowledgement timeout must be a transport failure"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interactive_authentication_disconnects_only_its_delegated_tree() {
+        use std::time::Duration;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let directory = scratch();
+        let root = directory.path();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root);
+        let endpoint = fixture_endpoint(root);
+        let server = super::super::server::spawn_server(
+            endpoint.clone(),
+            root.join("daemon.sock"),
+            root.join("endpoint.json"),
+            super::super::broadcast::BroadcastHub::new(),
+        )
+        .unwrap();
+        let mut unrelated = DaemonClient::connect(&endpoint).await.unwrap();
+        unrelated
+            .send_frame(&ClientFrame::SpawnVerification(held_command(
+                root,
+                "unrelated-auth",
+            )))
+            .await
+            .unwrap();
+        let unrelated_pid = match unrelated.read_frame::<DaemonFrame>().await.unwrap() {
+            DaemonFrame::VerificationAccepted(accepted) => accepted.pid,
+            other => panic!("expected unrelated command acceptance, got {other:?}"),
+        };
+        let mut child_pid = None;
+        let result = run_async_cancellable_with_detector(
+            &endpoint,
+            &held_command(root, "authentication"),
+            |pid| child_pid = Some(pid),
+            Some(Duration::from_secs(30)),
+            None,
+            &mut |_| {
+                root.join("authentication-ready")
+                    .exists()
+                    .then(|| "interactive authentication fixture".to_string())
+            },
+        )
+        .await;
+        let grandchild_pid = std::fs::read_to_string(root.join("authentication-grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let child_pid = child_pid.unwrap();
+        // test-hygiene: allow-wall-clock-deadline OS process reclamation has no completion event available to this fixture.
+        let safety = std::time::Instant::now() + Duration::from_secs(30);
+        while (crate::process::is_process_alive(child_pid)
+            || crate::process::is_process_alive(grandchild_pid))
+            // test-hygiene: allow-wall-clock-deadline Observe actual process death rather than assert a scheduling budget.
+            && std::time::Instant::now() < safety
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let unrelated_survived = crate::process::is_process_alive(unrelated_pid);
+        std::fs::write(root.join("unrelated-auth-release"), "release").unwrap();
+        let unrelated_result = unrelated.read_frame::<DaemonFrame>().await.unwrap();
+        server.abort();
+        let _ = server.await;
+        assert!(
+            matches!(result, Err(DelegatedRunError::InteractiveAuthentication(message))
+            if message == "interactive authentication fixture")
+        );
+        assert!(!crate::process::is_process_alive(child_pid));
+        assert!(!crate::process::is_process_alive(grandchild_pid));
+        assert!(
+            unrelated_survived,
+            "only the owned command tree may be reclaimed"
+        );
+        assert!(
+            matches!(unrelated_result, DaemonFrame::VerificationFinished(finished)
+            if finished.exit_code == 0)
+        );
     }
 
     #[cfg(unix)]

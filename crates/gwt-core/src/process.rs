@@ -409,7 +409,27 @@ pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
     let mut command = Command::new(program);
     configure_hidden_command(&mut command);
     scrub_git_env(&mut command);
+    // Test subprocesses can fetch through production code as well as through
+    // fixture helpers. Set their defaults at the common boundary (Issue #4426).
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    command.envs(noninteractive_git_environment());
     command
+}
+
+/// Authentication must fail instead of opening a terminal or credential GUI.
+/// Keep inherited settings and append an empty helper to the highest-priority
+/// inherited configuration, including Git -c settings propagated into hooks.
+pub fn noninteractive_git_environment() -> [(String, String); 3] {
+    let mut parameters = std::env::var("GIT_CONFIG_PARAMETERS").unwrap_or_default();
+    if !parameters.is_empty() {
+        parameters.push(' ');
+    }
+    parameters.push_str("'credential.helper='");
+    [
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ("GCM_INTERACTIVE".into(), "never".into()),
+        ("GIT_CONFIG_PARAMETERS".into(), parameters),
+    ]
 }
 
 /// Resolve a process request with the current platform rules and build a
@@ -436,6 +456,8 @@ pub fn resolved_tokio_command(
     for key in GIT_ENV_SCRUB_KEYS {
         command.env_remove(key);
     }
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    command.envs(noninteractive_git_environment());
     apply_resolved_tokio_plan(&mut command, &plan);
     Ok(command)
 }
@@ -595,6 +617,64 @@ pub fn get_command_version(cmd: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_commands_disable_git_credentials_and_preserve_inherited_config() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        let _key = crate::test_support::ScopedEnvVar::set("GIT_CONFIG_KEY_0", "test.retained");
+        let _value = crate::test_support::ScopedEnvVar::set("GIT_CONFIG_VALUE_0", "yes");
+        // Publish the count after its entries; drop it before those entries.
+        let _count = crate::test_support::ScopedEnvVar::set("GIT_CONFIG_COUNT", "1");
+        let _parameters = crate::test_support::ScopedEnvVar::set(
+            "GIT_CONFIG_PARAMETERS",
+            "'test.alsoRetained=kept'",
+        );
+        let mut command = hidden_command("git");
+        let environment: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            environment.get(OsStr::new("GIT_TERMINAL_PROMPT")),
+            Some(&Some(OsStr::new("0")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GCM_INTERACTIVE")),
+            Some(&Some(OsStr::new("never")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GIT_CONFIG_COUNT")),
+            None,
+            "the inherited config count must remain untouched"
+        );
+        assert_eq!(
+            environment.get(OsStr::new("GIT_CONFIG_PARAMETERS")),
+            Some(&Some(OsStr::new(
+                "'test.alsoRetained=kept' 'credential.helper='"
+            )))
+        );
+        let output = command
+            .args(["config", "--get", "test.retained"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "yes");
+
+        let output = hidden_command("git")
+            .args(["config", "--get", "test.alsoRetained"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "kept");
+
+        let asynchronous = resolved_tokio_command(ProcessPlanRequest::new("git")).unwrap();
+        let async_environment: std::collections::HashMap<_, _> =
+            asynchronous.as_std().get_envs().collect();
+        for (key, value) in noninteractive_git_environment() {
+            assert_eq!(
+                async_environment.get(OsStr::new(&key)),
+                Some(&Some(OsStr::new(&value))),
+                "async test subprocess default: {key}"
+            );
+        }
+    }
 
     #[test]
     fn fixture_git_init_cannot_reinitialize_an_inherited_bare_repository() {

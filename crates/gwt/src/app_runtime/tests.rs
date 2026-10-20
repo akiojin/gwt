@@ -363,13 +363,13 @@ fn sample_issue_snapshot(
 }
 
 fn init_repo(repo_path: &Path) {
-    let remote = format!(
-        "https://github.com/example/repo-{:x}.git",
-        remote_suffix(repo_path)
-    );
+    // Keep the local origin in Git metadata so fixture worktrees stay clean.
+    let origin = repo_path.join(".git").join("test-origin.git");
+    let remote = origin.to_str().expect("fixture origin path");
     for args in [
         ["init", "-q"].as_slice(),
-        ["remote", "add", "origin", remote.as_str()].as_slice(),
+        ["init", "--bare", "-q", remote].as_slice(),
+        ["remote", "add", "origin", remote].as_slice(),
     ] {
         let output = gwt_core::process::hidden_command("git")
             .args(args)
@@ -390,6 +390,27 @@ fn init_repo_with_initial_commit(repo_path: &Path) {
     run_git(repo_path, &["config", "user.name", "Test User"]);
     run_git(repo_path, &["config", "user.email", "test@example.com"]);
     run_git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
+}
+
+#[test]
+fn init_repo_fixture_fetch_uses_only_file_transport() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let output = gwt_core::process::hidden_command("git")
+        .args(["fetch", "origin", "--prune"])
+        .env("GIT_ALLOW_PROTOCOL", "file")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(&repo)
+        .output()
+        .expect("fetch fixture origin");
+    assert!(
+        output.status.success(),
+        "fixture fetch must succeed with network protocols disabled: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn init_repo_without_origin(repo_path: &Path) {
@@ -441,6 +462,7 @@ fn init_workspace_home_with_child_bare(workspace_home: &Path) -> PathBuf {
     bare_repo
 }
 
+#[cfg(unix)]
 fn remote_suffix(repo_path: &Path) -> u64 {
     use std::hash::{Hash, Hasher};
 
