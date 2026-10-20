@@ -1158,15 +1158,36 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn socket_tempdir_ignores_long_tmpdir_and_binds() {
-        let _lock = env_lock().lock().unwrap();
+        const CHILD: &str = "GWT_TEST_LONG_SOCKET_TMPDIR";
+        if std::env::var_os(CHILD).is_some() {
+            let ambient = std::env::temp_dir();
+            assert!(ambient.as_os_str().len() > 103);
+            let root = socket_tempdir().unwrap();
+            assert!(!root.path().starts_with(ambient));
+            let path = root.path().join("daemon.sock");
+            let _listener =
+                std::os::unix::net::UnixListener::bind(checked_socket_path(&path)).unwrap();
+            return;
+        }
+
         let ambient = tempfile::tempdir().unwrap();
         let nested = ambient.path().join("gwt-verify-".repeat(12));
         std::fs::create_dir_all(&nested).unwrap();
-        let _tmpdir = ScopedEnvVar::set("TMPDIR", &nested);
-        let root = socket_tempdir().unwrap();
-        assert!(!root.path().starts_with(&nested));
-        let path = root.path().join("daemon.sock");
-        let _listener = std::os::unix::net::UnixListener::bind(checked_socket_path(&path)).unwrap();
+        let output = crate::process::hidden_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "test_support::tests::socket_tempdir_ignores_long_tmpdir_and_binds",
+            ])
+            .env("TMPDIR", &nested)
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated socket fixture test failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(unix)]
