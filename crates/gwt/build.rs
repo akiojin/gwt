@@ -42,8 +42,9 @@ fn emit_build_stamp() {
         let Some(resolved) = git_output(&workspace_root, &["rev-parse", "--git-path", path]) else {
             continue;
         };
-        if std::path::Path::new(&resolved).exists() {
-            println!("cargo:rerun-if-changed={resolved}");
+        let resolved = workspace_root.join(resolved);
+        if resolved.exists() {
+            println!("cargo:rerun-if-changed={}", resolved.display());
         }
     }
 }
