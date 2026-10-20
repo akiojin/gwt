@@ -10,6 +10,19 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Continue work outcome receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/continue_work_outcome');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.message;', 'handleContinueWorkOutcome(event);']) {
+    const mutated = app.replace('case "continue_work_outcome":', `case "continue_work_outcome": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Work Projection Prune receivers commit shared state and reject bypass alerts", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
