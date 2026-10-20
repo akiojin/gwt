@@ -7347,12 +7347,14 @@ mod tests {
         if remote_url.starts_with("https://") {
             // These origins provide repository identity for the fake gh;
             // transport is intentionally unavailable to monitor fixtures.
-            let status = gwt_core::process::hidden_command("git")
-                .args(["config", "--local", "protocol.https.allow", "never"])
-                .current_dir(path)
-                .status()
-                .expect("disable fixture HTTPS transport");
-            assert!(status.success(), "fixture HTTPS transport must be disabled");
+            for key in ["protocol.allow", "protocol.https.allow"] {
+                let status = gwt_core::process::hidden_command("git")
+                    .args(["config", "--local", key, "never"])
+                    .current_dir(path)
+                    .status()
+                    .expect("disable fixture Git transport");
+                assert!(status.success(), "fixture Git transport must be disabled");
+            }
         }
     }
 
@@ -7365,7 +7367,7 @@ mod tests {
         // Check the fixture policy before any transport could run in a broken fixture.
         assert_eq!(String::from_utf8_lossy(&configured.stdout).trim(), "never");
         let origin = gwt_core::process::hidden_command("git")
-            .args(["remote", "get-url", "origin"])
+            .args(["config", "--local", "--get", "remote.origin.url"])
             .current_dir(path)
             .output()
             .expect("read fixture origin identity");
@@ -7377,6 +7379,8 @@ mod tests {
         let output = gwt_core::process::hidden_command("git")
             .args(["ls-remote", "origin"])
             .env_remove("GIT_ALLOW_PROTOCOL")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .current_dir(path)
             .output()
             .expect("probe fixture transport refusal");
