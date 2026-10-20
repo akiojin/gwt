@@ -15152,6 +15152,11 @@ fn work_branch_has_dirty_worktree(target: &WorkBranchScanTarget) -> bool {
 
 fn work_branch_dirty_state(target: &WorkBranchScanTarget) -> gwt_core::Result<bool> {
     for path in &target.worktree_paths {
+        // A projected worktree may belong to another host or be removed.
+        // Its absence is a stable input and must keep cleanup conservative.
+        if matches!(path.try_exists(), Ok(false)) {
+            return Ok(true);
+        }
         // This scan only reads status. Refreshing/writing the index would
         // invalidate its own inputs (including creation of an empty index).
         let output = gwt_core::process::run_git_logged(

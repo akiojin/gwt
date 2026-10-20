@@ -2623,6 +2623,54 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
         matches!(dirty, UserEvent::WorkMergeStatus { merged_branches, dirty_branches, .. }
         if merged_branches.is_empty() && dirty_branches.contains("work/reuse"))
     );
+
+    run_git(&repo, &["branch", "work/absent"]);
+    let absent = temp.path().join("absent");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-absent",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/absent".into()),
+                worktree_path: Some(absent.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .unwrap();
+    // Start watching after this scenario's refs and projection are in place.
+    cache = super::super::WorkMergeScanCache::default();
+    let missing = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(missing, UserEvent::WorkMergeStatus { dirty_branches, .. }
+        if dirty_branches.contains("work/absent"))
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count(),
+        before,
+        "an unchanged absent worktree must reuse its conservative dirty verdict"
+    );
+    run_git(
+        &repo,
+        &["worktree", "add", absent.to_str().unwrap(), "work/absent"],
+    );
+    let recreated = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        cache.measured,
+        "worktree reappearance must invalidate reuse"
+    );
+    assert!(
+        matches!(recreated, UserEvent::WorkMergeStatus { merged_branches, .. }
+        if merged_branches.contains_key("work/absent"))
+    );
 }
 
 #[test]

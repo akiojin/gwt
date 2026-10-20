@@ -330,7 +330,19 @@ impl WatchRoots {
             .chain(std::iter::once(project_root))
             .enumerate()
         {
-            let worktree = dunce::canonicalize(path).ok()?;
+            let worktree = match dunce::canonicalize(path) {
+                Ok(worktree) => worktree,
+                // Historical Work rows may outlive their local checkout.
+                // Every observation retries this path, so its recreation
+                // changes the roots and invalidates the cached verdict.
+                Err(error)
+                    if index < worktree_paths.len()
+                        && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    continue;
+                }
+                Err(_) => return None,
+            };
             let dot_git = worktree.join(".git");
             if dot_git.is_file() {
                 // Usually below common/worktrees/, but an explicit gitdir may
@@ -487,6 +499,8 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use gwt_core::test_support::ScopedGwtHome;
+
     use super::*;
 
     fn repository(root: &Path) -> PathBuf {
@@ -520,6 +534,7 @@ mod tests {
     #[test]
     fn unchanged_inputs_reuse_the_revision_without_git() {
         let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = repository(temp.path());
         let mut inputs = WorkScanInputs::default();
         assert_eq!(inputs.current_revision(), None);
@@ -565,6 +580,7 @@ mod tests {
     #[test]
     fn refs_linked_index_and_worktree_edits_invalidate_the_revision() {
         let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = repository(temp.path());
         let linked = temp.path().join("linked");
         fs::create_dir_all(&linked).unwrap();
@@ -594,6 +610,7 @@ mod tests {
     #[test]
     fn notifications_ignore_reads_and_runtime_writes_and_reject_errors() {
         let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = repository(temp.path());
         let roots = WatchRoots::capture(&repo, std::slice::from_ref(&repo)).unwrap();
         let revision = AtomicU64::new(0);
@@ -645,21 +662,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_roots_disable_reuse_and_recreation_recovers() {
+    fn missing_projected_paths_reuse_until_recreation() {
         let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = repository(temp.path());
         let linked = temp.path().join("linked");
-        fs::create_dir_all(&linked).unwrap();
         let mut inputs = WorkScanInputs::default();
         let first = inputs
             .observe_roots(&repo, std::slice::from_ref(&linked))
-            .expect("watch roots");
-        fs::remove_dir(&linked).unwrap();
+            .expect("watch repository with an absent projected worktree");
         assert_eq!(
             inputs.observe_roots(&repo, std::slice::from_ref(&linked)),
-            None
+            Some(first),
+            "an unchanged absent projected path must not disable cache reuse"
         );
-        assert_eq!(inputs.current_revision(), None);
+        assert_eq!(inputs.current_revision(), Some(first));
         fs::create_dir(&linked).unwrap();
         let recovered = inputs
             .observe_roots(&repo, std::slice::from_ref(&linked))
