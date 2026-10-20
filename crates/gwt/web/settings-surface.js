@@ -626,7 +626,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     const skip = field(row, "Skip permissions", "skip_permissions", profile.skip_permissions, "checkbox");
     const fast = field(row, "Fast mode", "fast_mode", profile.fast_mode, "checkbox");
     const modelSuggestions = document.createElement("datalist");
-    modelSuggestions.id = `candidate-models-${crypto.randomUUID()}`;
+    modelSuggestions.id = `candidate-models-${Math.random().toString(36).slice(2)}`;
     row.appendChild(modelSuggestions);
     row.updateCandidateChoices = changed => {
       const entry = capabilities();

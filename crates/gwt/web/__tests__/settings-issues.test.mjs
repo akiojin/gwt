@@ -352,7 +352,7 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
 test("Candidates restore shared choices, preserve saved values, and gate dependent controls", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
-  load("renderAgentsSettingsPanel")(panel, {
+  load("renderAgentsSettingsPanel", { crypto: {} })(panel, {
     profiles: [{ agent_id: "codex", model: "retired-model", reasoning: "retired-effort", docker_service: "saved-service" },
       { agent_id: "custom", fast_mode: true }, { agent_id: "saved-unknown-agent", model: "historic" }],
     availableAgents: null, choices: candidateChoices,
