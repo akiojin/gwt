@@ -69,6 +69,7 @@ use std::{io, path::PathBuf};
 pub use actions::{ActionsCommand, ActionsDispatchCall, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, IssueLabelAction, IssueMonitorPriorityPosition, PrCommand};
+pub use completion_pr::CompletionPrCandidate;
 pub use diagnostics::DiagnosticsCommand;
 pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;
@@ -335,7 +336,7 @@ pub enum PaneCommand {
 pub enum SkillStateAction {
     Start { spec: u64 },
     Phase { spec: u64, label: String },
-    Complete { spec: u64 },
+    Complete { spec: u64, pr: Option<u64> },
     Abort { spec: u64, reason: Option<String> },
 }
 
@@ -549,7 +550,7 @@ pub(crate) fn parse_skill_state_args(args: &[String]) -> Result<SkillStateAction
         }
         "complete" => {
             let spec = parse_named_u64(rest, "--spec")?;
-            Ok(SkillStateAction::Complete { spec })
+            Ok(SkillStateAction::Complete { spec, pr: None })
         }
         "abort" => {
             let spec = parse_named_u64(rest, "--spec")?;

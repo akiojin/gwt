@@ -57,6 +57,10 @@ pub trait CliEnv {
     ) -> io::Result<IssueSnapshot>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<super::CompletionPrCandidate>>;
     fn fetch_completion_pr(
         &mut self,
         number: u64,

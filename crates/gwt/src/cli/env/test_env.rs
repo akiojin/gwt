@@ -282,6 +282,22 @@ impl CliEnv for TestEnv {
         self.pr_current_call_count += 1;
         Ok(self.current_pr.clone())
     }
+    fn fetch_completion_pr_candidates(
+        &mut self,
+        number: Option<u64>,
+    ) -> io::Result<Vec<crate::cli::CompletionPrCandidate>> {
+        Ok(self
+            .completion_prs
+            .values()
+            .filter(|snapshot| number.is_none_or(|number| snapshot.inventory.number == number))
+            .map(|snapshot| crate::cli::CompletionPrCandidate {
+                number: snapshot.inventory.number,
+                url: snapshot.inventory.url.clone(),
+                head_ref_name: snapshot.inventory.head_ref_name.clone(),
+                head_sha: snapshot.head_sha.clone(),
+            })
+            .collect())
+    }
     fn create_pr(
         &mut self,
         base: &str,

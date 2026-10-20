@@ -20,8 +20,9 @@ pub(crate) mod types;
 #[allow(unused_imports)]
 pub(super) use gh::{
     close_pr_via_gh, comment_on_pr_via_gh, convert_pr_to_draft_via_gh, create_pr_via_gh,
-    edit_or_create_repo_guard, edit_pr_via_gh, extract_pr_url, fetch_current_pr_via_gh,
-    fetch_pr_checks_via_gh, fetch_pr_head_sha_via_gh, fetch_pr_quarantine_context_via_gh,
+    edit_or_create_repo_guard, edit_pr_via_gh, extract_pr_url,
+    fetch_completion_pr_candidates_via_gh, fetch_current_pr_via_gh, fetch_pr_checks_via_gh,
+    fetch_pr_head_sha_via_gh, fetch_pr_quarantine_context_via_gh,
     fetch_pr_review_thread_state_via_gh, fetch_pr_review_threads_via_gh, fetch_pr_reviews_via_gh,
     mark_pr_ready_via_gh, number_is_issue_via_gh, parse_available_fields,
     parse_github_remote_url as parse_pr_remote_url, parse_pr_checks_items_json,
@@ -3729,7 +3730,8 @@ mod tests {
             verified.verified_head.as_deref()
         );
         env.completion_prs.get_mut(&7).unwrap().head_sha = receipt_head;
-        let admission = crate::cli::completion_pr::admit(&mut env, session_id, Some(42), &mut out);
+        let admission =
+            crate::cli::completion_pr::admit(&mut env, session_id, Some(42), None, &mut out);
         assert!(admission.is_ok(), "{admission:?}: {out}");
 
         // #5216: a review Session may resume this same Work after final Done.
