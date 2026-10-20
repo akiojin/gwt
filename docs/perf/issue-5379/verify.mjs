@@ -66,8 +66,11 @@ for (const [path, expected] of sources) {
     assert.ok(text.includes(line), "missing recorded test comment: " + path);
     source = Buffer.from(text.replace(line, ""));
   }
-  const actual = createHash("sha256").update(source).digest("hex");
-  assert.equal(actual, expected.toLowerCase(), "source changed after measurement: " + path);
+  // Git may check out the measured source with LF or CRLF line endings.
+  const lf = source.toString("utf8").replaceAll("\r\n", "\n");
+  const variants = [source, Buffer.from(lf), Buffer.from(lf.replaceAll("\n", "\r\n"))];
+  assert.ok(variants.some(value => createHash("sha256").update(value).digest("hex") === expected.toLowerCase()),
+    "source changed after measurement: " + path);
 }
 
 const indices = [0, 1, 2, 3, 4];
