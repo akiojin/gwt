@@ -316,7 +316,9 @@ fn recovery_center_live_fixture_has_three_states_and_one_real_board_entry() {
 
     if let Some(home) = std::env::var_os("GWT_T461_FIXTURE_HOME") {
         let home = std::fs::canonicalize(home).expect("isolated browser-check HOME");
-        assert!(home.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
+        // Canonical verification narrows TMPDIR for each child. Use the shared
+        // OS-root guard, which also accepts its parent's temporary fixture.
+        let _isolated_home = gwt_core::test_support::ScopedGwtHome::set(&home);
         let marker: Value = serde_json::from_slice(
             &std::fs::read(home.join(".gwt/t461-browser-check.json"))
                 .expect("explicit isolation marker"),
