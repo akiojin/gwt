@@ -175,6 +175,7 @@ pub(crate) fn assess_planning_change(
 pub struct PlanningAssessment {
     pub planning_revision: u64,
     pub monitor: MonitorEvidence,
+    pub capacity: CapacityObservation,
     pub missing_inputs: Vec<&'static str>,
     pub issue_traces: Vec<IssueTrace>,
     pub roadmap: RoadmapHorizons,
@@ -189,6 +190,83 @@ pub struct MonitorEvidence {
     pub last_scan_at: Option<String>,
     pub active_launches_incomplete: bool,
     pub inbox_coverage: Option<IssueMonitorInboxCoverage>,
+}
+
+/// Supplied admission facts, sharing the assessment's Monitor provenance.
+/// Listed owner sets cannot establish physical occupancy or full WIP.
+#[derive(Debug, Serialize)]
+pub struct CapacityObservation {
+    pub implementation_launches: Option<Vec<u64>>,
+    pub review_issues: Option<Vec<u64>>,
+    pub pending_claim_issues: Option<Vec<u64>>,
+    pub needs_human_issues: Option<Vec<u64>>,
+    pub occupied_slot_count: Option<usize>,
+    pub max_active: Option<usize>,
+    pub observed_work_issues: Vec<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+fn observe_capacity(
+    monitor: Option<&IssueMonitorAgentStatus>,
+    monitor_missing_inputs: &[&'static str],
+) -> CapacityObservation {
+    let implementation_launches = monitor.map(|status| status.active_launches.clone());
+    let review_issues = monitor.map(|status| {
+        status
+            .review_windows
+            .iter()
+            .map(|window| window.issue_number)
+            .collect::<Vec<_>>()
+    });
+    let pending_claim_issues = monitor.and_then(|status| status.pending_claim_issues.clone());
+    let needs_human_issues = monitor.map(|status| {
+        status
+            .needs_human
+            .iter()
+            .copied()
+            .chain(
+                status
+                    .inbox
+                    .iter()
+                    .filter(|row| row.state == MonitorInboxState::NeedsHuman)
+                    .map(|row| row.issue_number),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    });
+    let observed_work_issues = [
+        &implementation_launches,
+        &review_issues,
+        &pending_claim_issues,
+        &needs_human_issues,
+    ]
+    .into_iter()
+    .flatten()
+    .flatten()
+    .copied()
+    .collect::<BTreeSet<_>>()
+    .into_iter()
+    .collect();
+    let occupied_slot_count = monitor.and_then(|status| status.occupied_slot_count);
+    let mut missing_inputs = monitor_missing_inputs.to_vec();
+    missing_inputs.extend(["verification_observation", "end_to_end_wip"]);
+    if pending_claim_issues.is_none() {
+        missing_inputs.push("pending_claim_issues");
+    }
+    if occupied_slot_count.is_none() {
+        missing_inputs.push("occupied_slot_count");
+    }
+    CapacityObservation {
+        implementation_launches,
+        review_issues,
+        pending_claim_issues,
+        needs_human_issues,
+        occupied_slot_count,
+        max_active: monitor.map(|status| status.max_active),
+        observed_work_issues,
+        missing_inputs,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -492,6 +570,7 @@ pub fn assess_planning(
         .collect();
     PlanningAssessment {
         planning_revision: state.revision,
+        capacity: observe_capacity(monitor, &missing_inputs),
         monitor: MonitorEvidence {
             source: monitor.map(|status| status.source),
             last_scan_at: monitor.and_then(|status| status.last_scan_at.clone()),
@@ -910,12 +989,119 @@ mod tests {
     }
 
     #[test]
+    fn capacity_preserves_admission_facts_without_claiming_full_wip() {
+        let state = fixture();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.active_launches = vec![3, 1, 3];
+        monitor.review_windows = serde_json::from_value(json!([
+            {"issue_number":3,"pr_number":30,"dispatched_at":"2026-10-21T00:00:00Z"},
+            {"issue_number":8,"pr_number":80,"dispatched_at":"2026-10-21T00:00:00Z"},
+            {"issue_number":8,"pr_number":81,"dispatched_at":"2026-10-21T00:00:00Z"}
+        ]))
+        .unwrap();
+        monitor.pending_claim_issues = Some(vec![9, 3, 9]);
+        monitor.needs_human = vec![10, 10];
+        monitor.queue = vec![20];
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":11,"state":"needs_human","attempts":0,"error_message":"private reason"},
+            {"issue_number":99,"state":"merged","attempts":0}
+        ]))
+        .unwrap();
+        monitor.occupied_slot_count = Some(17); // Includes unlisted/unknown panes.
+        monitor.max_active = 4;
+        monitor.last_scan_at = Some("2026-10-21T00:00:00Z".into());
+        monitor.inbox_coverage = Some(serde_json::from_value(json!({
+            "github_target_count":2,"inbox_row_count":2,"missing_issue_numbers":[],"source":"live"
+        })).unwrap());
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            report["capacity"],
+            json!({
+                "implementation_launches":[3,1,3], "review_issues":[3,8,8],
+                "pending_claim_issues":[9,3,9], "needs_human_issues":[10,11],
+                "occupied_slot_count":17, "max_active":4,
+                "observed_work_issues":[1,3,8,9,10,11],
+                "missing_inputs":["verification_observation","end_to_end_wip"]
+            })
+        );
+        assert!(!report.to_string().contains("private reason"));
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        monitor.active_launches_incomplete = true;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            degraded["capacity"]["observed_work_issues"],
+            report["capacity"]["observed_work_issues"]
+        );
+        assert!(degraded["capacity"]["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("complete_monitor_coverage")));
+        monitor.active_launches.clear();
+        monitor.review_windows.clear();
+        monitor.pending_claim_issues = None;
+        monitor.needs_human.clear();
+        monitor.inbox.clear();
+        monitor.occupied_slot_count = None;
+        let legacy = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(legacy["capacity"]["implementation_launches"], json!([]));
+        assert_eq!(legacy["capacity"]["observed_work_issues"], json!([]));
+        for key in ["pending_claim_issues", "occupied_slot_count"] {
+            assert_eq!(legacy["capacity"][key], Value::Null);
+            assert!(legacy["capacity"]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(key)));
+        }
+        monitor.source = IssueMonitorStatusSource::Daemon;
+        monitor.active_launches_incomplete = false;
+        monitor.pending_claim_issues = Some(vec![]);
+        monitor.occupied_slot_count = Some(0);
+        let empty = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(empty["capacity"]["occupied_slot_count"], 0);
+        assert_eq!(empty["capacity"]["pending_claim_issues"], json!([]));
+        assert_eq!(
+            empty["capacity"]["missing_inputs"],
+            json!(["verification_observation", "end_to_end_wip"])
+        );
+        monitor.last_scan_at = None;
+        let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert!(untimed["capacity"]["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("monitor_scan_time")));
+    }
+
+    #[test]
     fn absent_and_degraded_monitor_observations_never_prove_complete_coverage() {
         let state = fixture();
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
         assert_eq!(row(&absent, 1)["observed_inbox_states"], json!([]));
         assert_eq!(absent["monitor"]["source"], Value::Null);
         assert_eq!(absent["monitor"]["active_launches_incomplete"], true);
+        for key in [
+            "implementation_launches",
+            "review_issues",
+            "pending_claim_issues",
+            "needs_human_issues",
+            "occupied_slot_count",
+            "max_active",
+        ] {
+            assert_eq!(absent["capacity"][key], Value::Null);
+        }
+        assert_eq!(absent["capacity"]["observed_work_issues"], json!([]));
+        for key in [
+            "monitor_observation",
+            "verification_observation",
+            "end_to_end_wip",
+        ] {
+            assert!(absent["capacity"]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(key)));
+        }
         assert!(absent["missing_inputs"]
             .as_array()
             .unwrap()
