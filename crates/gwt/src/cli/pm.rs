@@ -149,6 +149,10 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
         "Use a recorded scoped instruction_id or pm.approval.request for this PR and review event; GitHub reviewer and CI gates remain enforced",
     ),
     (
+        "pr.auto_merge.enable", r#"{}"#, CapabilityGapReason::Permission,
+        "Review the external fork PR and use a scoped instruction_id or pm.approval.request bound to its exact number and reviewed_head_sha; otherwise human merge required because repository automation may exclude external forks",
+    ),
+    (
         "release.metadata.set", r#"{}"#, CapabilityGapReason::Permission,
         "Use a recorded scoped instruction_id or pm.approval.request to edit release metadata; publishing stays with the release workflow",
     ),

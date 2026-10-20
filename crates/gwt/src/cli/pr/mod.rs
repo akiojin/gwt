@@ -1724,6 +1724,12 @@ pub(super) fn render_pr_inventory(out: &mut String, read: &gwt_git::PrInventoryR
             if let Some(deferred) = item.deferred_user_verification {
                 row["deferred_user_verification"] = serde_json::json!(deferred);
             }
+            if let Some(head_sha) = &item.head_sha {
+                row["head_sha"] = serde_json::json!(head_sha);
+            }
+            if let Some(is_cross_repository) = item.is_cross_repository {
+                row["is_cross_repository"] = serde_json::json!(is_cross_repository);
+            }
             // SPEC #3835 AC-3 / AC-4 / AC-6: the facts the PM used to collect
             // by hand. Each is omitted when it was not measured, so an absent
             // key reads as "unknown" rather than as a zero.
@@ -1946,6 +1952,8 @@ mod tests {
             body: String::new(),
             closing_issues: vec![],
             head_ref_name: "work/issue-7".to_string(),
+            head_sha: None,
+            is_cross_repository: None,
             lifecycle: "MERGE-CANDIDATE".to_string(),
             lifecycle_source: "observed".to_string(),
             stale: false,

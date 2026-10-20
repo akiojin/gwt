@@ -854,6 +854,15 @@ supported reversible metadata, features, merge preferences and archive status.
 Topic replacements use `topics` alone. Existing review and CI checks remain in
 force; release publishing, assets and latest selection use the gated workflow.
 
+For an external fork PR excluded by repository merge automation, the owner can
+delegate the reviewed PR and its exact head SHA to the PM through the same scoped
+permission route. `pr.auto_merge.enable` takes `number` and `reviewed_head_sha`,
+then enables GitHub auto-merge only for that reviewed head after checking the
+current PR, CI and review state. The audit records the PR, SHA and permission
+source. A changed head requires a new review and authorization. If this route is
+unavailable or the owner has not delegated it, a human must merge the PR;
+`pr.list` explains the external-fork fallback instead of repeating a merge proposal.
+
 For an explicitly authorized PR close, build-cache cleanup, or provider approval
 response, the PM uses `pm.operation.execute` with the existing `pr.close`,
 `worktree.gc_build_artifacts`, or `pm.message.send` action. This route supports

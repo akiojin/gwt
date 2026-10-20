@@ -21,6 +21,7 @@ pub const OPERATIONS: &[&str] = &[
     "pm.message.send",
     "pr.reopen",
     "pr.review.submit",
+    "pr.auto_merge.enable",
     "release.metadata.set",
     "repository.settings.set",
 ];
@@ -269,6 +270,9 @@ pub fn authorize(
             }
             (id.clone(), "instruction")
         } else {
+            // A remembered grant must never authorize a different reviewed
+            // head or PR for the external-contribution delivery boundary.
+            let exact_scope_required = scope.operation == "pr.auto_merge.enable";
             let approval = store
                 .approvals
                 .iter_mut()
@@ -280,6 +284,7 @@ pub fn authorize(
                             Some(id) => &entry.id == id && (entry.standing || entry.scope == scope),
                             None => entry.standing,
                         }
+                        && (!exact_scope_required || entry.scope == scope)
                 })
                 .ok_or_else(|| permission_denied("no applicable human approval"))?;
             if !approval.standing {
@@ -340,6 +345,42 @@ mod tests {
             .unwrap(),
         };
         assert_eq!(first.scope().unwrap(), second.scope().unwrap());
+    }
+
+    #[test]
+    fn remembered_external_auto_merge_permission_stays_bound_to_pr_and_sha() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let intent = OperationIntent {
+            operation: "pr.auto_merge.enable".into(),
+            params: serde_json::json!({"number":17,"reviewed_head_sha":"a".repeat(40)}),
+        };
+        let approval = record_approval(
+            &repo,
+            &intent,
+            "Review external contribution",
+            "Disable auto-merge before merge",
+            true,
+        )
+        .unwrap();
+        let authorization = Authorization {
+            approval_id: Some(approval.id),
+            instruction_id: None,
+        };
+        assert!(authorize(&repo, &intent, &authorization, Some("pm"), Value::Null).is_ok());
+        let mut changed = intent.clone();
+        changed.params["reviewed_head_sha"] = "b".repeat(40).into();
+        assert!(authorize(&repo, &changed, &authorization, Some("pm"), Value::Null).is_err());
+        changed.params = serde_json::json!({"number":18,"reviewed_head_sha":"a".repeat(40)});
+        assert!(authorize(
+            &repo,
+            &changed,
+            &Authorization::default(),
+            Some("pm"),
+            Value::Null
+        )
+        .is_err());
     }
 
     #[test]

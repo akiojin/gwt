@@ -143,6 +143,19 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
         self.inner.fetch_completion_pr(number)
     }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        self.inner.enable_pr_auto_merge(number, reviewed_head_sha)
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.inner.fetch_auto_merge_pr(number)
+    }
     fn edit_pr(
         &mut self,
         number: u64,

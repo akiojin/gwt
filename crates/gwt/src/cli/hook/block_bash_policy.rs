@@ -101,8 +101,8 @@ pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
 }
 
 fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
-    for segment in super::segments::split_command_segments(command) {
-        let tokens = command_tokens(&segment);
+    for words in github_execution_commands(command) {
+        let tokens: Vec<_> = words.iter().map(String::as_str).collect();
         let Some(command_name) = tokens.first().copied() else {
             continue;
         };
@@ -158,6 +158,234 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
 /// It deliberately does not record budget spend or effect observations.
 pub(crate) fn github_mutation_policy(command: &str) -> Option<HookOutput> {
     evaluate_github_workflow_cli(command).or_else(|| evaluate_github_mutation_sinks(command))
+}
+
+/// Inspect executable positions, not arbitrary arguments containing `gh`.
+/// Keep quote-aware segmentation ahead of unquoting so quoted search/body data
+/// cannot become shell commands. Only actual interpreter command bodies reenter
+/// segmentation; each wrapper consumes words, so nested wrappers terminate.
+fn github_execution_commands(command: &str) -> Vec<Vec<String>> {
+    let mut pending = vec![command.to_string()];
+    let mut commands = Vec::new();
+    while let Some(command) = pending.pop() {
+        for segment in super::segments::split_command_segments(&command) {
+            let segment = segment
+                .trim_start_matches(['(', '{'])
+                .trim()
+                .trim_end_matches([')', '}'])
+                .trim();
+            let mut words = github_command_words(segment);
+            let mut index = 0;
+            while let Some(word) = words.get_mut(index) {
+                *word = word.trim_start_matches(['(', '{']).to_string();
+                if word.is_empty()
+                    || is_env_assignment(word)
+                    || matches!(
+                        word.as_str(),
+                        "do" | "then" | "if" | "elif" | "else" | "while" | "until" | "!"
+                    )
+                {
+                    index += 1;
+                    continue;
+                }
+                let name = normalize_command_name(word);
+                if matches!(
+                    name.as_str(),
+                    "bash" | "sh" | "zsh" | "dash" | "pwsh" | "powershell"
+                ) {
+                    // Preserve the existing PowerShell HTTP sink diagnosis as
+                    // well as inspecting gh calls inside its script argument.
+                    commands.push(words[index..].to_vec());
+                    let powershell = matches!(name.as_str(), "pwsh" | "powershell");
+                    let mut flag = index + 1;
+                    while let Some(arg) = words.get(flag) {
+                        let lowered = arg.to_ascii_lowercase();
+                        if (!powershell
+                            && arg.starts_with('-')
+                            && !arg.starts_with("--")
+                            && arg.contains('c'))
+                            || (powershell && matches!(lowered.as_str(), "-c" | "-command"))
+                        {
+                            if let Some(script) = words.get(flag + 1) {
+                                pending.push(if powershell {
+                                    powershell_policy_script(&words[flag + 1..].join(" "))
+                                } else {
+                                    script.clone()
+                                });
+                            }
+                            break;
+                        }
+                        if !arg.starts_with('-') || arg == "--" {
+                            break; // script filename: subsequent words are data
+                        }
+                        flag += 1 + usize::from(matches!(
+                            lowered.as_str(),
+                            "-o" | "--rcfile"
+                                | "--init-file"
+                                | "-executionpolicy"
+                                | "-workingdirectory"
+                                | "-inputformat"
+                                | "-outputformat"
+                                | "-windowstyle"
+                                | "-version"
+                        ));
+                    }
+                    break;
+                }
+                if !matches!(
+                    name.as_str(),
+                    "timeout" | "env" | "nice" | "command" | "exec" | "nohup" | "xargs"
+                ) {
+                    commands.push(words[index..].to_vec());
+                    break;
+                }
+                index += 1;
+                let mut discovery = false;
+                while let Some(arg) = words.get(index).filter(|arg| arg.starts_with('-')) {
+                    index += 1;
+                    if arg == "--" {
+                        break;
+                    }
+                    if name == "command"
+                        && !arg.starts_with("--")
+                        && (arg.contains('v') || arg.contains('V'))
+                    {
+                        discovery = true;
+                        break;
+                    }
+                    if name == "env"
+                        && (matches!(arg.as_str(), "-S" | "--split-string")
+                            || arg.starts_with("--split-string="))
+                    {
+                        let (value, end) = if let Some(value) = arg.strip_prefix("--split-string=")
+                        {
+                            (value.to_string(), index)
+                        } else if let Some(value) = words.get(index) {
+                            (value.clone(), index + 1)
+                        } else {
+                            break;
+                        };
+                        // env -S splits argv; it does not evaluate shell operators.
+                        words.splice(index - 1..end, github_command_words(&value));
+                        index -= 1;
+                        continue;
+                    }
+                    let takes_value = match name.as_str() {
+                        "timeout" => {
+                            matches!(arg.as_str(), "-k" | "--kill-after" | "-s" | "--signal")
+                        }
+                        "env" => matches!(arg.as_str(), "-u" | "--unset" | "-C" | "--chdir"),
+                        "nice" => matches!(arg.as_str(), "-n" | "--adjustment"),
+                        "exec" => arg == "-a",
+                        "xargs" => matches!(
+                            arg.as_str(),
+                            "-I" | "-n"
+                                | "-L"
+                                | "-P"
+                                | "-s"
+                                | "-a"
+                                | "-d"
+                                | "-E"
+                                | "--max-args"
+                                | "--max-lines"
+                                | "--max-procs"
+                                | "--max-chars"
+                                | "--arg-file"
+                                | "--delimiter"
+                        ),
+                        _ => false,
+                    };
+                    if takes_value {
+                        index += 1;
+                    }
+                }
+                if discovery {
+                    break;
+                }
+                if name == "timeout" {
+                    index += 1; // duration, after any timeout options
+                }
+            }
+        }
+    }
+    commands
+}
+
+/// Translate PowerShell escapes only inside an actual PowerShell command
+/// body. Shared shell segmentation can then keep escaped quotes/semicolons
+/// inside their argument instead of manufacturing a second command from data.
+fn powershell_policy_script(script: &str) -> String {
+    let mut normalized = String::new();
+    let mut quote = None;
+    let mut chars = script.chars();
+    while let Some(ch) = chars.next() {
+        if quote != Some('\'') && ch == '`' {
+            if let Some(escaped) = chars.next() {
+                normalized.push('\\');
+                normalized.push(escaped);
+            }
+            continue;
+        }
+        if quote != Some('\'') && ch == '\\' {
+            normalized.push('\\'); // backslashes are literal in PowerShell
+        } else if Some(ch) == quote {
+            quote = None;
+        } else if quote.is_none() && matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+        }
+        normalized.push(ch);
+    }
+    normalized
+}
+
+/// Shell quoting differs from the verification runner's direct-process argv
+/// format: an escaped quote must not turn a valid command into an opaque one.
+fn github_command_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut chars = segment.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && quote != Some('\'') {
+            let next = chars.peek().copied();
+            let windows_path = quote.is_none() && word.as_bytes().get(1) == Some(&b':');
+            if (!windows_path && quote.is_none())
+                || (quote == Some('"') && matches!(next, Some('"' | '\\' | '$' | '`' | '\n')))
+            {
+                let Some(escaped) = chars.next() else {
+                    word.push(ch);
+                    break;
+                };
+                if escaped != '\n' {
+                    word.push(escaped);
+                    started = true;
+                }
+                continue;
+            }
+        }
+        if Some(ch) == quote {
+            quote = None;
+        } else if quote.is_none() && matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            started = true;
+        } else if quote.is_none() && ch.is_whitespace() {
+            if started {
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+        } else {
+            word.push(ch);
+            started = true;
+        }
+    }
+    // Preserve a determined executable/verb even when argument quoting is
+    // opaque (e.g. PowerShell's backtick escapes). Body data must not erase a
+    // known write. Unfinished quoted data remains one argument, not commands.
+    if started {
+        words.push(word);
+    }
+    words
 }
 
 /// The inherited repository flag may precede either the category or its verb.
@@ -321,6 +549,7 @@ Recommended alternatives:\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
 - PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
 - Merges: existing merge automation and CI/review gates decide delivery; gwtd has no direct merge operation\n\
+- External fork PRs: a delegated PM can use `pr.auto_merge.enable` with the exact PR number, reviewed_head_sha and scoped instruction_id or approval_id. Repository automation may exclude external forks; if this authorized route is unavailable, a human must merge the PR.\n\
 - Actions: JSON operations `actions.rerun` (`run_id` + `failed_only`, or `job_id`) and `actions.cancel` (`run_id`)\n\
 Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
@@ -339,8 +568,9 @@ Blocked command: {command}"
 /// path (classified as a mutation sink but policed by the PR gates, not
 /// here). Approved wrapper intents and `hub` coverage are T-217 follow-ups.
 fn evaluate_github_mutation_sinks(command: &str) -> Option<HookOutput> {
-    for segment in super::segments::split_command_segments(command) {
-        let tokens = command_tokens(&segment);
+    for words in github_execution_commands(command) {
+        let segment = words.join(" ");
+        let tokens: Vec<_> = words.iter().map(String::as_str).collect();
         let Some(first) = tokens.first().copied() else {
             continue;
         };

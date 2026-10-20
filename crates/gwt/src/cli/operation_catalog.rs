@@ -584,6 +584,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pr.auto_merge.enable",
+        aliases: &[],
+    },
+    Operation {
         name: "pr.reopen",
         aliases: &[],
     },

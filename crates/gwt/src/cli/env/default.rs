@@ -422,6 +422,56 @@ impl CliEnv for DefaultCliEnv {
         gwt_git::pr_status::fetch_pr_completion_snapshot(&self.repo_path, number)
             .map_err(io::Error::other)
     }
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value> {
+        use gwt_git::pr_status::{self, PrAutoMergeRemoteState};
+        self.github_repository()?;
+        let repository = format!("github.com/{}/{}", self.owner, self.repo);
+        let remote = pr_status::fetch_pr_auto_merge_remote_state_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+        )
+        .ok_or_else(|| {
+            io::Error::other("auto-merge remote state is unknown; no mutation attempted")
+        })?;
+        let outcome = pr_status::arm_pr_auto_merge_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+            reviewed_head_sha,
+            &remote,
+        );
+        if !outcome.is_success() {
+            return Err(io::Error::other(format!(
+                "external fork auto-merge failed: {outcome:?}; inspect remote state before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks"
+            )));
+        }
+        match pr_status::fetch_pr_auto_merge_remote_state_in_repository(&self.repo_path, &repository, number) {
+            Some(PrAutoMergeRemoteState::Open { head_sha, auto_merge_requested: true })
+                if head_sha == reviewed_head_sha =>
+                Ok(serde_json::json!({"number":number,"reviewed_head_sha":head_sha,"auto_merge_enabled":true,"state":"OPEN"})),
+            Some(PrAutoMergeRemoteState::Merged { head_sha }) if head_sha == reviewed_head_sha =>
+                Ok(serde_json::json!({"number":number,"reviewed_head_sha":head_sha,"auto_merge_enabled":false,"state":"MERGED"})),
+            _ => Err(io::Error::other("auto-merge result is unconfirmed or head changed; inspect the remote PR before retrying")),
+        }
+    }
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        self.github_repository()?;
+        let repository = format!("github.com/{}/{}", self.owner, self.repo);
+        gwt_git::pr_status::fetch_pr_completion_snapshot_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+        )
+        .map_err(io::Error::other)
+    }
     fn edit_pr(
         &mut self,
         number: u64,

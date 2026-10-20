@@ -61,6 +61,17 @@ pub trait CliEnv {
         &mut self,
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot>;
+    /// Fresh evidence pinned to this project's canonical GitHub repository.
+    fn fetch_auto_merge_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot>;
+    /// Arm GitHub auto-merge for an already authorized and reviewed head.
+    fn enable_pr_auto_merge(
+        &mut self,
+        number: u64,
+        reviewed_head_sha: &str,
+    ) -> io::Result<serde_json::Value>;
     fn list_open_prs(
         &mut self,
         options: &gwt_git::PrInventoryOptions,

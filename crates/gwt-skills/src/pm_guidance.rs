@@ -256,6 +256,15 @@ Supported direct scoped operations:
   COMMENT and REQUEST_CHANGES require a non-empty body. GitHub reviewer,
   self-review and CI gates still apply; this does not create an internal
   reviewer verdict or override merge automation.
+- `pr.auto_merge.enable {number, reviewed_head_sha}` enables GitHub auto-merge
+  for a reviewed external fork PR. The owner must authorize that exact PR and
+  full head SHA through a recorded scoped instruction or native approval.
+  Remembered approval also stays bound to that PR and SHA. The runtime reads
+  current fork identity, Ready state, passing CI, approval and resolved review
+  threads before arming auto-merge with the reviewed head fixed. It records
+  the PR, SHA and permission source in the audit. A changed head requires
+  another review and authorization; it never bypasses GitHub's merge gates.
+  Same-repository PRs retain the ordinary verification and delivery path.
 - `release.metadata.set {tag, name?, body?, prerelease?}` changes an existing
   release's display name, notes or prerelease flag. Publishing, assets and
   latest selection remain with the existing gated release workflow.
@@ -1345,7 +1354,8 @@ quota:
     and a queued or failed run of it leaves the PR exactly here. Find
     that run and rerun it with `actions.rerun`; waiting does not land it
     (25 minutes measured). Never reach for `pr.draft` / `pr.ready` as a
-    nudge — Draft cancels auto-merge and no operation re-enables it.
+    nudge — Draft cancels auto-merge. External forks have the scoped operation
+    described above; ordinary PRs retain repository merge automation.
   - `CONFLICTED`: relaunch the owner to resolve the conflict
   - `BEHIND`: follow `default_action`; non-strict protection needs no sync
   - `CI-RED`: relaunch the owner to fix CI
@@ -1368,6 +1378,12 @@ quota:
   `updated_at`, never from the class of the moment.
   `stale` is also true for an unverified inventory snapshot; that hold
   does not advance `unchanged_cycles` or trigger `escalation_due`.
+- An external fork with auto-merge disabled may be excluded by the repository's
+  merge automation. Follow its `default_action` and `fallback`: use
+  `pr.auto_merge.enable` only after reviewing and obtaining exact PR/SHA
+  authority; otherwise a human merge is required. Unknown automation eligibility
+  is not proof of exclusion. Report that reason once and wait for delegation
+  or a changed PR state instead of repeating a merge proposal every cycle.
 - `owner_issue` names the Issue a relaunch or triage would target (the
   first closing Issue, else the Issue on the head's launch ref).
   `owner_issue_source` says whether the owner was declared by the PR
@@ -3101,7 +3117,7 @@ mod tests {
     /// than treating settings as owner chores or inventing write paths.
     #[test]
     fn contract_names_bounded_configuration_operations() {
-        let body = body();
+        let body = unwrapped(&render_contract());
         for phrase in [
             "`discussion.create {title, body, category, sync_board?, board_provider?}`",
             "`board.config.set {github_discussion, provider?}`",
@@ -3116,6 +3132,10 @@ mod tests {
             "`update.settings.set {auto_apply_updates}`",
             "`pr.reopen {number}`",
             "`pr.review.submit {number, event, body?}`",
+            "`pr.auto_merge.enable {number, reviewed_head_sha}`",
+            "Remembered approval also stays bound to that PR and SHA",
+            "a human merge is required",
+            "instead of repeating a merge proposal every cycle",
             "`COMMENT`, `APPROVE`, or `REQUEST_CHANGES`",
             "COMMENT and REQUEST_CHANGES require a non-empty body",
             "`release.metadata.set {tag, name?, body?, prerelease?}`",
