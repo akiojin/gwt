@@ -97,6 +97,18 @@ invalid expiration text is not copied. Absent Monitor yields null; no matching r
 Keep Monitor provenance and `claim_block_started_at` in missing inputs: blocked age is unknown.
 An elapsed claim deadline does not prove release or authorize requeue, launch or preemption.
 
+`declared_waits` reports only Launching/Launched inbox rows with a wait declaration,
+retaining supplied order and repeated owners. Copy canonical `in_force`; never infer protection from a deadline.
+`elapsed_seconds_at_scan` and `remaining_seconds_at_scan` use valid RFC3339 `since`,
+`expires_at` and the supplied scan time, with offsets respected and fractions floored.
+Expired deadlines yield zero remaining seconds without authorizing any action.
+Missing/invalid scan or declaration timestamps leave affected durations unknown and name missing inputs;
+a start after the scan leaves elapsed time unknown, and expiration before start leaves remaining time unknown.
+Invalid timestamp text, free-text reason and resume condition are not copied.
+Absent Monitor yields null; no matching rows yields []. Keep Monitor provenance:
+wait timing does not establish queue/claim-block age, SLA, liveness or full WIP,
+and never changes protection, invalidates a wait, releases a slot or triggers execution.
+
 Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
 and, for goals and milestones, referencing roadmap links.
@@ -3795,6 +3807,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`launch_activity` reports only Launching/Launched inbox rows",
             "`inactivity_seconds_at_scan` uses the supplied scan time",
             "`claim_blocks` reports only BlockedByClaim inbox rows",
+            "`declared_waits` reports only Launching/Launched inbox rows with a wait declaration",
+            "Copy canonical `in_force`; never infer protection from a deadline",
             "An elapsed claim deadline does not prove release or authorize requeue",
             "Activity timing does not establish queue age, SLA breaches or liveness",
             "Never recompute occupied slots or available capacity from Issue lists",
