@@ -18107,6 +18107,42 @@ impl IssueMonitorState {
         outcome
     }
 
+    /// Apply the owning canvas's absence evidence as well as verified owners.
+    /// Daemon scans must also retire ledger-only windows left by older closes.
+    pub(crate) fn reconcile_observed_launch_bindings(
+        &mut self,
+        live_launch_owners: &BTreeMap<String, u64>,
+        observed_at: &str,
+        now: &str,
+    ) -> Vec<u64> {
+        let mut readopted = self.readopt_live_launch_bindings(live_launch_owners, observed_at);
+        let Some(snapshot) = self.fresh_window_snapshot(now).filter(|snapshot| {
+            snapshot.observed_at == observed_at
+                && rfc3339_elapsed_secs(observed_at, now).is_some_and(|age| age >= 0)
+        }) else {
+            return readopted;
+        };
+        let live_windows = snapshot
+            .windows
+            .iter()
+            .map(|window| window.window_id.clone())
+            .collect();
+        for tab in self
+            .window_snapshot_tabs
+            .clone()
+            .iter()
+            .filter(|tab| !tab.is_empty())
+        {
+            readopted.extend(
+                self.reconcile_launch_bindings(tab, &live_windows, live_launch_owners, observed_at)
+                    .readopted,
+            );
+        }
+        readopted.sort_unstable();
+        readopted.dedup();
+        readopted
+    }
+
     /// Repair old ACK projections without taking a window away from its owner.
     fn reconcile_duplicate_launch_bindings(
         &mut self,
@@ -20944,6 +20980,7 @@ impl IssueMonitorState {
         {
             return Err(IssueMonitorStopMismatch::WindowMismatch);
         }
+        self.revoke_launch_binding(issue_number);
         self.clear_active_tracking(issue_number);
         if let Some(item) = self
             .inbox
@@ -21954,8 +21991,8 @@ impl IssueMonitorState {
     }
 
     /// Free the slot held by `window_id` for `issue_number` without spending an
-    /// attempt. Mirrors [`Self::settle_exact_terminal_delivery`],
-    /// plus dropping the binding ledger entry so a pane that survives its close
+    /// attempt. Mirrors [`Self::settle_exact_terminal_delivery`], including
+    /// dropping the binding ledger entry so a pane that survives its close
     /// cannot be re-adopted into the slot it just left. The caller decides
     /// whether the Issue is also requeued (see [`Self::requeue_released_launch`]).
     fn release_idle_launch(
@@ -22098,6 +22135,9 @@ impl IssueMonitorState {
         {
             return None;
         }
+        // Retire this closed window before clearing the identity used by revoke.
+        // Other live windows retain their ledger entries for verified readoption.
+        self.revoke_launch_binding(issue_number);
         let attempt = self.record_classified_attempt(issue_number, classification);
         let max = self.autonomous_tuning.max_attempts;
         // Issue #3944 AC-6: the human-gated flow keeps its cap-park unchanged.
@@ -25730,6 +25770,13 @@ mod tests {
             "closing an unmerged window returns to pending, never a fake done state"
         );
         assert_eq!(monitor.queue_len(), 1);
+        assert!(
+            monitor.prefs().launch_bindings.is_empty(),
+            "Issue #5783: closing releases the binding before the next scan"
+        );
+        monitor.record_candidate(issue(43));
+        monitor.complete_active_launch(43, "tab-1::agent-1");
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-1"), Some(43));
     }
 
     #[test]
@@ -29727,6 +29774,37 @@ mod tests {
         assert_eq!(foreign.prefs().launch_bindings.len(), 1);
     }
 
+    #[test]
+    fn issue_5783_ten_stale_bindings_allow_verified_window_id_reuse() {
+        let stale_bindings = (0..10)
+            .map(|index| (format!("project-a::agent-{index}"), 100 + index))
+            .collect::<BTreeMap<_, _>>();
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                launch_bindings: stale_bindings.clone(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(monitor.prefs().launch_bindings.len(), 10);
+        for (window, old_owner) in stale_bindings {
+            let new_owner = old_owner + 100;
+            monitor.record_candidate(issue(new_owner));
+            // The PM reconcile path supplies only Session/execution-verified owners.
+            monitor.readopt_live_launch_bindings(
+                &BTreeMap::from([(window.clone(), new_owner)]),
+                "2026-10-20T00:00:00Z",
+            );
+            monitor.complete_active_launch_at(new_owner, &window, "2026-10-20T00:00:00Z");
+            assert_eq!(monitor.launched_window_issue(&window), Some(new_owner));
+            assert_eq!(
+                monitor.prefs().launch_bindings.get(&window),
+                Some(&new_owner)
+            );
+        }
+        assert_eq!(monitor.active_issue_numbers().len(), 10);
+    }
+
     /// Issue #4862 AC-3/AC-4, the live case: #4777 was working in its window while
     /// its row read `hold_excluded` with no bound window at all, so the card sat
     /// outside Active and the slot accounting under-counted by one
@@ -30255,6 +30333,10 @@ mod tests {
             monitor.complete_active_launch(42, "tab-1::agent-1");
             monitor.requeue_window("tab-1::agent-1");
         }
+        assert!(
+            monitor.prefs().launch_bindings.is_empty(),
+            "Issue #5783: exhausting the retry budget also releases the binding"
+        );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman),
@@ -39803,6 +39885,10 @@ mod tests {
         assert_eq!(monitor.active_count(), 0, "the slot is released");
         assert_eq!(monitor.launched_window_issue(window_id), None);
         assert!(
+            !monitor.prefs().launch_bindings.contains_key(window_id),
+            "Issue #5783: successful owner termination releases its exact binding"
+        );
+        assert!(
             monitor
                 .vanished_launched_windows(
                     "tab-1",
@@ -39837,6 +39923,10 @@ mod tests {
             reloaded.settle_exact_terminal_delivery(&target).is_err(),
             "a second settlement of the same launch is refused"
         );
+        reloaded.record_candidate(issue(43));
+        reloaded.complete_active_launch(43, window_id);
+        assert_eq!(reloaded.launched_window_issue(window_id), Some(43));
+        assert_eq!(reloaded.prefs().launch_bindings.get(window_id), Some(&43));
     }
 
     #[test]
@@ -44854,20 +44944,23 @@ mod tests {
         );
         assert_eq!(monitor.active_count(), 2);
 
-        // The second half of the incident: the close of the *previous*
-        // occupant of `agent-348` is handled anyway and releases the new
-        // launch's local binding, so the next scan finds #4306 queued while
-        // its agent keeps running. The durable ledger still attributes the
-        // window to the Issue (#3883).
+        // The late close belongs to the previous generation. Production close
+        // controls carry its exact identity; an ID alone cannot revoke the
+        // successor (Issue #5783 releases genuinely closed bindings immediately).
         assert_eq!(
-            monitor.requeue_window_at("tab-1::agent-348", next_scan_at),
-            Some(4306)
+            monitor.requeue_exact_window(&IssueMonitorStopTarget {
+                issue_number: 4306,
+                claim_id: Some("gwt-auto-improve:previous-occupant".into()),
+                delivery_id: None,
+                window_id: Some("tab-1::agent-348".into()),
+            }),
+            None
         );
         assert_eq!(
             monitor.inbox_item(4306).unwrap().state,
-            MonitorInboxState::Queued
+            MonitorInboxState::Launched
         );
-        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.active_count(), 2);
 
         // A fresh scan proves the live Session before claim authorship can
         // preserve the recovered launch; the claim alone cannot restore it.
@@ -44876,7 +44969,7 @@ mod tests {
                 &BTreeMap::from([("tab-1::agent-348".to_string(), 4306)]),
                 next_scan_at,
             ),
-            vec![4306]
+            Vec::<u64>::new()
         );
 
         // AC-2: acquiring the claim again returns the comment this Monitor
@@ -45029,10 +45122,15 @@ mod tests {
             "2026-10-01T10:07:15Z",
         ));
         monitor.complete_active_launch_at(4740, "tab-1::agent-348", "2026-10-01T10:07:15Z");
-        assert_eq!(
-            monitor.requeue_window_at("tab-1::agent-348", "2026-10-01T10:10:09Z"),
-            Some(4740)
-        );
+        // A restart lost the volatile launch projection, not a real window.
+        // A genuine close now revokes its ledger and must not be readopted.
+        let mut prefs = monitor.prefs();
+        prefs.launched_issues.clear();
+        prefs.launched_claims.clear();
+        prefs.pending_launch_deliveries.clear();
+        monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(monitor.active_count(), 0);
+        monitor.record_candidate(issue(4740));
         assert_eq!(
             monitor.readopt_live_launch_bindings(
                 &BTreeMap::from([("tab-1::agent-348".to_string(), 4740)]),

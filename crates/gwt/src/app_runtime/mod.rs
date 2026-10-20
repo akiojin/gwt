@@ -3950,11 +3950,20 @@ fn publish_issue_monitor_window_snapshot(
     snapshot: &gwt::IssueMonitorWindowSnapshot,
     project_tab_ids: &std::collections::BTreeSet<String>,
 ) {
-    if let Err(error) = gwt::daemon_publisher::publish_issue_monitor_window_snapshot(
+    #[cfg(test)]
+    let publication = gwt::daemon_publisher::publish_issue_monitor_window_snapshot_with_timeout(
         project_root,
         snapshot,
         project_tab_ids,
-    ) {
+        TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
+    );
+    #[cfg(not(test))]
+    let publication = gwt::daemon_publisher::publish_issue_monitor_window_snapshot(
+        project_root,
+        snapshot,
+        project_tab_ids,
+    );
+    if let Err(error) = publication {
         tracing::debug!(
             %error,
             "Issue Monitor window snapshot stayed local; no daemon accepted it"
