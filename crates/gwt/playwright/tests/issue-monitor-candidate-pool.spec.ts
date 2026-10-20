@@ -50,14 +50,15 @@ test("candidate selection rejects unknown and duplicate drafts and explains an e
     await expect(pool.getByRole("alert")).toHaveText(message);
     expect(await page.evaluate(() => (window as any).candidateRequests)).toEqual([]);
   }
+  await expect(pool.getByLabel("Model ClaudeCode", { exact: true })).toHaveValue("preserved-model");
   await candidate.selectOption("codex");
-  await pool.getByLabel("Agent ClaudeCode", { exact: true }).fill("Codex");
+  await pool.getByLabel("Agent ClaudeCode", { exact: true }).selectOption("codex");
   await add.click();
   await expect(pool.getByRole("alert")).toHaveText("Agent codex is already in the candidate pool.");
-  await expect(pool.getByLabel("Model ClaudeCode", { exact: true })).toHaveValue("preserved-model");
+  await expect(pool.getByLabel("Model ClaudeCode", { exact: true })).toHaveValue("");
   const requests = await page.evaluate(() => (window as any).candidateRequests);
   expect(requests).toHaveLength(1);
-  expect(requests[0].profiles[0].agent_id).toBe("Codex");
+  expect(requests[0].profiles[0].agent_id).toBe("codex");
 
   await page.evaluate(() => (window as any).renderCandidates([{ id: "claude", name: "Claude Code" }]));
   await expect(candidate).toBeDisabled();
