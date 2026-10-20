@@ -50,11 +50,8 @@ impl VerificationHost {
 
 /// Decide where a run's commands are launched.
 ///
-/// The only error this returns is a malformed [`SPAWN_HOST_ENV`]. Placement
-/// itself always succeeds: when no daemon can take the workload it stays in the
-/// agent tree and the note explains why, rather than refusing. See
-/// [`gwt_core::verification_priority::decide_placement`] for why the refusal is
-/// a separate change.
+/// Refuse when a degraded launcher has no compatible daemon to escape to, or
+/// when [`SPAWN_HOST_ENV`] is malformed. Callers must not launch on an error.
 pub(crate) fn resolve(worktree: &Path) -> Result<(VerificationHost, String), String> {
     resolve_with(
         worktree,
@@ -106,6 +103,7 @@ fn resolve_with(
 
     let (availability, endpoint) = locate(worktree);
     match decide_placement(launcher, &availability) {
+        SpawnPlacement::Refuse { reason } => Err(reason),
         SpawnPlacement::Inherit { reason } => Ok((
             VerificationHost::Inherit,
             format!("spawn-host: inherit ({reason})\n"),
@@ -131,14 +129,12 @@ fn resolve_with(
 /// The lease record's answer to "is this holder's workload inside the agent
 /// tree, and at what priority" (Issue #4409 AC-4).
 ///
-/// `unknown` covers the one case placement cannot answer — a malformed
-/// [`SPAWN_HOST_ENV`] — because a waiter reading this is deciding whether to
-/// keep queueing and needs a value rather than a gap.
+/// `refused` covers unavailable baseline placement or a malformed declaration.
 pub(crate) fn describe_for_lease(worktree: &Path) -> (String, Option<i32>) {
     let nice = gwt_core::verification_priority::LauncherPriority::current().nice;
     let label = match resolve(worktree) {
         Ok((host, _)) => host.label().to_string(),
-        Err(_) => "unknown".to_string(),
+        Err(_) => "refused".to_string(),
     };
     (label, nice)
 }
@@ -787,21 +783,17 @@ mod tests {
         (guard, cleared)
     }
 
-    /// A degraded launcher with no daemon to escape to runs in place, and the
-    /// note carries the reason into the run's transcript and lease record.
-    ///
-    /// Refusing instead is the change that has to wait: it would have stopped
-    /// every agent worktree, starting with the one implementing it.
+    /// Issue #4473: missing infrastructure refuses before a workload can
+    /// silently inherit the degraded launcher's priority.
     #[test]
-    fn a_degraded_launcher_without_a_daemon_runs_in_place_and_says_why() {
+    fn a_degraded_launcher_without_a_daemon_is_refused_with_recovery() {
         let _env = without_declared_spawn_host();
         let dir = scratch();
-        let (host, note) = resolve_with(dir.path(), LauncherPriority { nice: Some(10) })
-            .expect("placement never refuses");
-        assert_eq!(host.label(), "inherit");
-        assert!(note.contains("nice 10"), "{note}");
-        assert!(note.contains("no gwt daemon is reachable"), "{note}");
-        assert!(note.contains("The run continues"), "{note}");
+        let error = resolve_with(dir.path(), LauncherPriority { nice: Some(10) })
+            .expect_err("a missing daemon cannot provide baseline priority");
+        for expected in ["nice 10", "nice 0", "no gwt daemon", "GUI", "retry"] {
+            assert!(error.contains(expected), "missing {expected}: {error}");
+        }
     }
 
     /// The same launcher at baseline priority runs in place: there is nothing
@@ -824,10 +816,8 @@ mod tests {
         let _env = without_declared_spawn_host();
         let dir = scratch();
         let (label, _) = describe_for_lease(dir.path());
-        assert!(
-            matches!(label.as_str(), "inherit" | "daemon"),
-            "unexpected lease spawn-host label: {label}"
-        );
+        let expected = resolve(dir.path()).map_or("refused", |(host, _)| host.label());
+        assert_eq!(label, expected);
     }
 
     /// A worktree with no endpoint descriptor at all is `Absent`, not a

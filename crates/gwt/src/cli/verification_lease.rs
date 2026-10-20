@@ -484,6 +484,16 @@ pub(super) fn run<E: CliEnv>(
                 &status,
                 project_scope_hash(&worktree).as_str(),
             );
+            // Placement can refuse before admission creates a holder. Report
+            // the current caller separately from the pool's holder (Issue #4473).
+            match crate::cli::daemon::verification_host::resolve(&worktree) {
+                Ok((host, _)) => {
+                    out.push_str(&format!("current_spawn_host: {}\n", host.label()));
+                }
+                Err(error) => out.push_str(&format!(
+                    "current_spawn_host: refused\ncurrent_spawn_error: {error}\n"
+                )),
+            }
             Ok(0)
         }
         VerificationLeaseCommand::Acquire { .. }

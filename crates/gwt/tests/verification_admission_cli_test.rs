@@ -29,6 +29,24 @@ fn spawn_gwtd_for_session(
     extra_env: &[(&str, &Path)],
     session: &str,
 ) -> Child {
+    let mut child = gwtd_command_for_session(home, cwd, extra_env, session)
+        .spawn()
+        .expect("spawn gwtd");
+    child
+        .stdin
+        .take()
+        .expect("gwtd stdin")
+        .write_all(envelope.as_bytes())
+        .expect("write envelope");
+    child
+}
+
+fn gwtd_command_for_session(
+    home: &Path,
+    cwd: &Path,
+    extra_env: &[(&str, &Path)],
+    session: &str,
+) -> std::process::Command {
     let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
     for key in [
         "GWT_BIN_PATH",
@@ -45,7 +63,7 @@ fn spawn_gwtd_for_session(
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    let mut child = command
+    command
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("GWT_SESSION_ID", session)
@@ -60,16 +78,8 @@ fn spawn_gwtd_for_session(
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn gwtd");
-    child
-        .stdin
-        .take()
-        .expect("gwtd stdin")
-        .write_all(envelope.as_bytes())
-        .expect("write envelope");
-    child
+        .stderr(Stdio::piped());
+    command
 }
 
 fn gwtd(home: &Path, cwd: &Path, envelope: &str) -> (bool, String) {
@@ -194,6 +204,63 @@ fn verify_run(max_wait_secs: u64) -> String {
 }
 
 const STATUS: &str = r#"{"schema_version":1,"operation":"verify.lease.status","params":{}}"#;
+
+#[test]
+fn degraded_verify_run_without_a_daemon_is_refused_before_its_command_starts() {
+    use std::os::unix::process::CommandExt;
+
+    let arena = Arena::new();
+    let sentinel = arena.home.path().join("unexpected-verification-command");
+    let run_degraded = |envelope: &str| {
+        let mut command = gwtd_command_for_session(
+            arena.home.path(),
+            &arena.repo,
+            &[("GWT_4473_SENTINEL", &sentinel)],
+            SESSION,
+        );
+        command.env_remove("GWT_VERIFY_SPAWN_HOST");
+        // SAFETY: setpriority is async-signal-safe and changes only the child.
+        // Raising its nice value is permitted even for an unprivileged runner.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpriority(libc::PRIO_PROCESS as _, 0, 19) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn degraded gwtd");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(envelope.as_bytes())
+            .unwrap();
+        collect_gwtd(child)
+    };
+
+    let (ok, refusal) = run_degraded(&verify_command(
+        "sh -c 'printf executed > \"$GWT_4473_SENTINEL\"'",
+        0,
+    ));
+    assert!(
+        !ok,
+        "a degraded launcher must refuse without a daemon: {refusal}"
+    );
+    assert!(!sentinel.exists(), "the refused command must never execute");
+    for diagnostic in ["nice 19", "no gwt daemon is reachable", "GUI", "verify.run"] {
+        assert!(refusal.contains(diagnostic), "{refusal}");
+    }
+
+    let (ok, status) = run_degraded(STATUS);
+    assert!(ok, "lease status must remain available: {status}");
+    assert!(status.starts_with("verification lease: free"), "{status}");
+    assert!(status.contains("current_spawn_host: refused\n"), "{status}");
+    assert!(status.contains("current_spawn_error: "), "{status}");
+    for diagnostic in ["nice 19", "no gwt daemon is reachable", "GUI", "verify.run"] {
+        assert!(status.contains(diagnostic), "{status}");
+    }
+}
 
 fn kill(mut child: Child) {
     let _ = child.kill();
