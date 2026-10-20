@@ -89,7 +89,7 @@ pub fn compile(&mut self)->std::io::Result<()>{Ok(())}}
         return {str(p): p.lstat().st_mtime_ns for p in (self.root / ".git").rglob("*")}
 
     def build(self):
-        log = self.command("cargo", "build", "--offline", "--manifest-path", str(self.root / "Cargo.toml"),
+        log = self.command("cargo", "build", "--color", "never", "--offline", "--manifest-path", str(self.root / "Cargo.toml"),
                            "--target-dir", str(self.root / "target/llvm-cov-target"), "-j", "1", "-vv")
         return "\n".join(line for line in log.splitlines() if any(word in line for word in ("Dirty", "Fresh", "Compiling", "Finished")))
 
