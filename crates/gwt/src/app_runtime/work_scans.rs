@@ -185,8 +185,7 @@ impl ExternalGitInputs {
         discover_all_config_inputs(&contexts, &mut paths)?;
         let files = paths
             .iter()
-            .cloned()
-            .map(|path| file_fingerprint(&path).map(|fingerprint| (path, fingerprint)))
+            .map(|path| file_fingerprint(path).map(|fingerprint| (path.clone(), fingerprint)))
             .collect::<Option<_>>()?;
         // A config may introduce a new include between the first query and
         // the byte capture. Confirm the dependency graph before trusting it.
