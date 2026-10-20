@@ -451,24 +451,29 @@ fn canonical_semantic_search_with_runner<R: CanonicalProjectIndexSearchRunner + 
     query: &str,
     limit: usize,
 ) -> Result<Vec<SemanticSearchHit>, SemanticSearchFailure> {
-    let scope = match kind {
-        KnowledgeKind::Issue => crate::protocol::IndexSearchScope::Issues,
-        KnowledgeKind::Spec => crate::protocol::IndexSearchScope::Specs,
+    use crate::protocol::{IndexSearchScope, IndexSearchTarget};
+    let scopes: &[_] = match kind {
+        KnowledgeKind::Issue => &[IndexSearchScope::Issues, IndexSearchScope::Specs],
+        KnowledgeKind::Spec => &[IndexSearchScope::Specs],
     };
     let outcome = runner
         .search(
             repo_path,
             query,
-            &[scope],
+            scopes,
             crate::protocol::IndexSearchMatchMode::Semantic,
             false,
         )
         .map_err(semantic_failure_from_index_error)?;
     let mut hits = Vec::new();
     for result in outcome.results {
-        let number = match (kind, result.target) {
-            (KnowledgeKind::Issue, crate::protocol::IndexSearchTarget::Issue { number }) => number,
-            (KnowledgeKind::Spec, crate::protocol::IndexSearchTarget::Spec { spec_id }) => spec_id,
+        let number = match (result.scope, result.target) {
+            (IndexSearchScope::Issues, IndexSearchTarget::Issue { number })
+                if kind == KnowledgeKind::Issue =>
+            {
+                number
+            }
+            (IndexSearchScope::Specs, IndexSearchTarget::Spec { spec_id }) => spec_id,
             _ => continue,
         };
         hits.push(SemanticSearchHit {
@@ -2160,6 +2165,11 @@ Extra context.
                         crate::protocol::IndexSearchTarget::Issue { number: 42 },
                         0.02,
                     ),
+                    project_index_result(
+                        crate::protocol::IndexSearchScope::Specs,
+                        crate::protocol::IndexSearchTarget::Spec { spec_id: 1939 },
+                        0.03,
+                    ),
                 ],
                 ..Default::default()
             },
@@ -2174,17 +2184,26 @@ Extra context.
         .expect("issue search");
         assert_eq!(
             issue_hits,
-            vec![SemanticSearchHit {
-                number: 42,
-                distance: Some(0.02)
-            }]
+            vec![
+                SemanticSearchHit {
+                    number: 42,
+                    distance: Some(0.02)
+                },
+                SemanticSearchHit {
+                    number: 1939,
+                    distance: Some(0.03)
+                }
+            ]
         );
         assert_eq!(
             issue_runner.calls.borrow().as_slice(),
             &[CanonicalSearchCall {
                 repo_path: repo.to_path_buf(),
                 query: "issue query".to_string(),
-                scopes: vec![crate::protocol::IndexSearchScope::Issues],
+                scopes: vec![
+                    crate::protocol::IndexSearchScope::Issues,
+                    crate::protocol::IndexSearchScope::Specs,
+                ],
                 match_mode: crate::protocol::IndexSearchMatchMode::Semantic,
                 auto_build: false,
             }]

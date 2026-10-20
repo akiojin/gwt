@@ -1478,15 +1478,9 @@ pub(crate) fn rebuild_action_for_scope(
     use crate::cli::index::runtime::RebuildAction;
 
     match scope {
-        IndexRebuildScope::Issues => RebuildAction {
+        IndexRebuildScope::Issues | IndexRebuildScope::Specs => RebuildAction {
             label: "issues",
             action: "index-issues",
-            scope: None,
-            needs_worktree_hash: false,
-        },
-        IndexRebuildScope::Specs => RebuildAction {
-            label: "specs",
-            action: "index-specs",
             scope: None,
             needs_worktree_hash: false,
         },
@@ -1683,8 +1677,7 @@ pub fn collect_unhealthy_rebuild_targets(scopes: &ProjectIndexScopes) -> Vec<Reb
     let mut targets = Vec::new();
     if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
-    }
-    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
+    } else if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
     if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
@@ -1748,8 +1741,7 @@ fn collect_unhealthy_rebuild_targets_for_worktree_hash(
     let mut targets = Vec::new();
     if matches!(&scopes.issues, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Issues, None));
-    }
-    if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
+    } else if matches!(&scopes.specs, Some(view) if scope_requires_repair(view)) {
         targets.push((IndexRebuildScope::Specs, None));
     }
     if matches!(&scopes.memory, Some(view) if scope_requires_repair(view)) {
@@ -1941,19 +1933,6 @@ fn project_index_status_for_path_inner(
     Ok(project_disk_status_view(&repo_hash, selection.inputs).with_coverage(coverage))
 }
 
-fn read_issue_index_source_fingerprint(index_root: &Path, repo_hash: &RepoHash) -> Option<String> {
-    let meta_path = index_root
-        .join(repo_hash.as_str())
-        .join("issues")
-        .join("meta.json");
-    let bytes = std::fs::read(meta_path).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    value
-        .get("source_cache_fingerprint")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
 fn issue_index_needs_rebuild_for_cache(
     index_root: &Path,
     repo_hash: &RepoHash,
@@ -1975,8 +1954,9 @@ fn issue_index_needs_rebuild_for_cache(
     if let Some(repair) = interrupted {
         let expected = &repair["expected_budget_interruption"];
         if repair["last_error"].as_str() == Some("BUILD_INCOMPLETE")
-            && repair["fingerprint"].as_str() == Some(source.fingerprint.as_str())
-            && expected["fingerprint"].as_str() == Some(source.fingerprint.as_str())
+            && repair["fingerprint"].as_str().is_some_and(|fingerprint| {
+                !fingerprint.is_empty() && expected["fingerprint"].as_str() == Some(fingerprint)
+            })
             && repair["refresh_run_id"].as_str().is_some_and(|run_id| {
                 !run_id.is_empty() && expected["run_id"].as_str() == Some(run_id)
             })
@@ -1986,10 +1966,26 @@ fn issue_index_needs_rebuild_for_cache(
             return Ok(true);
         }
     }
-    Ok(
-        read_issue_index_source_fingerprint(index_root, repo_hash).as_deref()
-            != Some(source.fingerprint.as_str()),
-    )
+    let meta = std::fs::read(index_root.join(repo_hash.as_str()).join("issues/meta.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .unwrap_or_default();
+    let revision = std::fs::read_to_string(cache_root.join("source-revision"))
+        .ok()
+        .and_then(|value| uuid::Uuid::parse_str(&value).ok());
+    if let Some(revision) = revision {
+        // The canonical stamp includes SPEC section edits. The record hash
+        // includes chunking and must not be compared to the legacy Issue hash.
+        let indexed = meta["source_cache_revision"]
+            .as_str()
+            .and_then(|value| uuid::Uuid::parse_str(value).ok());
+        return Ok(indexed != Some(revision));
+    }
+    Ok(meta
+        .get("issue_cache_fingerprint")
+        .or_else(|| meta.get("source_cache_fingerprint"))
+        .and_then(serde_json::Value::as_str)
+        != Some(source.fingerprint.as_str()))
 }
 
 /// Project roots this process registered with the Refresh Broker, keyed by
@@ -2043,9 +2039,8 @@ pub fn registered_refresh_project(repo_hash: &str) -> Option<RegisteredRefreshPr
 /// Both Files scopes always travel together so one View head publishes them
 /// atomically (SPEC #1939 AS-23).
 pub const REFRESH_FILE_SCOPES: [RefreshScope; 2] = [RefreshScope::Files, RefreshScope::FilesDocs];
-const REFRESH_REPO_SCOPES: [RefreshScope; 7] = [
+const REFRESH_REPO_SCOPES: [RefreshScope; 6] = [
     RefreshScope::Issues,
-    RefreshScope::Specs,
     RefreshScope::Memory,
     RefreshScope::Discussions,
     RefreshScope::Board,
@@ -4346,7 +4341,7 @@ mod tests {
             let snapshot = broker.inspect().unwrap();
             assert_eq!(
                 snapshot.target_count(),
-                7,
+                6,
                 "only repo-shared scopes for empty tree"
             );
             assert!(snapshot
@@ -4408,8 +4403,8 @@ mod tests {
         let snapshot = broker.inspect().expect("inspect");
         assert_eq!(
             snapshot.target_count(),
-            8,
-            "replays coalesce onto one Files pair and seven repo scope targets"
+            7,
+            "replays coalesce onto one Files pair and six repo scope targets"
         );
         assert_eq!(snapshot.queue_depth(), 0);
         assert_eq!(snapshot.running_count(), 0);
@@ -4832,7 +4827,6 @@ mod tests {
             targets,
             vec![
                 (IndexRebuildScope::Issues, None),
-                (IndexRebuildScope::Specs, None),
                 (IndexRebuildScope::Files, Some(current_hash.clone())),
             ]
         );
@@ -4976,10 +4970,14 @@ mod tests {
         let source = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
             .expect("source fingerprint")
             .expect("source");
+        let revision_path = cache_root.join("source-revision");
+        let revision = std::fs::read_to_string(&revision_path).expect("canonical revision");
         std::fs::write(
             issues_dir.join("meta.json"),
             serde_json::json!({
-                "source_cache_fingerprint": source.fingerprint,
+                "source_cache_fingerprint": "unified-record-fingerprint",
+                "issue_cache_fingerprint": source.fingerprint,
+                "source_cache_revision": revision,
             })
             .to_string(),
         )
@@ -4987,6 +4985,12 @@ mod tests {
         assert!(
             !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root)
                 .expect("current source")
+        );
+        std::fs::write(&revision_path, uuid::Uuid::new_v4().to_string()).unwrap();
+        assert!(issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap());
+        std::fs::remove_file(&revision_path).unwrap();
+        assert!(
+            !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap()
         );
         std::fs::write(
             issues_dir.join("repair.json"),

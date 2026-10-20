@@ -1,6 +1,14 @@
 # SPEC Search
 
-gwt maintains a repo-scoped vector search index of SPEC Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). SPECs are stored as `gwt-spec` labeled GitHub Issues and cached locally at `~/.gwt/cache/issues/`. The index is stored under `~/.gwt/index/<repo-hash>/` and is rebuilt from the cache. Use JSON operation `issue.spec.pull` with `{"all":true}` to refresh the cache before searching.
+gwt indexes SPECs once as heading chunks in the same repo-scoped `issues`
+generation store as plain Issues, using ChromaDB and
+`intfloat/multilingual-e5-base`. The `specs` scope filters this shared collection
+to `gwt-spec` labeled Issues cached at `~/.gwt/cache/issues/`. The first rebuild
+of either scope upgrades the old layout from the cache; old separate SPEC
+stores are no longer read. Use JSON operation `issue.spec.pull` with
+`{"all":true}` to refresh the cache before searching. Existing commands and
+SPEC result fields remain compatible. Use `scopes:["specs","issues"]` for
+both kinds, or omit scopes to include all searchable content.
 
 ## gwtd resolution
 
