@@ -460,8 +460,25 @@ fn record_issue_monitor_gui_phase(
     issue_number: u64,
     delivery_id: Option<&str>,
 ) {
+    record_issue_monitor_gui_phase_with_prefs(phase, started, issue_number, delivery_id, None);
+}
+
+fn record_issue_monitor_gui_phase_with_prefs(
+    phase: &'static str,
+    started: &mut std::time::Instant,
+    issue_number: u64,
+    delivery_id: Option<&str>,
+    prefs_stamp_elapsed_ms: Option<f64>,
+) {
     let now = std::time::Instant::now();
-    tracing::info!(target: "gwt.launch.timing", phase, issue_number, delivery_id = delivery_id.unwrap_or("none"), elapsed_ms = now.duration_since(*started).as_secs_f64() * 1000.0, thread = "gui", "Issue Monitor launch phase");
+    tracing::info!(target: "gwt.launch.timing", phase, issue_number, delivery_id = delivery_id.unwrap_or("none"), elapsed_ms = now.duration_since(*started).as_secs_f64() * 1000.0, prefs_stamp_elapsed_ms, thread = "gui", "Issue Monitor launch phase");
+    let log_elapsed = now.elapsed();
+    if log_elapsed > std::time::Duration::from_millis(50) {
+        // Keep the historical phase boundaries: the following phase includes
+        // this log call. Attribute its wait explicitly rather than to I/O in
+        // that following phase. Never recursively measure the diagnostic.
+        tracing::warn!(target: "gwt.launch.timing", phase = "monitor_gui_logging_slow", source_phase = phase, issue_number, delivery_id = delivery_id.unwrap_or("none"), elapsed_ms = log_elapsed.as_secs_f64() * 1000.0, thread = "gui", "Issue Monitor phase logging exceeded the handler budget");
+    }
     *started = now;
 }
 
@@ -4070,18 +4087,21 @@ impl AppRuntime {
         );
         // Metadata has the same freshness contract as the Monitor prefs cache.
         // Never reacquire the prefs writer lock from the GUI to validate worker facts.
+        let prefs_stamp_started = std::time::Instant::now();
         let prefs_changed = prefs_stamp
             != super::issue_monitor_prefs_stamp(&issue_monitor_prepared_prefs_path(&context));
+        let prefs_stamp_elapsed_ms = prefs_stamp_started.elapsed().as_secs_f64() * 1000.0;
         let provider_changed = provider_usage != self.provider_usage_accounts;
         let source_changed = delivery
             .result
             .as_ref()
             .is_err_and(|error| error == super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE);
-        record_issue_monitor_gui_phase(
+        record_issue_monitor_gui_phase_with_prefs(
             "monitor_gui_freshness",
             &mut phase_started,
             correlation_issue_number,
             correlation_delivery_id.as_deref(),
+            Some(prefs_stamp_elapsed_ms),
         );
         if session_changed || source_changed || admission_stale || prefs_changed || provider_changed
         {

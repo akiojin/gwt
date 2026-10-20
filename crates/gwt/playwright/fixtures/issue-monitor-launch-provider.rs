@@ -91,16 +91,38 @@ fn main() {
         std::thread::sleep(Duration::from_millis(100));
     }
     let mut cli_success = true;
+    let profile = home.join(format!("hook-profile-{session}.jsonl"));
+    let mut hook_commands = Vec::new();
     for event in ["SessionStart", "UserPromptSubmit"] {
+        let started = Instant::now();
         let mut child = Command::new(std::env::var_os("GWT_BIN_PATH").unwrap())
             .args(["hook", "event", event])
+            .env("GWT_HOOK_PROFILE_PATH", &profile)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         child.stdin.take().unwrap().write_all(serde_json::json!({"session_id":session,"hook_event_name":event,"source":"startup","cwd":std::env::current_dir().unwrap(),"prompt":args.last().unwrap()}).to_string().as_bytes()).unwrap();
-        cli_success &= child.wait_with_output().unwrap().status.success();
+        let output = child.wait_with_output().unwrap();
+        cli_success &= output.status.success();
+        // Protocol output can contain launch credentials. Persist only fixed
+        // diagnostic categories and sizes, never stdout/stderr contents.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        hook_commands.push(serde_json::json!({
+            "event": event, "exit_code": output.status.code(),
+            "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+            "stdout_bytes": output.stdout.len(), "stderr_bytes": output.stderr.len(),
+            "runtime_state_error": stderr.contains("runtime-state"),
+            "deadline_error": stderr.contains("deadline"),
+            "timeout_error": stderr.contains("timeout") || stderr.contains("timed out"),
+            "fail_open": stderr.contains("fail-open"),
+        }));
+        std::fs::write(
+            home.join(format!("hook-command-{session}.json")),
+            serde_json::to_vec(&hook_commands).unwrap(),
+        )
+        .unwrap();
     }
     // Hook exit 0 is fail-open: the exact prompt event can still be journaled.
     // Forward flushes that existing event without submitting another prompt.
@@ -131,7 +153,7 @@ fn main() {
     // The E2E also requires the GUI's authenticated and matched prompt receipt.
     while !drained() && Instant::now() < deadline {
         let mut child = Command::new(std::env::var_os("GWT_BIN_PATH").unwrap())
-            .args(["hook", "forward"])
+            .args(["__internal", "daemon-hook", "forward"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
