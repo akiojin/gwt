@@ -6263,6 +6263,7 @@ impl AppRuntime {
                     .insert(window_id.clone(), detail.clone());
                 return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
+            self.launch_wizard_cache.record_session(session.clone());
             named_assignment = Some(session.clone());
             if let Some(tab) = self.tab_mut(tab_id) {
                 let _ = tab
