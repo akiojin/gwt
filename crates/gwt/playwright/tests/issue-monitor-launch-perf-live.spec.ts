@@ -19,6 +19,7 @@ test('Issue #5596: twelve admitted launches keep completion handlers within budg
   let measurement: any = {};
   try {
     expect(fixture.issues).toHaveLength(12);
+    expect(fixture.expected_deliveries).toHaveLength(12);
     expect(fixture.checkout_binary.replaceAll('\\', '/')).toContain('/target/debug/gwt.exe');
     await page.addInitScript(theme => localStorage.setItem('gwt:ui:theme', theme), theme);
     await page.bringToFront();
@@ -52,10 +53,14 @@ test('Issue #5596: twelve admitted launches keep completion handlers within budg
           const hook = JSON.parse(await readFile(join(HOME, `hook-${provider.session_id}.json`), 'utf8'));
           return hook.success === true
             && measurement.user_prompt_authenticated_sessions.includes(provider.session_id)
-            && measurement.user_prompt_matched_sessions.includes(provider.session_id);
+            && measurement.user_prompt_matched_sessions.includes(provider.session_id)
+            && measurement.durable_launch_ack_complete
+            && measurement.durable_launch_ack_rows.some((ack: any) => ack.complete
+              && provider.argv.join(' ').includes(`#${ack.issue_number}`)
+              && ack.matched_session_ids.includes(provider.session_id));
         } catch { return false; }
       }));
-    }, { timeout: 120_000, message: 'all twelve exact UserPromptSubmit hooks are authenticated and matched by the GUI' }).toEqual(Array(12).fill(true));
+    }, { timeout: 120_000, message: 'all twelve exact UserPromptSubmit hooks are authenticated, matched and durably acknowledged by the GUI' }).toEqual(Array(12).fill(true));
     const windowListCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
     await sendLiveGwtEvent(page, { kind: 'list_windows' });
     await expect.poll(() => page.evaluate(({ sessions, cursor }) => {
@@ -115,6 +120,59 @@ async function observe(fixture: any): Promise<any> {
   const started = Date.parse(fixture.gui_started_at);
   const promptReceipts = logs.filter(row => row.target === 'gwt.hook.delivery' && Date.parse(row.timestamp) >= started
     && row.fields?.source_event === 'UserPromptSubmit');
+  let prefs: any = {};
+  let prefsReadError: string | null = null;
+  try {
+    prefs = JSON.parse(await readFile(join(HOME, '.gwt/projects', fixture.project_key, 'project-state/issue-monitor.json'), 'utf8'));
+    if (!prefs || typeof prefs !== 'object' || Array.isArray(prefs)) {
+      prefs = {};
+      prefsReadError = 'invalid_shape';
+    }
+  } catch (error) {
+    prefsReadError = error instanceof SyntaxError ? 'invalid_json' : 'read_error';
+  }
+  const matchedReceipts = promptReceipts.filter(row => row.fields.stage === 'window'
+    && row.fields.outcome === 'matched' && row.fields.route === 'live');
+  const durableAckRows = (fixture.expected_deliveries || []).map((expected: any) => {
+    const confirmation = prefs.launch_confirmations?.[expected.issue_number];
+    const windowId = confirmation?.window_id ?? null;
+    const binding = prefs.launch_bindings?.[windowId] ?? null;
+    const launchedClaim = prefs.launched_claims?.[expected.issue_number] ?? null;
+    const launchedIssueMatches = (prefs.launched_issues || []).some((launched: any) =>
+      launched.issue_number === expected.issue_number && launched.window_id === windowId);
+    const matchedSessions = [...new Set(matchedReceipts.filter(row => row.fields.window_id === windowId)
+      .map(row => row.fields.gwt_session_id))];
+    return {
+      issue_number: expected.issue_number, delivery_id: expected.delivery_id, claim_id: expected.claim_id,
+      window_id: windowId, confirmation_delivery_id: confirmation?.delivery_id ?? null,
+      confirmation_claim_id: confirmation?.claim_id ?? null, launch_binding: binding,
+      launched_claim_id: launchedClaim, launched_issue_matches: launchedIssueMatches,
+      matched_session_ids: matchedSessions,
+      complete: typeof expected.delivery_id === 'string' && expected.delivery_id.length > 0
+        && typeof expected.claim_id === 'string' && expected.claim_id.length > 0
+        && typeof windowId === 'string' && windowId.length > 0
+        && confirmation.delivery_id === expected.delivery_id && confirmation.claim_id === expected.claim_id
+        && binding === expected.issue_number && launchedClaim === expected.claim_id
+        && launchedIssueMatches && matchedSessions.length === 1,
+    };
+  });
+  const durableAckCounts = {
+    launched_issues: (prefs.launched_issues || []).length,
+    launch_bindings: Object.keys(prefs.launch_bindings || {}).length,
+    launched_claims: Object.keys(prefs.launched_claims || {}).length,
+    launch_confirmations: Object.keys(prefs.launch_confirmations || {}).length,
+    pending_launch_deliveries: (prefs.pending_launch_deliveries || []).length,
+    launching_issues: (prefs.launching_issues || []).length,
+    failed_issues: (prefs.failed_issues || []).length,
+  };
+  const durableAckComplete = prefsReadError === null && durableAckRows.length === 12
+    && fixture.issues.every((issue: number) => durableAckRows.filter((ack: any) => ack.issue_number === issue).length === 1)
+    && durableAckRows.every((ack: any) => ack.complete)
+    && new Set(durableAckRows.map((ack: any) => ack.window_id)).size === 12
+    && durableAckCounts.launched_issues === 12 && durableAckCounts.launch_bindings === 12
+    && durableAckCounts.launched_claims === 12 && durableAckCounts.launch_confirmations === 12
+    && durableAckCounts.pending_launch_deliveries === 0 && durableAckCounts.launching_issues === 0
+    && durableAckCounts.failed_issues === 0;
   const dispatch = logs.filter(row => row.target === 'gwt.frontend.timing' && Date.parse(row.timestamp) >= started
     && (row.fields?.message === 'GUI event loop dispatch handled' || /blocked the GUI event loop for \d+ms/.test(row.fields?.message || '')));
   const targets = dispatch.filter(row => row.fields.event === 'IssueMonitorLaunchPrepared');
@@ -164,6 +222,10 @@ async function observe(fixture: any): Promise<any> {
     user_prompt_matched_sessions: [...new Set(promptReceipts.filter(row => row.fields.stage === 'window'
       && row.fields.outcome === 'matched' && row.fields.route === 'live').map(row => row.fields.gwt_session_id))],
     user_prompt_receipt_rows: promptReceipts,
+    durable_launch_ack_rows: durableAckRows,
+    durable_launch_ack_counts: durableAckCounts,
+    durable_launch_ack_complete: durableAckComplete,
+    durable_launch_ack_read_error: prefsReadError,
     target_count: targets.length,
     target_rolling_minute_upper_bound_ms: rollingUpperBound,
     all_event_handlers: [...groups.values()].sort((a, b) => b.total_ms - a.total_ms),
