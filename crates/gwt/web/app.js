@@ -5131,6 +5131,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         );
       });
 
+      const workAdvisoryResultModel = createUiStateStore(null);
+      workAdvisoryResultModel.subscribe(event => event, event => {
+        if (event) applyWorkAdvisoryResultEvent(event);
+      });
+
       const projectNotificationModel = createUiStateStore(null);
       projectNotificationModel.subscribe(notice => notice, notice => {
         if (notice) agentCompletionNotifier.handleIntent(notice);
@@ -5607,7 +5612,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           case "work_advisory_result":
             // SPEC-2359 US-80: duplicate-work advisory results for the Plan
             // Agent work-registration prompt.
-            applyWorkAdvisoryResultEvent(event);
+            workAdvisoryResultModel.update(() => ({ ...event }));
             break;
           case "runtime_hook_event":
             runtimeHookModel.update(() => ({
