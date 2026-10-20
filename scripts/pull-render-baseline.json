@@ -2,7 +2,6 @@
   "[\"crates/gwt/web/app.js\",\"receive\",\"\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/branch_entries\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/hub_state\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/project_open_error\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/recovery_center_board_entry\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/recovery_center_state\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_resumable_agents\"]",
@@ -58,6 +57,5 @@
   "[\"crates/gwt/web/project-shell-surface.js\",\"applyPickerReceiveEvent\",\"\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"applyProjectOpenReceiveEvent\",\"\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/picker_started|picker_selected|picker_cancelled|picker_error|picker_busy\"]",
-  "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/project_open_error\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/project_opened\"]"
 ]

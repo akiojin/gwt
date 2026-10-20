@@ -81,14 +81,16 @@ test.describe("Project open entry surfaces", () => {
           return originalSend.call(this, data);
         };
       });
-      await gotoLiveGwt(page, liveBase, { enableTestBridge: true, suppressProjectSurfaces: true });
+      await gotoLiveGwt(page, liveBase, { enableTestBridge: true });
     } else {
       await bootProjectOpenFixture(page, [fixtureTab("git")]);
     }
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     const trigger = page.locator("#window-list-button");
+    await expect(trigger).toBeEnabled();
     await trigger.focus();
+    await expect(trigger).toBeFocused();
     await page.keyboard.press('Control+o');
     const modal = page.locator('#open-project-path-modal');
     await expect(modal).toBeVisible();
@@ -151,14 +153,22 @@ test.describe("Project open entry surfaces", () => {
       fixture.reply({ kind: 'project_open_error', message: 'Unrelated failure' });
     });
     await expect(modal.getByRole('status')).toHaveText('Opening project…');
+    const pickerError = page.locator('#project-picker-error');
+    await expect(pickerError).toHaveText('Unrelated failure');
     const input = modal.locator('[data-open-project-path]');
     await input.focus();
     await input.evaluate(element => {
       (window as any).__openProjectInput = element;
       (element as HTMLInputElement).setSelectionRange(3, 7);
     });
-    await page.evaluate((request_id) => (window as any).__gwtProjectOpenFixture.reply({ kind: 'project_open_error', request_id, message: 'Folder does not exist' }), firstRequestId);
-    await expect(modal.getByRole('status')).toHaveText('Folder does not exist');
+    const errorMessage = '<b>Folder does not exist</b>';
+    await page.evaluate(({ request_id, message }) => (window as any).__gwtProjectOpenFixture.reply({ kind: 'project_open_error', request_id, message }), { request_id: firstRequestId, message: errorMessage });
+    await expect(modal.getByRole('status')).toHaveText(errorMessage);
+    await expect(pickerError).toHaveText(errorMessage);
+    await expect(pickerError.locator('*')).toHaveCount(0);
+    expect(await pickerError.evaluate(element => element.hidden)).toBe(false);
+    await expect(page.locator('#project-picker')).not.toHaveClass(/visible/);
+    await expect(page.locator('#project-onboarding')).not.toHaveClass(/visible/);
     await expect(modal.locator('[data-open-project-path]')).toHaveValue('E:\\repos\\manual');
     expect(await input.evaluate(element => element === (window as any).__openProjectInput)).toBe(true);
     expect(await input.evaluate(element => [(element as HTMLInputElement).selectionStart, (element as HTMLInputElement).selectionEnd])).toEqual([3, 7]);
@@ -173,6 +183,19 @@ test.describe("Project open entry surfaces", () => {
     await page.evaluate((request_id) => (window as any).__gwtProjectOpenFixture.reply({ kind: 'project_opened', request_id, project_key: '0123456789abcdef', title: 'Valid Project' }), secondRequestId);
     await expect(modal).toBeHidden();
     await expect(trigger).toBeFocused();
+    // Controlled inbound state checks the legacy picker render after errors.
+    await page.evaluate(() => {
+      const reply = (window as any).__gwtProjectOpenFixture.reply;
+      reply({ kind: 'hub_state', hub: { app_version: 'e2e', projects: [], recent_projects: [] } });
+      reply({ kind: 'workspace_state', workspace: { app_version: 'e2e', tabs: [], active_tab_id: null, recent_projects: [] } });
+    });
+    await expect(pickerError).toBeHidden();
+    await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'project_open_error', message: 'Another folder failed' }));
+    await expect(page.locator('#project-picker')).toBeVisible();
+    await expect(pickerError).toBeVisible();
+    await expect(pickerError).toHaveText('Another folder failed');
+    await expect(page.locator('#project-onboarding')).not.toHaveClass(/visible/);
+    await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`project-picker-error-${theme}.png`) });
   });
 
   test("Clone from GitHub click opens the clone modal from the picker", async ({
