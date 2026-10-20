@@ -584,10 +584,7 @@ fn stopped_monitor_pane_close_publishes_complete_own_project_canvas() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempfile::Builder::new()
-        .prefix("gwt-close-")
-        .tempdir_in("/tmp")
-        .expect("short socket tempdir");
+    let temp = gwt_core::test_support::socket_tempdir().expect("short socket tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let project = temp.path().join("project");
@@ -658,7 +655,8 @@ fn stopped_monitor_pane_close_publishes_complete_own_project_canvas() {
     let scope =
         RuntimeScope::from_project_root(&project, RuntimeTarget::Host).expect("own project scope");
     let socket_path = temp.path().join("close.sock");
-    let listener = UnixListener::bind(&socket_path).expect("bind fake daemon");
+    let listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
+        .expect("bind fake daemon");
     let endpoint = DaemonEndpoint::new(
         scope.clone(),
         std::process::id(),
@@ -1436,7 +1434,7 @@ fn close_finalizer_falls_back_when_blocking_spawner_fails() {
         .clone();
 
     assert!(!runtime
-        .close_window_after_issue_monitor_finalize_events(&window_id)
+        .issue_monitor_idle_pane_close_events(&window_id, Some(4117), "review_verdict_published")
         .is_empty());
 
     let deadline = Instant::now() + Duration::from_secs(3);

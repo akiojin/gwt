@@ -804,6 +804,10 @@ Goal, milestone and roadmap changes also retain their reason, revision, changed
 values and directly affected Issues in the planning audit receipts. Goal changes
 include only Issues explicitly linked to that goal through roadmap items. These records do
 not confirm that dependent work or its agents have been notified.
+Risk, decision and policy edits also retain their redacted changed values in these
+receipts. They have no direct Issue mapping, which is explicitly marked as missing;
+an empty affected-Issue set does not mean the change has no impact. Recurring edits
+remain outside this change evidence.
 
 The PM never launches implementation agents itself — it moves an Issue to the
 front of the queue and asks for a scan, and the Issue Monitor's existing
@@ -898,6 +902,14 @@ entrypoints are:
 - `gwt-arch-review` — architecture review and improvement routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent-pane inspection and control
+
+SPECs and plain Issues share one search index. SPECs are indexed once as heading
+chunks. `gwtd` JSON `search` with `scopes:["specs"]` selects SPECs,
+`scopes:["issues"]` selects plain Issues, and `scopes:["specs","issues"]`
+selects both. The default includes both kinds and the other search scopes.
+`gwt-spec-search` and `gwt-issue-search` use these same filters. Rebuilding either
+scope upgrades older indexes from the local Issue cache; old separate SPEC
+stores are no longer read and need no manual removal.
 
 Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
@@ -1819,6 +1831,29 @@ has its own coordinator lane: semantic search and index builds keep excluding
 each other on `~/.gwt/runtime/index-coordinator` (one model-loaded runner at
 a time), and neither lane waits for the other.
 
+### Performance verification environment
+
+Canonical headed E2E commands also record their measurement environment. For a
+non-browser performance command, add the command-local assignment
+`GWT_VERIFY_PERFORMANCE=1` to its entry in `verify.plan` and `verify.run`.
+If the GUI was started separately, also set `GWT_VERIFY_TARGET_PIDS=1234`
+(comma-separated PIDs for multiple targets).
+
+On Windows, verification waits for the CPU hard caps on its gwt pane Jobs to
+clear before measuring. All canonical slots and the legacy verification lane
+participate; configured caps return after their holders leave. Process priority
+and pane-close cleanup remain in effect. Restart gwt with the updated runtime
+if an older GUI's Job ancestry cannot be inspected.
+
+The command's `measurement` evidence records target PIDs and start times,
+observed Job caps, sampled CPU time/utilization, admission wait, and cap-relief
+wait. The waits are admission/preflight durations, not an estimate of OS thread
+scheduling delay. The runner and nominated GUI have `required_uncapped: true`;
+other descendants provide CPU context and retain their ordinary resource policy.
+A remaining cap or unreadable environment for a required target produces
+`ENVIRONMENT_INCOMPATIBLE`; it cannot authorize completion or a Ready PR.
+Correct the reported environment and rerun the same registered matrix.
+
 ### PR head verification
 
 To correct a PR targeting the wrong branch, use `pr.edit` with `params.number`
@@ -1895,6 +1930,11 @@ a local estimate of the per-minute secondary limit (GitHub does not expose
 it; the estimate comes from this machine's spawn ledger under
 `~/.gwt/github-budget/`), the newest rate-limit refusal, and the throttle
 decision a periodic read would get right now.
+
+The source breakdown identifies callers such as `issue-cache.refresh` and
+`issue-monitor.queued-issues`, including paginated requests. Failed Monitor
+cache refreshes reuse general pages within the existing 15-minute freshness
+window; queue reads and explicit refreshes still fetch live data.
 
 ### Releasing
 

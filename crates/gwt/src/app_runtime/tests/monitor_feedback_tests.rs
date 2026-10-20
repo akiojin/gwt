@@ -433,25 +433,25 @@ fn issue4803_monitor_launch_request_does_not_wait_for_provider_preparation() {
     );
     assert_eq!(
         queued.lock().expect("queued preparations").len(),
-        2,
+        1,
         "replayed delivery must not start another preparation"
     );
+    assert_eq!(runtime.issue_monitor_launch_queue.len(), 1);
     drain_queued_blocking_tasks(&queued);
-    assert_eq!(PROBE_CALLS.load(Ordering::SeqCst), 2);
+    assert_eq!(PROBE_CALLS.load(Ordering::SeqCst), 1);
     runtime
         .project_tab_incarnations
         .get_mut("tab-1")
         .expect("project")
         .generation += 1;
-    for _ in 0..2 {
-        let prepared = take_issue4803_monitor_preparation(&recorded_events);
-        assert!(
-            runtime
-                .handle_issue_monitor_launch_prepared(prepared)
-                .is_empty(),
-            "a reopened project's old preparation must not be applied"
-        );
-    }
+    let prepared = take_issue4803_monitor_preparation(&recorded_events);
+    assert!(
+        runtime
+            .handle_issue_monitor_launch_prepared(prepared)
+            .is_empty(),
+        "a reopened project's old preparation must not be applied"
+    );
+    assert!(runtime.issue_monitor_launch_queue.is_empty());
     assert!(runtime.issue_monitor_launch_preparations.is_empty());
 }
 
@@ -509,12 +509,984 @@ fn issue4803_monitor_preparation_rechecks_deleted_resume_session() {
         .runtime
         .handle_issue_monitor_launch_prepared(prepared)
         .is_empty());
+    run_queued_monitor_gui_diagnostics(&queued, &[2, 0]);
     assert_eq!(
         queued.lock().expect("retry queue").len(),
         1,
         "stale resume must be prepared again"
     );
     assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+}
+
+#[test]
+fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "facts-prefetch",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read monitor prefs");
+    prefs.max_active_agents = 3;
+    for issue_number in [3166, 3167] {
+        prefs.queued_launch_session_strategies.insert(
+            issue_number,
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    }
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        prefs,
+    );
+    monitor.terminal_queue_push(&[3166, 3167], "operator", &Utc::now().to_rfc3339());
+    for issue_number in [3166, 3167] {
+        monitor.record_candidate(gwt::IssueMonitorIssue {
+            number: issue_number,
+            title: "fix: prefetched Monitor launch".to_string(),
+            labels: vec!["bug".to_string()],
+            state: gwt::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: gwt::IssueMonitorReadiness::Ready,
+            updated_at: None,
+        });
+        assert!(monitor.apply_confirmed_claim(
+            issue_number,
+            format!("claim-prefetch-{issue_number}"),
+            "host/session",
+            &format!("effect-prefetch-{issue_number}"),
+            &Utc::now().to_rfc3339(),
+        ));
+    }
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save durable deliveries");
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    for issue_number in [3165, 3166, 3167] {
+        let delivery_id = monitor
+            .pending_launch_delivery_id(issue_number)
+            .expect("native durable delivery");
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &fixture.project_root,
+                issue_number,
+                LinkedIssueKind::Issue,
+                Some(delivery_id),
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            );
+    }
+    assert_eq!(fixture.runtime.issue_monitor_launch_preparations.len(), 1);
+    assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 2);
+    assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+    assert_eq!(
+        queued.lock().expect("queued facts workers").len(),
+        2,
+        "the first full worker may overlap only the next durable launch's read-only facts"
+    );
+    let run_worker = |index| {
+        let task = queued.lock().expect("queued worker").remove(index);
+        task();
+    };
+    let take_prefetched = || {
+        let mut events = fixture.recorded_events.lock().expect("recorded events");
+        let index = events
+            .iter()
+            .position(|event| matches!(event, UserEvent::IssueMonitorLaunchFactsPrefetched(_)))
+            .expect("facts-prefetched completion");
+        match events.remove(index) {
+            UserEvent::IssueMonitorLaunchFactsPrefetched(prefetched) => *prefetched,
+            _ => unreachable!("selected facts-prefetched completion"),
+        }
+    };
+    run_worker(0);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let auth_probe = fixture.runtime.issue_monitor_provider_auth_probe;
+    // The successor's speculative failure must still release a FIFO slot.
+    fixture.runtime.issue_monitor_provider_auth_probe =
+        |_| gwt::issue_monitor::ProviderAuthState::Unauthenticated;
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared);
+    fixture.runtime.issue_monitor_provider_auth_probe = auth_probe;
+    // Reap the real first materialization before assertions can unwind.
+    // Its PTY preparation is never applied, so this test starts no provider.
+    let (first_window, first_result) =
+        take_monitor_launch_complete_event("facts-prefetch", &fixture.recorded_events);
+    assert!(first_result.is_ok(), "first launch: {first_result:?}");
+    assert!(fixture.runtime.issue_monitor_launch_preparations.is_empty());
+    run_queued_monitor_gui_diagnostics(&queued, &[3, 2, 1]);
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        2,
+        "an idle claim lane permits the waiting head and one successor to compute"
+    );
+    run_worker(1);
+    let successor = take_prefetched();
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_facts_prefetched(successor.clone());
+    assert!(fixture.runtime.issue_monitor_launch_preparations.is_empty());
+    assert_eq!(fixture.runtime.pending_launch_feedback_contexts.len(), 1);
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read unclaimed successors");
+    assert!(prefs
+        .pending_launch_deliveries
+        .iter()
+        .filter(|delivery| delivery.issue_number != 3165)
+        .all(|delivery| delivery.materializer_window_id.is_none()));
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_facts_prefetched(successor);
+    assert_eq!(queued.lock().unwrap().len(), 1, "duplicate result ignored");
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3168,
+            LinkedIssueKind::Issue,
+            Some("launch:external-prefetch-waiter".to_string()),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    assert!(fixture.runtime.issue_monitor_launch_preparations.is_empty());
+    assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 3);
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "a new arrival cannot bypass the waiting head or extend its two-entry prefix"
+    );
+    fixture.runtime.issue_monitor_launch_queue.pop();
+    let first_delivery = fixture.delivery_id.clone().expect("first durable delivery");
+    let Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { started_at, .. }) =
+        fixture
+            .runtime
+            .issue_monitor_launch_deliveries
+            .get_mut(&first_delivery)
+    else {
+        panic!("the first delivery must still be materializing");
+    };
+    // Inject expired Materializing age relative to its recorded start, without waiting.
+    *started_at -= super::super::ISSUE_MONITOR_MATERIALIZING_TTL + Duration::from_secs(1);
+    // Ordinary expired-delivery recovery may queue, but its tracked pane
+    // makes another speculative facts calculation unnecessary.
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            Some(first_delivery.clone()),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    assert!(fixture.runtime.tracked_window_exists(&first_window));
+    assert_eq!(fixture.runtime.issue_monitor_launch_queue.len(), 3);
+    let expected_window = combined_window_id(
+        "tab-1",
+        &fixture
+            .runtime
+            .tab("tab-1")
+            .unwrap()
+            .workspace
+            .next_window_id_preview(WindowPreset::Agent),
+    );
+    run_worker(0);
+    let head = take_prefetched();
+    // The ordinary worker must recheck authentication even for valid facts.
+    fixture.runtime.issue_monitor_provider_auth_probe =
+        |_| gwt::issue_monitor::ProviderAuthState::Unauthenticated;
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_facts_prefetched(head.clone());
+    assert!(fixture
+        .runtime
+        .issue_monitor_launch_preparations
+        .iter()
+        .any(|key| key.2 == 3166));
+    assert_eq!(queued.lock().unwrap().len(), 1);
+    let before = gwt_core::process::thread_git_spawn_count();
+    run_worker(0);
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count() - before,
+        1,
+        "reused facts leave only the current fallback claim's Git validation"
+    );
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read current head claim");
+    assert_eq!(
+        prefs
+            .pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == 3166)
+            .expect("head delivery")
+            .materializer_window_id
+            .as_deref(),
+        Some(expected_window.as_str()),
+        "the head must claim the preview after the first pane was registered"
+    );
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    assert_eq!(fixture.runtime.pending_launch_feedback_contexts.len(), 1);
+    drain_queued_blocking_tasks(&queued);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    assert!(fixture
+        .runtime
+        .issue_monitor_launch_preparations
+        .iter()
+        .any(|key| key.2 == 3167));
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "the expired same-delivery pane must not consume another prefetch slot"
+    );
+    let materializing = fixture.runtime.issue_monitor_launch_deliveries[&first_delivery].clone();
+    for settled in [
+        super::super::IssueMonitorLaunchDeliveryState::LaunchedPendingAck {
+            window_id: first_window.clone(),
+        },
+        super::super::IssueMonitorLaunchDeliveryState::Launched {
+            window_id: first_window.clone(),
+        },
+        super::super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            message: "settled delivery".to_string(),
+            session_mode: gwt_agent::SessionMode::Normal,
+            retryable: true,
+            fresh_execution: None,
+        },
+    ] {
+        fixture
+            .runtime
+            .issue_monitor_launch_deliveries
+            .insert(first_delivery.clone(), settled);
+        fixture.runtime.advance_issue_monitor_launch_queue_events();
+        assert_eq!(
+            queued.lock().unwrap().len(),
+            1,
+            "settled deliveries must not start speculative facts workers"
+        );
+    }
+    fixture
+        .runtime
+        .issue_monitor_launch_deliveries
+        .insert(first_delivery, materializing);
+    let before = gwt_core::process::thread_git_spawn_count();
+    run_worker(0);
+    assert!(
+        gwt_core::process::thread_git_spawn_count() - before > 1,
+        "unavailable speculation must run normal facts preparation"
+    );
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    assert_eq!(
+        fixture.runtime.pending_launch_feedback_contexts.len(),
+        1,
+        "the normal authentication failure cannot publish a successor pane"
+    );
+    drain_queued_blocking_tasks(&queued);
+    let preparations = fixture.runtime.issue_monitor_launch_preparations.clone();
+    fixture
+        .runtime
+        .project_tab_incarnations
+        .get_mut("tab-1")
+        .unwrap()
+        .generation += 1;
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_facts_prefetched(head)
+        .is_empty());
+    assert_eq!(
+        fixture.runtime.issue_monitor_launch_preparations,
+        preparations
+    );
+    assert!(queued.lock().unwrap().is_empty());
+}
+
+#[test]
+fn issue5596_same_project_preparation_overlaps_after_pane_registration() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "serial-preparation",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    for issue_number in [3165, 3166] {
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &fixture.project_root,
+                issue_number,
+                LinkedIssueKind::Issue,
+                None,
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            );
+    }
+    assert_eq!(
+        queued.lock().expect("preparation workers").len(),
+        1,
+        "sibling facts workers must not invalidate each other's preparation"
+    );
+    drain_queued_blocking_tasks(&queued);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    fixture.runtime.advance_issue_monitor_launch_queue_events();
+    let first_pane_inflight = fixture
+        .runtime
+        .inflight_launches
+        .values()
+        .any(|(window_id, _)| {
+            fixture
+                .runtime
+                .pending_launch_feedback_contexts
+                .get(window_id)
+                .is_some_and(|feedback| feedback.issue_monitor_issue_number == Some(3165))
+        });
+    let second_preparation_started = fixture
+        .runtime
+        .issue_monitor_launch_preparations
+        .iter()
+        .any(|key| key.2 == 3166);
+    let (window_id, result) =
+        take_monitor_launch_complete_event("serial-preparation", &fixture.recorded_events);
+    assert!(result.is_ok(), "first launch: {result:?}");
+    run_queued_monitor_gui_diagnostics(&queued, &[2, 1, 0]);
+    let next_preparation_count = queued.lock().expect("next preparation").len();
+    assert_eq!(
+        next_preparation_count, 1,
+        "the next facts preparation must start after the first pane is registered"
+    );
+    assert!(
+        first_pane_inflight,
+        "the first pane must remain inflight until its completion is applied"
+    );
+    assert!(
+        second_preparation_started,
+        "different branches must prepare while the first materialization is running"
+    );
+    fixture
+        .runtime
+        .handle_launch_complete(window_id.clone(), result);
+    assert_eq!(
+        queued.lock().expect("PTY and facts preparation").len(),
+        2,
+        "the first PTY preparation and next launch facts must overlap"
+    );
+    assert!(
+        fixture
+            .runtime
+            .issue_monitor_launch_preparations
+            .iter()
+            .any(|key| key.2 == 3166),
+        "the second launch must prepare while the first completion awaits PTY preparation"
+    );
+    assert!(
+        fixture
+            .runtime
+            .inflight_launches
+            .values()
+            .any(|(id, _)| id == &window_id),
+        "the first pane must remain inflight while its PTY preparation is queued"
+    );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_prepared_agent_launch(&fixture.recorded_events);
+    // A newer Session supersedes this completion without closing the pane.
+    let address = fixture.runtime.window_lookup[&window_id].clone();
+    fixture
+        .runtime
+        .tab_mut(&address.tab_id)
+        .unwrap()
+        .workspace
+        .set_session_id(&address.raw_id, Some("superseding-session".to_string()));
+    fixture.runtime.handle_agent_launch_prepared(prepared);
+    drain_queued_blocking_tasks(&queued);
+    assert!(
+        fixture
+            .runtime
+            .inflight_launches
+            .values()
+            .all(|(id, _)| id != &window_id),
+        "a stale completed worker must release its own materialization lane"
+    );
+    assert!(
+        fixture
+            .runtime
+            .issue_monitor_launch_preparations
+            .iter()
+            .any(|key| key.2 == 3166),
+        "the second launch must progress on completion without waiting for the scheduled tick"
+    );
+}
+
+#[test]
+fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "prepared-fresh",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let previous_spawner = fixture.runtime.blocking_tasks.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    fixture.runtime.blocking_tasks = previous_spawner;
+    // Admission must reserve the name on its worker. Holding the real history
+    // file makes any GUI-side reallocation fail immediately and causally.
+    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    fs::create_dir_all(history_path.parent().unwrap()).expect("name history directory");
+    let history = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&history_path)
+        .expect("open name history");
+    fs2::FileExt::lock_exclusive(&history).expect("hold name history after admission");
+    let before = gwt_core::process::thread_git_spawn_count();
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    let git_spawns = gwt_core::process::thread_git_spawn_count() - before;
+    let named_pane = fixture
+        .runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .any(|window| {
+            window.linked_issue_number == Some(3165)
+                && window
+                    .agent_name
+                    .as_ref()
+                    .is_some_and(|name| !name.is_empty())
+        });
+    fs2::FileExt::unlock(&history).expect("release name history");
+    // A busy history refusal creates no pane or LaunchComplete. Reap only an
+    // actual launch before asserting, including on the RED path.
+    let result = named_pane
+        .then(|| take_monitor_launch_complete("prepared-fresh", &fixture.recorded_events));
+    assert!(
+        named_pane,
+        "prepared completion must publish its worker-reserved name while history is locked"
+    );
+    assert!(result.as_ref().unwrap().is_ok(), "fresh launch: {result:?}");
+    assert_eq!(
+        git_spawns, 0,
+        "prepared completion spawned Git on the GUI thread"
+    );
+}
+
+#[test]
+fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "prepared-name-collision",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    let other = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    tab.workspace.set_linked_issue_number(&other.id, Some(3166));
+    tab.workspace
+        .set_status(&other.id, WindowProcessStatus::Running);
+    fixture.runtime.register_window("tab-1", &other.id);
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            prefs.max_active_agents = 3;
+            Ok(())
+        },
+    )
+    .expect("capacity for both issues");
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    let history = fs::read_to_string(&history_path).expect("worker-reserved name history");
+    let reserved: String = serde_json::from_str(history.lines().last().unwrap()).unwrap();
+    // The existing pane and proposed window ID stay the same. Only its name
+    // changes after capture, so the initial collision must trigger the retry.
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    assert!(tab
+        .workspace
+        .set_agent_name(&other.id, Some(reserved.clone())));
+    let before = gwt_core::process::thread_git_spawn_count();
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
+    assert_eq!(
+        fixture
+            .runtime
+            .tab("tab-1")
+            .unwrap()
+            .workspace
+            .persisted()
+            .windows
+            .len(),
+        1,
+        "a conflicting reserved initial must not publish a pane"
+    );
+    run_queued_monitor_gui_diagnostics(&queued, &[3, 1, 0]);
+    assert_eq!(queued.lock().unwrap().len(), 1, "reprepare on a worker");
+    drain_queued_blocking_tasks(&queued);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    let windows = &fixture
+        .runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows;
+    let launched_name = windows
+        .iter()
+        .find(|window| window.linked_issue_number == Some(3165))
+        .and_then(|window| window.agent_name.as_ref())
+        .expect("reprepared pane has a reserved name");
+    assert_ne!(launched_name.chars().next(), reserved.chars().next());
+    assert_eq!(windows.len(), 2);
+}
+
+#[test]
+fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "two-owner-preclaim",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    // Two workers can capture this preview before either creates a pane.
+    let foreign = fixture
+        .runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    let foreign_window_id = combined_window_id("tab-1", &foreign.id);
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    assert!(tab
+        .workspace
+        .set_linked_issue_number(&foreign.id, Some(3166)));
+    tab.workspace
+        .set_status(&foreign.id, WindowProcessStatus::Running);
+    let expected_window_id = combined_window_id(
+        "tab-1",
+        &tab.workspace.next_window_id_preview(WindowPreset::Agent),
+    );
+    fixture.runtime.register_window("tab-1", &foreign.id);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.max_active_agents = 2;
+        let delivery = prefs
+            .pending_launch_deliveries
+            .iter_mut()
+            .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
+            .expect("queued owner A");
+        delivery.materializer_id = Some(fixture.runtime.issue_monitor_materializer_id.clone());
+        delivery.materializer_pid = Some(std::process::id());
+        delivery.materializer_window_id = Some(foreign_window_id.clone());
+        Ok(())
+    })
+    .expect("seed owner A's stale preclaim before owner B used its preview");
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read reprepared claim");
+    let delivery = prefs
+        .pending_launch_deliveries
+        .iter()
+        .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
+        .expect("owner A delivery");
+    assert_eq!(
+        delivery.materializer_window_id.as_deref(),
+        Some(expected_window_id.as_str()),
+        "owner A must not reclaim owner B's pane merely because its ID matches an old preview"
+    );
+    assert_eq!(
+        fixture
+            .runtime
+            .tab("tab-1")
+            .unwrap()
+            .workspace
+            .persisted()
+            .windows[0]
+            .linked_issue_number,
+        Some(3166)
+    );
+    assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+}
+
+#[test]
+fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "reuse-fresh-facts",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    let unrelated = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    tab.workspace
+        .set_linked_issue_number(&unrelated.id, Some(3166));
+    tab.workspace
+        .set_status(&unrelated.id, WindowProcessStatus::Running);
+    let expected_window_id = combined_window_id(
+        "tab-1",
+        &tab.workspace.next_window_id_preview(WindowPreset::Agent),
+    );
+    fixture.runtime.register_window("tab-1", &unrelated.id);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.max_active_agents = 3;
+        Ok(())
+    })
+    .expect("change unrelated admission prefs");
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    run_queued_monitor_gui_diagnostics(&queued, &[2, 0]);
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "metadata changes must still revalidate on a worker"
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    drain_queued_blocking_tasks(&queued);
+    let repeated_git = gwt_core::process::thread_git_spawn_count() - before;
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read refreshed delivery");
+    let claim = prefs
+        .pending_launch_deliveries
+        .iter()
+        .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
+        .expect("delivery retained");
+    assert_eq!(
+        claim.materializer_window_id.as_deref(),
+        Some(expected_window_id.as_str()),
+        "the reused facts must claim the current proposed pane"
+    );
+    // This offline fixture rebinds through local fallback, which validates
+    // the origin. Base/hydration/prompt preparation must not run again.
+    assert_eq!(repeated_git, 1, "only the current claim may validate Git");
+    assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+}
+
+fn assert_issue5596_unsubmitted_answer_packet_retries(close_project: bool) {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "unsubmitted-answer",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    seed_resumed_autonomous_handoff(&fixture, "Keep the exact Session");
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    assert!(
+        matches!(
+            gwt::load_issue_monitor_prefs(&prefs_path)
+                .unwrap()
+                .autonomous_handoffs[0]
+                .delivery,
+            gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { attempt: 1, .. }
+        ),
+        "the callback must carry an existing unsubmitted write-ahead token"
+    );
+    if close_project {
+        fixture.runtime.close_project_tab_events("tab-1");
+    } else {
+        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.launch_profile.as_mut().expect("saved profile").model =
+                Some("changed-while-answer-worker-returned".to_string());
+            Ok(())
+        })
+        .expect("change profile after write-ahead");
+    }
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(prepared)
+        .is_empty());
+    drain_queued_blocking_tasks(&queued);
+    let prefs =
+        gwt::load_issue_monitor_prefs(&prefs_path).expect("load settled unsubmitted attempt");
+    assert!(
+        matches!(
+            prefs.autonomous_handoffs[0].delivery,
+            gwt::autonomous_handoff::AutonomousHandoffDeliveryState::RetryBackoff {
+                attempt: 1,
+                ..
+            }
+        ),
+        "unsubmitted token must retain bounded exact-session retry: {:?}",
+        prefs.autonomous_handoffs[0].delivery
+    );
+    assert!(prefs.autonomous_handoffs[0].delivered_at.is_none());
+    assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+}
+
+#[test]
+fn issue5596_answer_packet_pref_stale_settles_unsubmitted_attempt() {
+    assert_issue5596_unsubmitted_answer_packet_retries(false);
+}
+
+#[test]
+fn issue5596_answer_packet_project_closed_settles_unsubmitted_attempt() {
+    assert_issue5596_unsubmitted_answer_packet_retries(true);
+}
+
+#[test]
+fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_first() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "answer-exact-holder",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::ActiveSameConversation,
+        true,
+    );
+    seed_resumed_autonomous_handoff(&fixture, "Continue the asking conversation");
+    let holder_window_id = fixture.holder_window_id.clone().expect("exact holder");
+    insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
+    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
+    let other = tab
+        .workspace
+        .add_window(WindowPreset::Agent, canvas_bounds());
+    tab.workspace.set_linked_issue_number(&other.id, Some(3165));
+    tab.workspace
+        .set_status(&other.id, WindowProcessStatus::Running);
+    let holder_raw_id = tab.workspace.persisted().windows[0].id.clone();
+    assert!(tab
+        .workspace
+        .set_agent_name(&holder_raw_id, Some("ExistingExactHolder".to_string())));
+    let mut persisted = tab.workspace.persisted().clone();
+    persisted.windows.swap(0, 1);
+    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    fixture.runtime.register_window("tab-1", &other.id);
+    assert_eq!(
+        fixture
+            .runtime
+            .live_issue_agent_window("tab-1", 3165, "work/issue-3165"),
+        Some(combined_window_id("tab-1", &other.id)),
+        "generic Issue lookup must differ from the exact native holder"
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    // Both answer workers encounter a busy canonical history. Their unused
+    // name result must not prevent delivery to the existing named holder.
+    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    fs::create_dir_all(history_path.parent().unwrap()).expect("name history directory");
+    let history = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&history_path)
+        .expect("open name history");
+    fs2::FileExt::lock_exclusive(&history).expect("hold name history before answer admission");
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+    for _ in 0..2 {
+        drain_queued_blocking_tasks(&queued);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    fs2::FileExt::unlock(&history).expect("release name history");
+    let windows = &fixture
+        .runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows;
+    assert_eq!(windows.len(), 2, "an answer must keep the existing panes");
+    assert_eq!(
+        windows
+            .iter()
+            .find(|window| combined_window_id("tab-1", &window.id) == holder_window_id)
+            .unwrap()
+            .agent_name
+            .as_deref(),
+        Some("ExistingExactHolder"),
+        "an answer must preserve its holder's name despite a busy history"
+    );
+    assert!(
+        matches!(
+            fixture.runtime.issue_monitor_launch_deliveries.get(
+                fixture.delivery_id.as_deref().expect("durable delivery")
+            ),
+            Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+                if window_id == &holder_window_id
+        ),
+        "the prepared answer must reach its exact holder instead of retrying against the generic Issue pane"
+    );
 }
 
 #[test]
@@ -691,4 +1663,74 @@ fn termination_class_requires_exact_exit_and_readable_bridge_evidence() {
         );
         assert_eq!(after.issue_tiers[&4774].unknown_failures, 0);
     }
+}
+
+#[test]
+fn issue5596_answer_worker_uses_current_autonomous_mode() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _autonomous_execution =
+        ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_EXECUTION_ENV);
+    let _autonomous_issue = ScopedEnvVar::unset(gwt::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "answer-current-autonomous-mode",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    seed_resumed_autonomous_handoff(&fixture, "Continue the exact Session");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.autonomous_mode = false;
+        Ok(())
+    })
+    .expect("begin preparation without autonomous mode");
+    let previous_spawner = fixture.runtime.blocking_tasks.clone();
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Spec,
+            None,
+            gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+        );
+    drain_queued_blocking_tasks(&queued);
+    assert!(fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ))
+        .is_empty());
+    run_queued_monitor_gui_diagnostics(&queued, &[2, 1]);
+    assert_eq!(
+        queued.lock().expect("queued answer worker").len(),
+        1,
+        "the exact answer must await its write-ahead worker"
+    );
+    // The second worker accepts a new prefs stamp, so its launch facts must
+    // reflect a mode edit made after the first preparation callback.
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.autonomous_mode = true;
+        Ok(())
+    })
+    .expect("enable autonomous mode before answer preparation");
+    drain_queued_blocking_tasks(&queued);
+    fixture.runtime.blocking_tasks = previous_spawner;
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    let result =
+        take_monitor_launch_complete("answer-current-autonomous-mode", &fixture.recorded_events);
+    assert_monitor_exact_resume(result, &fixture);
 }

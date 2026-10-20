@@ -260,6 +260,10 @@ impl WorktreeManager {
 
     /// List all worktrees for this repository.
     pub fn list(&self) -> Result<Vec<WorktreeInfo>> {
+        crate::worktree_inventory::list(&self.repo_path, || self.list_uncached())
+    }
+
+    fn list_uncached(&self) -> Result<Vec<WorktreeInfo>> {
         let started = std::time::Instant::now();
         let output = run_git_observing_operation_deadline(
             &["worktree", "list", "--porcelain"],
@@ -417,6 +421,7 @@ impl WorktreeManager {
     /// Create a new worktree at `path` for `branch`.
     pub fn create(&self, branch: &str, path: &Path) -> Result<()> {
         let path_arg = path_arg_for_git(path);
+        let _config_write = crate::repository::lock_repository_config_write(&self.repo_path)?;
         let output = gwt_core::process::run_git_logged(
             &["worktree", "add", path_arg.as_str(), branch],
             Some(&self.repo_path),
@@ -447,6 +452,7 @@ impl WorktreeManager {
         }
 
         let path_arg = path_arg_for_git(path);
+        let _config_write = crate::repository::lock_repository_config_write(&self.repo_path)?;
         let output = gwt_core::process::run_git_logged(
             &["worktree", "add", "--detach", path_arg.as_str(), base_ref],
             Some(&self.repo_path),
@@ -680,6 +686,7 @@ impl WorktreeManager {
                 ResidentBranchMaterialization::RetainedBranchHead { head: head.clone() },
             ),
         };
+        let _config_write = crate::repository::lock_repository_config_write(&self.repo_path)?;
         let output = run_git_observing_operation_deadline(&args, &self.repo_path)
             .map_err(|e| GwtError::Git(format!("worktree add {branch}: {e}")))?;
         if !output.success {
@@ -1005,6 +1012,7 @@ impl WorktreeManager {
         }
 
         let path_arg = path_arg_for_git(path);
+        let _config_write = crate::repository::lock_repository_config_write(&self.repo_path)?;
         let output = run_git_observing_operation_deadline(
             &[
                 "worktree",
@@ -1111,6 +1119,7 @@ impl WorktreeManager {
         let _configuration_lock = self.lock_branch_configuration()?;
         let remote_ref = normalize_remote_ref(remote_ref);
         let path_arg = path_arg_for_git(path);
+        let _config_write = crate::repository::lock_repository_config_write(&self.repo_path)?;
         let output = run_git_observing_operation_deadline(
             &[
                 "worktree",
@@ -3969,13 +3978,40 @@ prunable gitdir file points to non-existent location
             .unwrap());
 
         let worktree_path = sibling_worktree_path(&repo_path, "feature/materialized");
-        manager
-            .create_from_remote(
+        let common = std::fs::canonicalize(
+            gwt_core::repo_hash::resolve_repository_common_dir(&repo_path).unwrap(),
+        )
+        .unwrap();
+        let holder = gwt_core::operation_deadline::NamedFileLock::acquire(
+            &common.join("gwt-config-write.lock"),
+            "test held config writer",
+        )
+        .unwrap();
+        let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+        let worker_path = worktree_path.clone();
+        let worker = std::thread::spawn(move || {
+            crate::repository::CONFIG_WRITE_CONTENTION.with(|slot| {
+                *slot.borrow_mut() = Some(notice_tx.clone());
+            });
+            let result = manager.create_from_remote(
                 "origin/feature/materialized",
                 "feature/materialized",
-                &worktree_path,
-            )
-            .unwrap();
+                &worker_path,
+            );
+            notice_tx.send("completed").unwrap();
+            result.map_err(|error| error.to_string())
+        });
+        // Observe the writer's actual lock contention or its completion, not
+        // an elapsed-time guess. Always release and reap before asserting RED.
+        // test-hygiene: allow-wall-clock-deadline hang guard for the causal lock-contention notification
+        let first_notice = notice_rx.recv_timeout(Duration::from_secs(60));
+        drop(holder);
+        worker.join().expect("config writer thread").unwrap();
+        assert_eq!(
+            first_notice.expect("writer contention or completion"),
+            "contended",
+            "tracking worktree creation must observe the shared config writer lock"
+        );
         assert!(worktree_path.exists());
 
         let branch_output =

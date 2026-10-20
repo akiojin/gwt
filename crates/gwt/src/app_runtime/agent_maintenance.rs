@@ -144,6 +144,7 @@ impl AppRuntime {
         let pending_launch = !self.inflight_launches.is_empty()
             || !self.pending_launch_completions.is_empty()
             || !self.issue_monitor_launch_preparations.is_empty()
+            || !self.issue_monitor_launch_queue.is_empty()
             || !self.pending_continue_work.is_empty()
             || !self.pending_fresh_execution_launches.is_empty()
             || !self.pending_startup_auto_resume_sessions.is_empty()

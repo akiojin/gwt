@@ -23,9 +23,9 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       import {
         attentionForWorkspace,
+        createActiveWorkProjectionModel,
         createIssueOtherSurface,
         formatLifecycleStateLabel,
-        mergeActiveWorkProjectionPatch,
       } from "/issue-other-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
@@ -445,6 +445,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // pending action) and wizardInteractionGuard moved to
       // /launch-wizard-surface.js.
       let activeWorkProjection = null;
+      const { model: activeWorkProjectionModel, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
       const agentKanbanPendingPlacement =
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
@@ -1280,8 +1281,17 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // Issue #4538 AC-1: the route's hash resolved to no open or Recent
       // Project. Show the path-free not-found view and stop reconnecting.
+      const projectRouteNotFoundModel = createUiStateStore(false);
+      projectRouteNotFoundModel.subscribe(missing => missing, missing => {
+        if (missing) showProjectRouteNotFound();
+      });
       function showProjectRouteNotFound() {
         routeProjectMissing = true;
+        connectionOverlay.dispose();
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
+        hubReconnectTimer = null;
         for (const connection of [socket, hubSocket, socketInputHandoff?.socket]) {
           try { connection?.close(); } catch { /* already closed */ }
         }
@@ -1443,10 +1453,12 @@ import { createUiStateStore } from "/ui-state-store.js";
         socketReceiveDispatcherGeneration += 1;
         socketReceiveDispatcher?.dispose?.();
         socketReceiveDispatcher = null;
-        setConnectionState(false);
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
         }
+        reconnectTimer = null;
+        if (routeProjectMissing) return;
+        setConnectionState(false);
         reconnectTimer = window.setTimeout(() => connectSocket(recoverSnapshots === true), 1000);
       }
 
@@ -1507,7 +1519,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           clearPickerPending();
           if (socket === connection) handleSocketClose();
           if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
-          hubReconnectTimer = window.setTimeout(connectSocket, 1000);
+          hubReconnectTimer = null;
+          if (!routeProjectMissing) hubReconnectTimer = window.setTimeout(connectSocket, 1000);
         });
       }
 
@@ -2098,6 +2111,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
         startupAutoResumeReadySent = true;
         requestAnimationFrame(() => {
+          if (routeProjectMissing) return;
           send({
             kind: "startup_auto_resume_ready",
             bounds: visibleBounds(),
@@ -4097,6 +4111,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         alertsToasts.push(alert);
       }
 
+      const continueWorkOutcomeModel = createUiStateStore(null);
+      continueWorkOutcomeModel.subscribe(outcome => outcome, outcome => {
+        if (outcome) handleContinueWorkOutcome(outcome);
+      });
+
       function handleContinueWorkOutcome(event) {
         const exact = continueWorkDispatcher.handleOutcome(event);
         if (!exact) {
@@ -4133,6 +4152,39 @@ import { createUiStateStore } from "/ui-state-store.js";
         getResumeBounds: () => visibleBounds(),
         launchPending,
       });
+
+      const workspaceResumeOutcomeModel = createUiStateStore(null);
+      workspaceResumeOutcomeModel.subscribe(outcome => outcome, outcome => {
+        if (outcome) handleWorkspaceResumeAgentOutcome(outcome);
+      });
+
+      function handleWorkspaceResumeAgentOutcome(event) {
+        switch (event.kind) {
+          case "workspace_resume_agent_error":
+            workspaceResumePicker.handleError(event);
+            {
+              const settled = launchPending.settleAck(event);
+              if (settled) {
+                alertsToasts.push({
+                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
+                  level: "error",
+                  title: "Resume failed",
+                  message: event?.message || "Failed to resume the selected session.",
+                  dismissible: true,
+                  timeoutMs: 0,
+                });
+                scheduleKnowledgeRelatedWorkRefresh(true);
+              }
+            }
+            break;
+          // Backend accepted the request: settle pending UI and dismiss the picker.
+          case "workspace_resume_agent_started":
+            workspaceResumePicker.handleStarted(event);
+            launchPending.settleAck(event);
+            scheduleKnowledgeRelatedWorkRefresh(true);
+            break;
+        }
+      }
 
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface
       // (branch list state map, branch rows/list rendering, cleanup modal
@@ -5073,6 +5125,23 @@ import { createUiStateStore } from "/ui-state-store.js";
         if (notice) agentCompletionNotifier.handleIntent(notice);
       });
 
+      const workspaceProjectionPruneModel = createUiStateStore(null);
+      function renderWorkspaceProjectionPruneFeedback(feedback) {
+        if (!feedback) return;
+        if (feedback.kind === "workspace_projection_prune_error") {
+          window.alert(`Work Projection Prune error: ${feedback.message}`);
+          return;
+        }
+        const modeLabel = feedback.mode === "dry_run" ? "dry-run" : "applied";
+        window.alert(
+          `Work Projection Prune (${modeLabel})\n` +
+            `  archived: ${feedback.archived}\n` +
+            `  deleted: ${feedback.deleted}\n` +
+            `  skipped: ${feedback.skipped}`,
+        );
+      }
+      workspaceProjectionPruneModel.subscribe(feedback => feedback, renderWorkspaceProjectionPruneFeedback);
+
       const terminalStatusModel = createUiStateStore(null);
       terminalStatusModel.subscribe(state => state, state => {
         if (!state) return;
@@ -5091,6 +5160,11 @@ import { createUiStateStore } from "/ui-state-store.js";
           messageEl.textContent = progress.message;
           updateTerminalOverlayCopyState(messageEl.closest(".terminal-overlay"));
         }
+      });
+
+      const runtimeHookModel = createUiStateStore(null);
+      runtimeHookModel.subscribe(state => state, state => {
+        if (state) frontendUnits.boardSurface.handleRuntimeHookEvent(state);
       });
 
       const issueMonitorNotificationModel = createUiStateStore(null);
@@ -5216,7 +5290,22 @@ import { createUiStateStore } from "/ui-state-store.js";
         knowledgeSettingsSurface,
       });
 
+      function renderActiveWorkProjection(snapshot) {
+        if (!snapshot) return;
+        activeWorkProjection = snapshot.projection;
+        cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
+        syncCurrentProjectWorkspaceIds(
+          deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
+        );
+        refreshBoardCurrentWorkspaceId();
+        workspaceOverviewSurface.renderWindows();
+        scheduleKnowledgeRelatedWorkRefresh();
+        recomputeOperatorTelemetry();
+      }
+      activeWorkProjectionModel.subscribe(state => state, renderActiveWorkProjection);
+
       function receive(event) {
+        if (routeProjectMissing) return;
         if (closeProjectController.receive(event)) return;
         if (shouldDropLiveEventForTestMode(event)) {
           return;
@@ -5228,7 +5317,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "project_not_found": {
-            if (event.project_key === routeProjectKey) showProjectRouteNotFound();
+            if (event.project_key === routeProjectKey) projectRouteNotFoundModel.update(() => true);
             break;
           }
           case "project_agent_aggregate": {
@@ -5259,23 +5348,14 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           }
           case "workspace_projection_prune_result": {
-            // SPEC-2359 US-41 Phase 8b: minimal feedback for projection prune.
-            // A richer Drawer surface lands in a follow-up; for now an alert
-            // keeps the loop closed so users see the count summary.
-            const modeLabel =
-              event.mode === "dry_run" ? "dry-run" : "applied";
-            window.alert(
-              `Work Projection Prune (${modeLabel})\n` +
-                `  archived: ${event.archived}\n` +
-                `  deleted: ${event.deleted}\n` +
-                `  skipped: ${event.skipped}`,
-            );
+            workspaceProjectionPruneModel.update(() => ({
+              kind: event.kind, mode: event.mode, archived: event.archived,
+              deleted: event.deleted, skipped: event.skipped,
+            }));
             break;
           }
           case "workspace_projection_prune_error":
-            window.alert(
-              `Work Projection Prune error: ${event.message}`,
-            );
+            workspaceProjectionPruneModel.update(() => ({ kind: event.kind, message: event.message }));
             break;
           case "ui_trace_saved":
           case "ui_trace_error":
@@ -5288,37 +5368,8 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyReleaseNotesError(event.message);
             break;
           case "active_work_projection":
-            activeWorkProjection = event.projection || null;
-            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
-            syncCurrentProjectWorkspaceIds(
-              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
-            );
-            refreshBoardCurrentWorkspaceId();
-            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
-            // overview is removed; the Work surface lives in the Workspace
-            // Overview (Kanban). Keep the projection global + telemetry update
-            // so the Kanban surface and Status Strip stay in sync.
-            workspaceOverviewSurface.renderWindows();
-            scheduleKnowledgeRelatedWorkRefresh();
-            recomputeOperatorTelemetry();
-            break;
           case "active_work_projection_patch":
-            activeWorkProjection = mergeActiveWorkProjectionPatch(
-              activeWorkProjection,
-              event.projection || null,
-            );
-            cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection);
-            syncCurrentProjectWorkspaceIds(
-              deriveCurrentProjectWorkspaceIds(activeWorkspace() || {}),
-            );
-            refreshBoardCurrentWorkspaceId();
-            // SPEC-2359 Phase W-12 Slice 3 (FR-351): the sidebar Active Works
-            // overview is removed; the Work surface lives in the Workspace
-            // Overview (Kanban). Keep the projection global + telemetry update
-            // so the Kanban surface and Status Strip stay in sync.
-            workspaceOverviewSurface.renderWindows();
-            scheduleKnowledgeRelatedWorkRefresh();
-            recomputeOperatorTelemetry();
+            applyActiveWorkProjectionReceiveEvent(event);
             break;
           // The backend snapshot gates only the List; both views read the catalog.
           case "window_list":
@@ -5528,31 +5579,11 @@ import { createUiStateStore } from "/ui-state-store.js";
             workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
             break;
           case "continue_work_outcome":
-            handleContinueWorkOutcome(event);
+            continueWorkOutcomeModel.update(() => ({ ...event }));
             break;
           case "workspace_resume_agent_error":
-            workspaceResumePicker.handleError(event);
-            {
-              const settled = launchPending.settleAck(event);
-              if (settled) {
-                alertsToasts.push({
-                  id: `workspace-resume-error-${event.operation_id || Date.now()}`,
-                  level: "error",
-                  title: "Resume failed",
-                  message: event?.message || "Failed to resume the selected session.",
-                  dismissible: true,
-                  timeoutMs: 0,
-                });
-                scheduleKnowledgeRelatedWorkRefresh(true);
-              }
-            }
-            break;
-          // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
-          // accepted — settle pending UI and dismiss the picker.
           case "workspace_resume_agent_started":
-            workspaceResumePicker.handleStarted(event);
-            launchPending.settleAck(event);
-            scheduleKnowledgeRelatedWorkRefresh(true);
+            workspaceResumeOutcomeModel.update(() => ({ ...event }));
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
@@ -5566,7 +5597,9 @@ import { createUiStateStore } from "/ui-state-store.js";
             applyWorkAdvisoryResultEvent(event);
             break;
           case "runtime_hook_event":
-            frontendUnits.boardSurface.handleRuntimeHookEvent(event);
+            runtimeHookModel.update(() => ({
+              event: event.event ? { kind: event.event.kind, project_root: event.event.project_root } : null,
+            }));
             break;
           case "update_state":
             if (event.state === "available") {

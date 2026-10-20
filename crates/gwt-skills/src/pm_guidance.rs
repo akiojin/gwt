@@ -72,6 +72,12 @@ goal, scope or reported-health change. An identical upsert has no direct impact;
 an exact retry returns the original receipt. Older receipts lack this evidence.
 This record does not prove dependency propagation or owner notification:
 `missing_inputs` names the absent dependency graph and active-owner handoff.
+Risk, Decision and Policy changes retain redacted before/after values
+in the same receipt, including decision source revision and policy version/budgets.
+These records have no direct Issue mapping:
+`direct_issue_mapping` is missing; an empty Issue set does not mean no impact.
+Use the recorded values and reason when explaining a revised decision or policy;
+they do not prove downstream propagation or notification. Recurring changes remain outside this evidence.
 
 The policy groups Now/Next/Later and explains missing milestone inputs;
 authored health and confidence are not verified evidence. Effective health
@@ -3722,6 +3728,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`change_impact`",
             "`directly_affected_issues`",
             "Goal changes use only roadmap links explicitly naming the goal",
+            "Risk, Decision and Policy changes retain redacted before/after values",
+            "`direct_issue_mapping` is missing; an empty Issue set does not mean no impact",
             "Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references",
             "Goal observations do not prove outcome achievement or metric evidence",
             "does not prove dependency propagation or owner notification",

@@ -137,7 +137,7 @@ for ($index = 0; $index -lt $paneCount; $index++) {
   # are separate from the source checkout and never change its refs.
   & git -C $folder init --quiet
   if ($LASTEXITCODE -ne 0) { throw 'Isolated workload Git metadata initialization failed.' }
-  & git -C $folder -c user.name=MemoryFixture -c user.email=memory@example.invalid commit --quiet --allow-empty -m 'test: initialize memory fixture'
+  & git -C $folder -c user.name=MemoryFixture -c user.email=memory@example.invalid -c commit.gpgsign=false -c core.hooksPath=NUL commit --quiet --allow-empty -m 'test: initialize memory fixture'
   if ($LASTEXITCODE -ne 0) { throw 'Isolated workload initial commit failed.' }
   $fixtureBranch = (& git -C $folder branch --show-current).Trim()
   $folderStatus = Invoke-IsolatedGwtd 'issue.monitor.status' @{} $folder

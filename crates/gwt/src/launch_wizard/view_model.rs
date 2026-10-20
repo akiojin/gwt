@@ -16,6 +16,102 @@ fn start_method_group(
 }
 
 impl LaunchWizardState {
+    /// Expose the Wizard's catalogs without applying its launch-time fallback
+    /// normalization to the profiles the Settings window is editing.
+    pub fn issue_monitor_profile_choices(
+        &self,
+        profiles: &[crate::IssueMonitorLaunchProfile],
+    ) -> IssueMonitorProfileChoices {
+        let agents = self
+            .detected_agents
+            .iter()
+            .map(|agent| {
+                let mut state = self.clone();
+                state.step = LaunchWizardStep::ModelSelect;
+                state.agent_id = agent.id.clone();
+                state.reasoning.clear();
+                let models: Vec<_> = state
+                    .model_options_view()
+                    .into_iter()
+                    .map(|option| {
+                        state.model = option.value.clone();
+                        IssueMonitorModelChoices {
+                            value: option.value,
+                            label: option.label,
+                            reasoning_options: state.reasoning_options_view(),
+                            default_reasoning: state
+                                .current_reasoning_options()
+                                .iter()
+                                .find(|option| option.is_default)
+                                .map(|option| option.stored_value.to_string()),
+                        }
+                    })
+                    .collect();
+                let default_model = models
+                    .first()
+                    .map(|option| option.value.clone())
+                    .unwrap_or_default();
+                let agent_id = agent_id_from_key(&agent.id);
+                let saved = profiles.iter().find(|profile| {
+                    gwt_agent::resolve_agent_id(&profile.agent_id)
+                        .unwrap_or_else(|| agent_id_from_key(&profile.agent_id))
+                        == agent_id
+                });
+                state.model = saved
+                    .and_then(|profile| profile.model.clone())
+                    .unwrap_or_else(|| default_model.clone());
+                state.reasoning = saved
+                    .and_then(|profile| profile.reasoning.clone())
+                    .unwrap_or_default();
+                state.reasoning_explicit = !state.reasoning.trim().is_empty();
+                let mut session_modes = vec![gwt_agent::SessionMode::Normal];
+                if state.agent_supports_continue_latest(&agent.id) {
+                    session_modes.push(gwt_agent::SessionMode::Continue);
+                }
+                if state.current_agent_supports_resume_picker() {
+                    session_modes.push(gwt_agent::SessionMode::Resume);
+                }
+                IssueMonitorAgentChoices {
+                    id: agent.id.clone(),
+                    name: agent.name.clone(),
+                    is_custom: agent.custom_agent.is_some(),
+                    supports_model_input: !models.is_empty()
+                        || state.current_agent_supports_freetext_model(),
+                    models,
+                    model_suggestions: if state.current_agent_supports_hermes_options() {
+                        state.hermes_choices.models_for(&state.hermes_provider)
+                    } else {
+                        Vec::new()
+                    },
+                    default_model,
+                    reasoning_options: state.reasoning_options_view(),
+                    default_reasoning: state
+                        .current_reasoning_options()
+                        .iter()
+                        .find(|option| option.is_default)
+                        .map(|option| option.stored_value.to_string()),
+                    supports_fast_mode: state.current_agent_supports_fast_mode(),
+                    supports_skip_permissions: gwt_agent::provider_skip_mapping(
+                        &agent_id,
+                        agent.custom_agent.as_ref(),
+                    )
+                    .supported,
+                    session_modes,
+                }
+            })
+            .collect();
+        IssueMonitorProfileChoices {
+            agents,
+            docker_services: self.docker_service_options(),
+            default_docker_service: self
+                .context
+                .docker_context
+                .as_ref()
+                .and_then(|context| context.suggested_service.clone()),
+            windows_shell_supported: cfg!(windows),
+        }
+    }
+
     pub fn view(&self) -> LaunchWizardView {
         let show_start_methods = self.show_start_methods();
         let show_back_button = self.show_back_button();

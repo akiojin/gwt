@@ -318,7 +318,7 @@ test("deprecated Intake command route emits no open_intake_session wire", () => 
 test("frontend handles active work projection as status-strip telemetry", () => {
   assert.match(
     appSource,
-    /case\s+"active_work_projection":[\s\S]+activeWorkProjection\s*=\s*event\.projection/,
+    /case\s+"active_work_projection":[\s\S]+applyActiveWorkProjectionReceiveEvent\(event\)/,
     "expected frontend to store active_work_projection separately from canvas workspace_state",
   );
   assert.match(
@@ -3923,15 +3923,12 @@ test("Board workspace id sync avoids stringify and reuses active Work id cache",
     "workspace_state id derivation must not remap active_work_projection on every render",
   );
 
-  const receiveBody = extractFunctionBody(appSource, "receive");
-  const activeProjectionCase = receiveBody.match(
-    /case\s+"active_work_projection":[\s\S]*?break;/,
-  );
-  assert.ok(activeProjectionCase, "expected active_work_projection receive case");
-  const cacheIndex = activeProjectionCase[0].indexOf(
+  const projectionRender = extractFunctionBody(appSource, "renderActiveWorkProjection");
+  assert.match(appSource, /activeWorkProjectionModel\.subscribe\(state => state, renderActiveWorkProjection\)/);
+  const cacheIndex = projectionRender.indexOf(
     "cacheActiveWorkProjectionWorkspaceIds(activeWorkProjection)",
   );
-  const syncIndex = activeProjectionCase[0].indexOf("syncCurrentProjectWorkspaceIds(");
+  const syncIndex = projectionRender.indexOf("syncCurrentProjectWorkspaceIds(");
   assert.ok(
     cacheIndex >= 0,
     "active_work_projection must update the cached active Work id set",
@@ -3941,7 +3938,7 @@ test("Board workspace id sync avoids stringify and reuses active Work id cache",
     "active_work_projection must sync Board ids after refreshing the cache",
   );
   assert.doesNotMatch(
-    activeProjectionCase[0],
+    projectionRender,
     /currentProjectWorkspaceId\s*=\s*deriveCurrentProjectWorkspaceIds/,
     "active_work_projection must not bypass the shared sync helper",
   );

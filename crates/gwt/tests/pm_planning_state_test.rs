@@ -502,6 +502,15 @@ fn planning_apply_upserts_all_seven_records_with_atomic_receipts() {
         let state = load_planning_state(&path).unwrap();
         assert_eq!(state.revision, receipt.resulting_revision);
         assert_eq!(state.audit_receipts.last(), Some(&receipt));
+        if matches!(kind, "risk" | "decision" | "policy") {
+            let impact = receipt
+                .change_impact
+                .as_ref()
+                .expect("governance upserts need change evidence");
+            assert!(impact.record_created);
+            assert_eq!(impact.changes["id"].before, json!(null));
+            assert_eq!(impact.changes["id"].after, json!(kind));
+        }
     }
     let mut request = plan_request("goal", 7, "replace-goal");
     if let gwt::pm_planning::PlanningAction::Goal(goal) = &mut request.action {
@@ -519,6 +528,66 @@ fn planning_apply_upserts_all_seven_records_with_atomic_receipts() {
     assert_eq!(state.policies.len(), 1);
     assert_eq!(state.recurring_items.len(), 1);
     assert_eq!(state.roadmap_items.len(), 1);
+
+    for (index, (kind, updates, changes)) in [
+        (
+            "risk",
+            json!({"severity":"high", "assumptions":["capacity"]}),
+            json!({"severity":{"before":"","after":"high"},
+                "assumptions":{"before":[],"after":["capacity"]}}),
+        ),
+        (
+            "decision",
+            json!({"options":["A","B"], "rationale":"Choose B", "source_revision":7}),
+            json!({"options":{"before":[],"after":["A","B"]},
+                "rationale":{"before":"","after":"Choose B"},
+                "source_revision":{"before":null,"after":7}}),
+        ),
+        (
+            "policy",
+            json!({"version":2, "token_budget":1000}),
+            json!({"version":{"before":0,"after":2},
+                "token_budget":{"before":null,"after":1000}}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut request = plan_request(kind, 8 + 2 * index as u64, &format!("change-{kind}"));
+        let mut action = serde_json::to_value(&request.action).unwrap();
+        action["value"]
+            .as_object_mut()
+            .unwrap()
+            .extend(updates.as_object().unwrap().clone());
+        request.action = serde_json::from_value(action).unwrap();
+        let receipt = apply_planning_action(&path, "pm-a", &request).unwrap();
+        let value = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(value["change_impact"]["record_created"], false);
+        assert_eq!(value["change_impact"]["changes"], changes);
+        assert_eq!(
+            value["change_impact"]["directly_affected_issues"],
+            json!([])
+        );
+        assert_eq!(
+            value["change_impact"]["missing_inputs"],
+            json!([
+                "dependency_graph",
+                "active_owner_handoff",
+                "direct_issue_mapping"
+            ])
+        );
+        let mut same = request.clone();
+        same.expected_revision += 1;
+        same.idempotency_key = format!("same-{kind}");
+        let unchanged = apply_planning_action(&path, "pm-a", &same).unwrap();
+        assert!(unchanged.change_impact.unwrap().changes.is_empty());
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(
+            apply_planning_action(&path, "pm-a", &request).unwrap(),
+            receipt
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
 }
 
 #[test]
@@ -578,7 +647,8 @@ fn planning_change_receipts_keep_direct_impact_and_exact_history_on_replay() {
         moved["change_impact"]["changes"]["horizon"],
         json!({"before":"now","after":"next"})
     );
-    let other = apply_planning_action(&path, "pm-a", &plan_request("risk", 2, "risk")).unwrap();
+    let other =
+        apply_planning_action(&path, "pm-a", &plan_request("recurring", 2, "recurring")).unwrap();
     assert!(serde_json::to_value(other)
         .unwrap()
         .get("change_impact")
@@ -724,6 +794,38 @@ fn planning_change_history_redacts_legacy_values_and_accepts_old_receipts() {
     assert!(!fs::read_to_string(&path)
         .unwrap()
         .contains("example0123456789"));
+
+    for (kind, collection, field, legacy) in [
+        (
+            "risk",
+            "risks",
+            "assumptions",
+            json!(["Bearer example0123456789"]),
+        ),
+        (
+            "decision",
+            "decisions",
+            "options",
+            json!(["Bearer example0123456789"]),
+        ),
+        (
+            "policy",
+            "policies",
+            "cost_budget",
+            json!("Bearer example0123456789"),
+        ),
+    ] {
+        let mut record = json!({"id":kind});
+        record[field] = legacy;
+        write_fixture(&path, &json!({(collection):[record]}));
+        let receipt = apply_planning_action(&path, "pm-a", &plan_request(kind, 0, kind)).unwrap();
+        let value = serde_json::to_value(receipt).unwrap();
+        let captured = value["change_impact"]["changes"][field]["before"].to_string();
+        assert!(captured.contains("REDACTED"), "{kind}: {captured}");
+        assert!(!fs::read_to_string(&path)
+            .unwrap()
+            .contains("example0123456789"));
+    }
 }
 
 #[test]

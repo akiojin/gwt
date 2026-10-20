@@ -23,8 +23,7 @@ use gwt_core::daemon::{
     short_socket_base_candidates_for, DaemonSocketPlacement, DAEMON_SOCKET_DIR_ENV,
     MAX_UNIX_SOCKET_PATH_LEN, UNIX_SOCKET_PATH_CAPACITY,
 };
-// Canonical verification nests TMPDIR; socket fixtures need a short OS root.
-use tempfile::tempdir_in;
+use gwt_core::test_support::socket_tempdir;
 
 /// Builds a path directly under `dir` whose full byte length is `len`.
 fn path_of_len(dir: &Path, len: usize) -> PathBuf {
@@ -72,8 +71,9 @@ fn unix_socket_path_capacity_matches_the_platform_sockaddr_un() {
         "one byte of sun_path is reserved for the NUL terminator"
     );
 
-    let dir = tempdir_in("/tmp").expect("tempdir");
+    let dir = socket_tempdir().expect("tempdir");
     let longest_ok = path_of_len(dir.path(), MAX_UNIX_SOCKET_PATH_LEN);
+    // test-hygiene: allow-unchecked-socket-bind Probe the actual kernel path boundary.
     let listener = UnixListener::bind(&longest_ok);
     assert!(
         listener.is_ok(),
@@ -85,6 +85,7 @@ fn unix_socket_path_capacity_matches_the_platform_sockaddr_un() {
 
     let one_too_long = path_of_len(dir.path(), MAX_UNIX_SOCKET_PATH_LEN + 1);
     assert!(
+        // test-hygiene: allow-unchecked-socket-bind Probe the actual kernel path boundary.
         UnixListener::bind(&one_too_long).is_err(),
         "a {}-byte socket path must be rejected by bind(2)",
         MAX_UNIX_SOCKET_PATH_LEN + 1
@@ -95,7 +96,7 @@ fn unix_socket_path_capacity_matches_the_platform_sockaddr_un() {
 fn daemon_socket_path_stays_colocated_when_it_fits() {
     // No regression for the ordinary `~/.gwt` layout: the socket keeps
     // living next to the endpoint metadata it belongs to (#2338).
-    let home = tempdir_in("/tmp").expect("tempdir");
+    let home = socket_tempdir().expect("tempdir");
     let endpoint_path = home.path().join("daemon").join("abcdef0123456789.json");
     fs::create_dir_all(endpoint_path.parent().unwrap()).expect("create daemon dir");
 
@@ -110,14 +111,14 @@ fn daemon_socket_path_stays_colocated_when_it_fits() {
 fn daemon_socket_path_is_shortened_and_bindable_when_the_endpoint_path_is_too_long() {
     // AC-1: the reported failure. A long fresh-home runtime root must
     // still yield a socket the kernel accepts.
-    let home = tempdir_in("/tmp").expect("tempdir");
+    let home = socket_tempdir().expect("tempdir");
     let endpoint_path = overlong_endpoint_path(home.path());
     assert!(
         endpoint_path.with_extension("sock").as_os_str().len() > MAX_UNIX_SOCKET_PATH_LEN,
         "fixture must overflow sun_path to exercise the shortening path"
     );
 
-    let base = tempdir_in("/tmp").expect("base tempdir");
+    let base = socket_tempdir().expect("base tempdir");
     let resolved = resolve_daemon_socket_path_in(&endpoint_path, &[base.path().to_path_buf()])
         .expect("resolve shortened socket path");
 
@@ -130,7 +131,7 @@ fn daemon_socket_path_is_shortened_and_bindable_when_the_endpoint_path_is_too_lo
     );
     assert!(resolved.path.starts_with(base.path()));
 
-    let listener = UnixListener::bind(&resolved.path);
+    let listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(&resolved.path));
     assert!(
         listener.is_ok(),
         "shortened socket path must bind, got: {:?}",
@@ -142,9 +143,9 @@ fn daemon_socket_path_is_shortened_and_bindable_when_the_endpoint_path_is_too_lo
 fn shortened_daemon_socket_path_is_deterministic_for_the_same_endpoint() {
     // AC-2: a restarting daemon must land on the same socket so stale
     // socket cleanup and endpoint reuse keep working.
-    let home = tempdir_in("/tmp").expect("tempdir");
+    let home = socket_tempdir().expect("tempdir");
     let endpoint_path = overlong_endpoint_path(home.path());
-    let base = tempdir_in("/tmp").expect("base tempdir");
+    let base = socket_tempdir().expect("base tempdir");
     let bases = [base.path().to_path_buf()];
 
     let first = resolve_daemon_socket_path_in(&endpoint_path, &bases).expect("first resolve");
@@ -157,11 +158,11 @@ fn shortened_daemon_socket_path_is_deterministic_for_the_same_endpoint() {
 fn shortened_daemon_socket_paths_do_not_collide_across_scopes() {
     // AC-2: distinct repo hash, worktree hash, or gwt home must never
     // share one socket, or two daemons would fight over the same bind.
-    let base = tempdir_in("/tmp").expect("base tempdir");
+    let base = socket_tempdir().expect("base tempdir");
     let bases = [base.path().to_path_buf()];
 
-    let home_a = tempdir_in("/tmp").expect("home a");
-    let home_b = tempdir_in("/tmp").expect("home b");
+    let home_a = socket_tempdir().expect("home a");
+    let home_b = socket_tempdir().expect("home b");
     let endpoint_a = overlong_endpoint_path(home_a.path());
     let endpoint_b = overlong_endpoint_path(home_b.path());
     let sibling_worktree = endpoint_a.with_file_name("fedcba9876543210.json");
@@ -199,9 +200,9 @@ fn shortened_daemon_socket_paths_do_not_collide_across_scopes() {
 fn shortened_daemon_socket_directory_is_private_to_its_owner() {
     // AC-4: moving the socket out of the project runtime root must not
     // widen the local-only, owner-scoped IPC boundary.
-    let home = tempdir_in("/tmp").expect("tempdir");
+    let home = socket_tempdir().expect("tempdir");
     let endpoint_path = overlong_endpoint_path(home.path());
-    let base = tempdir_in("/tmp").expect("base tempdir");
+    let base = socket_tempdir().expect("base tempdir");
 
     let resolved = resolve_daemon_socket_path_in(&endpoint_path, &[base.path().to_path_buf()])
         .expect("resolve shortened socket path");
@@ -229,16 +230,16 @@ fn shortened_daemon_socket_directory_is_private_to_its_owner() {
 
 #[test]
 fn shortened_daemon_socket_path_skips_bases_that_are_themselves_too_long() {
-    let home = tempdir_in("/tmp").expect("tempdir");
+    let home = socket_tempdir().expect("tempdir");
     let endpoint_path = overlong_endpoint_path(home.path());
 
-    let long_base_root = tempdir_in("/tmp").expect("long base tempdir");
+    let long_base_root = socket_tempdir().expect("long base tempdir");
     let mut long_base = long_base_root.path().to_path_buf();
     while long_base.as_os_str().len() <= MAX_UNIX_SOCKET_PATH_LEN {
         long_base = long_base.join("socket-base-padding");
     }
     fs::create_dir_all(&long_base).expect("create long base");
-    let usable_base = tempdir_in("/tmp").expect("usable base tempdir");
+    let usable_base = socket_tempdir().expect("usable base tempdir");
 
     let resolved = resolve_daemon_socket_path_in(
         &endpoint_path,
@@ -254,7 +255,7 @@ fn shortened_daemon_socket_path_skips_bases_that_are_themselves_too_long() {
 fn daemon_socket_path_reports_a_diagnosable_error_when_no_short_base_is_usable() {
     // AC-6: never surface a bare `path must be shorter than SUN_LEN`.
     // The operator needs the cause and a way out.
-    let home = tempdir_in("/tmp").expect("tempdir");
+    let home = socket_tempdir().expect("tempdir");
     let endpoint_path = overlong_endpoint_path(home.path());
 
     let error = resolve_daemon_socket_path_in(&endpoint_path, &[])

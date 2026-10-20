@@ -21,6 +21,112 @@ const panel = (page: Page, section: string) => section === "agents"
   : settings(page).locator(`[data-settings-panel="${section}"]`);
 const autonomous = (page: Page) => panel(page, "issues").locator('[data-action="monitor-autonomous"]');
 
+test.afterEach(async ({ page }) => {
+  if (!process.env.GWT_PLAYWRIGHT_BASE_URL || page.isClosed()) return;
+  // Release the fixed surface before closing its disposable backing window.
+  await page.locator('button[data-surface="agents"]').click();
+  const ids = await settings(page).evaluateAll(windows => windows.map(window => (window as HTMLElement).dataset.id));
+  const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+  for (const id of ids) await sendLiveGwtEvent(page, { kind: "close_window", id });
+  await sendLiveGwtEvent(page, { kind: "list_windows" });
+  // Wait for the backend's close/readback sequence before checking its DOM projection.
+  await page.waitForFunction(({ cursor, ids }) => ((window as any).__gwtPlaywrightMessages ?? [])
+    .some(({ sequence, payload }: any) => sequence > cursor && payload.kind === "window_list"
+      && Array.isArray(payload.windows) && !payload.windows.some((window: any) => ids.includes(window.id))), { cursor, ids });
+  await expect(settings(page)).toHaveCount(0);
+});
+
+test("Issue #5787 candidate choices preserve saved values and persist dependent selections", async ({ page }, info) => {
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base, "requires browser-check's isolated checkout");
+  test.setTimeout(180_000);
+  await withLiveGwtBackendLock(base!, info, async () => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .some(({ payload }: any) => payload.kind === "workspace_state"));
+    await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 578701,
+      profiles: [{ agent_id: "codex", model: "saved-unlisted-model", reasoning: "high", docker_service: "saved-service", runtime_target: "Host" }] });
+    const seeded = await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .find(({ payload }: any) => ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(payload.kind)
+        && payload.request_id === 578701)?.payload).then(handle => handle.jsonValue());
+    expect(seeded.kind, seeded.message).toBe("issue_monitor_profiles");
+    const open = async () => {
+      // Wait for project bootstrap; retained windows are awaited after reload.
+      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .some(({ payload }: any) => payload.kind === "workspace_state"));
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
+      await expect(panel(page, "agents")).toBeVisible();
+    };
+    await open();
+    const windowId = await settings(page).getAttribute("data-id");
+    const candidates = panel(page, "agents");
+    const control = (name: string) => candidates.getByLabel(`${name} codex`, { exact: true });
+    for (const name of ["Agent", "Model", "Reasoning", "Docker service"]) await expect(control(name)).toHaveJSProperty("tagName", "SELECT");
+    await expect(control("Model")).toHaveValue("saved-unlisted-model");
+    await expect(control("Reasoning")).toHaveValue("high");
+    await expect(control("Docker service")).toHaveValue("saved-service");
+    await expect(control("Docker service")).toBeDisabled();
+    const save = async (action: () => Promise<unknown>) => {
+      const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+      await action();
+      const result = await page.waitForFunction(cursor => ((window as any).__gwtPlaywrightMessages ?? [])
+        .find(({ sequence, payload }: any) => sequence > cursor
+          && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(payload.kind)
+          && Number.isInteger(payload.request_id))?.payload, cursor).then(handle => handle.jsonValue());
+      expect(result.kind, result.message).toBe("issue_monitor_profiles");
+      await expect(candidates).toHaveAttribute("data-saving", "false");
+    };
+    const select = (field: Locator, value: string) => save(async () => {
+      await field.focus();
+      await field.selectOption(value);
+    });
+    await select(control("Model"), "gpt-6-astra");
+    await expect(control("Reasoning")).toHaveValue("medium");
+    await select(control("Reasoning"), "high");
+    await select(control("Runtime"), "Docker");
+    await expect(control("Docker service")).toBeEnabled();
+    // The checkout has a Compose service; use the detected option rather than
+    // injecting a choice or contacting Docker.
+    const service = await control("Docker service").locator("option").evaluateAll(options =>
+      options.map(option => (option as HTMLOptionElement).value).find(value => value && value !== "saved-service"));
+    expect(service).toBeTruthy();
+    await select(control("Docker service"), service!);
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await expect(settings(page)).toHaveAttribute("data-id", windowId!);
+    await open();
+    await expect(control("Model")).toHaveValue("gpt-6-astra");
+    await expect(control("Reasoning")).toHaveValue("high");
+    await expect(control("Docker service")).toHaveValue(service!);
+    await expect(control("Windows shell")).toBeDisabled();
+    await info.attach(`candidate-selects-${themeFor(info)}`, { body: await candidates.screenshot(), contentType: "image/png" });
+    await select(control("Agent"), "openclaw");
+    await candidates.getByRole("heading", { name: "Candidates", exact: true }).click();
+    await expect(candidates.getByLabel("Reasoning openclaw", { exact: true })).toBeDisabled();
+    await expect(candidates.getByLabel("Fast mode openclaw", { exact: true })).toBeDisabled();
+    await select(candidates.getByLabel("Agent openclaw", { exact: true }), "hermes");
+    await candidates.getByRole("heading", { name: "Candidates", exact: true }).click();
+    const hermesModel = candidates.getByLabel("Model hermes", { exact: true });
+    await expect(hermesModel).toHaveJSProperty("tagName", "INPUT");
+    // A catalog reply may rerender the row between separate locator calls.
+    const suggestions = await hermesModel.evaluate((input: HTMLInputElement) => ({
+      id: input.getAttribute("list"), values: Array.from(input.list?.options ?? [], option => option.value),
+    }));
+    expect(suggestions.id).toBeTruthy();
+    expect(suggestions.values).toEqual(["fixture-model", "fixture-alternative"]);
+    await save(async () => { await hermesModel.fill("custom-hermes-model"); await hermesModel.press("Tab"); });
+    await gotoLiveGwt(page, base!, { enableTestBridge: true });
+    await expect(settings(page)).toHaveAttribute("data-id", windowId!);
+    await open();
+    await expect(candidates.getByLabel("Model hermes", { exact: true })).toHaveValue("custom-hermes-model");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", themeFor(info));
+    await info.attach(`candidate-choices-${themeFor(info)}`, { body: await candidates.screenshot(), contentType: "image/png" });
+    expect(errors).toEqual([]);
+  });
+});
+
 async function openSettings(page: Page, section: string): Promise<void> {
   await page.bringToFront();
   // The disposable Normal Git fixture may restore this unrelated focus trap.
@@ -281,7 +387,9 @@ test.describe("Issue #5322 Settings", () => {
           await expect(agents).toHaveAttribute("data-saving", "false");
         };
         const editCandidate = async (name: string, value: string) => saveCandidate(async () => {
-          await agents.getByLabel(name, { exact: true }).fill(value);
+          const control = agents.getByLabel(name, { exact: true });
+          if (await control.evaluate(node => node.tagName === "SELECT")) await control.selectOption(value);
+          else await control.fill(value);
           await agents.getByLabel(name, { exact: true }).press("Tab");
         });
         await expect(agents.getByRole("button", { name: "Save profiles", exact: true })).toHaveCount(0);

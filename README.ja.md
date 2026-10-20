@@ -738,6 +738,9 @@ Project の明示終了や GWT 再起動では許可を破棄します。クリ�
 Issue も計画の監査記録に残します。目標変更では、ロードマップ項目からその目標へ明示的に
 紐付く Issue のみが対象です。この記録だけでは、依存先や担当エージェントへの
 通知済みとは判断しません。
+リスク・意思決定・ポリシーの編集も、credential を除去した変更前後の値を同じ監査記録に
+残します。これらの記録は直接の Issue 紐付けを持たず、その不足を明記します。影響 Issue が
+空でも「影響なし」を意味しません。定期作業の編集は、この変更証跡の対象外です。
 
 PM 自身は実装エージェントを起動しません。対象 Issue をキュー先頭へ移動して
 スキャンを要求するだけで、実際の起動は Issue Monitor の既存 claim/slot 経路が
@@ -824,6 +827,13 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 - `gwt-arch-review` — architecture review と改善 routing
 - `gwt-search` — unified semantic search
 - `gwt-agent` — running agent pane の確認と操作
+
+SPEC と通常 Issue は同じ検索索引を使い、SPEC は見出しチャンクとして一度だけ格納します。
+`gwtd` JSON `search` の `scopes:["specs"]` は SPEC、`scopes:["issues"]` は
+通常 Issue、`scopes:["specs","issues"]` は両方を検索します。既定では両種と他の検索
+スコープを含みます。`gwt-spec-search` / `gwt-issue-search` も同じフィルターを使います。
+どちらかのスコープを再構築すると、ローカル Issue キャッシュから旧索引を移行します。
+旧 SPEC 専用ストアは参照されなくなるため、手動で削除する必要はありません。
 
 Managed hooks は user hook を保持しながら、Agent state、workflow guardrails、
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
@@ -1691,6 +1701,27 @@ lease の遷移は
 従来どおり `~/.gwt/runtime/index-coordinator` 上で相互排他（model を load する
 runner は同時に 1 本）し、検証とは互いに待ち合いません。
 
+### 性能検証の実行環境
+
+canonical な headed E2E コマンドは計測環境も記録します。ブラウザ以外の性能検証は、
+`verify.plan` と `verify.run` のコマンド項目にコマンド単位の環境変数
+`GWT_VERIFY_PERFORMANCE=1` を付けます。別途起動した GUI を測る場合は、
+`GWT_VERIFY_TARGET_PIDS=1234` も指定します（複数の PID はカンマ区切り）。
+
+Windows では、検証を含む gwt pane Job の CPU hard cap が解除されたことを確認してから
+計測します。canonical の全 slot と旧 verification lane が対象で、holder がいなくなると
+設定された上限を復元します。プロセス優先度と pane 終了時の回収は維持します。
+古い GUI の Job 祖先を検査できない場合は、更新後の runtime で gwt を再起動してください。
+
+コマンドの `measurement` 証跡には、対象 PID と開始時刻、観測した Job cap、
+サンプリングした CPU 時間・使用率、admission 待ち時間、cap 解除待ち時間を記録します。
+待ち時間は admission・事前確認の所要時間であり、OS スレッドのスケジューリング待ち時間の
+推定値ではありません。runner と指定した GUI は `required_uncapped: true` とし、
+それ以外の子プロセスは CPU の参考情報として通常の資源制御を維持します。
+解除が必要な対象に cap が残る場合や、その環境を検査できない場合は
+`ENVIRONMENT_INCOMPATIBLE` となり、完了や Ready PR の根拠にはできません。
+診断された環境を修正して、登録済みの同じ検証行列を再実行してください。
+
 ### PR HEAD の検証
 
 PR の対象ブランチを訂正するには、`pr.edit` に `params.number` と `params.base`
@@ -1761,6 +1792,11 @@ JSON
 secondary limit のローカル推定（GitHub は公開しないため、このマシンの
 `~/.gwt/github-budget/` の spawn ledger から近似）、最新の rate-limit 拒否、
 そして定期読み取りが今受ける間引き判定が含まれます。
+
+source 内訳には、継続ページも含めて `issue-cache.refresh` や
+`issue-monitor.queued-issues` などの呼び出し元名が表示されます。Monitor の
+キャッシュ更新に失敗した場合、一般一覧の取得済みページを既存の15分の期限内で再利用します。
+キュー一覧と明示的な更新は、引き続きリモートから取得します。
 
 ### リリース手順
 

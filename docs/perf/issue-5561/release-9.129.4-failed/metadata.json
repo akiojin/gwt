@@ -1,0 +1,19 @@
+{
+  "observed_at": "2026-10-20T03:14:18.9869663+00:00",
+  "gui_pid": 13508,
+  "version": "9.129.4",
+  "release_tag_sha": "6377a32018b29ee6a5d7bd6f874811a83c057a58",
+  "included_pr": 5742,
+  "included_merge_sha": "378d0f8bfe2c359d9693ce37e511f2743f6ac1b8",
+  "binary_sha256": "b62c6f891bd613b570826b01294d0acb222afe306a25d187a94fc0fd361ece41",
+  "provider_panes": {
+    "codex": 12,
+    "claude_pm": 1
+  },
+  "provider_processes": 14,
+  "budget_bytes": 1500000000,
+  "budget_pass": false,
+  "observation": "Read-only samples of an already-running installed GUI. The first sample is 2h36m after its recorded process start, not a cold-start memory sample. No GUI/process state was changed.",
+  "limitations": "Thirteen panes and fourteen provider processes, not a controlled 10-12-pane comparison. This budget failure is diagnostic evidence; it is not an AC-2 success run or an after-fix rate.",
+  "phase_log_scope": "Machine-global UI perf stream without a PID field. These are the long ingest worktree/ref phases seen while the installed GUI ran; their attribution to this GUI is an inference, not process-bound evidence. No intake completion follows before the observation cutoff in that stream."
+}

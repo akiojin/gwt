@@ -793,7 +793,9 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
         Some("Run and export coverage shard" | "Verify the complete workspace test union" | "Generate workspace summary") => Some(modern),
         Some("Run pre-shard head coverage") => Some(legacy_first),
         Some("Restore pre-shard head summary") => Some(legacy),
-        Some("Install tray + GTK dependencies (Linux)") => Some("${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}"),
+        Some("Install tray + GTK dependencies (Linux)" | "Select instrumented cache") => Some("${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}"),
+        Some("Restore verified coverage inputs") if step["run"].as_str() == Some("python3 scripts/ci_coverage_cache.py restore") => Some("${{ steps.cache-mode.outputs.rolling == 'true' }}"),
+        Some("Capture verified coverage inputs") if step["run"].as_str() == Some("python3 scripts/ci_coverage_cache.py capture") => Some("${{ steps.cache-mode.outputs.rolling == 'true' && matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
         Some("Generate pre-shard head lcov") => Some("${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
         Some("Generate lcov") => Some("${{ steps.transport.outputs.sharded == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
         Some("Restore pre-shard head lcov") => Some("${{ steps.transport.outputs.sharded == 'false' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
@@ -1223,6 +1225,8 @@ mod tests {
         assert!(validate_pre_pr_ci(dir.path(), &required).is_ok());
         for (before, after) in [
             ("grep -q '^  coverage-shard:'", "grep -q '^  optional-shard:'"),
+            ("steps.cache-mode.outputs.rolling == 'true'", "steps.cache-mode.outputs.rolling == 'unknown'"),
+            ("python3 scripts/ci_coverage_cache.py restore", "echo skip content verification"),
             (
                 "node scripts/coverage-summary.mjs --output-path target/coverage-export/coverage-summary.json --nextest -- --workspace --all-features",
                 "echo no legacy coverage",

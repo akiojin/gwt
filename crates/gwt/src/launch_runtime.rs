@@ -1462,13 +1462,22 @@ mod tests {
 
         let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main repo");
         let repo_hash = gwt_core::repo_hash::compute_path_hash(&main_repo);
+        let lock_dir = gwt_core::paths::gwt_home().join("locks/launch-worktree-materialization");
+        fs::create_dir_all(&lock_dir).expect("lock dir");
         let branch_digest = format!(
             "{:x}",
             <sha2::Sha256 as sha2::Digest>::digest(branch.as_bytes())
         );
-        let lock_dir = gwt_core::paths::gwt_home().join("locks/launch-worktree-materialization");
-        fs::create_dir_all(&lock_dir).expect("lock dir");
         let lock_path = lock_dir.join(format!("{repo_hash}-{}.lock", &branch_digest[..16]));
+        assert_eq!(
+            launch_worktree_materialization_lock_path(&main_repo, branch),
+            lock_path
+        );
+        assert_ne!(
+            launch_worktree_materialization_lock_path(&main_repo, "work/issue-other"),
+            lock_path,
+            "different branches must not share the materialization lock"
+        );
         let lock = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -1507,7 +1516,7 @@ mod tests {
                 break;
             }
             if let Ok(outcome) = rx.try_recv() {
-                panic!("resolver ignored the same-branch materialization lock: {outcome:?}");
+                panic!("resolver ignored the same branch materialization lock: {outcome:?}");
             }
             assert!(
                 std::time::Instant::now() < guard_expiry,

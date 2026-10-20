@@ -2264,6 +2264,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         .unwrap();
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(cache
+        .readiness
         .base_target(&repo, "work/gwt-writes", &tips)
         .unwrap()
         .is_some());
@@ -2456,6 +2457,269 @@ fn work_branch_scan_targets_preserve_merged_pr_dirty_guard() {
     assert!(
         targets[0].has_merged_pr,
         "case-insensitive merged PR metadata must request a dirty-worktree guard"
+    );
+}
+
+#[test]
+fn work_merge_scan_unchanged_inputs_spawn_no_git() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "work/reuse"]);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    let external_ignore = temp.path().join("external-ignore");
+    fs::write(&external_ignore, "ignored-user-change.txt\n").unwrap();
+    run_git(
+        &repo,
+        &[
+            "config",
+            "core.excludesFile",
+            external_ignore.to_str().unwrap(),
+        ],
+    );
+    fs::write(repo.join("ignored-user-change.txt"), "uncommitted\n").unwrap();
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-reuse",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/reuse".into()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut context = runtime.project_context_for_root(&repo).unwrap();
+    let mut cache = super::super::WorkMergeScanCache::default();
+    let first = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(first, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    let repeated = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(repeated, UserEvent::WorkMergeStatus { merged_branches, .. } if merged_branches.contains_key("work/reuse"))
+    );
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count() - before,
+        0,
+        "a repeated unchanged scan must reuse its complete Git result; cached={:?}, observed={:?}",
+        cache.last_inputs,
+        cache.inputs.current_revision()
+    );
+
+    // Compare the pre-change worker body with the warm input cache on the
+    // same immutable repository, retaining #5116's warm SHA-pair cache.
+    let targets = super::super::work_branch_scan_targets(
+        &gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo).unwrap(),
+    );
+    let control = capture_tracing_events(|| {
+        for _ in 0..10 {
+            let _ = AppRuntime::measure_work_merge_status_scan(
+                repo.clone(),
+                &mut cache.readiness,
+                &targets,
+                HashSet::new(),
+            );
+            gwt_git::refs::branch_tip_subjects(&repo).unwrap();
+        }
+    });
+    let treatment = capture_tracing_events(|| {
+        for _ in 0..10 {
+            AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+            assert!(!cache.measured);
+        }
+    });
+    let counts = |events: &[CapturedTracingEvent]| {
+        let mut labels = std::collections::BTreeMap::<String, usize>::new();
+        for event in events.iter().filter(|event| {
+            event.target == "gwt.process.summary"
+                && event
+                    .fields
+                    .get("phase")
+                    .is_some_and(|phase| phase == "start")
+        }) {
+            *labels.entry(event.fields["label"].clone()).or_default() += 1;
+        }
+        labels
+    };
+    let control = counts(&control);
+    let treatment = counts(&treatment);
+    assert_eq!(
+        control.get("git --no-optional-locks status --porcelain=v1"),
+        Some(&10)
+    );
+    assert!(treatment.is_empty());
+    println!(
+        "merge_scan_process_measurement={}",
+        serde_json::json!({
+            "requests": 10,
+            "scope": "unchanged local merge and tip scans; remote PR-title TTL excluded",
+            "control": control, "treatment": treatment,
+            "normalization": "multiply by 12 for 120 unchanged requests/hour; not a fleet-hour observation"
+        })
+    );
+
+    // Reopening clears the UI's tip subjects. The new generation must run
+    // the worker's tip-subject measurement even when Git inputs are unchanged.
+    context.generation += 1;
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        cache.measured,
+        "reopened project must republish tip subjects"
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(!cache.measured);
+    assert_eq!(gwt_core::process::thread_git_spawn_count(), before);
+
+    let revision = cache.inputs.current_revision().unwrap();
+    fs::write(&external_ignore, "").unwrap();
+    assert_ne!(
+        cache.inputs.observe(&repo, std::slice::from_ref(&repo)),
+        Some(revision),
+        "an external ignore edit must invalidate the dirty verdict"
+    );
+    let external_dirty = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(external_dirty, UserEvent::WorkMergeStatus { dirty_branches, .. }
+        if dirty_branches.contains("work/reuse"))
+    );
+    fs::write(&external_ignore, "ignored-user-change.txt\n").unwrap();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+
+    let revision = cache.inputs.current_revision().unwrap();
+    fs::write(repo.join("user-change.txt"), "uncommitted\n").unwrap();
+    // test-hygiene: allow-wall-clock-deadline Real notify-to-Git invalidation contract; only bounds a hung OS delivery probe.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while cache.inputs.current_revision() == Some(revision) {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Real OS delivery liveness bound, not a latency or ordering assertion.
+            std::time::Instant::now() < deadline,
+            "dirty edit must invalidate scan"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let dirty = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(dirty, UserEvent::WorkMergeStatus { merged_branches, dirty_branches, .. }
+        if merged_branches.is_empty() && dirty_branches.contains("work/reuse"))
+    );
+
+    run_git(&repo, &["branch", "work/absent"]);
+    let absent = temp.path().join("absent");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-absent",
+            chrono::Utc::now(),
+        );
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/absent".into()),
+                worktree_path: Some(absent.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .unwrap();
+    // Start watching after this scenario's refs and projection are in place.
+    cache = super::super::WorkMergeScanCache::default();
+    let missing = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        matches!(missing, UserEvent::WorkMergeStatus { dirty_branches, .. }
+        if dirty_branches.contains("work/absent"))
+    );
+    let before = gwt_core::process::thread_git_spawn_count();
+    AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count(),
+        before,
+        "an unchanged absent worktree must reuse its conservative dirty verdict"
+    );
+    run_git(
+        &repo,
+        &["worktree", "add", absent.to_str().unwrap(), "work/absent"],
+    );
+    let recreated = AppRuntime::prepare_work_merge_status_scan(&context, &mut cache).unwrap();
+    assert!(
+        cache.measured,
+        "worktree reappearance must invalidate reuse"
+    );
+    assert!(
+        matches!(recreated, UserEvent::WorkMergeStatus { merged_branches, .. }
+        if merged_branches.contains_key("work/absent"))
+    );
+}
+
+#[test]
+fn work_merge_scan_coalesces_requests_while_worker_is_active() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context_for_root(&repo).unwrap();
+    let mut worker = runtime
+        .work_merge_scan_queue
+        .workers
+        .request(context.clone())
+        .unwrap();
+    for _ in 0..10 {
+        runtime.spawn_work_merge_status_scan_with_pr_titles(repo.clone(), true);
+    }
+    assert!(
+        !runtime.work_merge_status_cache.borrow()[&repo]
+            .lock()
+            .unwrap()
+            .measured,
+        "a burst cannot start a competing Git worker"
+    );
+    assert!(runtime.work_merge_scan_queue.take_pr_request(&context));
+    assert!(!runtime.work_merge_scan_queue.take_pr_request(&context));
+    assert_eq!(worker.finish_pass(), Some(context.clone()));
+    let mut reopened = context.clone();
+    reopened.generation += 1;
+    assert!(runtime
+        .work_merge_scan_queue
+        .request(reopened.clone(), true)
+        .is_none());
+    assert!(
+        !runtime.work_merge_scan_queue.take_pr_request(&context),
+        "old generations cannot consume reopened PR requests"
+    );
+    assert!(runtime.work_merge_scan_queue.take_pr_request(&reopened));
+    assert_eq!(worker.finish_pass(), Some(reopened));
+    assert_eq!(
+        worker.finish_pass(),
+        None,
+        "the burst becomes one follow-up"
     );
 }
 
@@ -2714,9 +2978,13 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         }
         if !reader_ahead || index == 19 {
             for (data, seq) in undispatched.drain(..) {
-                for event in
-                    runtime.handle_runtime_output_event(window_id.clone(), incarnation, data, seq)
-                {
+                for event in runtime.handle_runtime_output_event(
+                    window_id.clone(),
+                    incarnation,
+                    data,
+                    seq,
+                    None,
+                ) {
                     let prepared = prepare_outbound_event(&event);
                     repair_queue.enqueue(&prepared);
                     if resync_connected {
@@ -3231,6 +3499,56 @@ fn reopening_the_pr_titles_window_allows_an_immediate_refresh() {
 }
 
 #[test]
+fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &id);
+    let incarnation = runtime.runtimes[&id].incarnation;
+    let data = b"worker captured output";
+    let seq = {
+        let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
+        pane.process_bytes(data);
+        pane.output_seq()
+    };
+    runtime.handle_runtime_output_event(
+        id.clone(),
+        incarnation,
+        data.to_vec(),
+        seq,
+        Some("worker captured output".into()),
+    );
+    let pane = runtime.runtimes[&id].pane.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = pane.lock().unwrap();
+        ready_tx.send(()).unwrap();
+        // Release on failure too, so a regressed GUI wait fails instead of hanging.
+        // test-hygiene: allow-wall-clock-deadline Bound a regressed GUI mutex wait; the ready channel establishes ordering.
+        release_rx.recv_timeout(Duration::from_secs(10)).is_ok()
+    });
+    // test-hygiene: allow-wall-clock-deadline Fail if the lock-holder thread cannot start; elapsed time is not asserted.
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let events =
+        runtime.flush_runtime_output_batches(runtime.next_runtime_output_deadline().unwrap());
+    let _ = release_tx.send(());
+    assert!(
+        holder.join().unwrap(),
+        "GUI flush waited for the PTY parser mutex"
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text.contains("worker captured output"))));
+}
+
+#[test]
 fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -3251,14 +3569,19 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     let mut bytes = Vec::new();
     let mut deadline = None;
     for chunk in chunks {
-        let seq = {
+        let (seq, screen) = {
             let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
             pane.process_bytes(chunk);
-            pane.output_seq()
+            (pane.output_seq(), pane.screen().contents())
         };
         bytes.extend_from_slice(chunk);
-        let events =
-            runtime.handle_runtime_output_event(id.clone(), incarnation, chunk.to_vec(), seq);
+        let events = runtime.handle_runtime_output_event(
+            id.clone(),
+            incarnation,
+            chunk.to_vec(),
+            seq,
+            Some(screen),
+        );
         assert_eq!(events.len(), 1, "only raw output is immediate");
         assert_eq!(events[0].terminal_stream_seq, Some(seq));
         assert!(
@@ -3299,6 +3622,19 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     assert!(runtime
         .flush_runtime_output_batches(deadline + Duration::from_secs(1))
         .is_empty());
+    let events = runtime.handle_runtime_output_event(
+        id,
+        incarnation,
+        vec![b'x'; gwt::pane_runtime::OUTPUT_BATCH_MAX_BYTES],
+        100,
+        Some("large burst".into()),
+    );
+    assert!(
+        runtime.next_runtime_output_deadline().is_none(),
+        "a size-limited batch flushes immediately"
+    );
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalPreview { text, .. } if text == "large burst")));
 }
 
 #[test]
@@ -3315,7 +3651,7 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
     let id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &id);
     let old = runtime.runtimes[&id].incarnation;
-    runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1);
+    runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1, Some("old".into()));
     runtime.runtimes.get_mut(&id).unwrap().incarnation += 1;
     let deadline = runtime.next_runtime_output_deadline().unwrap();
     assert!(runtime.flush_runtime_output_batches(deadline).is_empty());
@@ -3325,7 +3661,13 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
         .lock()
         .unwrap()
         .process_bytes(b"final output");
-    runtime.handle_runtime_output_event(id.clone(), current, b"final output".to_vec(), 2);
+    runtime.handle_runtime_output_event(
+        id.clone(),
+        current,
+        b"final output".to_vec(),
+        2,
+        Some("final output".into()),
+    );
     let events = runtime.handle_runtime_status_event(
         id.clone(),
         current,
@@ -3557,4 +3899,27 @@ fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
     );
     assert_eq!(delivery.materializer_pid, Some(host_pid));
     assert_eq!(delivery.materializer_window_id.as_deref(), Some(window_id));
+
+    let retry =
+        runtime.capture_issue_monitor_launch_claim(&repo, 42, "launch:effect-42", window_id);
+    let stamp = super::super::issue_monitor_prefs_stamp(&prefs_path);
+    assert!(retry
+        .claim_or_reuse()
+        .expect("reuse the exact current claim"));
+    assert_eq!(
+        super::super::issue_monitor_prefs_stamp(&prefs_path),
+        stamp,
+        "an unchanged claim must not write shared prefs during revalidation"
+    );
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.pending_launch_deliveries.clear();
+        Ok(())
+    })
+    .expect("retire the delivery after the first claim");
+    assert!(
+        !retry
+            .claim_or_reuse()
+            .expect("revalidate the latest delivery"),
+        "a previously valid tuple must not revive a retired delivery"
+    );
 }

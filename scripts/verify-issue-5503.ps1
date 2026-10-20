@@ -1,4 +1,7 @@
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs)
+param(
+    [switch]$CandidateSettings,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs
+)
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $checkoutGwt = Join-Path $repoRoot 'target/debug/gwt.exe'
@@ -15,11 +18,12 @@ foreach ($relative in @('.gwt/runtime', '.config', '.docker')) {
         New-Item -ItemType Junction -Path (Join-Path $checkHome $relative) -Target $source | Out-Null
     }
 }
-$statusJson = '{"schema_version":1,"operation":"issue.monitor.status","params":{}}' | & $checkoutGwtd
-if ($LASTEXITCODE -ne 0) { throw "gwtd issue.monitor.status failed with exit code $LASTEXITCODE." }
-$status = $statusJson | ConvertFrom-Json
-if (!$status.ok -or !$status.project_store.hash) { throw 'Cannot resolve the canonical project hash.' }
-$repoHash = $status.project_store.hash
+# Resolve canonical project identity locally before starting the isolated runtime.
+$identityJson = '{"schema_version":1,"operation":"issue.monitor.profiles","params":{}}' | & $checkoutGwtd
+if ($LASTEXITCODE -ne 0) { throw "gwtd issue.monitor.profiles failed with exit code $LASTEXITCODE." }
+$identity = $identityJson | ConvertFrom-Json
+if (!$identity.ok -or !$identity.project_store.hash) { throw 'Cannot resolve the canonical project hash.' }
+$repoHash = $identity.project_store.hash
 $statePath = Join-Path $checkHome ".gwt/projects/$repoHash/project-state"
 New-Item -ItemType Directory -Path $statePath -Force | Out-Null
 '{"settings":{"auto_start":false}}' | Set-Content -LiteralPath (Join-Path $statePath 'pm.json')
@@ -68,16 +72,94 @@ $isolatedEnv['USERPROFILE'] = $checkHome
 $isolatedEnv['GWT_BROWSER_URL_FILE'] = Join-Path $checkHome 'url'
 $isolatedEnv['GWT_HOOK_BIN'] = $hookBin
 $isolatedEnv['GIT_TERMINAL_PROMPT'] = '0'
+if ($CandidateSettings) {
+    $isolatedEnv['GWT_DISABLE_BACKGROUND_INDEX'] = '1'
+    $isolatedEnv['RUST_LOG'] = 'warn,gwt.process.summary=info'
+    # Load custom-agent configuration before either runtime caches its catalog.
+    @'
+[tools.customCodingAgents.fixture-candidate]
+id = "fixture-candidate"
+displayName = "Fixture Candidate"
+agentType = "command"
+command = "fixture-candidate-cli"
+'@ | Set-Content -LiteralPath (Join-Path $checkHome '.gwt/config.toml')
+    $isolatedEnv['HERMES_HOME'] = Join-Path $checkHome 'hermes-fixture'
+    New-Item -ItemType Directory -Path $isolatedEnv['HERMES_HOME'] -Force | Out-Null
+    "model:`n  provider: fixture`n  default: fixture-model`nproviders:`n  fixture:`n    models: [fixture-model, fixture-alternative]" |
+        Set-Content -LiteralPath (Join-Path $isolatedEnv['HERMES_HOME'] 'config.yaml')
+}
 # Provider UI fixtures need no live credentials or transcript data.
 $isolatedEnv['CODEX_HOME'] = Join-Path $checkHome 'codex-fixture'
 $isolatedEnv['CLAUDE_CONFIG_DIR'] = Join-Path $checkHome 'claude-fixture'
 New-Item -ItemType Directory -Path $isolatedEnv['CODEX_HOME'], $isolatedEnv['CLAUDE_CONFIG_DIR'] -Force | Out-Null
 $ownedGui = $null
+$ownedDaemon = $null
+$daemonStdoutTask = $null
+$daemonStderrTask = $null
 $stdoutTask = $null
 $stderrTask = $null
 $anchorSocket = $null
 $savedVars = @{}
+# Preserve diagnostics even when verify.run removes its disposable TEMP.
+$artifacts = Join-Path $repoRoot ('crates/gwt/playwright/test-results/issue-5503-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
 try {
+    if ($CandidateSettings) {
+        # Profile writes use the production daemon transport. The 250ms GUI
+        # fallback is a separate bounded recovery path, not this fixture's subject.
+        $daemonInfo = [Diagnostics.ProcessStartInfo]::new($checkoutGwtd)
+        $daemonInfo.WorkingDirectory = $repoRoot
+        $daemonInfo.UseShellExecute = $false
+        $daemonInfo.CreateNoWindow = $true
+        $daemonInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+        $daemonInfo.RedirectStandardInput = $true
+        $daemonInfo.RedirectStandardOutput = $true
+        $daemonInfo.RedirectStandardError = $true
+        $daemonInfo.Environment.Clear()
+        foreach ($name in $isolatedEnv.Keys) { $daemonInfo.Environment[$name] = $isolatedEnv[$name] }
+        $ownedDaemon = [Diagnostics.Process]::Start($daemonInfo)
+        $daemonStderrTask = $ownedDaemon.StandardError.ReadToEndAsync()
+        $ownedDaemon.StandardInput.WriteLine('{"schema_version":1,"operation":"daemon.start","params":{}}')
+        $ownedDaemon.StandardInput.Close()
+        foreach ($expected in @('gwtd daemon start: bind=', "gwtd daemon start: pid=$($ownedDaemon.Id) ")) {
+            $lineTask = $ownedDaemon.StandardOutput.ReadLineAsync()
+            if (!$lineTask.Wait(30000) -or !$lineTask.Result -or !$lineTask.Result.StartsWith($expected)) { throw 'Isolated daemon did not become ready.' }
+        }
+        $daemonStdoutTask = $ownedDaemon.StandardOutput.ReadToEndAsync()
+        $readyDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            $probeInfo = [Diagnostics.ProcessStartInfo]::new($checkoutGwtd)
+            $probeInfo.WorkingDirectory = $repoRoot
+            $probeInfo.UseShellExecute = $false
+            $probeInfo.CreateNoWindow = $true
+            $probeInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+            $probeInfo.RedirectStandardInput = $true
+            $probeInfo.RedirectStandardOutput = $true
+            $probeInfo.RedirectStandardError = $true
+            $probeInfo.Environment.Clear()
+            foreach ($name in $isolatedEnv.Keys) { $probeInfo.Environment[$name] = $isolatedEnv[$name] }
+            $probe = [Diagnostics.Process]::Start($probeInfo)
+            try {
+                $probeOutput = $probe.StandardOutput.ReadToEndAsync()
+                $probeError = $probe.StandardError.ReadToEndAsync()
+                $probe.StandardInput.WriteLine('{"schema_version":1,"operation":"daemon.status","params":{}}')
+                $probe.StandardInput.Close()
+                if (!$probe.WaitForExit(10000)) { throw 'Isolated daemon status probe timed out.' }
+                if ($probe.ExitCode) { throw $probeError.GetAwaiter().GetResult() }
+                $daemonStatus = ($probeOutput.GetAwaiter().GetResult() | ConvertFrom-Json).output
+            } finally {
+                if (!$probe.HasExited) { $probe.Kill(); $probe.WaitForExit(10000) | Out-Null }
+                $probe.Dispose()
+            }
+            if ($daemonStatus -match '^running pid=(\d+).*probe=ok') {
+                if ([int]$Matches[1] -ne $ownedDaemon.Id) { throw 'Isolated daemon PID does not match its owner.' }
+                break
+            }
+            if ($ownedDaemon.HasExited -or [DateTime]::UtcNow -ge $readyDeadline) { throw 'Isolated daemon did not pass its authenticated status probe.' }
+            Start-Sleep -Milliseconds 200
+        } while ($true)
+        Write-Output "Fresh checkout daemon PID: $($ownedDaemon.Id); isolated HOME: $checkHome"
+    }
     $startInfo = [Diagnostics.ProcessStartInfo]::new($checkoutGwt)
     $startInfo.WorkingDirectory = $repoRoot
     $startInfo.UseShellExecute = $false
@@ -115,7 +197,9 @@ try {
     @{project=$repoRoot;repo_hash=$repoHash;pid=$ownedGui.Id;url=$checkUrl} | ConvertTo-Json |
         Set-Content -LiteralPath (Join-Path $checkHome 'issue-5503-isolated.json')
     $version = (Get-Content -LiteralPath (Join-Path $repoRoot 'scripts/playwright-version.txt') -Raw).Trim()
-    $deps = Join-Path ([IO.Path]::GetTempPath()) "gwt-playwright-$version"
+    $deps = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else {
+        Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Temp/gwt-playwright-$version"
+    }
     $playwright = Join-Path $deps 'node_modules/@playwright/test/cli.js'
     if (!(Test-Path -LiteralPath $playwright)) {
         New-Item -ItemType Directory -Path $deps -Force | Out-Null
@@ -148,18 +232,37 @@ Module._resolveFilename = function(request, parent, ...rest) {
     }
     & node $playwright install chromium
     if ($LASTEXITCODE) { throw 'Chromium installation failed.' }
-    # Keep evidence outside verify.run's disposable TEMP, as run-visual-tests.sh does.
-    $artifacts = Join-Path $repoRoot ('crates/gwt/playwright/test-results/issue-5503-' + [guid]::NewGuid())
-    New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
+    $specs = if ($CandidateSettings) { @(
+        'settings-issues-live.spec.ts', 'issue-monitor-candidate-pool-live.spec.ts',
+        'issue-monitor-candidate-pool.spec.ts', '--grep',
+        'Issue #5787|Issue Monitor candidate pool|candidate selection rejects unknown'
+    ) } else { @('provider-usage.spec.ts') }
     & node $playwright test --config (Join-Path $repoRoot 'crates/gwt/playwright/playwright.config.ts') --workers=1 `
         --output $artifacts `
-        'provider-usage.spec.ts' @PlaywrightArgs
+        @specs @PlaywrightArgs
     if ($LASTEXITCODE) { throw 'Issue #5503 headed verification failed.' }
 } finally {
     foreach ($name in $savedVars.Keys) { [Environment]::SetEnvironmentVariable($name, $savedVars[$name], 'Process') }
+    foreach ($ownedProcess in @($ownedGui, $ownedDaemon)) {
+        if (!$ownedProcess) { continue }
+        try {
+            if (!$ownedProcess.HasExited) { $ownedProcess.Kill(); $ownedProcess.WaitForExit(10000) | Out-Null }
+        } catch {
+            # A child can exit between HasExited and Kill. Check both children
+            # after attempting every owned handle, even if one stop failed.
+        }
+    }
     if ($anchorSocket) { $anchorSocket.Abort(); $anchorSocket.Dispose() }
-    if ($ownedGui -and !$ownedGui.HasExited) { Stop-Process -Id $ownedGui.Id -Force; $ownedGui.WaitForExit(10000) | Out-Null }
-    if ($ownedGui -and !$ownedGui.HasExited) { throw "Owned GUI PID $($ownedGui.Id) remains alive." }
-    if ($stdoutTask) { $stdoutTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'startup.log') }
-    if ($stderrTask) { $stderrTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $checkHome 'stderr.log') }
+    $remaining = @(@($ownedGui, $ownedDaemon) | Where-Object { $_ -and !$_.HasExited })
+    if ($remaining.Count) { throw "Owned PID(s) remain alive: $(($remaining | ForEach-Object { $_.Id }) -join ', ')." }
+    if ($stdoutTask) { $stdoutTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $artifacts 'startup.log') }
+    if ($stderrTask) { $stderrTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $artifacts 'stderr.log') }
+    if ($daemonStdoutTask) { $daemonStdoutTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $artifacts 'daemon-startup.log') }
+    if ($daemonStderrTask) { $daemonStderrTask.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $artifacts 'daemon-stderr.log') }
+    if ($daemonStatus) { $daemonStatus | Set-Content -LiteralPath (Join-Path $artifacts 'daemon-status.txt') }
+    $fixtureLogs = Join-Path $checkHome '.gwt/logs'
+    if (Test-Path -LiteralPath $fixtureLogs -PathType Container) {
+        Copy-Item -LiteralPath $fixtureLogs -Destination (Join-Path $artifacts 'fixture-logs') -Recurse
+    }
+    Write-Output "Browser evidence: $artifacts"
 }

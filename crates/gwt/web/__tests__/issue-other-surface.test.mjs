@@ -6,9 +6,29 @@ import {
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import {
+  createActiveWorkProjectionModel,
   createIssueOtherSurface,
   mergeActiveWorkProjectionPatch,
 } from "../issue-other-surface.js";
+
+test("Active Work model commits immutable merged snapshots and clears on null", () => {
+  const { model, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
+  const rendered = [];
+  model.subscribe(state => state, state => rendered.push(state));
+  const initial = { id: "p", journal_entries: [{ id: "history" }], active_works: [] };
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: initial });
+  assert.notEqual(model.read().projection, initial);
+  assert.ok(Object.isFrozen(model.read().projection.journal_entries[0]));
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection_patch", projection: { id: "p", title: "Changed" } });
+  assert.equal(model.read().projection.title, "Changed");
+  assert.deepEqual(model.read().projection.journal_entries, initial.journal_entries);
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection_patch", projection: { id: "other" } });
+  assert.equal(model.read().projection.journal_entries, undefined, "project identity fences history");
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: null });
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: null });
+  assert.deepEqual(rendered.slice(-2), [{ projection: null }, { projection: null }]);
+  model.dispose();
+});
 
 test("bounded Active Work patches preserve history while replacing live membership", () => {
   const previousSession = {

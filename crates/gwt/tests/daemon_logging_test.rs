@@ -25,7 +25,7 @@ impl Drop for Daemon {
 
 #[test]
 fn issue_5644_daemon_start_persists_scan_stage_and_total_timings() {
-    let fixture = tempfile::tempdir().expect("fixture");
+    let fixture = gwt_core::test_support::socket_tempdir().expect("fixture");
     let home = fixture.path().join("home");
     let project = fixture.path().join("project");
     fs::create_dir_all(&home).unwrap();
