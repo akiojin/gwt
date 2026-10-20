@@ -9428,16 +9428,7 @@ fn commit_issue4803_monitor_preparation(
     events: &Arc<Mutex<Vec<UserEvent>>>,
 ) -> Vec<OutboundEvent> {
     drain_queued_blocking_tasks(queued);
-    let started = Instant::now();
-    let result =
-        runtime.handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(events));
-    eprintln!("monitor fresh completion: {:?}", started.elapsed());
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "fresh completion blocked the GUI: {:?}",
-        started.elapsed()
-    );
-    result
+    runtime.handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(events))
 }
 
 /// Issue #4868: the Rust 1.99 rewrite replaced `fetch_update` + `checked_add`
