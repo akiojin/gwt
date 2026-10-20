@@ -3488,10 +3488,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
 /// registry is reachable, and then ON stays refused exactly as before.
 // Only the tests decode without a repository: the worker always has
 // `scope.project_root`, so a production build has no caller for this shape.
-// Some of those tests are platform-gated, so on Windows the test build can
-// compile every caller out — the helper is still the right shape to keep.
 #[cfg(test)]
-#[allow(dead_code)]
 fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonitorControl> {
     decode_issue_monitor_control_in_repo(payload, None)
 }

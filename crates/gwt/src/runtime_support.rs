@@ -527,12 +527,6 @@ pub enum FrontDoorRoute {
     Gui,
     RepoBackedCli,
     DetachedCli,
-    /// SPEC #2920: tray-resident process route. Phase 4 will wire `main()`
-    /// to dispatch this variant to `gwt::cli::tray::run`. Until then it is
-    /// reachable only from tests and reserves the routing slot so the
-    /// public enum API stays stable across Phase 2〜4 commits.
-    #[allow(dead_code)]
-    Tray,
     /// SPEC #2920 Q9: `gwt serve` / `gwt --headless` verbs were removed in
     /// v10.0.0 (supersede of SPEC-1942 US-14). `main()` matches this
     /// variant first, writes the usage hint, and exits with code 2 — no
@@ -606,10 +600,10 @@ pub fn run_cli(argv: &[String]) -> io::Result<()> {
             let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
             std::process::exit(gwt::cli::dispatch(&mut env, argv));
         }
-        // Gui, Tray, and LegacyServeUsageHint are all handled by `main()`
+        // Gui and LegacyServeUsageHint are handled by `main()`
         // after `run_cli` returns; `run_cli` itself only dispatches verbs
         // that exit the process.
-        FrontDoorRoute::Gui | FrontDoorRoute::Tray | FrontDoorRoute::LegacyServeUsageHint => Ok(()),
+        FrontDoorRoute::Gui | FrontDoorRoute::LegacyServeUsageHint => Ok(()),
     }
 }
 
