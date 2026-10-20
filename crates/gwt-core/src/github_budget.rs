@@ -7,8 +7,8 @@
 //! - **Ledger** ([`BudgetLedger`]): a machine-local directory under
 //!   `~/.gwt/github-budget/` shared by every gwt process on the machine (GUI,
 //!   every `gwtd` invocation, every worktree). Each budget-spending `gh` spawn
-//!   appends one line to `spawns.jsonl`; the newest `gh api rate_limit` payload
-//!   is kept in `probe.json`; the newest rate-limit refusal in `block.json`.
+//!   appends one line to `spawns.jsonl`; REST and GraphQL budget observations
+//!   are merged in `probe.json`; the newest rate-limit refusal in `block.json`.
 //!   The gwt processes are short-lived and independent, so an in-process
 //!   counter would see almost nothing — the file is the only place the
 //!   machine's whole consumption is visible.
@@ -44,6 +44,7 @@ use crate::github_quota::{self, GitHubQuota, QuotaGate, RateLimitBlock, RATE_LIM
 pub const BUDGET_DIR_NAME: &str = "github-budget";
 const SPAWNS_FILE: &str = "spawns.jsonl";
 const PROBE_FILE: &str = "probe.json";
+const PROBE_LOCK_FILE: &str = "probe.lock";
 const BLOCK_FILE: &str = "block.json";
 
 /// Retention of the spawn ledger; nothing older than this is reported.
@@ -88,7 +89,7 @@ pub struct ResourceWindow {
     pub reset_at: DateTime<Utc>,
 }
 
-/// The newest `gh api rate_limit` payload, reduced to the reported resources.
+/// Budget observations, reduced to the reported resources.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeSnapshot {
     pub probed_at: DateTime<Utc>,
@@ -386,27 +387,21 @@ impl BudgetLedger {
                 cost: rate_limit.cost - 1,
             });
         }
-        let mut probe: ProbeSnapshot =
-            read_json(&self.dir.join(PROBE_FILE)).unwrap_or(ProbeSnapshot {
-                probed_at: now,
-                resources: BTreeMap::new(),
-            });
-        let limit = probe
-            .resources
-            .get(resource)
-            .map(|window| window.limit)
+        let limit = read_json::<ProbeSnapshot>(&self.dir.join(PROBE_FILE))
+            .and_then(|probe| probe.resources.get(resource).map(|window| window.limit))
             .filter(|limit| *limit > 0)
             .unwrap_or(DEFAULT_GRAPHQL_POINT_LIMIT);
-        probe.resources.insert(
-            resource.to_string(),
-            ResourceWindow {
-                limit,
-                remaining: rate_limit.remaining,
-                reset_at: rate_limit.reset_at,
-            },
-        );
-        probe.probed_at = now;
-        self.record_probe(&probe);
+        self.record_probe(&ProbeSnapshot {
+            probed_at: now,
+            resources: BTreeMap::from([(
+                resource.to_string(),
+                ResourceWindow {
+                    limit,
+                    remaining: rate_limit.remaining,
+                    reset_at: rate_limit.reset_at,
+                },
+            )]),
+        });
     }
 
     fn append_record(&self, record: SpawnRecord) {
@@ -429,9 +424,40 @@ impl BudgetLedger {
         }
     }
 
-    /// Persist the newest probe so every process sees the same primary budget.
+    /// Merge observations so a larger REST value cannot reopen a GraphQL
+    /// reset window. A newer window recovers; delayed older windows do not
+    /// replace it. Serialize the entire merge across processes and threads.
     pub fn record_probe(&self, probe: &ProbeSnapshot) {
-        let _ = write_json_atomic(&self.dir.join(PROBE_FILE), probe);
+        if std::fs::create_dir_all(&self.dir).is_err() {
+            return;
+        }
+        let Ok(_lock) = crate::operation_deadline::NamedFileLock::acquire(
+            &self.dir.join(PROBE_LOCK_FILE),
+            "github_budget.probe",
+        ) else {
+            return;
+        };
+        let path = self.dir.join(PROBE_FILE);
+        let mut merged: ProbeSnapshot = read_json(&path).unwrap_or(ProbeSnapshot {
+            probed_at: probe.probed_at,
+            resources: BTreeMap::new(),
+        });
+        merged.probed_at = merged.probed_at.max(probe.probed_at);
+        for (resource, observed) in &probe.resources {
+            let mut window = observed.clone();
+            if resource == "graphql" {
+                if let Some(previous) = merged.resources.get(resource) {
+                    if previous.reset_at > window.reset_at {
+                        continue;
+                    }
+                    if previous.reset_at == window.reset_at {
+                        window.remaining = window.remaining.min(previous.remaining);
+                    }
+                }
+            }
+            merged.resources.insert(resource.clone(), window);
+        }
+        let _ = write_json_atomic(&path, &merged);
     }
 
     /// Persist the newest refusal so a later process can throttle before it
