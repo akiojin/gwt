@@ -852,6 +852,31 @@ same profile to try again.
   reset or switch the whole fleet's profile to work around a hold you
   can release by name.
 
+### Stop during blocked authority recovery
+
+When `issue.monitor.status` reports `authority recovery is blocked`,
+`issue.monitor.config.set` remains fail-closed, including OFF and
+`max_active` changes. Record the error and its preferences/fence paths;
+do not delete the fence or hand-edit the preferences to bypass it.
+
+- Apply `issue.label {number, action:"add", labels:["hold"]}` to each
+  affected owner and require successful GitHub readback. A `hold` label
+  prevents new admission; it does not stop a running agent. An in-flight
+  claim or materializer may already have passed admission, so label
+  readback alone is not proof that the fleet stopped.
+- The direct `issue.monitor.stop` path still works when typed preferences
+  are readable for an authority-fence recovery error. Use the exact launch
+  identity and reason described above for each affected launch. It commits
+  authority revocation and a durable owner hold without the daemon control
+  lane, and preserves the authority fence. Require a successful stop reply;
+  a refusal is not a revoked launch.
+- Close only the returned exact window with `pane.close`, then reread
+  `pane.list` to confirm the affected panes are gone or stopped. The close
+  requires a responsive GUI Host; cleared Monitor slots do not prove that
+  their processes exited. If preferences are unreadable, stop is refused,
+  or the Host cannot confirm the close, report physical shutdown as
+  unconfirmed and retain the error and durable holds for recovery.
+
 ### Closing an inactive Work
 
 Use `workspace.close {work_id, close_kind}` for a specific inactive Work.
@@ -2444,6 +2469,26 @@ mod tests {
             "Force does not bypass live-launch or closed-Issue protections",
         ] {
             assert!(guidance.contains(phrase), "missing `{phrase}`");
+        }
+    }
+
+    #[test]
+    fn contract_documents_recovery_blocked_stop_fallback() {
+        let guidance = unwrapped(&render_contract());
+        for phrase in [
+            "authority recovery is blocked",
+            "`issue.monitor.config.set` remains fail-closed",
+            "`issue.label {number, action:\"add\", labels:[\"hold\"]}`",
+            "The direct `issue.monitor.stop` path still works when typed preferences are readable",
+            "preserves the authority fence",
+            "Close only the returned exact window with `pane.close`",
+            "A `hold` label prevents new admission; it does not stop a running agent",
+            "report physical shutdown as unconfirmed",
+        ] {
+            assert!(
+                guidance.contains(phrase),
+                "missing recovery stop rule `{phrase}`"
+            );
         }
     }
 
