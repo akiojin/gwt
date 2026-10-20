@@ -73,6 +73,10 @@ const ISSUE_MONITOR_PREFS_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
 const ISSUE_MONITOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE: &str =
+    "Recovery: preserve the prefs and authority marker, resolve the reported lock or invalid \
+     durable state with the PM, then restart only this project's daemon. Do not delete the \
+     authority marker or pending effects.";
 
 /// Pin the prefs budget for the current test thread until dropped.
 ///
@@ -764,9 +768,10 @@ fn spawn_issue_monitor_worker_with_lease(
                 loaded.recovery_blocked = true;
                 loaded.monitor.record_authority_recovery_blocked(
                     format!(
-                        "Issue Monitor authority recovery is blocked: startup retry budget exhausted; prefs={} authority_marker={}; automation disabled and durable state preserved",
+                        "Issue Monitor authority recovery is blocked: startup retry budget exhausted; prefs={} authority_marker={}; automation disabled and durable state preserved. {}",
                         prefs_path.display(),
                         issue_monitor_shutdown_revoke_marker_path(&prefs_path).display(),
+                        ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE,
                     ),
                 );
                 break;
@@ -1257,6 +1262,14 @@ fn spawn_issue_monitor_worker_with_lease(
                                 .retry_failed();
                         }
                         IssueMonitorControlCommit::TerminalFailure => {
+                            let pending = pending_authority_controls
+                                .as_ref()
+                                .expect("authority barrier exists during retry");
+                            record_issue_monitor_control_recovery_blocked(
+                                &prefs_path,
+                                &mut monitor,
+                                &pending.front_accepted().expect("pending control").control,
+                            );
                             pending_authority_controls
                                 .as_mut()
                                 .expect("authority barrier exists during retry")
@@ -1923,9 +1936,10 @@ fn load_issue_monitor_state_for_daemon_with_lease(
             let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
             monitor.record_authority_recovery_blocked(
                 format!(
-                    "Issue Monitor authority recovery is blocked; prefs={} authority_marker={}; automation disabled and durable state preserved: {error}",
+                    "Issue Monitor authority recovery is blocked; prefs={} authority_marker={}; automation disabled and durable state preserved: {error}. {}",
                     prefs_path.display(),
                     issue_monitor_shutdown_revoke_marker_path(prefs_path).display(),
+                    ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE,
                 ),
             );
             LoadedDaemonIssueMonitorState {
@@ -2586,12 +2600,35 @@ fn apply_or_queue_issue_monitor_control(
             );
         }
         IssueMonitorControlCommit::TerminalFailure => {
+            record_issue_monitor_control_recovery_blocked(prefs_path, monitor, &accepted.control);
             *pending_authority_controls = Some(PendingIssueMonitorAuthorityControls::terminal(
                 accepted, completion,
             ));
         }
     }
     outcome
+}
+
+fn record_issue_monitor_control_recovery_blocked(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+    control: &IssueMonitorControl,
+) {
+    let epoch = crate::load_issue_monitor_prefs(prefs_path)
+        .map(|prefs| prefs.effect_authority_epoch)
+        .unwrap_or_else(|_| monitor.effect_authority_epoch());
+    let cause = if epoch == u64::MAX {
+        "authority epoch exhausted"
+    } else {
+        "accepted control could not be applied"
+    };
+    monitor.record_authority_recovery_blocked(format!(
+        "Issue Monitor authority recovery is blocked: {cause}; control={control:?}; \
+         effect_authority_epoch={epoch}; prefs={} authority_marker={}. {}",
+        prefs_path.display(),
+        issue_monitor_shutdown_revoke_marker_path(prefs_path).display(),
+        ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE,
+    ));
 }
 
 fn reconcile_deferred_grant_after_authority_commit(
@@ -2648,9 +2685,9 @@ fn try_apply_issue_monitor_control(
             launch_agent,
             update_drain,
         } => {
-            if enabled == Some(true)
-                || autonomous_mode == Some(true)
-                || max_active_agents == Some(0)
+            // The decoder already verified the resident PM's authority to
+            // enable monitoring. Rejecting ON again here closes the whole lane.
+            if max_active_agents == Some(0)
                 || (allowed_labels.is_none()
                     && enabled.is_none()
                     && autonomous_mode.is_none()
@@ -3500,6 +3537,190 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             ));
             IssueMonitorControlCommit::RetryableFailure
         }
+    }
+}
+
+#[cfg(test)]
+mod issue_5694_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resident_pm_on_commits_and_survives_daemon_replacement() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo");
+        crate::pm_registry::try_register_pm(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            crate::pm_registry::PmRegistration {
+                session_id: "pm-session".to_string(),
+                agent_id: "codex".to_string(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .expect("register PM");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+            .expect("seed prefs");
+
+        let mut previous: Option<(u64, String)> = None;
+        for generation in 0..2 {
+            let mut loaded = load_issue_monitor_state_for_daemon_with_lease(
+                &prefs_path,
+                crate::IssueMonitorConfig::default(),
+                None,
+            );
+            assert!(!loaded.recovery_blocked && !loaded.authority_retry_pending);
+            if let Some((epoch, instance)) = &previous {
+                let restored = loaded.monitor.prefs();
+                assert!(
+                    restored.enabled && restored.autonomous_mode,
+                    "ON survives fence replay"
+                );
+                assert_eq!(restored.effect_authority_epoch, epoch + 1);
+                assert_ne!(
+                    &loaded.authority_fence.as_ref().expect("fence").instance_id,
+                    instance
+                );
+            }
+            let hub = BroadcastHub::new();
+            let mut receiver = hub.take_issue_monitor_control_receiver().expect("receiver");
+            let mut permit = IssueMonitorEffectPermit::new();
+            let mut pending = None;
+            for field in ["enabled", "autonomous_mode"] {
+                let payload = crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    serde_json::json!({"config_set": {
+                        field: true, "resident_pm_session": "pm-session",
+                    }}),
+                    u32::MAX,
+                );
+                assert!(decode_issue_monitor_control_in_repo(payload.clone(), None).is_none());
+                let control = decode_issue_monitor_control_in_repo(payload, Some(&repo))
+                    .expect("registered PM ON decodes");
+                let receipt = hub
+                    .enqueue_issue_monitor_control(DaemonFrame::Ack)
+                    .await
+                    .expect("control admitted");
+                let (_, completion) = receiver.recv().await.expect("request").into_parts();
+                let outcome = apply_or_queue_issue_monitor_control(
+                    &hub,
+                    &prefs_path,
+                    &mut loaded.monitor,
+                    control,
+                    &mut permit,
+                    &mut pending,
+                    Some(completion),
+                );
+                assert!(
+                    matches!(outcome, IssueMonitorControlCommit::Committed { .. }),
+                    "generation {generation}, {field}: {outcome:?}"
+                );
+                assert_eq!(receipt.await.expect("receipt"), Ok(()));
+                assert!(pending.is_none(), "PM ON must not close the control lane");
+            }
+            let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("persisted ON");
+            assert!(persisted.enabled && persisted.autonomous_mode);
+            assert_eq!(persisted, loaded.monitor.prefs());
+            previous = Some((
+                persisted.effect_authority_epoch,
+                loaded
+                    .authority_fence
+                    .as_ref()
+                    .expect("fence")
+                    .instance_id
+                    .clone(),
+            ));
+            // Dropping the lifetime lease models a crashed daemon. The next
+            // generation must replay its retained fence without manual repair.
+        }
+    }
+
+    #[test]
+    fn blocked_startup_and_control_publish_cause_and_recovery_steps() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let prefs = crate::IssueMonitorPrefs {
+            effect_authority_epoch: u64::MAX,
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let outcome = apply_or_queue_issue_monitor_control(
+            &BroadcastHub::new(),
+            &prefs_path,
+            &mut monitor,
+            IssueMonitorControl::Enabled(!prefs.enabled),
+            &mut IssueMonitorEffectPermit::new(),
+            &mut None,
+            None,
+        );
+        assert_eq!(outcome, IssueMonitorControlCommit::TerminalFailure);
+        let error = monitor
+            .agent_status()
+            .last_error
+            .expect("runtime blocked diagnostic");
+        assert!(error.contains("authority epoch exhausted"), "{error}");
+        assert!(error.contains("Recovery:"), "{error}");
+        assert!(error.contains(&prefs_path.display().to_string()), "{error}");
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path).expect("unchanged prefs"),
+            prefs
+        );
+        let hub = BroadcastHub::new();
+        hub.mark_issue_monitor_control_recovery_blocked();
+        for scan_failed in [false, true] {
+            if scan_failed {
+                monitor.record_scan_error("2026-10-20T00:01:00Z", "remote scan failed");
+            } else {
+                crate::issue_monitor::scan_issue_monitor_candidates(
+                    &mut monitor,
+                    &[],
+                    "2026-10-20T00:00:00Z",
+                );
+            }
+            refresh_issue_monitor_agent_status(&hub, &monitor);
+            let status = hub
+                .issue_monitor_status()
+                .expect("public status projection");
+            assert_eq!(
+                status["last_error"], error,
+                "blocked cause survives scan activity"
+            );
+        }
+
+        fs::write(
+            crate::issue_monitor_authority_fence_path(&prefs_path),
+            "{broken",
+        )
+        .expect("malformed fence");
+        let loaded = load_issue_monitor_state_for_daemon_with_lease(
+            &prefs_path,
+            crate::IssueMonitorConfig::default(),
+            None,
+        );
+        assert!(loaded.recovery_blocked);
+        let error = loaded
+            .monitor
+            .agent_status()
+            .last_error
+            .expect("startup diagnostic");
+        assert!(error.contains("Recovery:"), "{error}");
+        assert!(error.contains("authority_marker="), "{error}");
+        assert_eq!(
+            fs::read_to_string(crate::issue_monitor_authority_fence_path(&prefs_path))
+                .expect("fence retained"),
+            "{broken"
+        );
     }
 }
 
