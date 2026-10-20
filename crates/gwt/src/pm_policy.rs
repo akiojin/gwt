@@ -64,6 +64,39 @@ pub(crate) fn assess_planning_change(
             None,
             None,
         ),
+        PlanningAction::Risk(value) => (
+            state
+                .risks
+                .iter()
+                .find(|item| item.id == value.id)
+                .map(serde_json::to_value)
+                .transpose()?,
+            serde_json::to_value(value)?,
+            None,
+            None,
+        ),
+        PlanningAction::Decision(value) => (
+            state
+                .decisions
+                .iter()
+                .find(|item| item.id == value.id)
+                .map(serde_json::to_value)
+                .transpose()?,
+            serde_json::to_value(value)?,
+            None,
+            None,
+        ),
+        PlanningAction::Policy(value) => (
+            state
+                .policies
+                .iter()
+                .find(|item| item.id == value.id)
+                .map(serde_json::to_value)
+                .transpose()?,
+            serde_json::to_value(value)?,
+            None,
+            None,
+        ),
         _ => return Ok(None),
     };
     let mut changes = std::collections::BTreeMap::new();
@@ -96,11 +129,18 @@ pub(crate) fn assess_planning_change(
             }
         }
     }
+    let mut missing_inputs = vec!["dependency_graph".into(), "active_owner_handoff".into()];
+    if matches!(
+        action,
+        PlanningAction::Risk(_) | PlanningAction::Decision(_) | PlanningAction::Policy(_)
+    ) {
+        missing_inputs.push("direct_issue_mapping".into());
+    }
     Ok(Some(PlanningChangeImpact {
         record_created: before.is_none(),
         changes,
         directly_affected_issues: issues.into_iter().collect(),
-        missing_inputs: vec!["dependency_graph".into(), "active_owner_handoff".into()],
+        missing_inputs,
     }))
 }
 

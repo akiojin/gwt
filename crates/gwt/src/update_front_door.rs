@@ -350,10 +350,7 @@ impl UpdateApplyOps for RealUpdateApplyOps {
 #[derive(Debug, Clone)]
 pub struct PreparedUpdate {
     pub latest: String,
-    /// Source URL the asset was downloaded from. Retained for diagnostics
-    /// (logs, retry telemetry) so future Phase 19 work can correlate ready
-    /// payloads back to the upstream release without re-walking the cache.
-    #[allow(dead_code)]
+    /// Source URL persisted with the pending update manifest.
     pub asset_url: String,
     pub payload: gwt_core::update::PreparedPayload,
 }

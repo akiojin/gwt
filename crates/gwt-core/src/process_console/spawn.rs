@@ -111,6 +111,8 @@ pub struct SpawnOptions {
     /// Human-readable command label rendered in summary tracing (e.g.
     /// `"gh pr list"`). The label may differ from the actual argv.
     pub label: String,
+    /// Stable internal caller label for GitHub budget attribution.
+    pub github_caller: Option<String>,
     /// Working directory passed to the child.
     pub current_dir: Option<PathBuf>,
     /// Extra env entries to set / override.
@@ -132,6 +134,7 @@ impl SpawnOptions {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            github_caller: None,
             current_dir: None,
             envs: Vec::new(),
             remove_env: Vec::new(),
@@ -140,6 +143,11 @@ impl SpawnOptions {
             capture_stderr: true,
             forward_output: true,
         }
+    }
+
+    pub fn github_caller(mut self, caller: impl Into<String>) -> Self {
+        self.github_caller = Some(caller.into());
+        self
     }
 
     pub fn current_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -410,11 +418,11 @@ async fn spawn_logged_inner(
         // the per-minute (secondary) limit can be approximated across the
         // short-lived gwtd processes that share this account. Issue #3928
         // AC-4: with its source, so the count can be broken down by caller.
-        ledger.record_spawn_from(
-            crate::github_quota::classify_gh_args(args),
-            &crate::github_budget::spawn_source(args),
-            now,
-        );
+        let source = match options.github_caller.as_deref() {
+            Some(caller) => crate::github_budget::spawn_source_for_caller(args, caller),
+            None => crate::github_budget::spawn_source(args),
+        };
+        ledger.record_spawn_from(crate::github_quota::classify_gh_args(args), &source, now);
     }
     let program = program.into();
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);

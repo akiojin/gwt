@@ -851,6 +851,7 @@ pub use gwt::project_transport::{ClientScope, DispatchTarget, OutboundEvent};
 
 #[derive(Debug, Clone)]
 pub(crate) struct RecoveryCenterAction {
+    pub(crate) client_id: String,
     pub(crate) generation: u64,
     pub(crate) board_entry_id: Option<String>,
 }
@@ -11674,7 +11675,8 @@ impl AppRuntime {
                         FrontendEvent::FrontendReady => {
                             self.unopened_project_route_events(&client_id, key)
                         }
-                        _ => Vec::new(),
+                        event => recovery_center::rejected_action_events(&client_id, &event)
+                            .unwrap_or_default(),
                     };
                 };
                 self.handle_frontend_event_for_project(&context, client_id, event)
@@ -11981,7 +11983,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         if !self.project_owns_frontend_request(context, &event) {
             tracing::warn!(project_key = %context.project_key, "rejected frontend request outside its project scope");
-            return Vec::new();
+            return recovery_center::rejected_action_events(&client_id, &event).unwrap_or_default();
         }
         let project_scope = self.frontend_project_log_scope(Some(context), &event);
         let _project_scope = project_scope.as_ref().map(|scope| scope.enter()).unwrap_or_else(|| {

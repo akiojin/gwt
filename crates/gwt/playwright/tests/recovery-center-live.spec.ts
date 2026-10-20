@@ -60,7 +60,7 @@ test.describe.serial("Recovery Center live backend", () => {
       "status",
     ]);
     // A bad Session ledger entry cannot prevent the remaining projection.
-    expect(event.status).toBe("ready");
+    expect(["ready", "not_found"]).toContain(event.status);
     expect(Array.isArray(event.items)).toBe(true);
 
     for (const item of event.items) {
@@ -76,9 +76,29 @@ test.describe.serial("Recovery Center live backend", () => {
     expect(modalText).not.toMatch(/\b(?:Intake|Execution)\b/);
     if (event.status === "ready" && event.items.length === 0) {
       await expect(modal).toContainText("No recovery deliveries are available.");
+    } else if (event.status === "not_found") {
+      await expect(modal).toContainText("No recovery Store was found for this project.");
     } else if (event.status === "error") {
       await expect(modal).toContainText("Recovery deliveries could not be loaded.");
     }
+  });
+
+  test("invalid action receives an explicit handle rejection from the live backend", async ({ page }) => {
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_send", {
+      detail: { kind: "open_recovery_center_board_entry", request_id: "invalid-recovery-action",
+        generation: 1, action_handle: "rc-invalid-client-handle" },
+    })));
+    await page.waitForFunction(() => (window as any).__gwtPlaywrightMessages.some(
+      ({ payload }) => payload.kind === "recovery_center_board_entry"
+        && payload.request_id === "invalid-recovery-action",
+    ));
+    const reply = await page.evaluate(() => (window as any).__gwtPlaywrightMessages.find(
+      ({ payload }) => payload.kind === "recovery_center_board_entry"
+        && payload.request_id === "invalid-recovery-action",
+    ).payload);
+    expect(reply.board_entry_id).toBeUndefined();
+    expect(reply.error).toContain("rc-invalid-client-handle");
+    expect(reply.error).toContain("unknown or expired handle");
   });
 });
 

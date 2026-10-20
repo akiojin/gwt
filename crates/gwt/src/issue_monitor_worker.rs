@@ -1412,7 +1412,7 @@ pub fn refresh_issue_cache_for_scan_if_stale(
         return Ok(false);
     }
     run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
-        crate::issue_cache::sync_issue_cache_from_remote(repo_path, cache_root)
+        crate::issue_cache::sync_issue_cache_from_remote_for_monitor(repo_path, cache_root)
     })
     .map_err(|error| error.to_string())?;
     Ok(true)

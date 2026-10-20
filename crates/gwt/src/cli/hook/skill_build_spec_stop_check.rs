@@ -37,10 +37,22 @@ pub fn handle_with_input(
         SKILL_NAME,
         SKILL_DISPLAY,
     );
-    if matches!(output, HookOutput::StopBlock { .. })
-        && release_unabortable_build(worktree, current_session_id)
-    {
-        return HookOutput::Silent;
+    if matches!(output, HookOutput::StopBlock { .. }) {
+        let waiting = gwt_core::skill_state::load(worktree, SKILL_NAME)
+            .ok()
+            .flatten()
+            .is_some_and(|state| {
+                state.owner_spec.is_some()
+                    && current_session_id == Some(state.session_id.as_str())
+                    && super::execution_control_stop_check::active_monitor_wait(
+                        worktree,
+                        current_session_id,
+                        state.owner_spec,
+                    )
+            });
+        if waiting || release_unabortable_build(worktree, current_session_id) {
+            return HookOutput::Silent;
+        }
     }
     output
 }
@@ -152,6 +164,104 @@ mod tests {
                 "phase: red-green-refactor",
                 "build.complete",
             ],
+        );
+    }
+
+    #[test]
+    fn active_wait_releases_stop_only_until_expired_or_invalidated() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            1935,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        save(dir.path(), SKILL_NAME, &active_state("sess-1", "verify")).unwrap();
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.complete_active_launch(1935, "tab::sess-1");
+        let now = Utc::now().to_rfc3339();
+        monitor.declare_autonomous_wait(1935, "verification deferred", "capacity returns", &now);
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(dir.path());
+        let mut prefs = monitor.prefs();
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert_eq!(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            HookOutput::Silent
+        );
+
+        // An ambiguous live authority must not fall back to the valid prefs.
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            dir.path(),
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .unwrap();
+        let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+        std::fs::create_dir_all(endpoint_path.parent().unwrap()).unwrap();
+        std::fs::write(&endpoint_path, b"{\"pid\":").unwrap();
+        assert_block_with(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            &["still active"],
+        );
+        if endpoint_path.exists() {
+            std::fs::remove_file(endpoint_path).unwrap();
+        }
+
+        // A declaration from a different owner cannot release this build.
+        let state = active_state("sess-1", "verify");
+        save(
+            dir.path(),
+            SKILL_NAME,
+            &gwt_core::skill_state::SkillState {
+                owner_spec: Some(42),
+                ..state
+            },
+        )
+        .unwrap();
+        assert_block_with(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            &["still active"],
+        );
+        save(dir.path(), SKILL_NAME, &active_state("sess-1", "verify")).unwrap();
+
+        let wait = prefs
+            .autonomous_records
+            .iter_mut()
+            .find(|record| record.issue_number == 1935)
+            .unwrap()
+            .wait
+            .as_mut()
+            .unwrap();
+        wait.since = (Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert_block_with(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            &["still active"],
+        );
+
+        monitor.invalidate_autonomous_wait(1935, "pm", "capacity returned", &now);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        assert_block_with(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            &["still active"],
+        );
+        assert!(
+            gwt_core::skill_state::load(dir.path(), SKILL_NAME)
+                .unwrap()
+                .unwrap()
+                .active
+        );
+        assert_eq!(
+            crate::cli::execution_state::load(dir.path())
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::cli::execution_state::ExecutionControlStatus::Active
         );
     }
 

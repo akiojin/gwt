@@ -1977,17 +1977,6 @@ enum UserEvent {
         window_id: String,
         generation: u64,
     },
-    /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
-    /// only producer of this variant. The browser UI now handles
-    /// drag/drop natively via the HTML5 API. The variant stays around
-    /// in case a follow-up reintroduces native drag/drop for the tray
-    /// window, but the event_loop arm in `main()` simply drops it.
-    #[allow(dead_code)]
-    NativeFileDrop {
-        paths: Vec<String>,
-        x: i32,
-        y: i32,
-    },
     LogEntry {
         entry: gwt_core::logging::LogEvent,
     },
@@ -11254,12 +11243,6 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::IssueMonitorStartupTimeout { window_id, generation }) => {
                 clients.dispatch(app.handle_issue_monitor_startup_timeout(&window_id, generation));
-            }
-            Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
-                // SPEC #2920: the wry WebView drag/drop handler was the
-                // only producer of this variant. The browser UI now
-                // handles drag/drop natively via the HTML5 API, so any
-                // stragglers from older clients are dropped silently.
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 // Issue #3366 — gated on an open Logs window; see

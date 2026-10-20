@@ -7,6 +7,8 @@
 //! skill state, so a plain-Issue `$gwt-fix-issue` session that never called
 //! `build.start` is covered by the same lifecycle as `$gwt-build-spec`
 //! (FR-034).
+//! A current Monitor wait permits idle without settling the active execution;
+//! the admission watchdog can then resume the same Session.
 //!
 //! Existing Stop contracts hold: `stop_hook_active` short-circuits (one
 //! forced continuation per cycle), parse/IO errors and missing records fail
@@ -60,6 +62,9 @@ pub fn handle_with_input(
     if record.status != ExecutionControlStatus::Active {
         return HookOutput::Silent;
     }
+    if active_monitor_wait(&resolved, Some(current), Some(record.owner_number)) {
+        return HookOutput::Silent;
+    }
     // SPEC #3248 FR-243: a trusted No Action is a successful non-delivery
     // terminal outcome, so it releases Stop like a settlement does — but it is
     // neither Completed nor Blocked, and the record stays Active. The lookup
@@ -101,6 +106,62 @@ pub fn handle_with_input(
          Do not settle as complete without the verification evidence the owner requires.",
         entrypoint = record.entrypoint,
     ))
+}
+
+/// Temporarily release producing Stop gates for the owning Session's declared
+/// wait. Only a definitely absent daemon permits the durable prefs fallback;
+/// an unreadable/live projection must never revive a stale declaration.
+pub(super) fn active_monitor_wait(
+    worktree: &Path,
+    current_session: Option<&str>,
+    expected_owner: Option<u64>,
+) -> bool {
+    let Some(session) = current_session.map(str::trim).filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
+    let Ok(Some(record)) = execution_state::load(&resolved) else {
+        return false;
+    };
+    if record.status != ExecutionControlStatus::Active
+        || record.primary_session_id != session
+        || expected_owner.is_some_and(|owner| owner != record.owner_number)
+        || !execution_state::integrity_ok(&record)
+    {
+        return false;
+    }
+    let owner = record.owner_number;
+    let now = chrono::Utc::now();
+    match crate::daemon_publisher::read_issue_monitor_status(&resolved) {
+        Ok(Some(value)) => {
+            let Ok(status) = serde_json::from_value::<crate::IssueMonitorAgentStatus>(value) else {
+                return false;
+            };
+            status.active_launches.contains(&owner)
+                && status.inbox.iter().any(|row| {
+                    row.issue_number == owner
+                        && row.waiting.as_ref().is_some_and(|wait| {
+                            wait.in_force
+                                && wait.invalidated.is_none()
+                                && chrono::DateTime::parse_from_rfc3339(&wait.expires_at)
+                                    .is_ok_and(|expires| expires > now)
+                        })
+                })
+        }
+        Ok(None) => {
+            let path = crate::issue_monitor_prefs_path_for_repo_path(&resolved);
+            let Ok(prefs) = crate::load_issue_monitor_prefs(&path) else {
+                return false;
+            };
+            let monitor =
+                crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+            monitor.active_issue_numbers().contains(&owner)
+                && monitor.autonomous_wait(owner).is_some_and(|wait| {
+                    crate::issue_monitor::wait_declaration_in_force(wait, &now.to_rfc3339())
+                })
+        }
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
