@@ -20980,6 +20980,7 @@ impl IssueMonitorState {
         {
             return Err(IssueMonitorStopMismatch::WindowMismatch);
         }
+        self.revoke_launch_binding(issue_number);
         self.clear_active_tracking(issue_number);
         if let Some(item) = self
             .inbox
@@ -21990,8 +21991,8 @@ impl IssueMonitorState {
     }
 
     /// Free the slot held by `window_id` for `issue_number` without spending an
-    /// attempt. Mirrors [`Self::settle_exact_terminal_delivery`],
-    /// plus dropping the binding ledger entry so a pane that survives its close
+    /// attempt. Mirrors [`Self::settle_exact_terminal_delivery`], including
+    /// dropping the binding ledger entry so a pane that survives its close
     /// cannot be re-adopted into the slot it just left. The caller decides
     /// whether the Issue is also requeued (see [`Self::requeue_released_launch`]).
     fn release_idle_launch(
@@ -39884,6 +39885,10 @@ mod tests {
         assert_eq!(monitor.active_count(), 0, "the slot is released");
         assert_eq!(monitor.launched_window_issue(window_id), None);
         assert!(
+            !monitor.prefs().launch_bindings.contains_key(window_id),
+            "Issue #5783: successful owner termination releases its exact binding"
+        );
+        assert!(
             monitor
                 .vanished_launched_windows(
                     "tab-1",
@@ -39918,6 +39923,10 @@ mod tests {
             reloaded.settle_exact_terminal_delivery(&target).is_err(),
             "a second settlement of the same launch is refused"
         );
+        reloaded.record_candidate(issue(43));
+        reloaded.complete_active_launch(43, window_id);
+        assert_eq!(reloaded.launched_window_issue(window_id), Some(43));
+        assert_eq!(reloaded.prefs().launch_bindings.get(window_id), Some(&43));
     }
 
     #[test]
