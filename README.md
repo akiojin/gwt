@@ -794,6 +794,12 @@ work, so the PM can explain claim contention, holds or failures. States retain
 observation order without duplicates; missing inbox rows return an empty list,
 even for queued or active Issues. These observations do not change goal alignment
 or determine priority, readiness, health or completion.
+Capacity observations distinguish implementation launches, review windows, pending
+claims and Issues waiting for a human. They retain the Monitor's reported slot
+occupancy and limit, which cannot be recalculated from Issue counts. The combined
+Issue list excludes queued-only work and is a lower bound, not full WIP; unavailable
+observations stay unknown. Verification and full WIP remain unobserved, and reading
+these diagnostics does not change admission or enforce WIP limits.
 Milestone diagnostics also show the observed Monitor inbox states and unobserved
 Issues from explicit milestone membership and roadmap references to a unique,
 nonempty milestone ID. These are reference facts, not proof of goal alignment.

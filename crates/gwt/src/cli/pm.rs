@@ -915,6 +915,18 @@ mod tests {
         let planning_bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
         assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
+        assert_eq!(
+            status["policy"]["capacity"]["implementation_launches"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            status["policy"]["capacity"]["observed_work_issues"],
+            serde_json::json!([])
+        );
+        assert!(status["policy"]["capacity"]["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("end_to_end_wip")));
         assert_eq!(status["revision"], 1);
         assert_eq!(status["goals"][0]["outcome"], "Ship safely");
         assert_eq!(status["policy"]["planning_revision"], 1);

@@ -66,6 +66,19 @@ Queue or active membership alone does not supply an inbox state; absent rows ret
 Use the states to explain claim contention, holds or failures, retaining Monitor provenance.
 They do not change structural alignment or prove priority, readiness, health or completion.
 
+`policy.capacity` preserves implementation and review multiplicity, optional pending
+claim owners, and the supplied `occupied_slot_count` and `max_active` values.
+Occupied slots are admission accounting, including panes with unknown Issue numbers;
+they are not a process census and need not equal the listed windows.
+Never recompute occupied slots or available capacity from Issue lists.
+NeedsHuman owners combine the supplied list and matching inbox states.
+`observed_work_issues` is a lower-bound owner set, not an active count or full WIP:
+it deduplicates implementation, review, pending and human-wait owners, excluding queue-only work.
+Absent Monitor lists and missing legacy optional fields stay unknown rather than zero.
+Read the enclosing Monitor source, scan time and coverage alongside these observations;
+`verification_observation` and `end_to_end_wip` remain missing even for an empty live snapshot.
+This projection neither evaluates WIP limits nor changes admission, priority or launch decisions.
+
 Goal, milestone and roadmap-link apply receipts include `change_impact`: redacted
 changed fields before/after and `directly_affected_issues` from old/new membership
 and, for goals and milestones, referencing roadmap links.
@@ -3760,6 +3773,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Merged or Released does not prove milestone completion",
             "Never justify priority from an orphan or invalid trace",
             "Issue traces expose `observed_inbox_states` even for orphan or maintenance work",
+            "`policy.capacity` preserves implementation and review multiplicity",
+            "Never recompute occupied slots or available capacity from Issue lists",
+            "`observed_work_issues` is a lower-bound owner set, not an active count or full WIP",
+            "`verification_observation` and `end_to_end_wip` remain missing",
             "Queue or active membership alone does not supply an inbox state",
             "deadline/scope impact propagation and FR-045 delivery remain separate",
             "`change_impact`",
