@@ -14539,7 +14539,6 @@ impl IssueMonitorState {
             .monitor_canvas_windows()
             .filter(|window| {
                 window.review_dispatch
-                    && idle_window_is_alive(window.status)
                     // A settled Idle reviewer releases its active slot in the
                     // same scan (#4084), but still blocks duplicate reviews.
                     && !(window.status == WindowState::Idle
