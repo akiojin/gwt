@@ -260,6 +260,10 @@ impl WorktreeManager {
 
     /// List all worktrees for this repository.
     pub fn list(&self) -> Result<Vec<WorktreeInfo>> {
+        crate::worktree_inventory::list(&self.repo_path, || self.list_uncached())
+    }
+
+    fn list_uncached(&self) -> Result<Vec<WorktreeInfo>> {
         let started = std::time::Instant::now();
         let output = run_git_observing_operation_deadline(
             &["worktree", "list", "--porcelain"],
