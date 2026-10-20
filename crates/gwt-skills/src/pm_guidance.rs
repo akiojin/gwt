@@ -101,6 +101,10 @@ empty or duplicate Goal IDs resolve no links and name the missing identity input
 The Goal's `observed_issue_states` and `unobserved_issues` use the same inbox boundary.
 Goal observations do not prove outcome achievement or metric evidence;
 `metric_evidence` stays missing until a canonical source is connected.
+Each Goal names its blank or whitespace-only metadata in `missing_inputs`:
+outcome, metric, target, horizon, owner and status, including Goals with no roadmap links.
+Fill the named metadata through `pm.plan.apply`; complete metadata still does not
+prove metric evidence or outcome achievement.
 Monitor source, last scan time and incomplete coverage are separate from the
 planning revision: no observation, an old scan or a cache projection cannot
 prove full fleet alignment. This read-only assessment never launches work
@@ -3741,6 +3745,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`direct_issue_mapping` is missing; an empty Issue set does not mean no impact",
             "Each Goal's `roadmap_item_ids` and `issues` resolve only explicit roadmap references",
             "Goal observations do not prove outcome achievement or metric evidence",
+            "Each Goal names its blank or whitespace-only metadata in `missing_inputs`",
             "does not prove dependency propagation or owner notification",
             "`pm.status.set`",
             "`status: \"released\"`",
