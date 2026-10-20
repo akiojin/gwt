@@ -203,7 +203,67 @@ pub struct CapacityObservation {
     pub occupied_slot_count: Option<usize>,
     pub max_active: Option<usize>,
     pub observed_work_issues: Vec<u64>,
+    pub launch_activity: Option<Vec<LaunchActivityObservation>>,
     pub missing_inputs: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LaunchActivityObservation {
+    pub issue_number: u64,
+    pub state: MonitorInboxState,
+    pub last_activity_at: Option<String>,
+    pub inactivity_seconds_at_scan: Option<u64>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+/// Timing belongs to the supplied snapshot, never the reader's wall clock.
+fn observe_launch_activity(status: &IssueMonitorAgentStatus) -> Vec<LaunchActivityObservation> {
+    let scan = status
+        .last_scan_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+    status
+        .inbox
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.state,
+                MonitorInboxState::Launching | MonitorInboxState::Launched
+            )
+        })
+        .map(|row| {
+            let activity = row
+                .last_activity_at
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+            let mut missing_inputs = Vec::new();
+            if scan.is_none() {
+                missing_inputs.push("monitor_scan_time");
+            }
+            if activity.is_none() {
+                missing_inputs.push("last_activity_at");
+            }
+            let inactivity_seconds_at_scan = match (scan, activity) {
+                (Some(scan), Some(activity)) => {
+                    match scan.signed_duration_since(activity).to_std() {
+                        Ok(duration) => Some(duration.as_secs()),
+                        Err(_) => {
+                            missing_inputs.push("activity_after_scan");
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            LaunchActivityObservation {
+                issue_number: row.issue_number,
+                state: row.state,
+                last_activity_at: activity.map(|value| value.to_rfc3339()),
+                inactivity_seconds_at_scan,
+                missing_inputs,
+            }
+        })
+        .collect()
 }
 
 fn observe_capacity(
@@ -265,6 +325,7 @@ fn observe_capacity(
         occupied_slot_count,
         max_active: monitor.map(|status| status.max_active),
         observed_work_issues,
+        launch_activity: monitor.map(observe_launch_activity),
         missing_inputs,
     }
 }
@@ -1022,6 +1083,7 @@ mod tests {
                 "pending_claim_issues":[9,3,9], "needs_human_issues":[10,11],
                 "occupied_slot_count":17, "max_active":4,
                 "observed_work_issues":[1,3,8,9,10,11],
+                "launch_activity":[],
                 "missing_inputs":["verification_observation","end_to_end_wip"]
             })
         );
@@ -1075,6 +1137,68 @@ mod tests {
     }
 
     #[test]
+    fn launch_activity_is_relative_to_scan_without_inventing_liveness() {
+        let state = fixture();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.last_scan_at = Some("2026-10-21T00:01:00Z".into());
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":9,"state":"launched","attempts":0,"last_activity_at":"2026-10-21T09:00:00+09:00"},
+            {"issue_number":3,"state":"launching","attempts":0,"last_activity_at":"2026-10-21T00:00:59.100Z"},
+            {"issue_number":9,"state":"launched","attempts":0,"last_activity_at":"2026-10-21T00:01:00Z"},
+            {"issue_number":4,"state":"launched","attempts":0},
+            {"issue_number":5,"state":"launched","attempts":0,"last_activity_at":"private invalid timestamp"},
+            {"issue_number":6,"state":"launched","attempts":0,"last_activity_at":"2026-10-21T00:01:00.100Z"},
+            {"issue_number":7,"state":"queued","attempts":0,"last_activity_at":"2026-10-21T00:00:00Z"},
+            {"issue_number":8,"state":"needs_human","attempts":0,"error_message":"private reason"}
+        ])).unwrap();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["capacity"]["launch_activity"].as_array().unwrap();
+        let facts: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                json!([
+                    row["issue_number"],
+                    row["state"],
+                    row["inactivity_seconds_at_scan"],
+                    row["missing_inputs"]
+                ])
+            })
+            .collect();
+        assert_eq!(
+            json!(facts),
+            json!([
+                [9, "launched", 60, []],
+                [3, "launching", 0, []],
+                [9, "launched", 0, []],
+                [4, "launched", null, ["last_activity_at"]],
+                [5, "launched", null, ["last_activity_at"]],
+                [6, "launched", null, ["activity_after_scan"]]
+            ])
+        );
+        assert_eq!(rows[0]["last_activity_at"], "2026-10-21T09:00:00+09:00");
+        assert_eq!(rows[4]["last_activity_at"], Value::Null);
+        assert!(!report.to_string().contains("private"));
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        monitor.active_launches_incomplete = true;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            degraded["capacity"]["launch_activity"],
+            report["capacity"]["launch_activity"]
+        );
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        for scan in [None, Some("invalid scan".into())] {
+            monitor.last_scan_at = scan;
+            let untimed = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+            let row = &untimed["capacity"]["launch_activity"][0];
+            assert_eq!(row["inactivity_seconds_at_scan"], Value::Null);
+            assert_eq!(row["missing_inputs"], json!(["monitor_scan_time"]));
+        }
+    }
+
+    #[test]
     fn absent_and_degraded_monitor_observations_never_prove_complete_coverage() {
         let state = fixture();
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
@@ -1088,6 +1212,7 @@ mod tests {
             "needs_human_issues",
             "occupied_slot_count",
             "max_active",
+            "launch_activity",
         ] {
             assert_eq!(absent["capacity"][key], Value::Null);
         }
